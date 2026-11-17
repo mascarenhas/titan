@@ -46,18 +46,22 @@ describe("browser final trace map", function()
         rejected(wasm, result, "already contains x_titan_image")
     end)
 
-    it("counts only function imports and indexes names imports-first", function()
-        local imports = section(2, "\6" .. text("env") .. text("left") .. "\0\0" ..
+    it("counts only function imports, indexes names imports-first and records import signatures", function()
+        local types = section(1, "\2\96\0\0\96\2\127\126\1\124")
+        local imports = section(2, "\6" .. text("env") .. text("left") .. "\0\1" ..
             text("env") .. text("memory") .. "\2\1\1\2" ..
             text("env") .. text("table") .. "\1\112\0\1" ..
             text("env") .. text("global") .. "\3\127\0" ..
             text("env") .. text("tag") .. "\4\0\0" ..
             text("env") .. text("right") .. "\0\0")
-        local wasm = HEADER .. imports .. FUNCTIONS .. CODE .. names("\2\1" .. text("imported") .. "\3" .. text("defined"))
+        local wasm = HEADER .. types .. imports .. FUNCTIONS .. CODE .. names("\2\1" .. text("imported") .. "\3" .. text("defined"))
         local parsed = assert(metadata.browser_trace_image(wasm))
         assert.equal(2, parsed.function_imports)
         assert.equal(4, parsed.function_count)
         assert.equal(6, #parsed.imports)
+        local signatures = {}
+        for index, import in ipairs(parsed.imports) do signatures[index] = import.signature or false end
+        assert.same({ "(i32,i64)->(f64)", false, false, false, "()->()", "()->()" }, signatures)
         assert.equal("imported", parsed.function_names[2])
         assert.equal("defined", parsed.function_names[4])
         local result = assert(trace.rewrite(wasm, MAP, ID))
@@ -73,10 +77,12 @@ describe("browser final trace map", function()
     end)
 
     it("reads exports through the same bounded final-image walk", function()
-        local wasm = HEADER .. section(2, "\1" .. text("env") .. text("input") .. "\0\0") ..
+        local wasm = HEADER .. section(1, "\1\96\7\127\126\125\124\123\112\111\0") ..
+            section(2, "\1" .. text("env") .. text("input") .. "\0\0") ..
             section(7, "\1" .. text("exported") .. "\0\0")
         local parsed = assert(metadata.browser_trace_image(wasm))
-        assert.same({ { module = "env", name = "input", kind = 0 } }, parsed.imports)
+        assert.same({ { module = "env", name = "input", kind = 0,
+            signature = "(i32,i64,f32,f64,v128,funcref,externref)->()" } }, parsed.imports)
         assert.same({ { name = "exported", kind = 0, index = 0 } }, parsed.exports)
     end)
 
@@ -110,6 +116,14 @@ describe("browser final trace map", function()
         { "missing import type", HEADER .. section(2, "\1" .. text("env") .. text("x") .. "\1"), "truncated Wasm import type" },
         { "memory limits", HEADER .. section(2, "\1" .. text("env") .. text("x") .. "\2\4\1"), "limits" },
         { "global mutability", HEADER .. section(2, "\1" .. text("env") .. text("x") .. "\3\127\2"), "mutability" },
+        { "type form", HEADER .. section(1, "\1\94\0\0"), "unsupported final Wasm type form" },
+        { "value type", HEADER .. section(1, "\1\96\1\99\0"), "unsupported final Wasm value type 0x63" },
+        { "type length", HEADER .. section(1, "\1\96\9"), "invalid final Wasm type length" },
+        { "import type index", HEADER .. section(1, "\1\96\0\0") ..
+            section(2, "\1" .. text("env") .. text("x") .. "\0\1"), "type index is out of range" },
+        { "missing tag attribute", HEADER .. section(2, "\1" .. text("env") .. text("x") .. "\4"), "truncated Wasm import type" },
+        { "tag type index", HEADER .. section(1, "\1\96\0\0") ..
+            section(2, "\1" .. text("env") .. text("t") .. "\4\0\1"), "type index is out of range" },
         { "export kind", HEADER .. section(7, "\1" .. text("x") .. "\9\0"), "export kind" },
         { "missing export kind", HEADER .. section(7, "\1" .. text("x")), "export kind" },
         { "duplicate export", HEADER .. section(7, "\2" .. text("x") .. "\0\0" .. text("x") .. "\0\0"), "duplicate Wasm export" },

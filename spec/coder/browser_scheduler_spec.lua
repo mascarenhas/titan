@@ -26,6 +26,7 @@ local function build(info, assertions)
         { TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
     fixture.collector:collect()
     assert.is_true(result.ok, result.output)
+    toolchain.check_imports(output .. "/mini-driver.mjs", { "entry", "fixture:scheduler" })
     return output, "out/assertions-" .. assertions .. "/mini-driver.mjs"
 end
 
@@ -44,6 +45,9 @@ local function build_image(info, assertions, purpose, name, arguments)
     local result = fixture:run(argv, { TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
     fixture.collector:collect()
     assert.is_true(result.ok, result.output)
+    -- Only the scheduler owner links a scheduler fixture helper.
+    toolchain.check_imports(output .. "/" .. name .. ".mjs",
+        name == "scheduler" and { "entry", "fixture:scheduler" } or { "entry" })
     return "out/" .. name .. "-" .. assertions .. "/" .. name .. ".mjs"
 end
 

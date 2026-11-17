@@ -2532,6 +2532,99 @@ Default tiering and sandboxing were unchanged, with no memory feature or
 forced optimizing-only compiler. These are individual measurements, not
 maximum startup-memory guarantees.
 
+### Import manifest
+
+`scripts/browser_imports.lua` is the reviewed allowlist of the imports a final
+browser image may contain. The maintainer reviews every change to it, as for the
+[status inventory](#subset-parity-gate). Each row is
+`{ class, module, name, signature, provider = ..., reason = ... }`:
+
+* the class says which images may use the import;
+* the signature is the Wasm function type as `(params)->(results)`, for
+  example `(i32,i64,i32)->(i32)`; a non-function import names its kind
+  (`memory`, `table`, `global`, or `tag` and its signature) instead;
+* the provider names the JavaScript that implements the import in the
+  generated `.mjs`: one of Titan's three Emscripten libraries, a file of
+  Emscripten 6.0.13's own library, or a test fixture; and
+* the reason says why images need it.
+
+Every image has the `entry` class: programs, test images and provider protocol
+probes, which all link Titan's launcher. A repository test image adds one class
+for each test fixture it links, so one fixture's imports never pass in an
+image that does not link that fixture:
+
+| Class | Fixture |
+| --- | --- |
+| `fixture:controls` | `spec/fixtures/browser_runtime/fixture_controls.h`, the `EM_JS` controls that several C helpers include |
+| `fixture:trace` | `spec/fixtures/browser_trace/trace_support.c` |
+| `fixture:html5` | the html5 click counter `spec/fixtures/browser_bridge/counter.titan` |
+| `fixture:net` | `spec/fixtures/browser_net/controls.c` |
+| `fixture:loader` | `spec/fixtures/browser_loader/loader.c` |
+| `fixture:gate` | `spec/fixtures/browser_runtime/gate.c` |
+| `fixture:budget` | `spec/fixtures/browser_runtime/budget.c` |
+| `fixture:scheduler` | `spec/fixtures/browser_scheduler/mini_driver.c` and `scheduler_child.c` |
+
+No non-function import (memory, table, global or tag) is listed, so any such
+import fails the check.
+
+The `entry` rows are the bridge, completion, admission, coroutine, relinquish
+and trace imports of Titan's libraries, and the parts of Emscripten's runtime
+and C library that Emscripten implements in JavaScript:
+
+* `abort`, `assert`, `exit`, the checked stack overflow, and memory growth;
+* wall-clock and calendar time;
+* anonymous `mmap`/`munmap`;
+* three `wasi_snapshot_preview1` functions: `clock_time_get`,
+  `environ_sizes_get` and `environ_get`.
+
+The launcher defines the WASI stdio functions and file syscalls itself
+([Filesystem](#the-link-profile)), so they are not imports. The supplied
+loader therefore implements every `entry` import, and a browser image needs
+no WASI host and no Node.
+
+`staticmetadata.browser_trace_image` reads each function or tag import's
+signature from the type section. It refuses:
+
+* a type form other than a function type;
+* a value type other than `i32`, `i64`, `f32`, `f64`, `v128`, `funcref` or
+  `externref`;
+* an import type index outside the type section.
+
+`scripts/browser_stdlib.lua` provides the checks:
+
+* `allowed_imports(allowlist, classes)` first checks the allowlist itself:
+  known classes, complete rows with a provider and a reason, and one row per
+  class, module and name.
+* `check_imports(bytes, origin, classes)` then fails with one line per image
+  import that no row of the given classes lists with the same signature:
+  `<image>: unlisted browser import <module>.<name> <signature> (classes <classes>)`,
+  followed by `add a reviewed row for each to scripts/browser_imports.lua`.
+* `check_file_imports(strategy, image, classes)` reads the `.wasm` of one
+  image, named by its `.mjs` or `.wasm`, and checks it.
+
+The command-line form is
+`lua -E scripts/check_browser_stdlib.lua imports CLASS[,CLASS...] WASM...`.
+
+The check runs wherever the repository builds an image, with that image's own
+classes:
+
+| Where | Images and classes |
+| --- | --- |
+| `make titan-stdlib-browser-test`, after the closure check | `images/stdlib.wasm`: `entry` |
+| `spec/browser/build-trace.lua` | the runtime, uncaught and async images: `entry,fixture:trace` (the degraded variants copy the runtime image's `.wasm`) |
+| `spec/browser/build-bridge.lua` | the bridge and public-state images: `entry,fixture:controls`; `counter`: `entry,fixture:html5`; `initializer-failure` and `responsive`: `entry` |
+| `spec/browser/build-net.lua` | `http`: `entry`; `websocket`: `entry,fixture:net` |
+| The [`browser-toolchain`](continuous-integration.md#browser-toolchain-job) runner and loader image steps | the runner images and `loader_names`: `entry`; `loader_app`, `fidelity`, and the optimized `fidelity`: `entry,fixture:loader,fixture:controls` |
+| `spec/support/browser_toolchain.lua` `check_imports`, called by each spec's build | bridge spec: as `build-bridge.lua`; entry gate: `entry,fixture:gate,fixture:controls`; scheduler: the scheduler owner `entry,fixture:scheduler`, the others `entry`; budget probes: `entry,fixture:budget`; the stdlib gate, fixture and minicoro images: `entry` |
+
+The trace-adapter units of the `browser-toolchain` job link
+`spec/fixtures/browser_trace_adapter/lifecycle.c` and `filter.c` with plain
+`emcc` and the Titan C runtime. They have no Titan launcher, are not final
+browser images, and are not checked.
+
+The allowlist is a repository check, not a compiler rule: an application
+image may import its own `EM_JS` functions and any Emscripten API it calls.
+
 ## The browser entrypoint
 
 `browserentry.contents(worker, options)` renders the persistent browser
@@ -4071,9 +4164,10 @@ hosts`).
   resolution, malformed/truncated Wasm and map rejection, the
   [byte bounds](#build-time-image-bounds) (image equality, bodies at and below
   the bound with a padded length, imports-first indexing, quoted and unnamed
-  labels), and rejected-body source attribution (first mapping inside the body,
-  same-offset unmapped replacement, the half-open end, unavailable metadata,
-  whole-map validation).
+  labels), import signatures from the type section and their refusals (type
+  form, value type, type length, import type index), and rejected-body source
+  attribution (first mapping inside the body, same-offset unmapped
+  replacement, the half-open end, unavailable metadata, whole-map validation).
 * `spec/coder/browser_trace_entries_spec.lua` — browser-only
   `registry[TITAN_ENTRIES_KEY]` registration across all `titanentry` wrapper
   families, split-unit deduplication, early `_init` ordering before
@@ -4107,7 +4201,12 @@ hosts`).
   single-image audit of timing, owner, failure, skip, and filter accounting,
   the rejected `ExternalWait` record literal on both targets, the
   [absent-module diagnostic](#the-absent-module-diagnostic) on the real SDK,
-  and both type fixtures against the installed providers.
+  both type fixtures against the installed providers, and the [import
+  manifest](#import-manifest) checker over constructed images (listed imports
+  per class, an injected unlisted import, a changed signature, unlisted
+  memory and global imports, a fixture's imports refused for an `entry` image
+  and for another fixture's image, and malformed, duplicate or unknown-class
+  allowlists).
 * `spec/coder/browser_stdlib_gate_spec.lua` — the [initialization and
   fidelity gate](#initialization-and-fidelity-gate).
 * `spec/coder/browser_net_spec.lua` and `spec/browser/build-net.lua` — the

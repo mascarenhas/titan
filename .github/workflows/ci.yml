@@ -545,6 +545,8 @@ jobs:
             test -f "$output/$image.wasm"
             test -f "$output/$image.wasm.map"
           done
+          "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry \
+            "$output/runner_image.wasm" "$output/runner_status.wasm"
 
       # The loader suite takes image paths relative to --root, so every fixture
       # is built into one isolated root: loader_app and fidelity as programs,
@@ -594,6 +596,11 @@ jobs:
           test -f "$optimized/fidelity.mjs"
           test -f "$optimized/fidelity.wasm"
           test -f "$optimized/fidelity.wasm.map"
+          "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry \
+            "$root"/assertions-*/loader_names.wasm
+          "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry,fixture:loader,fixture:controls \
+            "$root"/assertions-*/loader_app.wasm "$root"/assertions-*/fidelity.wasm \
+            "$optimized/fidelity.wasm"
 
       - name: Run the portable loader suite under Node and Chromium
         run: |

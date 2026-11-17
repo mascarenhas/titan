@@ -15,6 +15,7 @@ describe("browser coroutine GC and trace fixtures", function()
             "--test", "--exe", workspace .. "/public.mjs",
             "--c-source", support.fixture .. "/close.c", "coroutine.tests", "gc.tests" })
         assert.is_true(ok, log)
+        toolchain.check_imports(workspace .. "/public.mjs", { "entry" })
         local names = {
             "coroutine.tests.test_routes_nested_tagged_yield_through_suspended_outer_handler",
             "coroutine.tests.test_roots_nested_stacked_payloads_and_tags_across_gc",
@@ -42,6 +43,7 @@ describe("browser coroutine GC and trace fixtures", function()
             "--test", "--exe", workspace .. "/trace.mjs",
             "--c-source", support.fixture .. "/trace.c", "runtime_trace" })
         assert.is_true(ok, log)
+        toolchain.check_imports(workspace .. "/trace.mjs", { "entry" })
         for _, engine in ipairs({ "node", "chromium" }) do
             ok, log = support.image(info, workspace, engine, "trace")
             assert.is_true(ok, log)

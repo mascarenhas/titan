@@ -257,9 +257,10 @@ aggregate, the owners drive their own `async` Runtimes.
 The image is `images/stdlib.mjs` with its `.wasm` and `.wasm.map`, below
 `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`); compiler
 output stays in `objects/`, which titanc creates and marks. The target writes
-`roots.txt`, prints the build duration, checks the dependency closure and the
-[subset parity gate](browser-target.md#subset-parity-gate), and writes
-`members.md`. There is no separate
+`roots.txt`, prints the build duration, checks the dependency closure, checks
+the image's imports against the `entry` class of the [import
+manifest](browser-target.md#import-manifest), applies the [subset parity
+gate](browser-target.md#subset-parity-gate), and writes `members.md`. There is no separate
 suite byte budget: the compiler's [general image
 bounds](browser-target.md#build-time-image-bounds) apply.
 

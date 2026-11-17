@@ -1355,6 +1355,8 @@ titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all
 	echo "Browser stdlib image stdlib build_seconds=$$elapsed"; \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua closure \
 	  "$$compiler_dir" $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/images/stdlib.wasm"; \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua imports \
+	  entry "$$build_dir/images/stdlib.wasm"; \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua inventory \
 	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.a) \
 	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/members.md"; \

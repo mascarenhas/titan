@@ -44,6 +44,8 @@ local function build(info, assertions, module, name, is_test, c_source)
     local ok, log = run(argv)
     assert.is_true(ok, log)
     assert.equal("file", lfs.attributes(output .. "/" .. name .. ".wasm", "mode"))
+    -- gate.c and entry_lifetimes.c both include the fixture controls.
+    toolchain.check_imports(output .. "/" .. name .. ".wasm", { "entry", "fixture:gate", "fixture:controls" })
 end
 
 describe("browser real runtime entry gate", function()

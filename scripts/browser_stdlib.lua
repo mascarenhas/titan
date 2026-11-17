@@ -15,6 +15,9 @@ local M = {}
 -- lists from it.
 local directory = debug.getinfo(1, "S").source:match("^@(.*[/\\])") or ""
 M.status_inventory = dofile(directory .. "browser_stdlib_inventory.lua")
+-- The reviewed import allowlist: every import a final browser image may name,
+-- by image class, with the loader piece that implements it.
+M.import_allowlist = dofile(directory .. "browser_imports.lua")
 M.absent_modules = {}
 local absent_modules, browser_only_modules = {}, {}
 for _, row in ipairs(M.status_inventory.modules) do
@@ -210,6 +213,78 @@ function M.check_image(bytes, origin)
         if not ok then return nil, err end
     end
     return true
+end
+
+local IMPORT_KINDS = { [1] = "table", [2] = "memory", [3] = "global", [4] = "tag" }
+
+-- Function imports compare by signature; other kinds by their kind, and a tag
+-- also by its signature.
+local function import_signature(import)
+    if import.kind == 0 then return import.signature end
+    local kind = IMPORT_KINDS[import.kind]
+    return import.signature and (kind .. " " .. import.signature) or kind
+end
+
+-- The permitted signatures by `module\0name` for the union of `classes`,
+-- after checking the whole allowlist's shape.
+function M.allowed_imports(allowlist, classes)
+    local wanted, permitted, seen = {}, {}, {}
+    for _, class in ipairs(classes) do
+        if not allowlist.classes[class] then return nil, "unknown browser import class " .. class end
+        wanted[class] = true
+    end
+    for index, row in ipairs(allowlist.imports) do
+        local class, module, name, signature = row[1], row[2], row[3], row[4]
+        if #row ~= 4 or not allowlist.classes[class] or type(module) ~= "string" or
+            type(name) ~= "string" or type(signature) ~= "string" or
+            type(row.provider) ~= "string" or row.provider == "" or
+            type(row.reason) ~= "string" or row.reason == "" then
+            return nil, "malformed browser import allowlist row " .. index
+        end
+        local key = module .. "\0" .. name
+        if seen[class .. "\0" .. key] then
+            return nil, "duplicate browser import allowlist row " .. class .. " " .. module .. "." .. name
+        end
+        seen[class .. "\0" .. key] = true
+        if wanted[class] then
+            permitted[key] = permitted[key] or {}
+            permitted[key][signature] = true
+        end
+    end
+    return permitted
+end
+
+-- Every import of a final image must be listed for one of the image's classes
+-- with the same signature.
+function M.check_imports(bytes, origin, classes, allowlist)
+    local permitted, err = M.allowed_imports(allowlist or M.import_allowlist, classes)
+    if not permitted then return nil, err end
+    local image
+    image, err = staticmetadata.browser_trace_image(bytes, origin)
+    if not image then return nil, err end
+    local unlisted = {}
+    for _, import in ipairs(image.imports) do
+        local signature = import_signature(import)
+        local signatures = permitted[import.module .. "\0" .. import.name]
+        if not (signatures and signatures[signature]) then
+            unlisted[#unlisted + 1] = string.format("%s: unlisted browser import %s.%s %s (classes %s)",
+                origin, import.module, import.name, signature, table.concat(classes, ","))
+        end
+    end
+    if #unlisted > 0 then
+        return nil, table.concat(unlisted, "\n") ..
+            "\nadd a reviewed row for each to scripts/browser_imports.lua"
+    end
+    return true
+end
+
+-- Checks the `.wasm` of one built image, named by its `.mjs` or `.wasm`, for
+-- the classes of that image.
+function M.check_file_imports(strategy, image, classes)
+    local wasm = image:gsub("%.mjs$", ".wasm")
+    local bytes, err = strategy:read_file(wasm)
+    if not bytes then return nil, err end
+    return M.check_imports(bytes, wasm, classes)
 end
 
 function M.check_output(strategy, directory)

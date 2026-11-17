@@ -18,6 +18,7 @@ local function build(info, root, assertions, name, budgets)
         "--c-source", support.fixture .. "/budget_pad.c",
         "--ldflag=-Wl,--wrap=mco_create", "budget_probe" })
     assert.is_true(ok, log)
+    toolchain.check_imports(root .. "/" .. name .. ".mjs", { "entry", "fixture:budget" })
 end
 
 local function limit_failure(status, log, mode)

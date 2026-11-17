@@ -472,4 +472,14 @@ function M.require(requirements)
     return nil, reason
 end
 
+-- A test image uses only reviewed imports (scripts/browser_imports.lua): the
+-- entry imports plus the classes of the test fixtures it links. `image` names
+-- the `.mjs` or its `.wasm`.
+local stdlib_checks
+function M.check_imports(image, classes)
+    stdlib_checks = stdlib_checks or dofile(repository_root() .. "/scripts/browser_stdlib.lua")
+    local ok, err = stdlib_checks.check_file_imports(compiler_io.new_sync(), image, classes)
+    if not ok then error(err, 2) end
+end
+
 return M

@@ -275,6 +275,8 @@ jobs begin with the same seven steps:
 10. **Runner images.** The installed `titanc` builds `runner_image` (a
     `--test` image) and `runner_status` (a program) from `spec/browser` into
     `out/browser/runner` and asserts `.mjs`, `.wasm`, and `.wasm.map` for each.
+    `scripts/check_browser_stdlib.lua imports entry` then checks both images
+    against the [import manifest](browser-target.md#import-manifest).
 11. **Loader images.** For assertions 2 and 0, the job sets
     `driver.browser_link_options` and builds `loader_app` and `fidelity`
     (programs with `--c-source spec/fixtures/browser_loader/loader.c`) with the
@@ -286,7 +288,9 @@ jobs begin with the same seven steps:
     builds one `fidelity` image with the `baseline` profile at `O2` and
     assertions off, plus the harness-only `--ldflag=-Os` (the profile itself
     supplies the debug flags), because Emscripten 6.0.13 minifies export names
-    only at `-O3` or a shrink level.
+    only at `-O3` or a shrink level. The import check accepts the `entry` class
+    for `loader_names` and `entry,fixture:loader,fixture:controls` for the
+    `loader_app` and both `fidelity` images, which link the loader fixture.
 12. **Loader suite.** The installed `titan-browser-run --timeout 300000
     --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
     workspace with relative image paths, runs under Node and then Chromium,
@@ -353,7 +357,8 @@ After step 7, `browser-stdlib` runs:
    once, unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
    builds all twenty-three browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
-   checks dependency closure and applies the [subset parity
+   checks dependency closure and the image's `entry` imports against the
+   [import manifest](browser-target.md#import-manifest), applies the [subset parity
    gate](browser-target.md#subset-parity-gate) to the fourteen shared
    modules, `async`, `timer`, `os`, `lua`, `http`, and `websocket`, then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
@@ -443,7 +448,10 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    `$RUNNER_TEMP/browser-playwright-build.log`) builds the test image and the
    uncaught and async-bootstrap program images for both assertion modes with
    the cell's installed `titanc` and stages the degraded-map variants,
-   `trace.test.mjs`, and `manifest.json`.
+   `trace.test.mjs`, and `manifest.json`. Like `build-bridge.lua` and
+   `build-net.lua` (steps 7 and 8), it checks each image it builds against the
+   [import manifest](browser-target.md#import-manifest) classes of the
+   fixtures that image links.
 5. **Positive trace gate.** `"$TITAN_NODE" spec/browser/playwright-run.mjs --engine
    "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 --sdk
    "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT"

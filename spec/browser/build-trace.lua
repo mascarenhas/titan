@@ -8,6 +8,9 @@ assert(not arg[2], "build-trace.lua accepts exactly one output directory")
 if not path.is_absolute(output) then output = path.join(repository, output) end
 local prefix = assert(os.getenv("TITAN_ROOT") or os.getenv("PREFIX"), "TITAN_ROOT or PREFIX is required")
 local fixture = path.join(repository, "spec/fixtures/browser_trace")
+-- Each image uses only reviewed imports (scripts/browser_imports.lua).
+local checks = dofile(path.join(repository, "scripts/browser_stdlib.lua"))
+local strategy = require("titan-compiler.io").new_sync()
 
 local cases = {
   "test_direct_locations", "test_selected_contributor_locations",
@@ -115,6 +118,7 @@ end
     io.stdout:write(result.output or result.diagnostic or ""); io.stdout:flush()
     assert(result.ok, "trace fixture build failed: " .. image .. " (" .. tostring(result.status) .. ")")
     assert(lfs.attributes(image, "mode") == "file", "missing built image " .. image)
+    assert(checks.check_file_imports(strategy, image, {"entry", "fixture:trace"}))
     io.stdout:write("TRACE-IMAGE " .. image .. " nativeCases=" .. (target.testing and #all or 0) .. "\n")
   end
 end
