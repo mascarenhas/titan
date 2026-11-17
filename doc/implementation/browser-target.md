@@ -4298,9 +4298,12 @@ their values. Two harnesses take them:
     prints them at start; after a warm-up batch of 256 Tasks has finished and
     two collections; after each batch of 256 Tasks parked on channels of their
     own, until creating a Task fails; and after the parked Tasks finish and
-    two collections. The bytes per Task come from the parked batches. The run
-    must exit with status 0 and the failure must be Titan's own `could not
-    create coroutine: Out of memory`; an engine failure fails the step;
+    two collections. The bytes per Task come from the parked batches. A run
+    that completes must have stopped at Titan's own `could not create
+    coroutine: Out of memory`. An engine that fails first (status 70, 71 or
+    75), as a [fatal engine allocation
+    failure](../language/browser-target.md#limits) does, is recorded as that
+    engine's limit with the last parked count;
   * recursion: the deepest depth that passes for plain recursion in `main`
     and in a new coroutine (`stack.mjs`, which imports neither `async` nor
     `io`, so `main` is not a Task and runs on the main stack), in `main`'s
@@ -4311,14 +4314,20 @@ their values. Two harnesses take them:
     call stack (75 with a call-stack message), an abort (70), a trap (71),
     or a Titan error (1). Any other status fails the step.
 
+Recursion depth is engine-specific, so the `production` Firefox and WebKit
+Playwright cells run the collector too, with `--engines` set to their engine
+and `--measure memory,recursion`; together the jobs record memory and recursion
+on all four engines.
+
 `spec/browser/build-records.lua` builds `records.titan` and `stack.titan` from
 `spec/fixtures/browser_records/` with the installation's `titanc` and checks
 both images' imports against the `entry` class. The collector runs Node images
 through the SDK's `titan-browser-run` and the other engines through
-`spec/browser/playwright-run.mjs`, and writes
-`out/browser-records/packaging.json` with a Markdown table beside it; the
-hosted test writes `out/browser-records/playwright-<engine>.json`. Both jobs
-upload `out/browser-records/` as `browser-records-*` artifacts.
+`spec/browser/playwright-run.mjs`, and writes its JSON file with a Markdown
+table beside it: `out/browser-records/packaging.json` in `browser-packaging`
+and `records-<engine>.json` in the Playwright cells, where the hosted test
+writes `playwright-<engine>.json`. Both jobs upload `out/browser-records/` as
+`browser-records-*` artifacts.
 
 ## Host processes
 
@@ -4653,9 +4662,10 @@ same texts.
   job runs both chapters from a fresh clone through `doc_check.lua
   --clean-checkout` and the same tests on the result.
 * `spec/browser/build-records.lua` with `spec/fixtures/browser_records/` —
-  the release profile's [records](#records) in the `browser-packaging` job;
-  they fail on harness errors and on a Task limit that is not Titan's
-  allocation error, never on the measured values.
+  the release profile's [records](#records) in the `browser-packaging` job
+  and the `production` Firefox and WebKit cells; they fail on harness errors
+  and on a memory run that completes without Titan's allocation error, never
+  on the measured values.
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and

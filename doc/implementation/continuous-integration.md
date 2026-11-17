@@ -589,7 +589,16 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
    (`$RUNNER_TEMP/browser-playwright-node-policy.log`),
    and the `--allow-degraded-trace ... -- --degraded` run covers the degraded
    rows (`$RUNNER_TEMP/browser-playwright-node-degraded.log`).
-13. **Complete browser core stdlib suite (`validation` only, last).** With
+13. **Engine records (`production` × `firefox` and `webkit`).** Recursion
+    depth is engine-specific, so these cells add their engine to the Node and
+    Chromium records of [`browser-packaging`](#browser-packaging-job). With
+    emsdk sourced, `lua -E spec/browser/build-records.lua` builds the records
+    programs with the cell's installation
+    (`$RUNNER_TEMP/browser-playwright-records-build.log`), and `collect.mjs
+    --engines "$TITAN_TRACE_ENGINE" --measure memory,recursion` writes
+    `out/browser-records/records-<engine>.json`
+    (`$RUNNER_TEMP/browser-playwright-records.log`; [records](browser-target.md#records)).
+14. **Complete browser core stdlib suite (`validation` only, last).** With
     emsdk sourced, `make titan-stdlib-browser-test PREFIX="$PREFIX"
     TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE"
     TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs
@@ -597,7 +606,7 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
     stdlib image as `browser-stdlib`'s `sdk` shard and runs it on the cell's
     managed engine (`$RUNNER_TEMP/browser-playwright-stdlib.log`). It is the
     last test step, so a failing case leaves every earlier gate's receipts.
-14. **Receipts.** On `always()`, `actions/upload-artifact` uploads
+15. **Receipts.** On `always()`, `actions/upload-artifact` uploads
     `${{ runner.temp }}/browser-playwright-*.log`,
     `${{ runner.temp }}/browser-production-pins.log`,
     `${{ env.TITAN_TRACE_OUTPUT }}`, `${{ env.TITAN_BRIDGE_OUTPUT }}`,
@@ -654,7 +663,8 @@ environment. It runs on a four-vCPU runner with `MAKEFLAGS=-j4` and
    node,chromium` writes `out/browser-records/packaging.json` and
    `packaging.md` ([records](browser-target.md#records);
    `browser-packaging-records.log`). The step fails on harness errors and on
-   a Task limit that is not Titan's allocation error, never on the values.
+   a memory run that completes without Titan's allocation error, never on the
+   values.
 6. **Receipts.** On `always()`, the job uploads
    `${{ runner.temp }}/browser-packaging-*.log` as `browser-packaging` and
    `out/browser-records/` as `browser-records-packaging`, for seven days.

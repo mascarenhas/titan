@@ -1437,6 +1437,21 @@ jobs:
             --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-degraded.log"
 
+      # Measurements only: recursion depth is engine-specific, so the
+      # production Firefox and WebKit cells add their engine to the Node and
+      # Chromium records of browser-packaging. Never fails on the numbers.
+      - name: Record memory, Task scaling and recursion depth on the managed engine
+        if: matrix.profile == 'production' && matrix.engine != 'chromium'
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          lua -E spec/browser/build-records.lua "$RUNNER_TEMP/browser-records" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-records-build.log"
+          "$TITAN_NODE" spec/fixtures/browser_records/collect.mjs --sdk "$PREFIX/lib/titan-browser/0.6" \
+            --images "$RUNNER_TEMP/browser-records" --engines "$TITAN_TRACE_ENGINE" --measure memory,recursion \
+            --out "$PWD/out/browser-records/records-$TITAN_TRACE_ENGINE.json" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-records.log"
+
       # The complete browser core stdlib image on this cell's engine. The step
       # runs last, so that failing cases leave every earlier gate's receipts;
       # the image runs every case and the audit reports each failure.
@@ -1590,8 +1605,9 @@ jobs:
             --root "$workspace" --js-test "$workspace/dod.test.mjs" \
             2>&1 | tee "$RUNNER_TEMP/browser-packaging-node.log"
 
-      # Measurements only: the collector fails on harness errors and on a Task
-      # limit that is not Titan's allocation error, never on the numbers.
+      # Measurements only: the collector fails on harness errors and on a
+      # memory run that completes without Titan's allocation error, never on
+      # the numbers.
       - name: Record sizes, startup, memory, Task scaling and recursion depth
         run: |
           set -euo pipefail

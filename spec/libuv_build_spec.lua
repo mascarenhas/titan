@@ -6564,6 +6564,18 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.truthy(records:find(contract, 1, true), contract)
             end
+            -- browser-packaging records Node and Chromium; the production
+            -- Firefox and WebKit cells add their engine's memory and recursion.
+            local engine_records = named_step(playwright_job,
+                "Record memory, Task scaling and recursion depth on the managed engine")
+            for _, contract in ipairs({
+                "if: matrix.profile == 'production' && matrix.engine != 'chromium'",
+                'lua -E spec/browser/build-records.lua "$RUNNER_TEMP/browser-records"',
+                '--engines "$TITAN_TRACE_ENGINE" --measure memory,recursion',
+                '--out "$PWD/out/browser-records/records-$TITAN_TRACE_ENGINE.json"',
+            }) do
+                assert.truthy(engine_records:find(contract, 1, true), contract)
+            end
             -- Every validation cell runs the stdlib aggregate on its engine,
             -- last, so that failing cases leave the earlier gates' receipts.
             local playwright_suite = named_step(playwright_job,

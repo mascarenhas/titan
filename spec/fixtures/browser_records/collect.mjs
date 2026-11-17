@@ -1,25 +1,28 @@
 // Browser records of the release profile (doc/implementation/browser-target.md#records):
 //
-//   node collect.mjs --sdk SDK --images DIR --app DIR --engines node,chromium --out FILE
+//   node collect.mjs --sdk SDK --images DIR [--app APP] --engines node,chromium
+//       [--measure sizes,startup,memory,recursion] --out FILE
 //
 // DIR holds records.mjs and stack.mjs (spec/browser/build-records.lua), and APP
-// the complete application's build. It records:
+// the complete application's build. It records, unless --measure selects
+// fewer:
 //
-// - the sizes of app.wasm, app.mjs, app.wasm.trace and app.wasm.map: raw,
-//   gzip -9 and brotli -q 11;
+// - sizes: app.wasm, app.mjs, app.wasm.trace and app.wasm.map, raw, gzip -9
+//   and brotli -q 11;
 // - startup under Node, in 5 fresh instances: create() until initialize()
 //   resolves for the application and records.mjs, and until records.mjs's
 //   first output;
 // - memory on each engine: records.mjs's `memory` run, which parks Tasks until
-//   creating one fails;
+//   creating one fails, with Titan's allocation error, or until the engine
+//   fails first;
 // - recursion on each engine: the deepest passing depth of each stack shape,
 //   each probe in a fresh run.
 //
 // Node runs images through the SDK's titan-browser-run, the other engines
 // through spec/browser/playwright-run.mjs. It writes FILE and FILE with `.md`
 // in place of `.json`. The numbers never fail it; a run that fails in a way no
-// record explains does, and so does a Task limit that is not Titan's own
-// allocation error.
+// record explains does, and so does a memory run that completes without
+// Titan's allocation error.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {mkdir, readFile, writeFile} from 'node:fs/promises';
@@ -30,15 +33,21 @@ import {brotliCompressSync, constants, gzipSync} from 'node:zlib';
 
 const {values: options} = parseArgs({options: {
   sdk: {type: 'string'}, images: {type: 'string'}, app: {type: 'string'},
-  engines: {type: 'string'}, out: {type: 'string'},
+  engines: {type: 'string'}, measure: {type: 'string', default: 'sizes,startup,memory,recursion'},
+  out: {type: 'string'},
 }});
-for (const name of ['sdk', 'images', 'app', 'engines', 'out']) {
-  assert.ok(options[name], 'usage: collect.mjs --sdk SDK --images DIR --app DIR --engines LIST --out FILE');
+const measure = new Set(options.measure.split(','));
+for (const name of measure) assert.ok(['sizes', 'startup', 'memory', 'recursion'].includes(name), name);
+const needed = ['sdk', 'images', 'engines', 'out'];
+if (measure.has('sizes') || measure.has('startup')) needed.push('app');
+for (const name of needed) {
+  assert.ok(options[name], 'usage: collect.mjs --sdk SDK --images DIR [--app APP] --engines LIST ' +
+    '[--measure LIST] --out FILE');
 }
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const sdk = resolve(options.sdk);
 const images = resolve(options.images);
-const app = resolve(options.app);
+const app = options.app && resolve(options.app);
 const engines = options.engines.split(',');
 for (const engine of engines) assert.ok(['node', 'chromium', 'firefox', 'webkit'].includes(engine), engine);
 
@@ -134,9 +143,11 @@ function deepest(engine, image, mode) {
   return {passing: low, failing: high, failure, probes};
 }
 
+// The memory run ends with Titan's allocation error once creating a Task
+// fails. An engine that fails before that, which the browser target documents
+// as fatal, is recorded as that engine's limit instead.
 function memory(engine) {
   const result = run(engine, 'records', ['memory'], 300000);
-  assert.equal(result.status, 0, `${engine} memory run:\n${result.text}`);
   const phases = {}, parked = [];
   for (const match of result.text.matchAll(/^RECORD (\w+) heap=(\d+) used=(\d+) lua=(\d+)(?: tasks=(\d+))?(?: error=(.*))?$/gm)) {
     const phase = {heap: Number(match[2]), used: Number(match[3]), lua: Number(match[4])};
@@ -145,56 +156,80 @@ function memory(engine) {
     if (match[1] === 'parked') parked.push(phase);
     else phases[match[1]] = phase;
   }
-  for (const name of ['start', 'steady', 'limit', 'end']) assert.ok(phases[name], `${engine}: no ${name} record`);
-  assert.ok(parked.length >= 2, `${engine}: fewer than two batches of parked Tasks`);
-  assert.match(phases.limit.error, /could not create coroutine: Out of memory/,
-    `${engine}: the Task limit was not Titan's allocation error`);
+  const what = `${engine} memory run (status ${result.status}):\n${result.text}`;
+  assert.ok(phases.start && phases.steady && parked.length >= 2, what);
   const [first, last] = [parked[0], parked.at(-1)];
-  return {...phases, perTaskBytes: Math.round((last.used - first.used) / (last.tasks - first.tasks))};
+  const record = {...phases, perTaskBytes: Math.round((last.used - first.used) / (last.tasks - first.tasks))};
+  if (result.status === 0) {
+    assert.ok(phases.limit && phases.end, what);
+    assert.match(phases.limit.error, /could not create coroutine: Out of memory/,
+      `${engine}: the Task limit was not Titan's allocation error`);
+    record.limit.failure = 'Titan error';
+  } else {
+    const failure = {70: 'engine abort', 71: 'trap', 75: 'engine failure'}[result.status];
+    assert.ok(failure, what);
+    const diagnostic = result.text.split('\n').filter(line => /^titan-(browser|playwright)-run: /.test(line)).at(-1);
+    record.limit = {...last, failure, error: diagnostic ?? ''};
+  }
+  return record;
 }
 
 const records = {
   profile: (await readFile(join(sdk, 'build-profile'), 'utf8')).trim(),
   node: process.version,
-  sizes: await sizes(),
-  startup: {node: {app: await startup(join(app, 'app.mjs')),
-    records: await startup(join(images, 'records.mjs'), ['start'])}},
-  memory: {},
-  recursion: {},
 };
+if (measure.has('sizes')) records.sizes = await sizes();
+if (measure.has('startup')) {
+  records.startup = {node: {app: await startup(join(app, 'app.mjs')),
+    records: await startup(join(images, 'records.mjs'), ['start'])}};
+}
+if (measure.has('memory')) records.memory = {};
+if (measure.has('recursion')) records.recursion = {};
 for (const engine of engines) {
-  records.memory[engine] = memory(engine);
-  records.recursion[engine] = {
-    main: deepest(engine, 'stack', 'main'),
-    coroutine: deepest(engine, 'stack', 'coroutine'),
-    task: deepest(engine, 'records', 'task'),
-    'task-sleep': deepest(engine, 'records', 'sleep'),
-  };
+  if (records.memory) records.memory[engine] = memory(engine);
+  if (records.recursion) {
+    records.recursion[engine] = {
+      main: deepest(engine, 'stack', 'main'),
+      coroutine: deepest(engine, 'stack', 'coroutine'),
+      task: deepest(engine, 'records', 'task'),
+      'task-sleep': deepest(engine, 'records', 'sleep'),
+    };
+  }
 }
 
 const kib = bytes => (bytes / 1024).toFixed(1);
 const mib = bytes => (bytes / 1048576).toFixed(1);
-const lines = [`# Browser records (${records.profile}, Node ${records.node})`, '',
-  '| File | Raw KiB | gzip -9 KiB | brotli -q 11 KiB |', '| --- | ---: | ---: | ---: |'];
-for (const [name, size] of Object.entries(records.sizes)) {
-  lines.push(`| ${name} | ${kib(size.raw)} | ${kib(size.gzip)} | ${kib(size.brotli)} |`);
+const lines = [`# Browser records (${records.profile}, Node ${records.node})`];
+if (records.sizes) {
+  lines.push('', '| File | Raw KiB | gzip -9 KiB | brotli -q 11 KiB |', '| --- | ---: | ---: | ---: |');
+  for (const [name, size] of Object.entries(records.sizes)) {
+    lines.push(`| ${name} | ${kib(size.raw)} | ${kib(size.gzip)} | ${kib(size.brotli)} |`);
+  }
 }
-lines.push('', '| Node startup (5 fresh instances) | Median ms | Max ms |', '| --- | ---: | ---: |');
-for (const [image, timing] of Object.entries(records.startup.node)) {
-  for (const [name, value] of Object.entries(timing)) lines.push(`| ${image} ${name} | ${value.median} | ${value.max} |`);
+if (records.startup) {
+  lines.push('', '| Node startup (5 fresh instances) | Median ms | Max ms |', '| --- | ---: | ---: |');
+  for (const [image, timing] of Object.entries(records.startup.node)) {
+    for (const [name, value] of Object.entries(timing)) lines.push(`| ${image} ${name} | ${value.median} | ${value.max} |`);
+  }
 }
-lines.push('', 'Memory is the WebAssembly memory size, which never shrinks; in use is what malloc has handed out.', '',
-  '| Engine | Start MiB (in use) | Steady MiB (in use) | Parked Tasks at the limit | KiB per Task | Peak MiB | In use at the end MiB |',
-  '| --- | ---: | ---: | ---: | ---: | ---: | ---: |');
-for (const [engine, phase] of Object.entries(records.memory)) {
-  lines.push(`| ${engine} | ${mib(phase.start.heap)} (${mib(phase.start.used)}) | ` +
-    `${mib(phase.steady.heap)} (${mib(phase.steady.used)}) | ${phase.limit.tasks} | ` +
-    `${kib(phase.perTaskBytes)} | ${mib(phase.end.heap)} | ${mib(phase.end.used)} |`);
+if (records.memory) {
+  lines.push('', 'Memory is the WebAssembly memory size, which never shrinks; in use is what malloc has handed out.', '',
+    '| Engine | Start MiB (in use) | Steady MiB (in use) | Parked Tasks at the limit | KiB per Task | Limit | Peak MiB | In use at the end MiB |',
+    '| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |');
+  for (const [engine, phase] of Object.entries(records.memory)) {
+    const peak = phase.end ?? phase.limit;
+    lines.push(`| ${engine} | ${mib(phase.start.heap)} (${mib(phase.start.used)}) | ` +
+      `${mib(phase.steady.heap)} (${mib(phase.steady.used)}) | ${phase.limit.tasks} | ` +
+      `${kib(phase.perTaskBytes)} | ${phase.limit.failure} | ${mib(peak.heap)} | ` +
+      `${phase.end ? mib(phase.end.used) : '—'} |`);
+  }
 }
-lines.push('', '| Engine | Stack | Deepest passing depth | Failing depth | How it failed |', '| --- | --- | ---: | ---: | --- |');
-for (const [engine, shapes] of Object.entries(records.recursion)) {
-  for (const [shape, row] of Object.entries(shapes)) {
-    lines.push(`| ${engine} | ${shape} | ${row.passing} | ${row.failing} | ${row.failure} |`);
+if (records.recursion) {
+  lines.push('', '| Engine | Stack | Deepest passing depth | Failing depth | How it failed |', '| --- | --- | ---: | ---: | --- |');
+  for (const [engine, shapes] of Object.entries(records.recursion)) {
+    for (const [shape, row] of Object.entries(shapes)) {
+      lines.push(`| ${engine} | ${shape} | ${row.passing} | ${row.failing} | ${row.failure} |`);
+    }
   }
 }
 const out = resolve(options.out);
