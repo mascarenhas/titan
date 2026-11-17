@@ -14,7 +14,7 @@ TypeScript, Go, or C. Load every applicable peer cartridge as well:
 
 | Work | Skill |
 | --- | --- |
-| Application repository, build layout, executable delivery | [titan-application](.agents/skills/titan-application/SKILL.md) |
+| Application repository, build layout, executable delivery, browser application layout and deployment | [titan-application](.agents/skills/titan-application/SKILL.md) |
 | Native tests, fixtures, test-layer placement, filtering | [titan-tester](.agents/skills/titan-tester/SKILL.md) |
 | Tasks, timers, cross-state Receivers, cancellation, libuv callbacks, native ownership | [titan-async](.agents/skills/titan-async/SKILL.md) |
 | Cross-thread channels, thread handles, thread groups | [titan-thread](.agents/skills/titan-thread/SKILL.md) |
