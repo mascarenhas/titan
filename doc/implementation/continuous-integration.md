@@ -623,9 +623,11 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
 (ubuntu-24.04, emsdk 6.0.13, Node 26, Playwright 1.64.1 Chromium)`) installs
 Titan as a new user does, from the manuals alone, and records the release
 profile. It has no `needs` and takes nothing from another job: no prepared
-tree, no C-probe or native-dependency cache, and no Titan variable in its
-environment. It runs on a four-vCPU runner with `MAKEFLAGS=-j4` and
-`TITAN_JOBS=4`.
+tree and no C-probe or native-dependency cache. The workflow's own
+`TITAN_BUILD_PROFILE` and `OPENSSL_MODE` still reach it, so `doc_check`
+unsets them for the documented commands, and the later build scripts use the
+profile that the installed browser SDK recorded. It runs on a four-vCPU
+runner with `MAKEFLAGS=-j4` and `TITAN_JOBS=4`.
 
 1. **Host packages.** `apt-get` installs the installation chapter's Ubuntu
    list (`build-essential cmake curl git libreadline-dev libssl-dev

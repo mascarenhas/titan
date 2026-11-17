@@ -178,12 +178,13 @@ local function substitute(block, options, used, log)
 end
 
 -- The variables that select a Titan installation, profile or build mode, or
--- Lua's module paths, which a new user's shell does not have.
+-- Lua's module paths, which a new user's shell does not have. A CI workflow
+-- sets some of them for all its jobs (`TITAN_BUILD_PROFILE`, `OPENSSL_MODE`).
 M.clean_variables = { "PREFIX", "ROCKS_TREE", "STDLIB_USE_INSTALLED_RUNTIME", "TITAN_ROOT",
     "TITAN_PREFIX", "TITAN_TARGET", "TITAN_PATH", "TITAN_PATH_0_6", "TITAN_BUILD_PROFILE",
-    "TITAN_RUNTIME_PREBUILT", "TITAN_C_PARTS", "TITAN_NO_LINE_DIRECTIVES", "TITAN_EXTRA_CPPFLAGS",
-    "TITAN_EXTRA_CFLAGS", "TITAN_EXTRA_LDFLAGS", "LUA_INIT", "LUA_INIT_5_5", "LUA_PATH", "LUA_PATH_5_5",
-    "LUA_CPATH", "LUA_CPATH_5_5" }
+    "OPENSSL_MODE", "TITAN_RUNTIME_PREBUILT", "TITAN_C_PARTS", "TITAN_NO_LINE_DIRECTIVES",
+    "TITAN_EXTRA_CPPFLAGS", "TITAN_EXTRA_CFLAGS", "TITAN_EXTRA_LDFLAGS", "LUA_INIT", "LUA_INIT_5_5",
+    "LUA_PATH", "LUA_PATH_5_5", "LUA_CPATH", "LUA_CPATH_5_5" }
 
 -- The plan options and environment of a clean checkout in `workspace`: the
 -- checkout block clones `checkout` into `workspace/titan`, the installation

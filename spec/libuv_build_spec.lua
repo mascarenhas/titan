@@ -6627,8 +6627,9 @@ printf '%s\n' "${schedule[@]}"
                 "- name: Install the selected native compiler and SDK profile",
                 1, true)), playwright_job)
 
-            -- The clean checkout starts from nothing another job made, with no
-            -- Titan variable, and runs the two chapters as one reader would.
+            -- The clean checkout starts from nothing another job made, sets no
+            -- Titan variable of its own, and runs the two chapters as one
+            -- reader would (doc_check unsets the workflow's).
             for _, forbidden in ipairs({
                 "\n    needs:", "actions/download-artifact", "titan-probes", "TITAN_BUILD_PROFILE",
                 "\n      PREFIX:", "TITAN_ROOT", "TITAN_PREFIX", "\n      CC:", "TITAN_CHROME",

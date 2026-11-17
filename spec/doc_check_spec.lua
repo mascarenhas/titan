@@ -191,7 +191,7 @@ describe("doc-check execution", function()
         local install = markdown("<!-- doc-check: setup=checkout -->", "```sh",
             "git clone --recurse-submodules https://github.com/mascarenhas/titan", "cd titan",
             -- A clean checkout's shell has none of the job's Titan variables.
-            'test -z "${TITAN_BUILD_PROFILE-}${TITAN_ROOT-}${PREFIX-}"',
+            'test -z "${TITAN_BUILD_PROFILE-}${OPENSSL_MODE-}${TITAN_ROOT-}${PREFIX-}"',
             'export PREFIX="$HOME/.local/titan/my-project"', 'mkdir -p "$PREFIX"', 'cp notes.txt "$PREFIX/"', "```")
         local use = markdown("<!-- doc-check: run -->", "```sh", "test ! -e titan",
             'cat "$PREFIX/notes.txt" /path/to/titan/notes.txt > both.txt', "```")

@@ -4320,8 +4320,10 @@ and `--measure memory,recursion`; together the jobs record memory and recursion
 on all four engines.
 
 `spec/browser/build-records.lua` builds `records.titan` and `stack.titan` from
-`spec/fixtures/browser_records/` with the installation's `titanc` and checks
-both images' imports against the `entry` class. The collector runs Node images
+`spec/fixtures/browser_records/` with the installation's `titanc`, under the
+profile that its browser SDK recorded whatever `TITAN_BUILD_PROFILE` the
+environment holds, and checks both images' imports against the `entry` class.
+The collector runs Node images
 through the SDK's `titan-browser-run` and the other engines through
 `spec/browser/playwright-run.mjs`, and writes its JSON file with a Markdown
 table beside it: `out/browser-records/packaging.json` in `browser-packaging`
@@ -4413,7 +4415,8 @@ installation whose source tree has moved: nothing installed may still point
 into it. The shell starts without the variables that select a Titan
 installation, profile or build mode, or Lua's module paths
 (`doc_check.clean_variables`: `PREFIX`, `ROCKS_TREE`, `TITAN_ROOT`,
-`TITAN_BUILD_PROFILE`, `LUA_PATH`, and the like), so a job's own settings
+`TITAN_BUILD_PROFILE`, `OPENSSL_MODE`, `LUA_PATH`, and the like), so a job's
+own settings, including those a workflow sets for all its jobs,
 cannot stand in for a documented command. The script needs only Lua 5.4 or
 newer, so a job can run it with its distribution's Lua before the clone has
 built its own.
@@ -4462,11 +4465,12 @@ standard-library test tree never resolves modules from the manual.
 The "A complete application" section documents `doc/language/browser-app/`:
 `app.titan`, its page `index.html`, and `greeting.txt`.
 `spec/browser/build-delivery.lua OUTPUT` runs that section's commands with
-`doc_check` in the reader's shell (the installation's `bin` on `PATH`,
-`PREFIX` naming it, no Titan overrides), so the build uses the installation's
-profile; it builds the documented `http-dev-server` natively, checks the
-image's imports against the `entry` class, and writes `delivery.json` with the
-profile and the section's `expect=app` and `expect=app-errors` texts. With
+`doc_check` in the reader's shell: the installation's `bin` on `PATH`,
+`PREFIX` naming it, `TITAN_BUILD_PROFILE` set to the profile that its browser
+SDK recorded, and no Titan overrides. It builds the documented
+`http-dev-server` natively under the same profile, checks the image's imports
+against the `entry` class, and writes `delivery.json` with the profile and the
+section's `expect=app` and `expect=app-errors` texts. With
 `--built WORKSPACE`, it builds and runs nothing: the clean-checkout job has
 already run the whole chapter there, so it checks the imports of the first
 page's `out/hello.mjs` and of the application, then writes the same

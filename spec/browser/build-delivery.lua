@@ -2,9 +2,10 @@
 -- documents, plus the documented http-dev-server, for the hosted deployment
 -- test (spec/fixtures/browser_delivery/hosted.mjs) and the Node run
 -- (dod.test.mjs). Run it with Emscripten active and the installation's
--- PREFIX; the build uses the installation's profile. With --built, the
--- clean-checkout job's doc_check run has already run the whole chapter in
--- OUTPUT, and this only checks and stages what it built.
+-- PREFIX; the build uses the profile that the installation's browser SDK
+-- recorded, whatever TITAN_BUILD_PROFILE the caller's environment holds.
+-- With --built, the clean-checkout job's doc_check run has already run the
+-- whole chapter in OUTPUT, and this only checks and stages what it built.
 local lfs = require "lfs"
 local process = require "titan-compiler.process"
 local path = require "titan-compiler.path"
@@ -45,8 +46,11 @@ local function json_string(text)
   end) .. '"'
 end
 
+local profile = read(path.join(prefix, "lib/titan-browser/0.6/build-profile")):match("^(%a+)%s*$")
+assert(profile == "production" or profile == "validation", "the SDK records no build profile")
+
 -- The section's commands, verbatim, in the reader's shell: the installation
--- on PATH, PREFIX naming it, and no Titan overrides.
+-- on PATH, PREFIX naming it, its profile, and no Titan overrides.
 local chapter = "doc/language/browser-target.md"
 local section = assert(doc_check.section(read(path.join(repository, chapter)), "A complete application"))
 local plan = assert(doc_check.plan({ { name = chapter, text = section } },
@@ -61,6 +65,7 @@ else
   mkdir(output)
   assert(doc_check.run(plan, {
     PATH = path.join(prefix, "bin") .. ":" .. assert(os.getenv("PATH")), PREFIX = prefix,
+    TITAN_BUILD_PROFILE = profile,
     TITAN_ROOT = false, TITAN_TARGET = false, TITAN_PATH_0_6 = false, TITAN_PATH = false,
     TITAN_EXTRA_CPPFLAGS = false, TITAN_EXTRA_CFLAGS = false, TITAN_EXTRA_LDFLAGS = false,
   }))
@@ -69,15 +74,13 @@ else
   local server = process.capture({ path.join(prefix, "bin/titanc"), "-q", "--incremental",
     "--tree", path.join(repository, "doc/language"), "--output", path.join(output, "native"),
     "--exe", path.join(output, "http-dev-server"), "http-dev-server" }, { cwd = repository, env = {
-      TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "",
-      TITAN_EXTRA_LDFLAGS = "",
+      TITAN_ROOT = prefix, TITAN_BUILD_PROFILE = profile, TITAN_TARGET = "", TITAN_EXTRA_CPPFLAGS = "",
+      TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "",
     } })
   assert(server.ok, server.output or server.diagnostic)
 end
 assert(checks.check_file_imports(strategy, path.join(output, "browser-app/out/app.mjs"), { "entry" }))
 
-local profile = read(path.join(prefix, "lib/titan-browser/0.6/build-profile")):match("^(%a+)%s*$")
-assert(profile == "production" or profile == "validation", "the SDK records no build profile")
 -- The Node run's module and the expectations it shares with the hosted test
 -- sit at the root that titan-browser-run serves.
 for _, name in ipairs({ "dod.test.mjs", "expectations.mjs" }) do
