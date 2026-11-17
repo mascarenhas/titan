@@ -13,7 +13,7 @@ EM_JS(void, trace_fixture_publish_controls, (void), {
   publish(Object.freeze({
     metadata: () => {
       const value = Module['titanBrowserTrace'];
-      return Object.freeze({state: value.state, reason: value.reason, mapBytes: value.mapBytes,
+      return Object.freeze({state: value.state, reason: value.reason, traceBytes: value.traceBytes,
         indexBytes: value.indexBytes, loadMilliseconds: value.loadMilliseconds});
     },
   }));

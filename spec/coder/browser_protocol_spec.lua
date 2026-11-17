@@ -173,6 +173,7 @@ local function no_staged_images(directory)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]c$", ".o"))), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm"))), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm.map"))), filename)
+            assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm.trace"))), filename)
         end
     end
     if lfs.symlinkattributes(directory, "mode") ~= "directory" then return end
@@ -182,6 +183,7 @@ local function no_staged_images(directory)
             assert.is_nil(entry:match("[.]mjs$"), entry)
             assert.is_nil(entry:match("[.]wasm$"), entry)
             assert.is_nil(entry:match("[.]wasm[.]map$"), entry)
+            assert.is_nil(entry:match("[.]wasm[.]trace$"), entry)
             no_staged_images(directory .. "/" .. entry)
         end
     end

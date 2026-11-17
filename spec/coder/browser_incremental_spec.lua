@@ -326,8 +326,9 @@ end
     end)
 
     for _, failure in ipairs({ "trace", "record", "rename-1", "rename-2", "rename-3",
-            "rename-4", "rename-5", "rename-6", "map-missing", "map-malformed", "before-commit" }) do
-        it("restores all three predecessor image files after a " .. failure .. " certificate failure", function()
+            "rename-4", "rename-5", "rename-6", "rename-7", "rename-8", "map-missing", "map-malformed",
+            "before-commit" }) do
+        it("restores all four predecessor image files after a " .. failure .. " certificate failure", function()
             local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
             fixture = new_fixture()
             local source = fixture.source .. "/pair_main.titan"
@@ -339,7 +340,8 @@ end
             local previous_mjs, previous_wasm = fixture.root .. "/before.mjs", fixture.root .. "/before.wasm"
             fixtures.copy(mjs, previous_mjs); fixtures.copy(wasm, previous_wasm)
             local map, previous_map = wasm .. ".map", previous_wasm .. ".map"
-            fixtures.copy(map, previous_map)
+            local table_, previous_table = wasm .. ".trace", previous_wasm .. ".trace"
+            fixtures.copy(map, previous_map); fixtures.copy(table_, previous_table)
             local record = record_path(fixture.output)
             fixtures.write(source, "function main(args: {string}): integer return 7 end\n")
             local hook, log = fixture.root .. "/certificate-case.lua", fixture.root .. "/certificate-observation"
@@ -353,6 +355,7 @@ function certificate.commit(context, ticket)
     assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new mjs was not published")
     assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new wasm was not published")
     assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new map was not published")
+    assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new table was not published")
     local file = assert(io.open(%q, "wb"))
     assert(file:write("new pair observed\n")); assert(file:close())
     if %q == "trace" then
@@ -370,7 +373,7 @@ local boundary = tonumber((%q):match("^rename%%-(%%d)$"))
 if boundary then
     local io_module = require "titan-compiler.io"
     local new_sync, renames = io_module.new_sync, 0
-    local finals = { [%q] = true, [%q] = true, [%q] = true }
+    local finals = { [%q] = true, [%q] = true, [%q] = true, [%q] = true }
     local canonical = certificate.canonical_path
     local path_context = { io = new_sync() }
     local physical = {}
@@ -418,8 +421,8 @@ elseif map_case == "before-commit" then
         return invalidate(...)
     end
 end
-]], mjs, previous_mjs, wasm, previous_wasm, map, previous_map, log, failure,
-                failure, mjs, wasm, map, failure))
+]], mjs, previous_mjs, wasm, previous_wasm, map, previous_map, table_, previous_table, log, failure,
+                failure, mjs, wasm, map, table_, failure))
             local setup = string.format("package.path=%q..package.path;",
                 fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;") ..
                 fixture.collector:init_code() .. ";\n" .. string.format("dofile(%q);", hook)
@@ -443,6 +446,7 @@ end
             assert.equal(fixtures.read(previous_mjs), fixtures.read(mjs))
             assert.equal(fixtures.read(previous_wasm), fixtures.read(wasm))
             assert.equal(fixtures.read(previous_map), fixtures.read(map))
+            assert.equal(fixtures.read(previous_table), fixtures.read(table_))
             assert.is_nil(lfs.attributes(record))
             for name in lfs.dir(fixture.output) do
                 assert.is_nil(name:find(".stage.tmp.", 1, true), name)
@@ -459,7 +463,7 @@ end
         end)
     end
 
-    it("certifies all three image files, invalidates every shared asset and rolls back a failed commit", function()
+    it("certifies all four image files, invalidates every shared asset and rolls back a failed commit", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         fixture = new_fixture()
         local physical_output = fixture.root .. "/physical-out"
@@ -486,17 +490,17 @@ end
         end
         assert.matches("Titan link miss", build(), 1, true)
         local mjs, wasm = fixture.output .. "/pair_main.mjs", fixture.output .. "/pair_main.wasm"
-        local map = wasm .. ".map"
+        local map, table_ = wasm .. ".map", wasm .. ".trace"
         local record = record_path(fixture.output)
         local original = { mjs = fixtures.read(mjs), wasm = fixtures.read(wasm), record = fixtures.read(record) }
-        original.map = fixtures.read(map)
+        original.map, original.table = fixtures.read(map), fixtures.read(table_)
         local past = os.time() - 120
         assert(lfs.touch(mjs, past, past)); assert(lfs.touch(wasm, past, past))
         assert.matches("Titan link hit", build(), 1, true)
         assert.equal(past, lfs.attributes(mjs, "modification"))
         assert.equal(past, lfs.attributes(wasm, "modification"))
         assert.equal(original.record, fixtures.read(record))
-        for _, filename in ipairs({ mjs, wasm, map }) do
+        for _, filename in ipairs({ mjs, wasm, map, table_ }) do
             fixtures.write(filename, fixtures.read(filename) .. "corrupt")
             local output = build()
             assert.matches("Titan link miss", output, 1, true)
@@ -504,6 +508,7 @@ end
             assert.equal(original.mjs, fixtures.read(mjs))
             assert.equal(original.wasm, fixtures.read(wasm))
             assert.equal(original.map, fixtures.read(map))
+            assert.equal(original.table, fixtures.read(table_))
         end
         for _, key in ipairs(keys) do
             local bytes = fixtures.read(assets[key])
@@ -518,7 +523,8 @@ end
             assert.matches("Titan link miss", output, 1, true)
             assert.matches("Titan object hit pair_main", output, 1, true)
         end
-        local predecessor = { mjs = fixtures.read(mjs), wasm = fixtures.read(wasm), map = fixtures.read(map) }
+        local predecessor = { mjs = fixtures.read(mjs), wasm = fixtures.read(wasm), map = fixtures.read(map),
+            table = fixtures.read(table_) }
         fixtures.write(fixture.source .. "/pair_main.titan",
             "function main(args: {string}): integer return 7 end\n")
         local log = fixture.root .. "/renames"
@@ -566,6 +572,7 @@ end
         assert.equal(predecessor.mjs, fixtures.read(mjs))
         assert.equal(predecessor.wasm, fixtures.read(wasm))
         assert.equal(predecessor.map, fixtures.read(map))
+        assert.equal(predecessor.table, fixtures.read(table_))
         assert.is_nil(lfs.attributes(record), "failed pair cannot retain a link hit record")
         for name in lfs.dir(fixture.output) do
             assert.is_nil(name:find(".stage.tmp.", 1, true), name)
@@ -579,8 +586,8 @@ end
         assert.equal(7, ran.status)
     end)
 
-    -- Publication renames the map, then the Wasm, then the module (the commit
-    -- point). Each set an interruption can leave refuses to enter Lua.
+    -- Publication renames the table, the map, the Wasm, then the module (the
+    -- commit point). Each set an interruption can leave refuses to enter Lua.
     it("refuses every artifact set an interrupted publication can leave before entry", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         fixture = new_fixture()
@@ -591,7 +598,7 @@ end
             local built = fixture:compile({ "--target", "browser", "--incremental", "publish_main" })
             assert.is_true(built.ok, built.output)
             local artifacts = {}
-            for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map" }) do
+            for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map", ".wasm.trace" }) do
                 artifacts[suffix] = fixtures.read(fixture.output .. "/publish_main" .. suffix)
             end
             artifacts.identity = assert(artifacts[".wasm.map"]:match('"x_titan_image":"(%x+)"'))
@@ -602,25 +609,28 @@ end
         fixtures.write(source, (contents:gsub("first link", "second link")))
         local new = link()
         assert.not_equal(old.identity, new.identity)
-        local function run(name, module, wasm, map)
+        local function run(name, module, wasm, map, table_)
             local directory = fixture.root .. "/" .. name
             fixtures.mkdir(directory)
             fixtures.write(directory .. "/publish_main.mjs", module[".mjs"])
             fixtures.write(directory .. "/publish_main.wasm", wasm[".wasm"])
             fixtures.write(directory .. "/publish_main.wasm.map", map[".wasm.map"])
+            fixtures.write(directory .. "/publish_main.wasm.trace", table_[".wasm.trace"])
             return fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0",
                 directory .. "/publish_main.mjs" })
         end
-        local ran = run("after-map", old, old, new)
-        assert.equal(1, ran.status, ran.output)
-        assert.matches("degraded browser trace: trace map image or extensions do not match", ran.output, 1, true)
-        assert.is_nil(ran.output:find(" link", 1, true), ran.output)
-        ran = run("after-wasm", old, new, new)
+        for _, interrupted in ipairs({ { "after-table", old }, { "after-map", new } }) do
+            local ran = run(interrupted[1], old, old, interrupted[2], new)
+            assert.equal(1, ran.status, ran.output)
+            assert.matches("degraded browser trace: trace table image does not match", ran.output, 1, true)
+            assert.is_nil(ran.output:find(" link", 1, true), ran.output)
+        end
+        local ran = run("after-wasm", old, new, new, new)
         assert.is_false(ran.ok, ran.output)
         assert.matches("browser image mismatch: publish_main.mjs belongs to image " .. old.identity:sub(1, 12) ..
             ", publish_main.wasm is image " .. new.identity:sub(1, 12), ran.output, 1, true)
         assert.is_nil(ran.output:find(" link", 1, true), ran.output)
-        ran = run("committed", new, new, new)
+        ran = run("committed", new, new, new, new)
         assert.is_true(ran.ok, ran.output)
         assert.matches("second link", ran.output, 1, true)
     end)

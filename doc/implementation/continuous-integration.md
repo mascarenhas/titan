@@ -274,7 +274,7 @@ jobs begin with the same seven steps:
    measured.
 10. **Runner images.** The installed `titanc` builds `runner_image` (a
     `--test` image) and `runner_status` (a program) from `spec/browser` into
-    `out/browser/runner` and asserts `.mjs`, `.wasm`, and `.wasm.map` for each.
+    `out/browser/runner` and asserts `.mjs`, `.wasm`, `.wasm.map`, and `.wasm.trace` for each.
     `scripts/check_browser_stdlib.lua imports entry` then checks both images
     against the [import manifest](browser-target.md#import-manifest).
 11. **Loader images.** For assertions 2 and 0, the job sets
@@ -283,7 +283,7 @@ jobs begin with the same seven steps:
     `program` purpose and `loader_names` (a `--test` image) with the `test`
     purpose, because a contrary purpose is refused
     ([internal selection](browser-target.md#the-link-profile)), into
-    `out/browser/loader`, asserting `.mjs`, `.wasm`, and `.wasm.map` for each.
+    `out/browser/loader`, asserting `.mjs`, `.wasm`, `.wasm.map`, and `.wasm.trace` for each.
     It also
     builds one `fidelity` image with the `baseline` profile at `O2` and
     assertions off, plus the harness-only `--ldflag=-Os` (the profile itself
@@ -409,7 +409,7 @@ After step 7, `browser-stdlib` runs:
     days: the `browser-*.log` files and, when present, the browser core stdlib
     suite's evidence: `out/browser-stdlib/*.log` (the
     per-engine `stdlib.<engine>.log` stdout and `stdlib.<engine>.stderr.log`
-    files), `out/browser-stdlib/images/*.{mjs,wasm,wasm.map}`, `roots.txt`
+    files), `out/browser-stdlib/images/*.{mjs,wasm,wasm.map,wasm.trace}`, `roots.txt`
     (through the `*roots.txt` pattern), `members.md`, and the live network
     harness's `out/browser-net/` tree.
 
@@ -477,7 +477,7 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    (`$RUNNER_TEMP/browser-playwright-policy.log`); then
    `playwright-run.mjs ... --allow-degraded-trace ... "$TITAN_TRACE_OUTPUT/trace.test.mjs"
    -- --degraded` (`$RUNNER_TEMP/browser-playwright-degraded.log`) verifies the
-   single load warning, the `(native Titan frames unavailable: trace map not
+   single load warning, the `(native Titan frames unavailable: trace table not
    loaded)` marker, and original-error preservation.
 7. **Persistent bridge gate (all six cells).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
@@ -531,7 +531,7 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    program and exercises plain HTTP loading, relocated assets through
    `locateFile`, and a Vite build using the cell's managed Chromium. The gate
    serves only generated program assets and page files, requires successful
-   Wasm/map fetches and a ready trace map, and runs `main`; no external Titan
+   Wasm and trace-table fetches and a ready trace, and runs `main`; no external Titan
    loader is supplied. Its output is
    `$RUNNER_TEMP/browser-playwright-deployment.log`. Firefox and WebKit cells
    keep their own managed engine without installing another one for this gate.

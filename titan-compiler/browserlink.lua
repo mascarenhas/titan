@@ -425,13 +425,13 @@ function M.embed(image, loader, wasm_name, identity)
             return string.format("\\u%04x", char:byte())
         end) .. '"'
     end
-    local wasm, map = quote(wasm_name), quote(wasm_name .. ".map")
+    local wasm, trace = quote(wasm_name), quote(wasm_name .. ".trace")
     for _, rule in ipairs(NODE_SHELL) do image = image:gsub(rule[1], rule[2], 1) end
     return refuse_node_imports(image .. "\nconst titanCreate = (() => {\n" .. loader ..
         "\nreturn create;\n})();\n" ..
         "export default function create(options = {}) {\n" ..
         "  const locateFile = options.locateFile ?? ((name, prefix) => {\n" ..
-        "    if (name.endsWith('.wasm.map')) return new URL(" .. map .. ", import.meta.url).href;\n" ..
+        "    if (name.endsWith('.wasm.trace')) return new URL(" .. trace .. ", import.meta.url).href;\n" ..
         "    if (name.endsWith('.wasm')) return new URL(" .. wasm .. ", import.meta.url).href;\n" ..
         "    return prefix + name;\n  });\n" ..
         "  return titanCreate(" .. factory .. ", {...options, locateFile}, {identity: \"" .. identity ..

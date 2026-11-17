@@ -146,6 +146,7 @@ plan:
             "${{ runner.temp }}/browser-*.log",
             "out/browser-stdlib/*.log", "out/browser-stdlib/images/*.mjs",
             "out/browser-stdlib/images/*.wasm", "out/browser-stdlib/images/*.wasm.map",
+            "out/browser-stdlib/images/*.wasm.trace",
             "out/browser-stdlib/*roots.txt", "out/browser-stdlib/members.md",
         }) do
             assert.truthy(artifact:find(contract, 1, true), contract)

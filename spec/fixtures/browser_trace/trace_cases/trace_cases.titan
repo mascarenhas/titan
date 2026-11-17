@@ -9,7 +9,7 @@ local type Action = function(): ()
 local type Shape = function(Action): ()
 local type Mixed = function(function(Action): (), Action, value): ()
 local type Pin = function(Action, function(value): ()): ()
-local unavailable = "(native Titan frames unavailable: trace map not loaded)"
+local unavailable = "(native Titan frames unavailable: trace table not loaded)"
 local capture_failed = "(native Titan frames unavailable: capture failed)"
 local truncated = "(...native frames truncated...)"
 

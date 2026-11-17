@@ -544,6 +544,7 @@ jobs:
             test -f "$output/$image.mjs"
             test -f "$output/$image.wasm"
             test -f "$output/$image.wasm.map"
+            test -f "$output/$image.wasm.trace"
           done
           "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry \
             "$output/runner_image.wasm" "$output/runner_status.wasm"
@@ -577,6 +578,7 @@ jobs:
               test -f "$output/$image.mjs"
               test -f "$output/$image.wasm"
               test -f "$output/$image.wasm.map"
+              test -f "$output/$image.wasm.trace"
             done
           done
           # Exercise the guard in an optimized, assertions-off measurement
@@ -596,6 +598,7 @@ jobs:
           test -f "$optimized/fidelity.mjs"
           test -f "$optimized/fidelity.wasm"
           test -f "$optimized/fidelity.wasm.map"
+          test -f "$optimized/fidelity.wasm.trace"
           "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry \
             "$root"/assertions-*/loader_names.wasm
           "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry,fixture:loader,fixture:controls \
@@ -1038,6 +1041,7 @@ jobs:
             out/browser-stdlib/images/*.mjs
             out/browser-stdlib/images/*.wasm
             out/browser-stdlib/images/*.wasm.map
+            out/browser-stdlib/images/*.wasm.trace
             out/browser-stdlib/*roots.txt
             out/browser-stdlib/members.md
             out/browser-net/**

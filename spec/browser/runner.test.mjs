@@ -25,7 +25,7 @@ function testImage(t) {
     return null;
 }
 
-async function missingMapImage(t) {
+async function missingTableImage(t) {
     const image = testImage(t);
     if (!image) return null;
     const directory = await mkdtemp(join(dirname(image), "trace-policy-"));
@@ -824,7 +824,7 @@ test("exact-profile PID EPERM ignores only retired processes", { skip: !supporte
 for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium", "port"]]) {
     test(`required trace fails before main for direct and host-test images (${engine}/${cdp})`,
         {skip: !supported}, async t => {
-        const image = await missingMapImage(t);
+        const image = await missingTableImage(t);
         if (!image || (engine === "chromium" && !await chromium(t))) return;
         const directory = fixtureRoot(image.file);
         const imageArg = relative(directory, image.file).split(sep).join("/");
@@ -850,7 +850,7 @@ for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium"
 }
 
 test("required trace uses the existing lazy initialization and disposal lifecycle", {skip: !supported}, async t => {
-    const image = await missingMapImage(t);
+    const image = await missingTableImage(t);
     if (!image) return;
     const {default: createImage} = await import(pathToFileURL(image.file).href);
     const decoder = new TextDecoder();

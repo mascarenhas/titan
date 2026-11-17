@@ -47,7 +47,8 @@ async function prepare(directory, relocated = false) {
   await copyFile(image, join(directory, name));
   const assets = relocated ? join(directory, 'assets') : directory;
   await mkdir(assets, {recursive: true});
-  for (const suffix of ['', '.map']) {
+  // The deployed set is the module, its Wasm and its trace table; the map only serves DevTools.
+  for (const suffix of ['', '.trace']) {
     await copyFile(image.replace(/\.mjs$/, '.wasm') + suffix, join(assets, wasmName + suffix));
   }
   await writeFile(join(directory, 'index.html'), pageSource(relocated));
@@ -62,7 +63,7 @@ async function serve(directory) {
       if (file !== directory && !file.startsWith(directory + sep)) throw new Error('outside served root');
       if (!(await stat(file)).isFile()) throw new Error('not a file');
       const bytes = await readFile(file);
-      const type = file.endsWith('.wasm') ? 'application/wasm' : file.endsWith('.map') ? 'application/json' :
+      const type = file.endsWith('.wasm') ? 'application/wasm' : file.endsWith('.trace') ? 'application/octet-stream' :
         ['.mjs', '.js'].includes(extname(file)) ? 'text/javascript' : 'text/html';
       seen.push({pathname, status: 200});
       response.writeHead(200, {'Content-Type': type, 'Content-Length': bytes.length});
@@ -93,10 +94,10 @@ async function execute(label, directory, relocated = false) {
     assert.deepEqual(result.stderr, []);
     assert.equal(result.trace.state, 'ready');
     assert.ok(seen.some(item => item.status === 200 && /\.wasm$/.test(item.pathname)), label + ': no Wasm request');
-    assert.ok(seen.some(item => item.status === 200 && /\.wasm(?:-[^/]*)?\.map$|\.map(?:\?|$)/.test(item.pathname)), label + ': no trace-map request');
+    assert.ok(seen.some(item => item.status === 200 && /\.wasm(?:-[^/]*)?\.trace$|\.trace(?:\?|$)/.test(item.pathname)), label + ': no trace-table request');
     assert.ok(!seen.some(item => /titan-browser|\/sdk\//.test(item.pathname)), label + ': external loader dependency');
-    if (relocated) assert.deepEqual(result.located.sort(), [wasmName, wasmName + '.map'].sort());
-    requests.push({label, trace: result.trace.state, assets: seen.filter(item => /\.wasm|\.map/.test(item.pathname))});
+    if (relocated) assert.deepEqual(result.located.sort(), [wasmName, wasmName + '.trace'].sort());
+    requests.push({label, trace: result.trace.state, assets: seen.filter(item => /\.wasm|\.trace/.test(item.pathname))});
   } finally {
     await page.close();
     await new Promise(resolve => server.close(resolve));
@@ -117,7 +118,7 @@ async function viteBuild(directory) {
   });
   const assets = await readdir(join(directory, 'dist/assets'));
   assert.ok(assets.some(name => name.endsWith('.wasm')), 'Vite did not emit Wasm');
-  assert.ok(assets.some(name => name.endsWith('.map')), 'Vite did not emit the trace map');
+  assert.ok(assets.some(name => name.endsWith('.trace')), 'Vite did not emit the trace table');
   assert.ok(!assets.includes(wasmName), 'Vite did not rewrite the Wasm URL');
 }
 

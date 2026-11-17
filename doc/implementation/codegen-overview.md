@@ -215,7 +215,7 @@ helpers in `cpreamble.definition_prefix`) emit
 prevents a function prologue (such as `luaC_checkGC` or argument/root setup
 before the first statement's `#line`) from inheriting the preceding definition's
 trailing `#line` across folder contributors, so DWARF, libbacktrace, and the
-browser `.wasm.map` function range's first in-body segment (`first[body]`) name
+browser trace table's declaring basename for a function body (`first[body]`) name
 the function's own declaring `.titan` file and definition line.
 
 `definitionline` and the part preamble follow exactly the policies below:

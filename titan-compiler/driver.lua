@@ -13223,6 +13223,7 @@ function driver.preflight_build_outputs(context, plan, options)
             output(image, "browser executable")
             output(wasm, "browser Wasm")
             output(wasm .. ".map", "browser source map")
+            output(wasm .. ".trace", "browser trace table")
         elseif platform.windows then
             local paths, err = driver.windows_program_paths(
                 options.test and require("titan-compiler.test_runner").MODULE_NAME or main,
@@ -13643,6 +13644,7 @@ function driver.run_standalone_archive_probe(
         local cleanup <close> = setmetatable({}, { __close = function()
             os.remove(source); os.remove(base .. ".o")
             os.remove(image); os.remove(base .. ".wasm"); os.remove(base .. ".wasm.map")
+            os.remove(base .. ".wasm.trace")
         end })
         local linked, term, code = driver.compile_browser_image(
             standalone_archive_probe_source(entries, module_names, true),
@@ -13921,7 +13923,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     append_argv(inputs, extra_objects)
     append_argv(inputs, libraries)
     valid, err = driver.validate_program_output_paths({}, executable, entrypoint,
-        inputs, { wasm, wasm .. ".map" }, {}, context)
+        inputs, { wasm, wasm .. ".map", wasm .. ".trace" }, {}, context)
     if not valid then return nil, err end
     valid, err = ensure_output_parent(executable)
     if not valid then return nil, err end
@@ -13961,6 +13963,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local cleanup <close> = setmetatable({}, { __close = function() remove_path(directory) end })
     local staged_wasm = staged:gsub("[.]mjs$", ".wasm")
     local staged_map, map = staged_wasm .. ".map", wasm .. ".map"
+    local staged_trace, trace = staged_wasm .. ".trace", wasm .. ".trace"
     local command
     command, err = compiler_argv(false, context)
     if not command then return nil, err end
@@ -14008,12 +14011,14 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         end
         return nil, err
     end
-    local map_bytes
+    local map_bytes, table_bytes
     map_bytes, err = context.io:read_file(staged_map)
     if not map_bytes then return nil, err end
-    map_bytes, err = browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)
-    if not map_bytes then return nil, err end
+    map_bytes, table_bytes = browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)
+    if not map_bytes then return nil, table_bytes end
     valid, err = context.io:write_file(staged_map, map_bytes)
+    if not valid then return nil, err end
+    valid, err = context.io:write_file(staged_trace, table_bytes)
     if not valid then return nil, err end
     local module_bytes, loader_bytes
     module_bytes, err = context.io:read_file(staged)
@@ -14029,6 +14034,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         if not valid then return nil, err end
     end
     local outputs = {
+        { source = staged_trace, destination = trace },
         { source = staged_map, destination = map },
         { source = staged_wasm, destination = wasm },
         { source = staged, destination = executable },

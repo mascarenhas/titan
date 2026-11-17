@@ -2,11 +2,12 @@
 
 `titanc --target browser` compiles Titan programs, tests, and libraries to
 WebAssembly with Emscripten, to run inside web pages and web applications. A
-program becomes three files that belong together: an ES module, its
-WebAssembly binary, and its extended source map. A page runs the program
-through Titan's JavaScript [loader](#the-loader-api). For testing, the
-command-line runner [`titan-browser-run`](#testing-with-titan-browser-run)
-runs the same files under Node and headless Chrome.
+program becomes an ES module, its WebAssembly binary, and its trace table,
+which belong together, plus a source map for browser developer tools. A page
+runs the program through Titan's JavaScript [loader](#the-loader-api). For
+testing, the command-line runner
+[`titan-browser-run`](#testing-with-titan-browser-run) runs the same files
+under Node and headless Chrome.
 
 ## A first web page
 
@@ -45,14 +46,15 @@ Build it for the browser:
 titanc --target browser -o out hello
 ```
 
-This writes `out/hello.mjs`, `out/hello.wasm`, and `out/hello.wasm.map`: the
-ES module, its WebAssembly binary, and its source map, next to the compiler's
-intermediate files. Copy the three files into a folder `site/` that will hold
-the page:
+This writes `out/hello.mjs`, `out/hello.wasm`, `out/hello.wasm.trace`, and
+`out/hello.wasm.map`: the ES module, its WebAssembly binary, the trace table
+that locates Titan frames in errors, and a source map for browser developer
+tools, next to the compiler's intermediate files. Copy the first three into a
+folder `site/` that will hold the page:
 
 ```sh
 mkdir -p site
-cp out/hello.mjs out/hello.wasm out/hello.wasm.map site/
+cp out/hello.mjs out/hello.wasm out/hello.wasm.trace site/
 ```
 
 The generated ES module already contains Titan's loader. There is no runtime
@@ -123,9 +125,10 @@ Titan counts 3
 (returned, status 0)
 ```
 
-To deploy the page, serve `hello.mjs`, `hello.wasm`, and `hello.wasm.map`
-together with it. No external loader is required. The source map lets errors
-report Titan source files and lines (see [traces](#traces)).
+To deploy the page, serve `hello.mjs`, `hello.wasm`, and `hello.wasm.trace`
+together with it. No external loader is required. The trace table lets errors
+report Titan source files and lines (see [traces](#traces)); serve
+`hello.wasm.map` too if you want browser developer tools to show sources.
 
 ## Prerequisites
 
@@ -367,10 +370,10 @@ WebAssembly optimizer may restructure the code, and therefore which frames a
 
 In both profiles, objects keep their line tables (`-gline-tables-only`), the
 link writes the source map and keeps the WebAssembly `name` section
-(`-gsource-map -g2`), and Titan extends the map as described in
-[traces](#traces). Every Titan frame that a trace shows is therefore
+(`-gsource-map -g2`), and Titan derives the trace table from them as described
+in [traces](#traces). Every Titan frame that a trace shows is therefore
 attributed to its `.titan` file and line as that section describes, and a
-deployed program needs its `<stem>.wasm.map` next to `<stem>.wasm`, in either
+deployed program needs its `<stem>.wasm.trace` next to `<stem>.wasm`, in either
 profile. The implementation manual's [historical measurement
 table](../implementation/browser-target.md#measurements) records pre-JSPI
 sizes, link times, engine ceilings, and micro-benchmarks. Those results do not
@@ -417,25 +420,27 @@ titanc --target browser --output out-browser -c app.widgets
 ### Programs
 
 A build whose root module defines `main` links a program. The result is always
-three files that belong together: the ES module, its WebAssembly binary, and
-its extended source map, all with the same stem. Without `--exe`, the program
-uses the native program's path below the output directory with `.mjs` added, so
-`titanc --target browser -o out app` writes `out/app.mjs`, `out/app.wasm`, and
-`out/app.wasm.map`. An explicit `--exe` must end in `.mjs`:
+four files with the same stem: the ES module, its WebAssembly binary, its trace
+table, and its source map. Without `--exe`, the program uses the native
+program's path below the output directory with `.mjs` added, so
+`titanc --target browser -o out app` writes `out/app.mjs`, `out/app.wasm`,
+`out/app.wasm.trace`, and `out/app.wasm.map`. An explicit `--exe` must end in
+`.mjs`:
 
 ```text
 browser executable output "out/app" must end in .mjs
 ```
 
-Titan publishes the three files together: a failed link leaves the previous
-files in place, so a partial or unextended map is never published.
-`--incremental` reuses an unchanged set without relinking. When a web server
-serves the program to a browser page, it must serve `app.wasm.map` alongside
-`app.wasm` so that the runtime can load the trace map during module
-initialization (see [traces](#traces)).
+Titan publishes the four files together: a failed link leaves the previous
+files in place. `--incremental` reuses an unchanged set without relinking.
+The runtime reads the module, the binary, and the trace table; the source map
+is for browser developer tools and the runtime never reads it. A web server
+therefore serves `app.wasm.trace` alongside `app.wasm`, so that the runtime can
+load it during module initialization (see [traces](#traces)), and serves
+`app.wasm.map` only when developer tools should show sources.
 
-The three files of one link belong together, and the runtime checks this
-before any Titan code runs:
+The module, binary, and table of one link belong together, and the runtime
+checks this before any Titan code runs:
 
 * An `app.mjs` loaded with an `app.wasm` from another link refuses to run.
   `initialize()` and `run()` reject with a `TitanBrowserError` whose `code`
@@ -445,13 +450,13 @@ before any Titan code runs:
   browser image mismatch: app.mjs belongs to image 3f1c0a9b7e42, app.wasm is image 9d07e5a2c6b1
   ```
 
-* An `app.wasm.map` from another link only degrades traces, as described
-  under [deploying `.wasm.map`](#traces).
+* An `app.wasm.trace` from another link only degrades traces, as described
+  under [deploying `.wasm.trace`](#traces).
 
-Titan publishes the map first, then the `.wasm`, then the `.mjs`. A
-publication that is interrupted, or a server or cache that mixes files of two
-links, therefore never runs a Titan program against the wrong image. Linking
-again repairs the set.
+Titan publishes the table first, then the map, then the `.wasm`, then the
+`.mjs`. A publication that is interrupted, or a server or cache that mixes
+files of two links, therefore never runs a Titan program against the wrong
+image. Linking again repairs the set.
 
 `main` has the same signature as for a native program:
 
@@ -712,8 +717,8 @@ Options are:
 | `stdin` | A function called once per `titan:stdin` read, synchronously as a binding is. Returns a `Uint8Array` chunk (including an empty chunk), `null` or `undefined`, or a promise of one of those values. Without it, `titan:stdin` is an unknown binding. |
 | `stdinKind`, `stdoutKind`, `stderrKind` | Declared stream backings, passed through unchanged by `titan:stdio`. The loader supplies no default and does not validate these values. |
 | `stdoutEnd`, `stderrEnd` | Functions called by argumentless `titan:stdout` or `titan:stderr` requests, after earlier entries on that stream. Like sinks, they return `undefined` or a promise. A missing hook rejects the request with `TypeError`. |
-| `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
-| `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
+| `locateFile(name, directory)` | Resolves both the Wasm binary and its trace table (`<stem>.wasm.trace`). The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
+| `requireTrace` | Boolean, default `false`. Requires a ready trace table after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
 | `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. Names starting with `titan:` are [reserved for the SDK](standard-library-browser.md#reserved-sdk-bindings) and rejected with `TypeError`. |
 | `env` | An object whose own enumerable string-named properties have string values, snapshotted at `create`. Absent means empty. Non-objects (including `null`), empty names, `=` or NUL in a name, NUL in a value, and non-string values are rejected with `TypeError`. |
 | `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks, a request failure event that cannot be delivered, and secondary cleanup failures. A host Promise rejection instead goes to its mandatory failure callable. |
@@ -996,11 +1001,11 @@ titanc --target browser -o out --exe out/app.mjs app
 titan-browser-run out/app.mjs -- first second
 ```
 
-The first command builds `out/app.mjs`, `out/app.wasm`, and `out/app.wasm.map`
-from the module `app`, which defines `main`. The second runs the program under
-Node with the arguments `first` and `second`, copies its output byte for byte,
-and exits with its status. A test image built with `--test` runs the same way
-(see [tests](#tests)).
+The first command builds `out/app.mjs`, `out/app.wasm`, `out/app.wasm.trace`,
+and `out/app.wasm.map` from the module `app`, which defines `main`. The second
+runs the program under Node with the arguments `first` and `second`, copies
+its output byte for byte, and exits with its status. A test image built with
+`--test` runs the same way (see [tests](#tests)).
 
 `titan-browser-run` is installed in the SDK directory,
 `PREFIX/lib/titan-browser/0.6/titan-browser-run`. Put that directory on `PATH`
@@ -1025,8 +1030,8 @@ stdout and stderr exactly, and writes its own messages, all starting with
 | `--grace MS` | Time to keep watching after the program completes, to catch late traps and aborts; default 1500. |
 | `--chrome PATH` | The Chrome or Chromium executable; overrides `TITAN_CHROME`. |
 | `--cdp pipe\|port` | How the tool controls Chromium: a private pipe (the default) or a loopback DevTools port. |
-| `--root DIR` | The directory served to the engine; defaults to `FILE`'s directory, and must contain `FILE`, its `.wasm`, and (unless `--allow-degraded-trace` is set) its `.wasm.map`. |
-| `--allow-degraded-trace` | Permit missing, malformed, or mismatched trace maps by creating images with `requireTrace: false`; otherwise map failure is an ordinary initialization failure before Lua or main, not an infrastructure failure. |
+| `--root DIR` | The directory served to the engine; defaults to `FILE`'s directory, and must contain `FILE`, its `.wasm`, and (unless `--allow-degraded-trace` is set) its `.wasm.trace`. |
+| `--allow-degraded-trace` | Permit missing, malformed, or mismatched trace tables by creating images with `requireTrace: false`; otherwise a table failure is an ordinary initialization failure before Lua or main, not an infrastructure failure. |
 | `--js-test` | Run `FILE` as a JavaScript test module instead of a program (used by Titan's own tests). |
 | `--help`, `--version` | Print usage or the version to stderr and exit 0. |
 | `--probe` | Print one line of JSON describing the Node and Chrome that the tool would use, without running anything. |
@@ -1081,7 +1086,7 @@ A browser program completes in one of three ways:
   report: `<progname>: <message>`, then `stack traceback:`, then one
   tab-indented line per frame. The status is 1. `<progname>` is the last
   component of the main module's name, or of the first test root's name for a
-  test image. A required trace map that is missing or invalid also fails
+  test image. A required trace table that is missing or invalid also fails
   initialization with status 1: stderr receives
   `degraded browser trace: <reason>`, without a traceback because no Titan
   code ran.
@@ -1105,10 +1110,12 @@ Node as well as in a web page.
 ### Traces
 
 When a web page or application initializes a browser image (or when tests run
-it through `titan-browser-run`), the runtime eagerly loads `<stem>.wasm.map`
-before `main` or any module initializer runs, verifies that its embedded build
-identity matches the instantiated `.wasm`, and builds an in-memory lookup
-index. Nothing is fetched or awaited when an error is raised or when
+it through `titan-browser-run`), the runtime eagerly loads `<stem>.wasm.trace`
+before `main` or any module initializer runs and verifies that its embedded
+build identity matches the instantiated `.wasm`. The compiler derives this
+table from the final source map: it holds only the `.titan` locations and the
+function names that traces use, so loading it takes a few milliseconds.
+Nothing is fetched or awaited when an error is raised or when
 `titan.backtrace()` is called.
 
 On **Chromium, Chrome, Firefox, and Node**, browser tracebacks have the same
@@ -1228,9 +1235,10 @@ limit, the trace ends with one final frame line:
 (...native frames truncated...)
 ```
 
-**Deploying `.wasm.map` and degraded mode.** A web server serving a browser
-image must serve `<stem>.wasm.map` next to `<stem>.wasm` (or map both through
-`locateFile`). If `<stem>.wasm.map` cannot be loaded, is malformed, or does not
+**Deploying `.wasm.trace` and degraded mode.** A web server serving a browser
+image must serve `<stem>.wasm.trace` next to `<stem>.wasm` (or map both
+through `locateFile`). The source map is optional: the runtime never reads it.
+If `<stem>.wasm.trace` cannot be loaded, is malformed, or does not
 match the instantiated `.wasm` image, Wasm instantiation logs one console
 warning (`Titan browser trace: <reason>`). By default an embedding permits
 degraded mode; with `requireTrace: true`, initialization instead fails before
@@ -1238,7 +1246,7 @@ Lua or any module initializer runs. In permitted degraded mode, every trace
 generated by that instance contains the Lua frames plus one marker line:
 
 ```text
-(native Titan frames unavailable: trace map not loaded)
+(native Titan frames unavailable: trace table not loaded)
 ```
 
 To catch deployment and staging mistakes in tests, `titan-browser-run` sets
@@ -1597,8 +1605,8 @@ mangled function name. An unmapped or native function without source metadata
 reports `source unavailable` and the reason; a native function with a mapping
 can name its C source. A nonempty `sourceRoot` is shown separately, as recorded
 in the map. Rejection happens before publication and leaves any previously
-published `.mjs`, `.wasm` and `.wasm.map` unchanged. Titan does not split or
-outline an oversized function automatically.
+published `.mjs`, `.wasm`, `.wasm.trace` and `.wasm.map` unchanged. Titan does
+not split or outline an oversized function automatically.
 
 Static byte size does not bound startup memory. The [implementation
 measurements](../implementation/browser-target.md#build-time-image-bounds)

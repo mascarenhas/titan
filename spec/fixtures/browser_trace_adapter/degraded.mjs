@@ -1,7 +1,7 @@
-// The runner test supplies a compiler-produced image whose map was omitted.
+// The runner test supplies a compiler-produced image whose trace table was omitted.
 // Exercise context.image's policy, not a synthetic second image lifecycle.
 export async function run(context) {
-    context.assert(context.args.length > 0, 'pass the real image with a missing map');
+    context.assert(context.args.length > 0, 'pass the real image with a missing trace table');
     const {create, locateFile} = await context.image(context.args[0]);
     const instance = create({locateFile, stdout: context.stdout, stderr: context.stderr});
     try {

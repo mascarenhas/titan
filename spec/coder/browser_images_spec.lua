@@ -191,7 +191,7 @@ describe("browser image profile and SDK readiness", function()
         local embedded = assert(browserlink.embed(image, loader, "app.wasm", IDENTITY))
         assert.truthy(embedded:find("async function Module(options)", 1, true))
         assert.truthy(embedded:find("new URL('app.wasm', import.meta.url)", 1, true))
-        assert.truthy(embedded:find('new URL("app.wasm.map", import.meta.url)', 1, true))
+        assert.truthy(embedded:find('new URL("app.wasm.trace", import.meta.url)', 1, true))
         assert.truthy(embedded:find("options.locateFile ??", 1, true))
         assert.truthy(embedded:find("export default function create(options = {})", 1, true))
         assert.is_nil(embedded:find("export default Module", 1, true))
@@ -607,7 +607,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({ "-Wl,--trace" }, policy.argv)
     end)
 
-    it("owns the browser artifact triple at final validation even on a Darwin host", function()
+    it("owns the browser artifact set at final validation even on a Darwin host", function()
         local root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
         local previous = driver.IS_DARWIN
         local cleanup <close> = setmetatable({}, { __close = function()
@@ -620,12 +620,12 @@ describe("browser image profile and SDK readiness", function()
         local dsym, entrypoint = executable .. ".dSYM", root .. "/entrypoint.c"
         files.write(dsym, "unrelated user file")
         local ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
-            { dsym }, { wasm, wasm .. ".map" }, {}, context)
+            { dsym }, { wasm, wasm .. ".map", wasm .. ".trace" }, {}, context)
         assert.is_true(ok, why)
         assert.equal("unrelated user file", read(dsym))
-        for _, input in ipairs({ wasm, wasm .. ".map" }) do
+        for _, input in ipairs({ wasm, wasm .. ".map", wasm .. ".trace" }) do
             ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
-                { input }, { wasm, wasm .. ".map" }, {}, context)
+                { input }, { wasm, wasm .. ".map", wasm .. ".trace" }, {}, context)
             assert.is_nil(ok)
             assert.truthy(why:find("aliases input", 1, true), why)
         end

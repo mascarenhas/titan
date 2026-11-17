@@ -86,7 +86,7 @@ require("titan-compiler.driver").browser_link_options = {purpose=%q, assertions=
     }})
     io.stdout:write(result.output or result.diagnostic or ""); io.stdout:flush()
     assert(result.ok, "bridge fixture build failed: " .. image .. " (" .. tostring(result.status) .. ")")
-    for _, suffix in ipairs({".mjs", ".wasm", ".wasm.map"}) do
+    for _, suffix in ipairs({".mjs", ".wasm", ".wasm.map", ".wasm.trace"}) do
       local artifact = path.join(root, target.name .. suffix)
       assert(lfs.attributes(artifact, "mode") == "file", "missing built image asset " .. artifact)
     end

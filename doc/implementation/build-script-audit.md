@@ -254,7 +254,7 @@ invocation compiles every root with
 `--c-source spec/fixtures/browser_runtime/close.c`; like the native
 aggregate, the owners drive their own `async` Runtimes.
 
-The image is `images/stdlib.mjs` with its `.wasm` and `.wasm.map`, below
+The image is `images/stdlib.mjs` with its `.wasm`, `.wasm.trace`, and `.wasm.map`, below
 `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`); compiler
 output stays in `objects/`, which titanc creates and marks. The target writes
 `roots.txt`, prints the build duration, checks the dependency closure, checks

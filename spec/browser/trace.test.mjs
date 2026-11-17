@@ -1,6 +1,6 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const unavailable = "(native Titan frames unavailable: trace map not loaded)";
+const unavailable = "(native Titan frames unavailable: trace table not loaded)";
 const captureFailed = "(native Titan frames unavailable: capture failed)";
 const truncated = "(...native frames truncated...)";
 const own = (object, key) => Object.getOwnPropertyDescriptor(object, key);
@@ -430,12 +430,12 @@ async function executeRow(context, row, degraded, recordCost, profile) {
       context.assert(warnings + occurrences(stderr, "Titan browser trace: ") === (degraded ? 1 : 0), "map load did not warn exactly once per degraded instance");
       if (recordCost && !degraded) {
         const wasm = await context.bytes(row.image.replace(/\.mjs$/, ".wasm"));
-        const map = await context.bytes(row.image.replace(/\.mjs$/, ".wasm.map"));
+        const table = await context.bytes(row.image.replace(/\.mjs$/, ".wasm.trace"));
         context.assert(Number.isFinite(metadata.loadMilliseconds) && metadata.loadMilliseconds >= 0 &&
-          Number.isSafeInteger(metadata.mapBytes) && metadata.mapBytes === map.length &&
+          Number.isSafeInteger(metadata.traceBytes) && metadata.traceBytes === table.length &&
           Number.isSafeInteger(metadata.indexBytes) && metadata.indexBytes > 0, "invalid trace cost metadata");
-        emit({traceCost: {wasmBytes: wasm.length, mapBytes: map.length, mapToWasmRatio: map.length / wasm.length,
-          loadMilliseconds: metadata.loadMilliseconds, retainedTypedArrayBytes: metadata.indexBytes}});
+        emit({traceCost: {wasmBytes: wasm.length, traceBytes: table.length, traceToWasmRatio: table.length / wasm.length,
+          loadMilliseconds: metadata.loadMilliseconds, retainedIndexBytes: metadata.indexBytes}});
       }
       if (hostMode === "host_limit_small") Object.defineProperty(Error, "stackTraceLimit", {value:1, writable:true, configurable:true, enumerable:false});
       if (hostMode === "host_limit_absent") context.assert(Reflect.deleteProperty(Error, "stackTraceLimit"), "cannot remove configurable stack limit");

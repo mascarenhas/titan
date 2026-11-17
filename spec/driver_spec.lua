@@ -13170,21 +13170,17 @@ describe("target-aware source resolver", function()
         fixtures.remove(root)
     end)
 
-    it("reserves the browser source map during pre-worker output planning", function()
+    it("reserves the browser source map and trace table during pre-worker output planning", function()
         put("app.titan", "function main(args: {string}): integer return #args end\n")
         local ctx = context("browser")
         local source = assert(driver.resolve_source(ctx, "app"))
         local plan = { order = { "app" },
             modules = { app = { kind = "source", source = source } } }
         assert(driver.preflight_build_outputs(ctx, plan, { roots = { "app" }, c_parts = 1 }))
-        local reserved = false
-        for _, output in ipairs(plan.reservations) do
-            if output.owner == "browser source map" then
-                assert.matches("%.wasm%.map$", paths.to_slash(output.path))
-                reserved = true
-            end
-        end
-        assert.is_true(reserved, "preflight omitted the browser source map")
+        local reserved = {}
+        for _, output in ipairs(plan.reservations) do reserved[output.owner] = paths.to_slash(output.path) end
+        assert.matches("%.wasm%.map$", reserved["browser source map"])
+        assert.matches("%.wasm%.trace$", reserved["browser trace table"])
     end)
 
     it("keeps context validation ahead of the Windows browser host model", function()

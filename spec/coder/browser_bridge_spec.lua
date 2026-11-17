@@ -33,7 +33,7 @@ local function build(info, assertions, tree, module, name, is_test, c_source, wr
         TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
     fixture.collector:collect()
     assert.is_true(result.ok, result.output)
-    for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map" }) do
+    for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map", ".wasm.trace" }) do
         assert.equal("file", lfs.attributes(output .. "/" .. name .. suffix, "mode"))
     end
     -- The independent-state helper includes the fixture controls; the click
