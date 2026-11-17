@@ -1009,12 +1009,16 @@ emsdk, Node 26+, and a JSPI-capable headless Chromium. It:
 2. runs `check_browser_stdlib.lua inventory` once against the installed native
    and browser providers, which applies the [subset parity
    gate](#subset-parity-gate), and writes `members.md`;
-3. for `node` and then `chromium`, runs the image with the SDK's
-   `titan-browser-run --engine <engine> --timeout 300000 --grace 2000` through
-   `scripts/run_browser_stdlib.sh`, forwarding a nonempty `TITAN_FILTER` as
-   one `--filter=` argument. The wrapper saves stdout in `stdlib.<engine>.log`
-   and stderr in `stdlib.<engine>.stderr.log`, replays both, and preserves the
-   runner's status. Failure under one engine does not hide the other; and
+3. for each engine of `TITAN_BROWSER_TEST_ENGINES` (default `node chromium`),
+   runs the image with `TITAN_BROWSER_TEST_RUNNER --engine <engine> --timeout
+   300000 --grace 2000` through `scripts/run_browser_stdlib.sh`, forwarding a
+   nonempty `TITAN_FILTER` as one `--filter=` argument. The runner is a shell
+   command that takes `titan-browser-run`'s options and defaults to the SDK's
+   `titan-browser-run`; the validation Playwright cells pass their engine and
+   `"$TITAN_NODE" spec/browser/playwright-run.mjs --image --sdk <sdk>`. The
+   wrapper saves stdout in `stdlib.<engine>.log` and stderr in
+   `stdlib.<engine>.stderr.log`, replays both, and preserves the runner's
+   status. Failure under one engine does not hide the other; and
 4. after each engine, audits only stdout with
    `check_browser_stdlib.lua output roots.txt <filter> <stdout-log>`.
    The shared native validator requires nonzero selection, no duplicate or

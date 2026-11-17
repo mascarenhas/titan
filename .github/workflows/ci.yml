@@ -1437,6 +1437,18 @@ jobs:
             --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-degraded.log"
 
+      # The complete browser core stdlib image on this cell's engine. The step
+      # runs last, so that failing cases leave every earlier gate's receipts;
+      # the image runs every case and the audit reports each failure.
+      - name: Run the complete browser core stdlib suite on the managed engine
+        if: matrix.profile == 'validation'
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE" \
+            TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs --image --sdk \"$PREFIX/lib/titan-browser/0.6\"" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-stdlib.log"
+
       - name: Upload Playwright trace receipts
         if: always()
         uses: actions/upload-artifact@v7
@@ -1450,6 +1462,7 @@ jobs:
             ${{ env.TITAN_NET_OUTPUT }}
             ${{ env.TITAN_DELIVERY_OUTPUT }}/delivery.json
             ${{ env.TITAN_DELIVERY_OUTPUT }}/browser-app/site
+            out/browser-stdlib/*.log
           if-no-files-found: error
           retention-days: 7
 

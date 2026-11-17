@@ -1336,11 +1336,17 @@ uninstall-browser-sdk: ## Remove the files browser-sdk installed, keeping other 
 
 TITAN_BROWSER_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-stdlib
 TITAN_BROWSER_TEST_SDK := $(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)
+# The engines that run the image, and the shell command that runs it there. The
+# command takes titan-browser-run's options (--engine, --timeout, --grace,
+# --root, FILE -- ARGS); the Playwright CI cells pass their own engine and
+# spec/browser/playwright-run.mjs --image.
+TITAN_BROWSER_TEST_ENGINES ?= node chromium
+TITAN_BROWSER_TEST_RUNNER ?= $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan-browser-run)
 
 # Keep compiler-owned output separate from the image and logs: a cold suite
 # leaves browser output initialization and its marker to titanc.
 .PHONY: titan-stdlib-browser-test
-titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all owners, and run Node and Chromium
+titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all owners, and run it on each test engine
 	+@$(strip $(TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK)) $(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	build_dir=$(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))); \
@@ -1367,13 +1373,13 @@ titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all
 	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/members.md"; \
 	filter=$(call make_shell_quote_value,TITAN_FILTER); \
 	overall=0; \
-	for engine in node chromium; do \
+	for engine in $(TITAN_BROWSER_TEST_ENGINES); do \
 	  echo "Browser stdlib engine: $$engine image: stdlib"; \
 	  set --; \
 	  if test -n "$$filter"; then set -- "--filter=$$filter"; fi; \
 	  status=0; \
 	  bash scripts/run_browser_stdlib.sh "$$build_dir/stdlib.$$engine.log" "$$build_dir/stdlib.$$engine.stderr.log" \
-	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan-browser-run) \
+	    $(TITAN_BROWSER_TEST_RUNNER) \
 	    --engine "$$engine" --timeout 300000 --grace 2000 --root "$$build_dir/images" \
 	    "$$build_dir/images/stdlib.mjs" -- "$$@" || status=$$?; \
 	  if test "$$status" != 0; then \

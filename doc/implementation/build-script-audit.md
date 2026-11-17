@@ -265,7 +265,9 @@ suite byte budget: the compiler's [general image
 bounds](browser-target.md#build-time-image-bounds) apply.
 
 The SDK's `titan-browser-run` executes the complete image under Node and
-Chromium through `scripts/run_browser_stdlib.sh`. The `stdlib.<engine>.log`
+Chromium through `scripts/run_browser_stdlib.sh`; `TITAN_BROWSER_TEST_ENGINES`
+and `TITAN_BROWSER_TEST_RUNNER` select other engines and a runner that takes
+the same options, as the Playwright CI cells do. The `stdlib.<engine>.log`
 and `stdlib.<engine>.stderr.log` streams remain separate, and only stdout is
 audited. `TITAN_FILTER` is forwarded as one `--filter=` argument. Each engine
 must select at least one case, and an unfiltered run must execute every

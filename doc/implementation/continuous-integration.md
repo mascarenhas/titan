@@ -418,10 +418,11 @@ After step 7, `browser-stdlib` runs:
 
 `browser-playwright` (`browser traces and bridge (${{ matrix.profile }}, ${{
 matrix.engine }}, Playwright 1.64.1)`) runs the multi-engine trace, bridge,
-live network and hosted deployment gates on Linux across a six-cell
-`fail-fast: false` matrix (`profile: [validation, production]` × `engine:
-[chromium, firefox, webkit]`), each on a four-vCPU runner with a 60-minute
-timeout after `build-compiler`:
+live network and hosted deployment gates, and in `validation` cells the
+browser stdlib suite, on Linux across a six-cell `fail-fast: false` matrix
+(`profile: [validation, production]` × `engine: [chromium, firefox,
+webkit]`), each on a four-vCPU runner with a 60-minute timeout after
+`build-compiler`:
 
 1. **Prefix preparation (`validation` versus `production`).** `validation`
    cells restore `titan-linux-prepared.tar.gz` into `$GITHUB_WORKSPACE/.lua`.
@@ -586,12 +587,21 @@ timeout after `build-compiler`:
    (`$RUNNER_TEMP/browser-playwright-node-policy.log`),
    and the `--allow-degraded-trace ... -- --degraded` run covers the degraded
    rows (`$RUNNER_TEMP/browser-playwright-node-degraded.log`).
-13. **Receipts.** On `always()`, `actions/upload-artifact` uploads
+13. **Complete browser core stdlib suite (`validation` only, last).** With
+    emsdk sourced, `make titan-stdlib-browser-test PREFIX="$PREFIX"
+    TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE"
+    TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs
+    --image --sdk \"$PREFIX/lib/titan-browser/0.6\""` builds the same single
+    stdlib image as `browser-stdlib`'s `sdk` shard and runs it on the cell's
+    managed engine (`$RUNNER_TEMP/browser-playwright-stdlib.log`). It is the
+    last test step, so a failing case leaves every earlier gate's receipts.
+14. **Receipts.** On `always()`, `actions/upload-artifact` uploads
     `${{ runner.temp }}/browser-playwright-*.log`,
     `${{ runner.temp }}/browser-production-pins.log`,
     `${{ env.TITAN_TRACE_OUTPUT }}`, `${{ env.TITAN_BRIDGE_OUTPUT }}`,
-    `${{ env.TITAN_NET_OUTPUT }}`, and the complete application's
-    `delivery.json` and staged `browser-app/site` as
+    `${{ env.TITAN_NET_OUTPUT }}`, the complete application's
+    `delivery.json` and staged `browser-app/site`, and the stdlib suite's
+    per-engine `out/browser-stdlib/*.log` as
     `browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}` for seven
     days. `production` cells also upload `out/browser-records/` as
     `browser-records-playwright-${{ matrix.engine }}`.

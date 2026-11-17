@@ -6562,6 +6562,22 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.truthy(records:find(contract, 1, true), contract)
             end
+            -- Every validation cell runs the stdlib aggregate on its engine,
+            -- last, so that failing cases leave the earlier gates' receipts.
+            local playwright_suite = named_step(playwright_job,
+                "Run the complete browser core stdlib suite on the managed engine")
+            for _, contract in ipairs({
+                "if: matrix.profile == 'validation'",
+                'make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE"',
+                'TITAN_BROWSER_TEST_RUNNER="\\"$TITAN_NODE\\" spec/browser/playwright-run.mjs --image --sdk',
+                'tee "$RUNNER_TEMP/browser-playwright-stdlib.log"',
+            }) do
+                assert.truthy(playwright_suite:find(contract, 1, true), contract)
+            end
+            assert.equal(1, count_literal(playwright_job, "make titan-stdlib-browser-test"), playwright_job)
+            local _, later = playwright_job:match("()%- name: Run the complete browser core stdlib suite.-\n()%s*%- name:")
+            assert.truthy(later and playwright_job:sub(later):match("^%s*%- name: Upload Playwright trace receipts"),
+                "the stdlib aggregate is the last test step")
             assert.falsy(playwright_job:find("browser_deployment_spec", 1, true), playwright_job)
             assert.falsy(browser_job:find("TITAN_VITE_VERSION", 1, true))
             assert.falsy(browser_stdlib_job:find("TITAN_VITE_VERSION", 1, true))
