@@ -28,19 +28,22 @@ do
     package.cpath = table.concat(c_paths, ";")
 end
 
+local browserlink = require "titan-compiler.browserlink"
+local remedy_prefix = getenv("TITAN_BROWSER_REMEDY_PREFIX") or prefix
+
 local ok_lfs, lfs = pcall(require, "lfs")
 if not ok_lfs or type(lfs) ~= "table" then
-    io.stderr:write("browser-sdk: LuaFileSystem (lfs) is unavailable; run 'luarocks make' first\n")
+    io.stderr:write("browser-sdk: LuaFileSystem (lfs) is unavailable; ", browserlink.compiler_remedy(), "\n")
     os.exit(1)
 end
 local ok_support, support = pcall(require, "titan")
 if not ok_support or type(support) ~= "table" then
-    io.stderr:write("browser-sdk: installed Titan support module is unavailable; run 'luarocks make' or 'make install-compiler-sdk' first\n")
+    io.stderr:write("browser-sdk: installed Titan support module is unavailable; ",
+        browserlink.compiler_remedy(), "\n")
     os.exit(1)
 end
 
 local driver = require "titan-compiler.driver"
-local browserlink = require "titan-compiler.browserlink"
 local incremental = require "titan-compiler.incremental"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local compiler_io = require "titan-compiler.io"
@@ -137,6 +140,7 @@ local function stage_differing_roots()
         local prefix_ctx = { io = strategy, extra_ffi_include_dirs = {} }
         local prefix_desc, prefix_err = driver._browser_target.build(prefix_ctx, {
             paths = prefix_paths,
+            install_prefix = remedy_prefix,
             runtime_include = runtime_inc,
             compile_flags = {},
             build_profile = getenv("TITAN_BUILD_PROFILE") or "production",
@@ -183,7 +187,7 @@ local function stage_differing_roots()
     for _, rel in ipairs(common_headers) do
         local hdr = install_tree .. "/" .. rel
         if lfs.attributes(hdr, "mode") ~= "file" then
-            fail("missing installed header '" .. hdr .. "'; run 'luarocks make' or 'make install-compiler-sdk' first")
+            fail("missing installed header '" .. hdr .. "'; " .. browserlink.compiler_remedy())
         end
     end
 end
@@ -299,9 +303,10 @@ elseif action == "stage-runtime" then
     local recorded, record_err = strategy:write_file(assets.build_profile, descriptor.build_profile .. "\n")
     if not recorded then fail("cannot write '" .. assets.build_profile .. "': " .. tostring(record_err)) end
 
-    local rocks_tree = getenv("ROCKS_TREE")
+    local rocks_tree = os.getenv("TITAN_BROWSER_REMEDY_ROCKS_TREE")
+    if rocks_tree == nil then rocks_tree = getenv("ROCKS_TREE") end
     local ready, ready_err = browserlink.require_sdk(context, descriptor, {
-        prefix = prefix,
+        prefix = remedy_prefix,
         rocks_tree = rocks_tree,
     })
     if not ready then

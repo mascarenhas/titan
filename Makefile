@@ -1263,6 +1263,7 @@ install-stdlib publish-stdlib:
 	install -p -m 0644 THIRD_PARTY_NOTICES.md "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"; \
 	install -p -m 0644 $(STDLIB_LICENSES) "$(TITAN_SHARE_DIR)/LICENSES/"
 
+BROWSER_COMPILER_REMEDY := run 'luarocks make' or 'make install-compiler-sdk' first
 include $(TITAN_MAKEFILE_DIR)scripts/browser.mk
 
 # Compatibility name for callers of the former rockspec build target.

@@ -2,6 +2,8 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 export async function run(context) {
+  // Windows host timer granularity prevents reliable 10 ms Node intervals.
+  const intervalMs = context.engine === "node" && process.platform === "win32" ? 13 : 10;
   const [gatePath, finalPath] = context.args;
   context.assert(gatePath && finalPath, "gate image paths are required");
   const gateImage = await context.image(gatePath);
@@ -22,7 +24,7 @@ export async function run(context) {
     let raf;
     let interval;
     function startTimers() {
-      interval = setInterval(() => tickTimes.push(performance.now()), 10);
+      interval = setInterval(() => tickTimes.push(performance.now()), intervalMs);
       if (context.engine === "chromium") {
         const frame = () => { frames++; raf = requestAnimationFrame(frame); };
         raf = requestAnimationFrame(frame);
@@ -127,16 +129,16 @@ export async function run(context) {
 
   // Isolate responsiveness from busy work and from initialization time.
   const responsive = await execute(gateImage, ["--filter=^entry_gate%.test_07_"], 1, false, "responsive");
-  const ideal = responsive.elapsed / 10;
+  const ideal = responsive.elapsed / intervalMs;
   const boundaries = [responsive.started, ...responsive.tickTimes, responsive.finished];
   const gaps = boundaries.slice(1).map((time, index) => time - boundaries[index]);
   const maxGap = Math.max(0, ...gaps);
   emit({item: 7, elapsedMs: responsive.elapsed,
-    ticks: responsive.tickTimes.length, idealTicks: ideal,
+    intervalMs, ticks: responsive.tickTimes.length, idealTicks: ideal,
     ratio: responsive.tickTimes.length / ideal, maxGapMs: maxGap, animationFrames: responsive.frames,
     thresholds: {minimumRatio: 0.75, maximumRatio: 1.25, maximumGapMs: 100}});
   context.assert(responsive.tickTimes.length >= ideal * 0.75 && responsive.tickTimes.length <= ideal * 1.25,
-    "10ms interval count was not close to elapsed/10");
+    `${intervalMs} ms interval count was not close to elapsed / ${intervalMs}`);
   context.assert(maxGap <= 100, "outer suspension left a host timer gap above 100ms");
   if (context.engine === "chromium") context.assert(responsive.frames >= 2, "requestAnimationFrame did not advance");
 

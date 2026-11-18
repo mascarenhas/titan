@@ -4,6 +4,7 @@ local compiler_io = require "titan-compiler.io"
 local files = require "spec.fixtures.target_selection.support"
 local fixtures = require "spec.support.browser_fixtures"
 local lfs = require "lfs"
+local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local temporary = require "spec.support.temporary"
 local toolchain = require "spec.support.browser_toolchain"
@@ -103,12 +104,12 @@ end
 local oversized = os.getenv("TITAN_PROTOCOL_OVERSIZED")
 if oversized and oversized ~= "" then
     local link = driver.run_link_command
-    function driver.run_link_command(argv, verbose, output)
-        local linked, term, code = link(argv, verbose, output)
+    function driver.run_link_command(argv, verbose, output, ...)
+        local linked, term, code = link(argv, verbose, output, ...)
         if linked and output and output:match("[.]mjs$") then
             local wasm = output:gsub("[.]mjs$", ".wasm")
-            assert(util.set_file_contents(wasm, assert(util.get_file_contents(oversized, "rb"))))
-            assert(util.set_file_contents(wasm .. ".map", assert(util.get_file_contents(oversized .. ".map", "rb"))))
+            assert(util.set_file_contents(wasm, assert(util.get_file_contents(oversized, "rb")), "wb"))
+            assert(util.set_file_contents(wasm .. ".map", assert(util.get_file_contents(oversized .. ".map", "rb")), "wb"))
         end
         return linked, term, code
     end
@@ -244,13 +245,15 @@ describe("browser executing provider protocol", function()
             local fault = { prefix = info.prefix, lua = info.lua, node = info.node, publication_fault = mode }
             result = cli(fault, nil, "--incremental", "pkg.left")
             assert.is_false(result.ok)
+            local companion = paths.join(workspace, "out/pkg/left.so")
             local expected = mode == "before-commit" and "injected browser pre-commit failure" or
-                mode == "rename" and "injected browser archive rename failure" or workspace .. "/out/pkg/left.so"
+                mode == "rename" and "injected browser archive rename failure" or
+                string.format("has native companion %q", companion)
             assert.truthy(result.output:find(expected, 1, true), result.output)
             assert.equal(predecessor, files.read(archive))
             assert.equal("execute\nexecute\n", files.read(workspace .. "/executions"))
             if mode == "late-companion" then
-                assert.equal("preserve late companion", files.read(workspace .. "/out/pkg/left.so"))
+                assert.equal("preserve late companion", files.read(companion))
             end
             no_staged_images(workspace .. "/out")
         end)

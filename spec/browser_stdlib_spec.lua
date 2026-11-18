@@ -156,8 +156,18 @@ plan:
         local makefile = assert(strategy:read_file("scripts/browser.mk"))
         local environment = assert(makefile:match("\nBROWSER_SDK_ENV%s*[:?+]?=%s*(.-)\n\nbrowser%-sdk:"))
         local recipe = assert(makefile:match("\nbrowser%-sdk:[^\n]*\n(.-)\n\n"))
+        local sources = { environment, recipe, assert(strategy:read_file("scripts/build_browser_sdk.sh")) }
+        for _, filename in ipairs({ "Makefile", "Makefile.win" }) do
+            local host = assert(strategy:read_file(filename)):gsub("\\\r?\n", " ")
+            for _, variable in ipairs({ "BROWSER_LPEGLABEL_CPPFLAGS", "BROWSER_LPEGLABEL_SOURCES",
+                    "LPEGLABEL_CPPFLAGS", "LPEGLABEL_SOURCES", "TITAN_RUNTIME_SOURCES" }) do
+                local assignment = host:match("\n" .. variable .. "%s*[:?+]?=%s*([^\r\n]+)")
+                if assignment then sources[#sources + 1] = assignment end
+            end
+        end
+        local sdk = table.concat(sources, "\n")
         for _, forbidden in ipairs({ "STDLIB_EXTRA_OBJECTS", "LIBUV_", "OPENSSL_", "LLHTTP_", "SQLITE3_" }) do
-            assert.is_nil((environment .. recipe):find(forbidden, 1, true), forbidden)
+            assert.is_nil(sdk:find(forbidden, 1, true), forbidden)
         end
         -- The real SDK spec builds with poisoned ambient CPPFLAGS and checks
         -- the exact native archive members instead of pinning recipe spelling.

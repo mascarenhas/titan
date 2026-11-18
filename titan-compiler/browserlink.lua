@@ -34,12 +34,29 @@ function M.windows_runner_files(release)
     return { "bin/titan-browser-job.exe", "lib/titan/" .. release .. "/windows_browser_job.dll" }
 end
 
+-- Keep diagnostics usable from the same host shell as the failed build.
+-- The caller supplies the user's root spelling, never the certified path.
+function M.install_command(goal, prefix, rocks_tree, profile)
+    local make = platform.windows and "mingw32-make -f Makefile.win " or "make "
+    if goal == "compiler" then
+        return make .. (platform.windows and "compiler" or "install-compiler-sdk")
+    end
+    local target = goal == "lua" and (platform.windows and "lua-browser" or "install-browser") or "browser-sdk"
+    local command = make .. target .. " PREFIX=" .. prefix
+    if rocks_tree and rocks_tree ~= "" then command = command .. " ROCKS_TREE=" .. rocks_tree end
+    if profile then command = command .. " TITAN_BUILD_PROFILE=" .. profile end
+    return command
+end
+
+function M.compiler_remedy()
+    return (platform.windows and "run '" or "run 'luarocks make' or '") ..
+        M.install_command("compiler") .. "' first"
+end
+
 function M.require_sdk(context, descriptor, install)
     local assets = M.sdk_assets(descriptor.paths)
-    local make = platform.windows and "make -f Makefile.win browser-sdk" or "make browser-sdk"
-    local command = make .. " PREFIX=" .. install.prefix
-    if install.rocks_tree and install.rocks_tree ~= "" then
-        command = command .. " ROCKS_TREE=" .. install.rocks_tree
+    local function command()
+        return M.install_command("sdk", install.prefix, install.rocks_tree)
     end
     for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
             "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
@@ -48,7 +65,7 @@ function M.require_sdk(context, descriptor, install)
         local readable = stat and stat.kind == "file" and context.io:read_file(filename, 0)
         if not readable then
             return nil, "browser SDK is incomplete: missing " .. string.format("%q", filename) ..
-                "; run '" .. command .. "'"
+                "; run '" .. command() .. "'"
         end
     end
     -- The SDK's archives were compiled for one build profile, and a link must
@@ -57,14 +74,14 @@ function M.require_sdk(context, descriptor, install)
     local profile = recorded and recorded:match("^(%l+)\n$")
     if not profile or not require("titan-compiler.browsertarget").valid_profile(profile) then
         return nil, "browser SDK build profile " .. string.format("%q", assets.build_profile) ..
-            " is invalid; run '" .. command .. "'"
+            " is invalid; run '" .. command() .. "'"
     end
     if profile ~= descriptor.build_profile then
-        local rocks = install.rocks_tree and install.rocks_tree ~= "" and " ROCKS_TREE=<tree>" or ""
+        local rocks = install.rocks_tree and install.rocks_tree ~= "" and "<tree>" or nil
         return nil, string.format("browser SDK %q was built with the %s profile, but this build uses %s; " ..
-            "set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
-            "'%s PREFIX=<prefix>%s TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin,
-            profile, descriptor.build_profile, profile, descriptor.build_profile, make, rocks, descriptor.build_profile)
+            "set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with '%s'",
+            descriptor.paths.titan_bin, profile, descriptor.build_profile, profile, descriptor.build_profile,
+            M.install_command("sdk", "<prefix>", rocks, descriptor.build_profile))
     end
     if platform.windows then
         for _, relative in ipairs(M.windows_runner_files(require("titan-compiler.version").TITAN_LIBRARY_VERSION)) do
@@ -72,7 +89,7 @@ function M.require_sdk(context, descriptor, install)
             local stat = context.io:stat(filename)
             if not stat or stat.kind ~= "file" then
                 return nil, "browser SDK is incomplete: missing " .. string.format("%q", filename) ..
-                    "; run '" .. command .. "'"
+                    "; run '" .. command() .. "'"
             end
         end
     end

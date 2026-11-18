@@ -17,6 +17,7 @@ local lfs = require "lfs"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local FAKE_ROOT = platform.windows and "C:/fake" or "/fake"
+local LUA_REMEDY = platform.windows and "mingw32-make -f Makefile.win lua-browser" or "make install-browser"
 local function tool_suffix()
     return platform.windows and ".exe" or ""
 end
@@ -186,6 +187,22 @@ describe("browser target descriptor", function()
         assert.same(fixtures.target_defines, browser.export(descriptor.target_defines))
         assert.is_nil(flags:find("-fPIC", 1, true))
         assert.is_nil(flags:find("-flto", 1, true))
+    end)
+
+    it("uses a C source suffix and cleans up a raw .s reservation in the fingerprint probe", function()
+        local context, inputs, calls, storage = fake_context()
+        local reservation = inputs.paths.root .. "/fingerprint.s"
+        function context.io:tmpname()
+            storage[reservation] = ""
+            return reservation
+        end
+        assert(browser.build(context, inputs))
+        local command = calls[#calls]
+        assert.same({ "-c", reservation .. ".c", "-o", reservation .. ".c.o" },
+            { table.unpack(command, #command - 3) })
+        for _, filename in ipairs({ reservation, reservation .. ".c", reservation .. ".c.o" }) do
+            assert.is_nil(storage[filename])
+        end
     end)
 
     it("round-trips transport data without running tools or reading the record", function()
@@ -621,7 +638,7 @@ describe("browser target descriptor", function()
         for _, route in ipairs({ "EMSDK", "PATH" }) do
             platform.getenv = function(name)
                 if name == "EMSDK" and route == "EMSDK" then return root .. "/emsdk" end
-                if name == "PATH" then return "D:/not-empty;" .. directory end
+                if name == "PATH" then return [["D:\missing; not a delimiter";"]] .. directory .. '"' end
             end
             local context, inputs, calls, files = fake_context({ root = root, tool_root = root })
             files["D:/not-empty/emcc.com"] = "not the pinned SDK executable"
@@ -634,12 +651,53 @@ describe("browser target descriptor", function()
             assert.equal(2, #calls, "descriptor creation never launches archive tools")
             local data = browser.export(descriptor)
             assert(browser.import(data))
+            data.tools.cc[1] = data.tools.cc[1]:gsub("/", "\\")
+            fixtures.identify(data)
+            local invalid, spelling_error = browser.import(data)
+            assert.is_nil(invalid)
+            assert.equal("invalid browser tool argv", spelling_error)
+            data.tools.cc[1] = directory .. "/emcc.exe"
             data.tools.ranlib[1] = directory .. "/emranlib"
             fixtures.identify(data)
             local imported, err = browser.import(data)
             assert.is_nil(imported)
             assert.equal("invalid browser tool argv", err)
         end
+    end)
+
+    it("resolves Win32 EMSDK paths without destroying their root or namespace", function()
+        platform.windows = true
+        for _, row in ipairs({
+            { [[\kit]], "C:/kit", "/" },
+            { "D:kit", "D:/per-drive/kit", "/" },
+            { [[\\?\C:\long root\kit]], [[\\?\C:\long root\kit]], "\\" },
+        }) do
+            local input, resolved, sep = table.unpack(row)
+            platform.getenv = function(name) if name == "EMSDK" then return input end end
+            local context, _, _, storage = fake_context({ root = "C:/project", tool_root = "C:/project" })
+            function context.io:absolute(filename)
+                assert.equal("D:kit", filename)
+                return resolved
+            end
+            local location = table.concat({ resolved, "upstream", "emscripten" }, sep)
+            for _, name in ipairs({ "emcc", "emar", "emranlib" }) do
+                storage[location .. sep .. name .. ".exe"] = "launcher"
+            end
+            local tools = assert(browser.discover_tools(context))
+            assert.equal(location, tools.location)
+            assert.same({ location .. sep .. "emcc.exe" }, tools.cc)
+        end
+    end)
+
+    it("reports a Windows relative EMSDK lookup error without a Lua source location", function()
+        platform.windows = true
+        platform.getenv = function(name) if name == "EMSDK" then return "kit" end end
+        local context = fake_context({ root = "C:/project", tool_root = "C:/project" })
+        function context.io:cwd() return nil, "injected cwd failure" end
+        local tools, err = browser.discover_tools(context)
+        assert.is_nil(tools)
+        assert.equal('browser target requires Emscripten 6.0.13: cannot resolve "kit": injected cwd failure; ' ..
+            "install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh", err)
     end)
 
     it("does not continue past an existing Windows candidate with a resolution error", function()
@@ -678,11 +736,21 @@ describe("browser target descriptor", function()
         contains(err, "not a Windows executable")
     end)
 
-    it("diagnoses a missing record with the fork install command", function()
-        local context, inputs = fake_context({ missing_record = true })
-        local descriptor, err = browser.build(context, inputs)
-        assert.is_nil(descriptor)
-        contains(err, "is unavailable"); contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+    it("diagnoses a missing Lua record with the exact host install command and raw prefix", function()
+        for _, row in ipairs({
+            { false, "/fake", "./sdk", "make install-browser PREFIX=./sdk" },
+            { true, "C:/fake", [[C:\sdk]], [[mingw32-make -f Makefile.win lua-browser PREFIX=C:\sdk]] },
+        }) do
+            local windows, root, prefix, command = table.unpack(row)
+            platform.windows = windows
+            platform.getenv = function(name) if name == "EMSDK" then return root .. "/emsdk" end end
+            local context, inputs = fake_context({ root = root, tool_root = root, missing_record = true })
+            inputs.install_prefix = prefix
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            assert.equal(string.format("browser Lua record %q is unavailable: not found; install it with '%s'",
+                inputs.paths.lua_record, command), err)
+        end
     end)
 
     for _, case in ipairs({
@@ -699,7 +767,7 @@ describe("browser target descriptor", function()
             local context, inputs = fake_context({ record_text = case[2](text) })
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor); contains(err, case[3])
-            contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+            contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
         end)
     end
 
@@ -718,7 +786,7 @@ describe("browser target descriptor", function()
                 local descriptor, err = browser.build(context, inputs)
                 assert.is_nil(descriptor)
                 contains(err, 'invalid field "' .. key .. '": noncanonical list')
-                contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+                contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
                 local data = fixtures.descriptor()
                 data.lua.record[key] = changed
                 fixtures.identify(data)
@@ -741,7 +809,7 @@ describe("browser target descriptor", function()
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor); contains(err, "field " .. case[1] .. " mismatch")
             contains(err, "recorded"); contains(err, "expected"); contains(err, "fork_revision=")
-            contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+            contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
         end)
     end
 
@@ -751,7 +819,7 @@ describe("browser target descriptor", function()
         local descriptor, err = browser.build(context, inputs)
         assert.is_nil(descriptor)
         contains(err, "field wasm_features mismatch")
-        contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+        contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
         assert.is_nil(err:find("browser target compiler probe", 1, true))
     end)
 
@@ -771,7 +839,7 @@ describe("browser target descriptor", function()
         contains(err, "remove feature-changing flags")
         contains(err, "TITAN_EXTRA_CPPFLAGS/TITAN_EXTRA_CFLAGS/--cflag")
         assert.is_nil(err:find("browser Lua record", 1, true))
-        assert.is_nil(err:find("make install-browser", 1, true))
+        assert.is_nil(err:find(LUA_REMEDY, 1, true))
     end)
 
     it("attributes feature drift without user flags to the selected toolchain", function()
@@ -829,7 +897,7 @@ describe("browser target descriptor", function()
         local context, inputs = fake_context({ record = { cflags = record.cflags .. " -fPIC" } })
         local descriptor, err = browser.build(context, inputs)
         assert.is_nil(descriptor); contains(err, 'invalid field "cflags"')
-        contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+        contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
     end)
 
     it("diagnoses host-only flags including ambient LTO without using native defaults", function()
@@ -897,7 +965,7 @@ describe("browser target descriptor", function()
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor)
             contains(err, "required -sWASM_LEGACY_EXCEPTIONS=1")
-            contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+            contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
             local data = fixtures.descriptor()
             data.lua.record.cflags = cflags
             fixtures.identify(data)

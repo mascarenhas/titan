@@ -99,6 +99,39 @@ local function context(files)
     return ctx, files
 end
 
+describe("browser generated C preprocessing", function()
+    it("preserves C mode and retires the .s reservation and its products on Windows", function()
+        local windows = platform.windows
+        local ok, failure = xpcall(function()
+            platform.windows = true
+            local ctx, storage = context({})
+            local reservation = "C:/temporary.s"
+            local output = "C:/temporary.i"
+            local names = { reservation, output }
+            ctx.target = "browser"
+            ctx.incremental_options = { compile_prefix = { "C:/tool/emcc.exe" } }
+            function ctx.io:tmpname()
+                local name = assert(table.remove(names, 1))
+                storage[name] = ""
+                return name
+            end
+            function ctx.io:run(argv)
+                assert.same({ "-E", "-P", "-x", "c", reservation .. ".c", "-o", output },
+                    { table.unpack(argv, #argv - 6) })
+                assert.equal("int input;", storage[reservation .. ".c"])
+                storage[output] = "int input;\n"
+                return { ok = true }
+            end
+            local identities = assert(incremental.preprocessed_identities(ctx,
+                { { filename = "C:/src/generated.c", contents = "int input;" } }))
+            assert.equal(1, #identities)
+            assert.same({}, storage)
+        end, debug.traceback)
+        platform.windows = windows
+        assert(ok, failure)
+    end)
+end)
+
 local function native_context(files)
     local ctx = context(files)
     function ctx.io:executable_search_cwd() return false end

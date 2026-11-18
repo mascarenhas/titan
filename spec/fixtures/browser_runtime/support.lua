@@ -72,8 +72,10 @@ assert(driver.close_resolver_context(context))
 ]], M.repository .. "/?.lua;" .. M.repository .. "/?/init.lua;", info.prefix,
         "-I" .. M.repository, require("inspect")(options), root, worker, name,
         root .. "/" .. name .. ".c", root .. "/" .. name .. ".mjs")
+    local script = root .. "/" .. name .. "-build.lua"
+    files.write(script, code)
     return M.run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-        "TITAN_PATH_0_6=", info.lua, "-E", "-e", code })
+        "TITAN_PATH_0_6=", info.lua, "-E", script })
 end
 return M

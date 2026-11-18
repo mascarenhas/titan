@@ -9,7 +9,8 @@ BROWSER_LUA_MODULE_SUFFIX ?= .so
 BROWSER_NATIVE_PATH ?= $(abspath $(1))
 BROWSER_RUNNER_SHELL ?=
 BROWSER_LPEGLABEL_CPPFLAGS ?= $(LPEGLABEL_CPPFLAGS)
-BROWSER_COMPILER_REMEDY ?= run 'luarocks make' or 'make install-compiler-sdk' first
+BROWSER_REMEDY_PREFIX ?= $(PREFIX)
+BROWSER_REMEDY_ROCKS_TREE ?= $(ROCKS_TREE)
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -49,34 +50,18 @@ BROWSER_SDK_ENV = PREFIX=$(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(PR
 	$(if $(strip $(ROCKS_TREE)),LUA_CPATH=$(call make_shell_quote,$(BROWSER_INSTALL_TREE)/lib/lua/5.5/?$(BROWSER_LUA_MODULE_SUFFIX);;))
 
 browser-sdk: ## Build and install the browser target runtime, tools and core stdlib provider
-	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
+	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
-	if test -z "$${TITAN_NODE:-}"; then \
-	  unset TITAN_NODE; \
-	fi; \
-	titanc_bin=$(call make_shell_quote,$(BROWSER_INSTALL_TREE)/bin/titanc$(BROWSER_EXE_SUFFIX)); \
-	if test ! -x "$$titanc_bin"; then titanc_bin=$(call make_shell_quote,$(PREFIX)/bin/titanc$(BROWSER_EXE_SUFFIX)); fi; \
-	if test ! -x "$$titanc_bin"; then \
-	  echo "browser-sdk: installed titanc not found; $(BROWSER_COMPILER_REMEDY)" >&2; \
-	  exit 1; \
-	fi; \
-	build_dir=$(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(TITAN_BROWSER_BUILD_DIR))); \
-	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua prepare "$$build_dir" $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,.)); \
-	$(BROWSER_BUILD_HOST_TOOLS) \
-	c_objects=$$($(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
-	  --output "$$build_dir" -c --incremental -j$(TITAN_JOBS) \
-	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) --print-c-objects \
-	  $(foreach source,$(TITAN_RUNTIME_SOURCES) $(BROWSER_LPEGLABEL_SOURCES),--c-source $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(source))))); \
-	if test -n "$(BROWSER_EXE_SUFFIX)"; then c_objects=$$(printf '%s' "$$c_objects" | tr -d '\r'); fi; \
-	nl="$$(printf '\nX')"; nl="$${nl%X}"; \
-	set -f; IFS="$$nl"; set -- $$c_objects; set +f; unset IFS; \
-	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua stage-runtime \
-	  "$$build_dir" $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,.)) "$$@"; \
-	$(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
-	  --output "$$build_dir" --source-first --incremental -j$(TITAN_JOBS) \
-	  -X $(call make_shell_quote,$(BROWSER_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)/libtitan-lpeglabel.a) \
-	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) $(BROWSER_STDLIB_ROOTS); \
-	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua finalize "$$build_dir"
+	$(BROWSER_SDK_ENV) TITAN_JOBS=$(call make_shell_quote,$(TITAN_JOBS)) \
+	TITAN_BROWSER_REMEDY_PREFIX=$(call make_shell_quote,$(BROWSER_REMEDY_PREFIX)) \
+	TITAN_BROWSER_REMEDY_ROCKS_TREE=$(call make_shell_quote,$(BROWSER_REMEDY_ROCKS_TREE)) \
+	BROWSER_STDLIB_ROOTS=$(call make_shell_quote,$(BROWSER_STDLIB_ROOTS)) \
+	sh scripts/build_browser_sdk.sh $(call make_shell_quote,$(TITAN_LUA)) \
+	  $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(TITAN_BROWSER_BUILD_DIR))) \
+	  $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,.)) $(TITAN_LIBRARY_VERSION) \
+	  $(call make_shell_quote,$(BROWSER_EXE_SUFFIX)) TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX) \
+	  $(call make_shell_quote,$(BROWSER_COMPILER_REMEDY)) \
+	  $(foreach source,$(TITAN_RUNTIME_SOURCES) $(BROWSER_LPEGLABEL_SOURCES),--c-source $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(source))))
 
 # Implementation notes: doc/implementation/build-script-audit.md#installation-and-publication
 uninstall-browser-sdk: ## Remove the files browser-sdk installed, keeping other files in their directory
@@ -84,7 +69,7 @@ uninstall-browser-sdk: ## Remove the files browser-sdk installed, keeping other 
 	  $(call make_shell_quote,$(BROWSER_INSTALL_TREE)) $(TITAN_LIBRARY_VERSION)
 
 TITAN_BROWSER_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-stdlib
-TITAN_BROWSER_TEST_SDK := $(BROWSER_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)
+TITAN_BROWSER_TEST_SDK = $(BROWSER_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)
 # The engines that run the image, and the shell command that runs it there.
 # The Playwright CI cells pass their own engine and spec/browser/playwright-run.mjs --image.
 TITAN_BROWSER_TEST_ENGINES ?= node chromium

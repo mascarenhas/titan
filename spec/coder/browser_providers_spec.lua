@@ -342,7 +342,7 @@ describe("browser providers", function()
     it("refuses symlink companions without touching their target", function()
         local available, message = filesystem.symlink_capability()
         if not available then
-            pending(message)
+            pending("capability: " .. message)
             return
         end
         local context = browser_context(root)
@@ -775,9 +775,13 @@ describe("browser providers real toolchain", function()
         prepare(info)
         local profile = native_inventory(root).target_profile
         local encoded = assert(require("titan-compiler.graphcodec").encode(profile))
+        local filename = root .. "/native-profile"
+        write(filename, encoded)
         local script = string.format([[
 local driver = require("titan-compiler.driver")
-local native = assert(require("titan-compiler.graphcodec").decode(%q))
+local file = assert(io.open(%q, "rb"))
+local native = assert(require("titan-compiler.graphcodec").decode(assert(file:read("a"))))
+assert(file:close())
 local context = driver.new_resolver_context({
     target = "browser", analysis_only = true,
     embedded_interface_provider = { provider_file = "/native-host.so",
@@ -791,11 +795,11 @@ assert(service.profile.identity ~= native.identity)
 local result = service:_run_source("baseline", "typedef char browser_pointer[(sizeof(void*) == 4) ? 1 : -1];")
 assert(result.classification == "success", result.diagnostic)
 assert(driver.close_resolver_context(context))
-]], encoded)
+]], filename)
         local argv = lua_argv()
         argv[#argv + 1], argv[#argv + 2] = "-e", script
         local result = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
-        assert.is_true(result.ok, result.output)
+        assert.is_true(result.ok, result.output or result.diagnostic)
     end)
     it("refuses a stale native companion before a warm archive certificate hit", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end

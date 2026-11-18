@@ -27,6 +27,20 @@ local function shell_words(command)
     end
     return assert(cdriver.split_shell_words(command))
 end
+
+function M.read_link_response(argument)
+    if not (argument and (argument:match("^@.+[.]mjs[.]rsp$") or
+                          argument:match("^@.+[.]mjs[.]link[.]rsp[.]tmp[.][^/\\]+$"))) then
+        return nil
+    end
+    -- The compiler's GNU quoting only escapes backslashes and double quotes,
+    -- both supported by split_shell_words.
+    local file = assert(io.open(argument:sub(2), "rb"))
+    local bytes = assert(file:read("a"))
+    assert(file:close())
+    return assert(cdriver.split_shell_words(bytes))
+end
+
 local function render(argv)
     local words = {}
     for index, value in ipairs(argv) do words[index] = assert(cdriver.shell_quote(value)) end
@@ -98,15 +112,8 @@ function M.install(options)
                 if matches then
                     tool = entry[2]
                     local args = { table.unpack(argv, #prefix + 1) }
-                    if entry[1] == "cc" and #args == 1 and
-                            (args[1]:match("^@.+[.]mjs[.]rsp$") or
-                             args[1]:match("^@.+[.]mjs[.]link[.]rsp[.]tmp[.][^/\\]+$")) then
-                        -- The compiler's GNU quoting only escapes backslashes
-                        -- and double quotes, both supported by split_shell_words.
-                        local file = assert(io.open(args[1]:sub(2), "rb"))
-                        local bytes = assert(file:read("a"))
-                        assert(file:close())
-                        args = assert(cdriver.split_shell_words(bytes))
+                    if entry[1] == "cc" and #args == 1 then
+                        args = M.read_link_response(args[1]) or args
                     end
                     if #args == 1 and args[1] == "--version" then operation = "query"
                     elseif entry[1] == "cc" then

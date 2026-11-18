@@ -1,5 +1,6 @@
 local compiler_paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
+local browserlink = require "titan-compiler.browserlink"
 local cdriver = require "c-parser.cdriver"
 local csemantics = require "titan-compiler.csemantics"
 local incremental = require "titan-compiler.incremental"
@@ -130,12 +131,14 @@ local function argv(value)
 end
 
 local function normalized_absolute(value)
-    return text(value) and platform.is_absolute(value) and
-        compiler_paths.to_slash(compiler_paths.normalize(value)) == compiler_paths.to_slash(value)
+    if not text(value) or not platform.is_absolute(value) then return false end
+    if platform.windows then return platform.path.normalize(value) == value end
+    return compiler_paths.normalize(value) == value
 end
 
 local function tool_path(directory, name)
-    return compiler_paths.to_slash(compiler_paths.join(directory, platform.windows and name .. ".exe" or name))
+    if platform.windows then return platform.join(directory, name .. ".exe") end
+    return compiler_paths.join(directory, name)
 end
 
 -- Match emcc 6.0.13's joined/split settings, bare =1 and boolean NO_ aliases.
@@ -203,7 +206,7 @@ local function validate(data, context)
     for _, item in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
         local command = tools[item[1]]
         if not argv(command) or #command ~= 1 or not normalized_absolute(command[1]) or
-            compiler_paths.to_slash(command[1]) ~= tool_path(tools.location, item[2]) then
+            command[1] ~= tool_path(tools.location, item[2]) then
             return nil, "invalid browser tool argv"
         end
     end
@@ -357,6 +360,17 @@ function M.validate_flags(flags, origin)
 end
 
 local function absolute(strategy, filename)
+    if platform.windows then
+        local cwd, err
+        if not platform.is_absolute(filename) then
+            cwd, err = strategy:cwd()
+            if not cwd then return nil, err end
+        end
+        local resolved
+        resolved, err = platform.absolute(filename, cwd, strategy)
+        if not resolved then return nil, err end
+        return platform.path.normalize(resolved)
+    end
     if platform.is_absolute(filename) then return compiler_paths.to_slash(compiler_paths.normalize(filename)) end
     local cwd, err = strategy:cwd()
     if not cwd then return nil, err end
@@ -399,7 +413,7 @@ local function tool_candidate(context, filename)
             return nil, identity
         end
         if not identity then return nil, selected end
-        if compiler_paths.to_slash(selected) ~= filename then
+        if selected ~= filename then
             return nil, "physical resolver selected " .. string.format("%q", selected)
         end
         return true
@@ -418,7 +432,10 @@ function M.discover_tools(context)
     local strategy = context.io
     local emsdk, cc = platform.getenv("EMSDK")
     if emsdk and emsdk ~= "" then
-        cc = assert(absolute(strategy, tool_path(compiler_paths.join(emsdk, "upstream/emscripten"), "emcc")))
+        local root, err = absolute(strategy, emsdk)
+        if not root then return nil, resolution_error(emsdk, err) end
+        local directory = platform.join(root, "upstream/emscripten")
+        cc = tool_path(directory, "emcc")
         local present, reason = tool_candidate(context, cc)
         if reason then return nil, resolution_error(cc, reason) end
         if not present then
@@ -426,11 +443,17 @@ function M.discover_tools(context)
                 string.format("%q", cc) .. " (EMSDK=" .. string.format("%q", emsdk) .. ")" .. INSTALL
         end
     else
-        local separator = platform.windows and ";" or ":"
-        for directory in ((platform.getenv("PATH") or "") .. separator):gmatch("(.-)" .. separator) do
-            local candidate, err = absolute(strategy,
-                tool_path(directory == "" and "." or directory, "emcc"))
-            if not candidate then return nil, err end
+        local search = platform.getenv("PATH") or ""
+        local directories = platform.windows and platform.windows_path_entries(search, true) or
+            (search .. ":"):gmatch("(.-):")
+        while true do
+            local directory, err = directories()
+            if err then return nil, resolution_error("PATH", err) end
+            if not directory then break end
+            local root
+            root, err = absolute(strategy, directory == "" and "." or directory)
+            if not root then return nil, resolution_error(directory, err) end
+            local candidate = tool_path(root, "emcc")
             local present, reason = tool_candidate(context, candidate)
             if reason then return nil, resolution_error(candidate, reason) end
             if present then cc = candidate; break end
@@ -452,7 +475,7 @@ function M.discover_tools(context)
         return nil, "browser target requires Emscripten 6.0.13: " .. string.format("%q", cc) ..
             " reports " .. found .. INSTALL
     end
-    local location = compiler_paths.to_slash(compiler_paths.dirname(cc))
+    local location = platform.windows and platform.parent(cc) or compiler_paths.dirname(cc)
     local out = { cc = { cc }, version = found, source = emsdk and emsdk ~= "" and "EMSDK" or "PATH",
         location = location, version_output = result.output }
     for _, item in ipairs({ { "ar", "emar" }, { "ranlib", "emranlib" } }) do
@@ -471,7 +494,7 @@ end
 
 local function record_error(paths, kind, detail)
     return "browser Lua record " .. string.format("%q", paths.lua_record) .. " " .. kind ..
-        ": " .. detail .. "; install it with 'make install-browser PREFIX=" .. paths.root .. "'"
+        ": " .. detail .. "; install it with '" .. browserlink.install_command("lua", paths.root) .. "'"
 end
 
 local function mismatch(paths, record, key, expected, recorded)
@@ -587,10 +610,14 @@ local function header_digest(context, paths)
 end
 
 local function probe_fingerprint(context, descriptor)
-    local source, err = context.io:tmpname()
-    if not source then return nil, err end
+    local reservation, err = context.io:tmpname()
+    if not reservation then return nil, err end
+    -- Emscripten classifies .s before it forwards -x c to Clang; Win32
+    -- tmpname can choose that suffix for an ordinary reservation.
+    local source = reservation .. ".c"
     local object = source .. ".o"
     local function finish(value, failure)
+        context.io:unlink(reservation)
         context.io:unlink(source)
         context.io:unlink(object)
         return value, failure
@@ -627,22 +654,23 @@ function M.build(context, inputs)
             inputs.trace_control == true, build_profile)
         if not tail then return nil, tail_error end
         local paths = inputs.paths
+        local remedy_paths = { root = inputs.install_prefix or paths.root, lua_record = paths.lua_record }
         local tool, tool_error = M.discover_tools(context)
         if not tool then return nil, tool_error end
         local bytes, read_error = context.io:read_file(paths.lua_record)
-        if not bytes then return nil, record_error(paths, "is unavailable", tostring(read_error)) end
-        local record, defines = parse_record(bytes, paths)
+        if not bytes then return nil, record_error(remedy_paths, "is unavailable", tostring(read_error)) end
+        local record, defines = parse_record(bytes, remedy_paths)
         if not record then return nil, defines end
         local archive_ok, archive = pcall(incremental.file_digest, context, paths.liblua)
         if not archive_ok then
             if type(archive) ~= "string" then error(archive, 0) end
-            return nil, mismatch(paths, record, "archive_sha256", "unavailable: " .. archive)
-        elseif archive ~= record.archive_sha256 then return nil, mismatch(paths, record, "archive_sha256", archive) end
+            return nil, mismatch(remedy_paths, record, "archive_sha256", "unavailable: " .. archive)
+        elseif archive ~= record.archive_sha256 then return nil, mismatch(remedy_paths, record, "archive_sha256", archive) end
         local header_ok, headers, header_error = pcall(header_digest, context, paths)
         if not header_ok and type(headers) ~= "string" then error(headers, 0) end
         if not header_ok or not headers then
-            return nil, mismatch(paths, record, "headers_sha256", "unavailable: " .. tostring(header_error or headers))
-        elseif headers ~= record.headers_sha256 then return nil, mismatch(paths, record, "headers_sha256", headers) end
+            return nil, mismatch(remedy_paths, record, "headers_sha256", "unavailable: " .. tostring(header_error or headers))
+        elseif headers ~= record.headers_sha256 then return nil, mismatch(remedy_paths, record, "headers_sha256", headers) end
         -- Emscripten -g2 preserves names but strips object line tables.
         local flags = M.object_flags(build_profile)
         for _, define in ipairs(defines) do flags[#flags + 1] = define end
@@ -670,7 +698,7 @@ function M.build(context, inputs)
         profile, profile_error = csemantics.build_profile(profile_inputs)
         if not profile then return nil, profile_error end
         local numeric = "integer=" .. profile.lua_integer .. ",float=" .. profile.lua_number
-        if numeric ~= record.numeric then return nil, mismatch(paths, record, "numeric", numeric) end
+        if numeric ~= record.numeric then return nil, mismatch(remedy_paths, record, "numeric", numeric) end
         local fingerprint, fingerprint_error = probe_fingerprint(context, provisional)
         if not fingerprint then return nil, fingerprint_error end
         local expected = { format = "wasm", word_size = 32, linking_version = 2, features = FEATURES }

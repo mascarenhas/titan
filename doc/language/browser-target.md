@@ -500,6 +500,8 @@ browser Lua record "/home/me/.local/titan/lib/browser/liblua-config.txt" field a
 
 A missing record is reported as `is unavailable: <reason>` and a damaged one
 as `is malformed: <detail>`, with the same install command.
+On Windows the repair command is `mingw32-make -f Makefile.win lua-browser`
+from the Titan checkout, with the same `PREFIX`.
 
 ### Installing the browser SDK
 
@@ -516,6 +518,8 @@ On MSYS2 CLANG64, use `make -f Makefile.win browser-sdk PREFIX="$PREFIX"`
 after `make -f Makefile.win compiler` and `lua-browser`. `mingw32-make`
 is also supported. Use the same `TITAN_BUILD_PROFILE` for the SDK and
 the program or test image.
+If the SDK is incomplete, its Windows diagnostic names
+`mingw32-make -f Makefile.win browser-sdk` with the installation settings.
 
 It uses the installed `titanc --target browser` and needs Node 26 or newer
 with JSPI because it publishes the standard library through the ordinary

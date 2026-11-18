@@ -2,6 +2,7 @@ import { spawn, execFile } from "node:child_process";
 import { constants, fstatSync } from "node:fs";
 import { access, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
+import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -299,6 +300,9 @@ async function retireGroup(child) {
 // are always pipes into them, so a redirect to a file is visible only here.
 function streamKind(stream) {
     if (stream.isTTY) return "tty";
+    // For Windows named pipes Node already selects a Socket; its fstat
+    // cannot classify the libuv pipe mode as FIFO or socket.
+    if (windows && stream instanceof Socket) return "pipe";
     const status = fstatSync(stream.fd);
     return status.isFile() ? "file" : status.isFIFO() || status.isSocket() ? "pipe" : undefined;
 }

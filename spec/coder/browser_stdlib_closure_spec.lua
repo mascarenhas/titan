@@ -444,11 +444,11 @@ end
         assert.equal(assert(strategy:read_file("spec/fixtures/stdlib/titan_stdlib_browser_types.lua")),
             checks.type_fixture(browser),
             "browser type fixture is stale; regenerate it with check_browser_stdlib.lua fixture")
-        if platform.windows then
-            local native = checks.native_fixture()
-            assert(checks.inventory(native, browser))
-            assert(checks.check_status(native, browser))
-        end
+        -- Exercise the Windows oracle on Unix too, without replacing the
+        -- separate comparison against Unix's installed native archive.
+        local native = checks.native_fixture()
+        assert(checks.inventory(native, browser))
+        assert(checks.check_status(native, browser))
     end)
 
     it("pins the native type fixture to the installed archive", function()

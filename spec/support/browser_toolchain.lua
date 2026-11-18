@@ -70,7 +70,8 @@ local function discover()
         local filename = paths.join(base, relative)
         if not strategy:readable(filename) then
             return nil, "browser Lua prerequisite not readable: " .. string.format("%q", filename) ..
-                "; run 'make install-browser PREFIX=" .. prefix .. "' in the Lua fork"
+                "; run '" .. browserlink.install_command("lua", prefix) .. "'" ..
+                (platform.windows and " from the Titan checkout" or " in the Lua fork")
         end
     end
     return { prefix = prefix, compiler = paths.join(prefix, "bin/titanc" .. suffix),

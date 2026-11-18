@@ -330,12 +330,14 @@ When `install.rocks_tree` is set, the suggested command also names
 under the SDK's profile, so a link under the other one would mix two object
 profiles in one image.
 
-`driver.require_browser_sdk(context)` supplies `install`: `prefix` is
-`driver.INSTALL_PATHS.root` (the descriptor root when unset) and `rocks_tree`
-is the nonempty `ROCKS_TREE` environment variable, which selects the second
-form. The
-check runs only at a program or test link, before the executing protocol
-check, and in `make browser-sdk` itself; object compilation never runs it.
+`driver.require_browser_sdk(context)` supplies the repair command's roots.
+It keeps the user's original `PREFIX` and `ROCKS_TREE` spelling when called
+by the Make recipe, and otherwise uses the installation root and the
+nonempty `ROCKS_TREE` environment variable. Identity checks still use
+canonical paths. On Windows `browserlink` renders the same command as
+`mingw32-make -f Makefile.win browser-sdk`. The check runs only when linking
+an image, before the executing protocol check, and during `browser-sdk`;
+object compilation never runs it.
 
 ### `make browser-sdk`
 
@@ -348,12 +350,14 @@ library, or the native SDK build, and it clears ambient `LUA_PATH`,
 `LUA_CPATH`, and `TITAN_TARGET`. It runs the installed `titanc` from
 `TITAN_INSTALL_TREE` (then `PREFIX`); a missing compiler stops with
 `browser-sdk: installed titanc not found; run 'luarocks make' or 'make
-install-compiler-sdk' first`. Every child gets `TITAN_ROOT` set to the
-installation tree, `TITAN_PATH_0_6` set to the checkout, an empty
-`TITAN_PATH`, an empty `CPPFLAGS`, and `TITAN_EXTRA_CPPFLAGS` replaced by
-exactly `LPEGLABEL_CPPFLAGS` (`-I<checkout>/vendor/lpeglabel`); the ambient
-values of both are discarded, never appended to (`BROWSER_SDK_ENV`). When
-`TITAN_NODE` is unset or empty, the recipe unsets it and leaves ordinary
+install-compiler-sdk' first` on Unix, or `browser-sdk: installed titanc not
+found; run 'mingw32-make -f Makefile.win compiler' first` on Windows.
+`scripts/build_browser_sdk.sh` runs the install sequence once the guarded
+Make recipe has set `TITAN_ROOT` to the installation tree, `TITAN_PATH_0_6` to
+the checkout, `TITAN_PATH` and `CPPFLAGS` to empty, and
+`TITAN_EXTRA_CPPFLAGS` to exactly the vendored lpeglabel include flag.
+The native Windows runner helper builds separately against `PREFIX`.
+When `TITAN_NODE` is unset or empty, the script unsets it and leaves ordinary
 `PATH` selection intact; emsdk's bundled Node does not override it. The
 build directory is `TITAN_BROWSER_BUILD_DIR` (default
 `$(TITAN_OUTPUT_DIR)/browser-sdk`), a browser `--output` root.
@@ -1315,7 +1319,9 @@ Native exception switches remain unsupported: Wasm SJLJ is selected by
 ### Record diagnostics
 
 Every record diagnostic names the record path, the offending field, and the
-fork's install command with the actual root:
+host install command. Unix uses the fork's `make install-browser`; Windows
+uses `mingw32-make -f Makefile.win lua-browser` from the Titan checkout.
+Both include the prefix the user supplied. For example, on Unix:
 
 ```text
 browser Lua record "<path>" is unavailable: <reason>; install it with 'make install-browser PREFIX=<root>'
@@ -1360,7 +1366,8 @@ precedence.
 `PATH` for the first matching compiler (an empty entry means `.`) and selects
 `emar` and `emranlib` only beside it. The selected compiler must report the
 pinned version; a bad first match does not fall through to another SDK.
-On Windows the basenames end in `.exe` and `PATH` is semicolon-delimited.
+On Windows the basenames end in `.exe` and `PATH` is semicolon-delimited,
+with semicolons inside a quoted entry treated as part of that path.
 Native executable resolution must select that exact filename; it may not
 append another extension. POSIX requires effective execute permission.
 During a Windows `PATH` search, an absent exact candidate permits a later
@@ -1376,6 +1383,8 @@ browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on P
 browser target requires Emscripten 6.0.13: emcc not found at "<path>" (EMSDK="<root>"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
 browser target requires Emscripten 6.0.13: "<path>" reports <found>; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
 browser target requires Emscripten 6.0.13: <tool> not found at "<path>" (emcc="<cc>"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
+browser target requires Emscripten 6.0.13: cannot resolve "<path>": <reason>; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
+browser target requires Emscripten 6.0.13: cannot execute emcc at "<path>": <reason>; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
 ```
 
 `<found>` is `unknown` when the output carries no parsable version or the
@@ -4395,6 +4404,7 @@ publication with `Makefile`. Its native runner helper and provider use the
 ordinary Windows executable/DLL layout outside the browser asset directory.
 The Wasm profile and verified SDK rules are the same on all three hosts;
 Windows browser build and runner commands are supported from MSYS2 CLANG64.
+Node timers on Windows follow the host timer granularity.
 
 ## Documentation checks
 

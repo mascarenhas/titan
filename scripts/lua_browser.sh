@@ -43,9 +43,14 @@ myldflags=${LUA_BROWSER_MYLDFLAGS-${MYLDFLAGS-}}
 browser_cc=${LUA_BROWSER_CC-}
 browser_ar=${LUA_BROWSER_AR-}
 browser_ranlib=${LUA_BROWSER_RANLIB-}
+emsdk=${EMSDK-}
 
 tool_suffix=
-if [ "${OS:-}" = Windows_NT ]; then tool_suffix=.exe; fi
+if [ "${OS:-}" = Windows_NT ]; then
+	tool_suffix=.exe
+	if [ -n "$browser_cc" ]; then browser_cc=$(printf '%s' "$browser_cc" | tr '\\' /); fi
+	if [ -n "$emsdk" ]; then emsdk=$(printf '%s' "$emsdk" | tr '\\' /); fi
+fi
 emcc=emcc$tool_suffix
 emar=emar$tool_suffix
 emranlib=emranlib$tool_suffix
@@ -56,8 +61,8 @@ if [ -n "$browser_cc" ]; then
 	*/*) [ -x "$browser_cc" ] && resolved_cc=$browser_cc ;;
 	*) resolved_cc=$(command -v "$browser_cc" 2>/dev/null || true) ;;
 	esac
-elif [ -n "${EMSDK:-}" ]; then
-	candidate="$EMSDK/upstream/emscripten/$emcc"
+elif [ -n "$emsdk" ]; then
+	candidate="$emsdk/upstream/emscripten/$emcc"
 	if [ -x "$candidate" ]; then
 		resolved_cc=$candidate
 	else
@@ -82,6 +87,20 @@ fi
 effective_cc=${browser_cc:-$emcc}
 effective_ar=${browser_ar:-$emar rcu}
 effective_ranlib=${browser_ranlib:-$emranlib}
+if [ "$tool_suffix" = .exe ] && [ -n "$resolved_cc" ]; then
+	# The directory is now first on PATH. Pass the basename through the
+	# fork's recursive Make command variables without quoting a drive path
+	# or any spaces in the tool's parent directories.
+	effective_cc=${resolved_cc##*/}
+fi
+
+fork_make() {
+	if [ "$tool_suffix" = .exe ]; then
+		"$make_cmd" SHELL=sh.exe "$@"
+	else
+		"$make_cmd" "$@"
+	fi
+}
 
 if command -v sha256sum >/dev/null 2>&1; then
 	sha256_file() { sha256sum < "$1" | cut -c1-64; }
@@ -129,7 +148,7 @@ build_and_install() {
 			rm -f "$obj"
 		fi
 	done
-	"$make_cmd" -C "$lua_dir" install-browser PREFIX="$prefix" \
+	fork_make -C "$lua_dir" install-browser PREFIX="$prefix" \
 		FORK_REVISION="${FORK_REVISION-}" \
 		BROWSER_CC="$effective_cc" \
 		BROWSER_AR="$effective_ar" \
@@ -152,7 +171,7 @@ check_reuse() {
 
 	command -v "$effective_cc" >/dev/null 2>&1 || return 1
 
-	"$make_cmd" -s --no-print-directory -C "$lua_dir/src" browser-config \
+	fork_make -s --no-print-directory -C "$lua_dir/src" browser-config \
 		BROWSER_CC="$effective_cc" \
 		BROWSER_AR="$effective_ar" \
 		BROWSER_RANLIB="$effective_ranlib" \

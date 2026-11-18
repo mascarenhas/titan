@@ -1042,6 +1042,11 @@ local function probe_include_paths(config)
                         return nil, "invalid C include search directory " .. string.format("%q", path) ..
                             ": " .. path_error
                     end
+                    local parent, leaf = platform.path.split(normalized)
+                    while leaf == "" do
+                        normalized = parent
+                        parent, leaf = platform.path.split(normalized)
+                    end
                     path = normalized
                 end
                 table.insert(paths[mode], path)

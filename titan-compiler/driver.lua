@@ -457,6 +457,12 @@ end
 local explicit_root = platform.getenv("TITAN_ROOT")
 if explicit_root == "" then explicit_root = nil end
 local probe_prefix = platform.getenv("TITAN_PREFIX")
+
+function perf.browser_install_prefix(root)
+    local prefix = platform.getenv("TITAN_BROWSER_REMEDY_PREFIX")
+    if prefix and prefix ~= "" then return prefix end
+    return explicit_root and normalize_absolute_path(explicit_root) == root and explicit_root or root
+end
 if probe_prefix == "" then probe_prefix = nil end
 local probe_cache_disabled = platform.getenv("TITAN_PROBE_CACHE_DISABLE") == "1"
 local configured_installation_root, installation_root_error = explicit_root, nil
@@ -727,6 +733,7 @@ function driver._finish_target_initialization(context)
             end
             local descriptor, err = driver._browser_target.build(context, {
                 paths = paths, runtime_include = runtime_include, compile_flags = extras,
+                install_prefix = perf.browser_install_prefix(paths.root),
                 build_profile = driver.BUILD_PROFILE,
                 trace_control = driver.browser_link_options and
                     (driver.browser_link_options.purpose == "baseline" or
@@ -817,10 +824,11 @@ end
 function driver.require_browser_sdk(context)
     local descriptor, err = driver.context_target_descriptor(context)
     if not descriptor then return nil, err end
-    local rocks_tree = platform.getenv("ROCKS_TREE")
-    if rocks_tree == "" then rocks_tree = nil end
+    local rocks_tree = platform.getenv("TITAN_BROWSER_REMEDY_ROCKS_TREE")
+    if rocks_tree == nil then rocks_tree = platform.getenv("ROCKS_TREE") end
+    local root = driver.INSTALL_PATHS and driver.INSTALL_PATHS.root or descriptor.paths.root
     return driver.browserlink.require_sdk(context, descriptor, {
-        prefix = driver.INSTALL_PATHS and driver.INSTALL_PATHS.root or descriptor.paths.root,
+        prefix = perf.browser_install_prefix(root),
         rocks_tree = rocks_tree,
     })
 end

@@ -51,6 +51,11 @@ PREFIX ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),.windows-sd
 ROCKS_TREE ?= $(PREFIX)
 WINDOWS_BUILD_ROOT ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),out/windows-validation,out/windows)
 
+# Remedies quote the original settings, not the path spellings Make or
+# the native compiler needs for lookup.
+BROWSER_REMEDY_PREFIX := $(PREFIX)
+BROWSER_REMEDY_ROCKS_TREE := $(ROCKS_TREE)
+
 # Native GNU Make requires C:/ paths; MSYS Make accepts /c paths. Apply this
 # after direct-entry defaults, and only to values that are actually present.
 ifeq ($(OS),Windows_NT)
@@ -351,7 +356,7 @@ include spec/support/stdlib_test_modules.mk
 # The browser recipes use host-native paths when passing data to lua.exe or
 # titanc.exe, even when the invoking GNU Make accepts MSYS absolute paths.
 TITAN_OUTPUT_DIR ?= $(WINDOWS_BUILD_ROOT)
-TITAN_LUA ?= $(shell cygpath -m "$(LUA_BIN)")
+TITAN_LUA ?= $(call BROWSER_NATIVE_PATH,$(LUA_BIN))
 TITAN_LIBRARY_VERSION_SUFFIX := _$(subst .,_,$(TITAN_LIBRARY_VERSION))
 LPEGLABEL_VENDOR_DIR ?= vendor/lpeglabel
 TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
@@ -361,15 +366,11 @@ BROWSER_LPEGLABEL_CPPFLAGS = -I"$(call BROWSER_NATIVE_PATH,$(LPEGLABEL_VENDOR_DI
 BROWSER_INSTALL_TREE = $(call BROWSER_NATIVE_PATH,$(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX)))
 BROWSER_EXE_SUFFIX := .exe
 BROWSER_LUA_MODULE_SUFFIX := .dll
+ifeq ($(OS),Windows_NT)
 BROWSER_NATIVE_PATH = $(shell cygpath -am "$(1)")
+endif
 BROWSER_RUNNER_SHELL := sh
-BROWSER_COMPILER_REMEDY := run 'make -f Makefile.win compiler' first
-BROWSER_BUILD_HOST_TOOLS = TITAN_ROOT=$(call quote,$(call BROWSER_NATIVE_PATH,$(PREFIX))) TITAN_PATH= \
-	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call quote,$(call BROWSER_NATIVE_PATH,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION))) \
-	TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS= \
-	"$$titanc_bin" --target windows --no-uv-bootstrap --incremental -j$(TITAN_JOBS) \
-	  --tree $(call quote,$(call BROWSER_NATIVE_PATH,titan-runtime/browser)) \
-	  --output "$$build_dir.windows-host" --exe "$$build_dir.windows-host/bin/titan-browser-job.exe" windows_browser_job;
+BROWSER_COMPILER_REMEDY := run 'mingw32-make -f Makefile.win compiler' first
 BROWSER_NATIVE_PARITY = $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua inventory-fixture \
 	$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/members.md"
 include $(call make_path,$(TITAN_MAKEFILE_DIR)scripts/browser.mk)

@@ -212,7 +212,7 @@ describe("c preprocessor (cpp)", function()
         end)
     end
 
-    it("resumes include_next after a mixed-separator Windows search root", function()
+    it("resumes include_next after a mixed-separator Windows search root with a trailing separator", function()
         local strategy = require("titan-compiler.io").new_sync()
         local contents = {
             ["C:/sdk/before/carrier.h"] = "int wrong_header;\n",
@@ -233,8 +233,8 @@ describe("c preprocessor (cpp)", function()
                     output = '#include "..." search starts here:\r\n' ..
                         " C:/sdk/before\r\n" ..
                         "#include <...> search starts here:\r\n" ..
-                        " C:\\sdk\\link/../compat\r\n" ..
-                        " C:\\sdk/clang\\include\r\nEnd of search list.\r\n"
+                        " C:\\sdk\\link/../compat\\\r\n" ..
+                        " C:\\sdk/clang\\include\r\n C:\\\r\n \\\\server\\share\\\r\nEnd of search list.\r\n"
                 end
             end
             return { started = true, ok = true, output = output }
@@ -244,6 +244,8 @@ describe("c preprocessor (cpp)", function()
             platform.windows = true
             local context = assert(cpp.new_context({ compiler = { "clang.exe" }, io = strategy }))
             assert.equal("C:/sdk/link/../compat", context.incdirs.system[1])
+            assert.equal("C:/", context.incdirs.system[3])
+            assert.equal("//server/share/", context.incdirs.system[4])
             -- Angle lookup excludes the quote-only decoy. The nested directive
             -- must continue after the actual directory that supplied carrier.h.
             local parsed = assert(cpp.parse_contents("C:/fixture.c", "#include <carrier.h>\n", context))
