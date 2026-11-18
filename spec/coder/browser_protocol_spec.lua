@@ -245,7 +245,7 @@ describe("browser executing provider protocol", function()
             local fault = { prefix = info.prefix, lua = info.lua, node = info.node, publication_fault = mode }
             result = cli(fault, nil, "--incremental", "pkg.left")
             assert.is_false(result.ok)
-            local companion = paths.join(workspace, "out/pkg/left.so")
+            local companion = paths.join(assert(compiler_io.new_sync():realpath(workspace)), "out/pkg/left.so")
             local expected = mode == "before-commit" and "injected browser pre-commit failure" or
                 mode == "rename" and "injected browser archive rename failure" or
                 string.format("has native companion %q", companion)
