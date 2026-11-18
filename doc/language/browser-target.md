@@ -387,9 +387,9 @@ The page loads exactly six files: itself, `app.mjs`, `app.wasm`,
 
 You need:
 
-* **A Linux or macOS host** for the complete SDK and runner workflow below.
-  The compiler also accepts compile-only browser work from MSYS2 CLANG64
-  on Windows with Emscripten and the fork's installed browser Lua.
+* **Linux, macOS, or Windows with MSYS2 CLANG64.** On Windows, build and run
+  from the CLANG64 shell. Browser builds from native PowerShell or `cmd` are
+  not supported.
 * **Emscripten 6.0.13**, exactly. Install it with
   [emsdk](https://emscripten.org/docs/getting_started/downloads.html):
 
@@ -400,6 +400,11 @@ You need:
   ./emsdk activate 6.0.13
   source ./emsdk_env.sh
   ```
+
+  On Windows use `emsdk.bat install 6.0.13` and `emsdk.bat activate 6.0.13`
+  with Python on `PATH`, then source `emsdk_env.sh` in CLANG64. `EMSDK`,
+  `TITAN_NODE`, and `TITAN_CHROME` can name drive-letter paths with forward
+  slashes, for example `C:/tools/node26/node.exe`.
 
 * **Node 26 or newer with WebAssembly JSPI.** `titanc` uses it for the
   executing check before publishing browser libraries or linking their
@@ -507,6 +512,11 @@ source /path/to/emsdk/emsdk_env.sh
 make browser-sdk PREFIX="$PREFIX"
 ```
 
+On MSYS2 CLANG64, use `make -f Makefile.win browser-sdk PREFIX="$PREFIX"`
+after `make -f Makefile.win compiler` and `lua-browser`. `mingw32-make`
+is also supported. Use the same `TITAN_BUILD_PROFILE` for the SDK and
+the program or test image.
+
 It uses the installed `titanc --target browser` and needs Node 26 or newer
 with JSPI because it publishes the standard library through the ordinary
 executing check. It uses nonempty `TITAN_NODE`, otherwise `node` on `PATH`;
@@ -529,6 +539,11 @@ root; other chapters refer to this list:
 | `build-profile` | the [build profile](#build-profiles), `production` or `validation`, that compiled the SDK's archives |
 | `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
 | `sdk-digests` | content digests of the browser SDK, written last |
+
+On Windows, the SDK also installs the native runner helper
+`bin/titan-browser-job.exe` and its provider
+`lib/titan/0.6/windows_browser_job.dll` in the same prefix. Neither file
+is part of an image or page deployment.
 
 The directory is a sibling of the native `lib/titan/0.6/`, never inside it,
 and native builds never search it. `make browser-sdk` works into an empty
@@ -1290,7 +1305,8 @@ its output byte for byte, and exits with its status. A test image built with
 
 `titan-browser-run` is installed in the SDK directory,
 `PREFIX/lib/titan-browser/0.6/titan-browser-run`. Put that directory on `PATH`
-or call it by path:
+or call it by path. In MSYS2 CLANG64 you can invoke the same launcher
+explicitly as `sh "$PREFIX/lib/titan-browser/0.6/titan-browser-run"`:
 
 ```text
 titan-browser-run [--engine node|chromium] [--timeout MS] [--grace MS]
@@ -2011,8 +2027,7 @@ a walk over a deep record graph with `reflect`, has no library limit; under
   four-engine, two-profile recursion-ceiling matrix.
 * A loader instance runs `main` once; calls and explicit notification drains
   remain available afterward. Output sinks may return promises.
-* `Makefile.win` does not install the browser SDK, and the browser runner
-  does not execute images on Windows.
+* Windows-host browser builds use MSYS2 CLANG64, not a native Windows shell.
 * The language server analyzes the host target only.
 * Native source coverage (`--coverage` and its backend/report options) is not
   supported for the browser target.

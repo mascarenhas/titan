@@ -1077,9 +1077,13 @@ refer to the same location.
 
 The CLI admits `--target browser` on Windows; browser option-policy tests
 assert the same disabled-line-directive diagnostic on all three hosts.
-Browser object compilation uses the fork's browser Lua, not the controlled
-native DLL. See [Windows browser builds](browser-target.md#windows-and-other-hosts)
-for the browser SDK and runner requirements.
+Browser object compilation uses the fork's browser Lua and Emscripten,
+not the native DLL and compiler. Run `lua-browser` and `browser-sdk` through
+`Makefile.win` under MSYS2 CLANG64. The SDK's Wasm archives and JavaScript
+are published under `lib/titan-browser/0.6/`; the runner's job supervisor
+uses the ordinary native executable/DLL layout. The runner is part of
+SDK publication because its Node protocol check exercises the linked
+provider. See [Windows browser builds](browser-target.md#windows-and-other-hosts).
 
 The pre-marker generated-C upgrade fixture reads bytes in binary mode and
 exercises both LF and CRLF output. Removing generated preamble lines must

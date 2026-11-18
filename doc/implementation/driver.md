@@ -132,6 +132,10 @@ remains a private source-build input rather than part of the installed SDK.
 The browser target resolves its separate Lua and SDK paths under the same root
 with `driver.installed_paths(root, "browser")`; the native table is unchanged
 for every host label ([Installed paths](browser-target.md#installed-paths)).
+On Windows the browser link uses emcc with a response file encoded by the
+driver's Windows CRT quoting rule, for both the program and the trace link.
+Static browser provider archives still use emar with bounded argv batches;
+neither path goes through the native Windows DLL publication rule.
 Outside a checkout, an unknown root becomes `driver.INSTALLATION_ERROR`,
 `cannot locate the Titan installation root[: <reason>]; set TITAN_ROOT to the
 installation prefix`, and stops compiler/toolchain use instead of silently

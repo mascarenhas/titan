@@ -3932,7 +3932,8 @@ titan-browser-run: Node 26 or newer is required ("<path>" reports <found>; expec
 where `<found>` is `unknown` without a parsable version. It then locates
 `titan-browser-run.mjs` beside itself, never relative to the working directory
 (`titan-browser-run: harness failure: runner assets are missing`), and execs
-it.
+it. Native `titanc.exe` runs the same script with `sh.exe` and an argv
+vector; it does not interpret the launcher path as a command.
 
 `titan-browser-run.mjs` parses `[--engine node|chromium] [--timeout MS]
 [--grace MS] [--chrome PATH] [--cdp pipe|port] [--root DIR]
@@ -3948,6 +3949,22 @@ exports `within(root, path)` and `Monitor` and guards its top-level `main()`
 with a `realpath(process.argv[1])` check so that importing it from tests or
 `spec/browser/playwright-run.mjs` does not run the CLI while direct invocation
 (including through a symlink) works normally.
+
+On Windows, Node spawns a native Titan helper for each engine, compiled by
+`Makefile.win browser-sdk`. The helper attaches an unnamed, non-breakaway
+Job Object atomically at `CreateProcessW` and owns its only handle. It
+forwards Node's inherited CRT stdio table with only the engine handles in
+the allowlist, preserving the worker IPC descriptor and Chromium pipe
+descriptors 3/4. Two private slots carry the supervisor's lifetime and the
+helper's post-drain acknowledgement; neither is inherited by the engine.
+The helper resolves its own provider in the installed native tree, then
+restores the supervisor's original `TITAN_PATH_0_6` for the engine.
+If Node disappears, the lifetime pipe closes; if the helper disappears,
+Windows closes the job handle and kills its members. The runner removes a
+Chromium profile only after the helper confirms no processes remain.
+This preserves the existing `pipe` default and explicit loopback `port`
+without silently switching transports. POSIX uses its existing group and
+profile retirement rules.
 
 **Probe.** `--probe` (with an optional `--chrome`) needs no file, SDK, or
 browser launch. It prints exactly one LF-terminated JSON object:
@@ -4373,10 +4390,11 @@ CLANG64 and the fork's browser Lua; `make install-browser` in the Lua
 submodule works there with the pinned emsdk. The compiler does not enable
 native cross-compilation.
 
-`Makefile.win lua-browser` installs the verified browser Lua. The Windows
-`browser-sdk` build goes through the same archive staging and module checks,
-but its executing protocol check cannot finish while the runner refuses to
-execute images on Windows. Compile-only work does not need the runner.
+`Makefile.win` shares browser Lua/SDK staging, validation, and manifest
+publication with `Makefile`. Its native runner helper and provider use the
+ordinary Windows executable/DLL layout outside the browser asset directory.
+The Wasm profile and verified SDK rules are the same on all three hosts;
+Windows browser build and runner commands are supported from MSYS2 CLANG64.
 
 ## Documentation checks
 
