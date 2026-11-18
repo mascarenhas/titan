@@ -310,7 +310,10 @@ describe("browser target descriptor", function()
     for _, role in ipairs({ "runtime", "extra FFI" }) do
         for _, spelling in ipairs({ "absolute", "relative" }) do
             it("preserves " .. spelling .. " symlink-parent " .. role .. " lookup and transport", function()
-                if platform.windows then pending("POSIX symlink-parent include lookup"); return end
+                if platform.windows then
+                    pending("platform: Windows resolves a link followed by .. lexically, not as a POSIX symlink parent")
+                    return
+                end
                 workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
                 files.mkdir(workspace .. "/physical/nested")
                 files.mkdir(workspace .. "/physical/include")
@@ -367,7 +370,10 @@ describe("browser target descriptor", function()
         end
 
         it("matches native missing-root and resolution-error handling for " .. role .. " roots", function()
-            if platform.windows then pending("POSIX filesystem-aware root resolution"); return end
+            if platform.windows then
+                pending("platform: Windows normalizes .. before filesystem lookup; the fixture injects POSIX lookup errors")
+                return
+            end
             for _, state in ipairs({ "missing", "existing", "stat failure" }) do
                 local context, inputs = fake_context()
                 local raw = FAKE_ROOT .. "/unresolved/../include"

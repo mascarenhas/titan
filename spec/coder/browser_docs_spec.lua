@@ -39,7 +39,10 @@ describe("browser chapter examples", function()
     -- files are copied into one source tree: no standard-library test tree
     -- resolves modules from the manual.
     it("serves files and refuses traversal with http-dev-server.titan", function()
-        if platform.windows then pending("the browser host and http-dev-server's test fixture are POSIX") return end
+        if platform.windows then
+            pending("capability: the traversal fixture requires POSIX ln -s links, including a dangling self-link")
+            return
+        end
         fixture = files.new()
         files.copy(repository .. "/doc/language/http-dev-server.titan", fixture.source .. "/http-dev-server.titan")
         files.copy(repository .. "/spec/fixtures/browser_docs/http_dev_server_test.titan",
@@ -59,6 +62,10 @@ describe("browser chapter examples", function()
     -- Vite. No SDK loader is served. The complete application has its own
     -- section, which the hosted deployment test builds and serves.
     it("builds, serves and bundles the first web page exactly as documented", function()
+        if platform.windows then
+            pending("platform: doc_check.run executes the POSIX workflow; the CLANG64 opening image runs in the Windows browser gate")
+            return
+        end
         local info, why = dependencies()
         if not info then pending(why) return end
         fixture = files.new() -- Includes the ordinary compiler child-coverage collector.

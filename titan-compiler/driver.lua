@@ -1533,7 +1533,7 @@ end
 -- Keep the configured compiler/wrapper prefix outside the response file.
 -- Only Windows links need this transport; ordinary compile/tool commands and
 -- every POSIX command retain their existing execution and diagnostics.
-function driver.run_link_command(argv, verbose, output)
+function driver.run_link_command(argv, verbose, output, browser_cc)
     if not platform.windows then return run_argv(argv, verbose) end
     if type(argv) ~= "table" or #argv == 0 then
         return nil, "link command must be a nonempty argument array"
@@ -1549,8 +1549,13 @@ function driver.run_link_command(argv, verbose, output)
             return nil, "link command must be a dense argument array"
         end
     end
-    local command, err = perf.tool_command(driver.CC, "CC")
-    if not command then return nil, err end
+    local command, err
+    if browser_cc then
+        command = driver._browser_target.compiler_argv(browser_cc)
+    else
+        command, err = perf.tool_command(driver.CC, "CC")
+        if not command then return nil, err end
+    end
     for index = 1, #command do
         if argv[index] ~= command[index] then
             return nil, "link command does not match the configured CC command prefix"
@@ -13994,27 +13999,28 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     append_argv(command, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
     append_argv(command, extra_flags)
     append_argv(command, options.final_link_flags)
-    if verbose then io.stderr:write(assert(command_argv(command)), "\n") end
-    if platform.windows then
-        -- Keep emcc's host wrapper outside the response file. The same argv
-        -- is expanded by emcc before linking or reporting linker inputs.
-        local response, response_error = platform.windows_response_contents(
-            { table.unpack(command, 4) })
-        if not response then return nil, response_error end
-        local response_path = staged .. ".rsp"
-        valid, err = context.io:write_file(response_path, response)
-        if not valid then return nil, err end
-        command = { command[1], command[2], command[3], "@" .. response_path }
-    end
     local linked, term, code
     if options.dependency_output then
+        if verbose then io.stderr:write(assert(command_argv(command)), "\n") end
+        if platform.windows then
+            -- The link and the trace must receive the same emcc arguments.
+            local wrapped = driver._browser_target.compiler_argv(context.target_descriptor.tools.cc)
+            local response, response_error = platform.windows_response_contents(
+                { table.unpack(command, #wrapped + 1) })
+            if not response then return nil, response_error end
+            local response_path = staged .. ".rsp"
+            valid, err = context.io:write_file(response_path, response)
+            if not valid then return nil, err end
+            wrapped[#wrapped + 1] = "@" .. response_path
+            command = wrapped
+        end
         local result = context.io:run(command, { stderr_to_stdout = false })
         if not result.started then return nil, result.diagnostic end
         if not result.ok then return nil, result.why, result.status end
         linked, err = context.io:write_file(options.dependency_output, result.output or "")
         if not linked then return nil, err end
     else
-        linked, term, code = run_argv(command, false)
+        linked, term, code = driver.run_link_command(command, verbose, staged, context.target_descriptor.tools.cc)
         if not linked then return nil, term, code end
     end
     for _, filename in ipairs({ staged, staged_wasm, staged_map }) do

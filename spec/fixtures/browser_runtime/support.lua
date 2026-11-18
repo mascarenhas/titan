@@ -2,9 +2,9 @@ local assert = require "luassert"
 local compiler_io = require "titan-compiler.io"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
-local lfs = require "lfs"
+local toolchain = require "spec.support.browser_toolchain"
 local M = {}
-M.repository = assert(lfs.currentdir())
+M.repository = toolchain.repository
 M.fixture = M.repository .. "/spec/fixtures/browser_runtime"
 
 function M.workspace()
@@ -25,7 +25,7 @@ function M.cli(info, root, options, arguments)
     local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         "TITAN_PATH_0_6=", "TITAN_PROBE_CACHE_DISABLE=1", "CCACHE_DISABLE=1",
-        info.prefix .. "/bin/lua", "-E", "-e", code, M.repository .. "/titanc",
+        info.lua, "-E", "-e", code, M.repository .. "/titanc",
         "--target", "browser", "-q", "--incremental", "--no-uv-bootstrap",
         "--tree", M.fixture .. ";" .. M.repository .. "/spec/stdlib/titan",
         "--output", root }
@@ -34,8 +34,8 @@ function M.cli(info, root, options, arguments)
 end
 
 function M.image(info, root, engine, name, arguments, timeout)
-    local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine,
-        "--timeout", tostring(timeout or 30000), "--grace", "1500", "--root", root, root .. "/" .. name .. ".mjs", "--" }
+    local argv = toolchain.runner(info, "--engine", engine, "--timeout", tostring(timeout or 30000),
+        "--grace", "1500", "--root", root, root .. "/" .. name .. ".mjs", "--")
     for _, argument in ipairs(arguments or {}) do argv[#argv + 1] = argument end
     local ok, log, status = M.run(argv)
     io.stdout:write("\nRUNTIME engine=" .. engine .. " image=" .. name .. "\n" .. log .. "\n")
@@ -74,6 +74,6 @@ assert(driver.close_resolver_context(context))
         root .. "/" .. name .. ".c", root .. "/" .. name .. ".mjs")
     return M.run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-        "TITAN_PATH_0_6=", info.prefix .. "/bin/lua", "-E", "-e", code })
+        "TITAN_PATH_0_6=", info.lua, "-E", "-e", code })
 end
 return M

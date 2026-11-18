@@ -1,6 +1,5 @@
 local assert = require "luassert"
 local lfs = require "lfs"
-local platform = require "titan-compiler.platform"
 
 local source_inventory = {}
 
@@ -123,12 +122,9 @@ end
 -- The declared native inventory plus the browser-only standard-library
 -- sources, which no native Make list names: the compiler's browser selection
 -- of the standard tree supplies them, and each must belong to a module that
--- the browser status inventory marks browser-only. Browser builds need a
--- Linux or macOS host, so Windows audits the native inventory alone. Run
--- from the checkout root.
+-- the browser status inventory marks browser-only. Run from the checkout root.
 function source_inventory.audited_stdlib_sources()
     local sources = source_inventory.stdlib_source_files()
-    if platform.windows then return sources end
     local driver = require "titan-compiler.driver"
     local browser_fixtures = require "spec.support.browser_fixtures"
     local paths = require "titan-compiler.path"

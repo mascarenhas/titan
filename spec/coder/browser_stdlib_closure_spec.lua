@@ -10,6 +10,7 @@ local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local driver = require "titan-compiler.driver"
+local paths = require "titan-compiler.path"
 
 describe("browser stdlib real-toolchain closure", function()
     local workspace
@@ -73,7 +74,6 @@ describe("browser stdlib real-toolchain closure", function()
     end)
 
     it("builds and audits the real suite target from cold and warm output trees", function()
-        if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local info = fixture({ node = true, chrome = true, sdk = true })
         if not info then return end
         local output = workspace .. "/suite"
@@ -83,7 +83,8 @@ describe("browser stdlib real-toolchain closure", function()
         local argv = {
             "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
             "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
-            "make", "--no-print-directory", "titan-stdlib-browser-test",
+            toolchain.make, "--no-print-directory", "-f", toolchain.makefile,
+            "titan-stdlib-browser-test",
             "PREFIX=" .. info.prefix, "TITAN_BROWSER_TEST_BUILD_DIR=" .. output,
             "TITAN_STDLIB_BROWSER_TEST_ROOTS=test.tests",
             "TITAN_FILTER=",
@@ -101,7 +102,7 @@ describe("browser stdlib real-toolchain closure", function()
             assert.equal(2, summaries, state .. "\n" .. log)
             assert.equal("browser\n", assert(strategy:read_file(output .. "/objects/.titan-target")))
             assert.is_nil(strategy:lstat(output .. "/.titan-target"))
-            assert.equal("test.tests\n", assert(strategy:read_file(output .. "/roots.txt")))
+            assert.equal("test.tests\n", assert(strategy:read_file(output .. "/roots.txt")):gsub("\r\n", "\n"))
             assert.is_nil(strategy:lstat(output .. "/stdlib.roots.txt"))
             for _, artifact in ipairs({
                 "images/stdlib.mjs", "images/stdlib.wasm", "images/stdlib.wasm.map", "images/stdlib.wasm.trace",
@@ -388,12 +389,15 @@ end
                 -- just repeated path strings. Each physical payload is decoded
                 -- once across both certificates and the output-tree traversal.
                 local aliases, foreign = { "-X" }, {}
+                local function path_key(path)
+                    return platform.windows and paths.to_slash(path):lower() or path
+                end
                 for _, side in ipairs({ "left", "right" }) do
                     local original = workspace .. "/" .. side .. "/payload." .. extension
                     local alias = workspace .. "/mirror-" .. side .. "." .. extension
                     assert(lfs.link(original, alias))
                     aliases[#aliases + 1] = alias
-                    foreign[original], foreign[alias] = true, true
+                    foreign[path_key(original)], foreign[path_key(alias)] = true, true
                 end
                 run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser", "--incremental",
                     "--tree", workspace, "--output", output, "--exe", output .. "/mirror.mjs", "intruder",
@@ -401,7 +405,7 @@ end
                 local reads = 0
                 local observed = setmetatable({
                     read_file = function(_, filename, ...)
-                        if foreign[filename] then reads = reads + 1 end
+                        if foreign[path_key(filename)] then reads = reads + 1 end
                         return strategy:read_file(filename, ...)
                     end,
                 }, { __index = function(_, method)

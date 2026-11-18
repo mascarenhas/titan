@@ -8,6 +8,7 @@ local fixtures = require "spec.support.browser_fixtures"
 local lfs = require "lfs"
 local layouts = require "titan-compiler.nominallayout"
 local path = require "titan-compiler.path"
+local platform = require "titan-compiler.platform"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local temporary = require "spec.support.temporary"
 local toolchain = require "spec.support.browser_toolchain"
@@ -691,7 +692,7 @@ describe("browser providers real toolchain", function()
             "BROWSER_CC=" .. info.tools.cc[1], "BROWSER_AR=" .. info.tools.ar[1],
             "BROWSER_RANLIB=" .. info.tools.ranlib[1], "BROWSER_AUDIT_HOOK=" .. root .. "/hook.lua",
             "BROWSER_CORRUPTION=" .. (corruption or ""),
-            info.prefix .. "/bin/lua", "-e",
+            info.lua, "-e",
             string.format("package.path=%q..package.path", repo .. "/?.lua;" .. repo .. "/?/init.lua;") }
     end
     local function run_cli(corruption, ...)
@@ -707,10 +708,9 @@ describe("browser providers real toolchain", function()
         -- the provider and manifest in this isolated publication destination.
         info = real_info
         root = temporary.name("-browser-real-provider"); mkdir(root)
-        repo = assert(lfs.currentdir()); prefix = root .. "/prefix"
+        repo = toolchain.repository; prefix = root .. "/prefix"
         mkdir(prefix .. "/lib")
-        assert(lfs.link(info.prefix .. "/lib/browser", prefix .. "/lib/browser", true))
-        assert(lfs.link(info.prefix .. "/include", prefix .. "/include", true))
+        toolchain.stage_lua(info, prefix)
         sdk = fixtures.paths(prefix).titan_bin; mkdir(sdk)
         log = root .. "/commands"
         write(root .. "/hook.lua", PROVIDER_HOOK)
@@ -722,8 +722,13 @@ describe("browser providers real toolchain", function()
         local source = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(info.prefix))
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
                 "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
-            assert(lfs.link(source[key], assets[key], true))
+            if platform.windows then
+                files.copy(source[key], assets[key])
+            else
+                assert(lfs.link(source[key], assets[key], true))
+            end
         end
+        toolchain.stage_runner(info, prefix)
     end
     after_each(function()
         if root then remove(root) end

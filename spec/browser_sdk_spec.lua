@@ -15,6 +15,8 @@ local toolchain = require "spec.support.browser_toolchain"
 local installed_prefix = require "spec.support.installed_prefix"
 local temporary = require "spec.support.temporary"
 local files = require "spec.fixtures.target_selection.support"
+local path_separator = platform.windows and ";" or ":"
+local sdk_remedy = platform.windows and "make -f Makefile.win browser-sdk" or "make browser-sdk"
 
 local EXPECTED_RUNTIME_MEMBERS = {
     "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o",
@@ -53,6 +55,9 @@ local function contains(text, fragment)
 end
 
 local function run_with_env(strategy, env, argv)
+    if platform.windows then
+        return strategy:run(argv, { env = env, stderr_to_stdout = true })
+    end
     local full_argv = { "env" }
     local keys = {}
     for k in pairs(env or {}) do keys[#keys + 1] = k end
@@ -276,6 +281,14 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         files.mkdir(directory)
         for _, name in ipairs(installer.browser_sdk_owned) do files.write(directory .. "/" .. name, name) end
         files.write(directory .. "/app.a", "user archive")
+        local host_files = platform.windows and browserlink.windows_runner_files(release) or {}
+        for _, relative in ipairs(host_files) do
+            local filename = paths.join(root, relative)
+            files.mkdir(paths.dirname(filename))
+            files.write(filename, relative)
+        end
+        local user_native = root .. "/lib/titan/" .. release .. "/app.dll"
+        if platform.windows then files.write(user_native, "user provider") end
         local lua = paths.join(installed_prefix.active(), "bin/lua" .. (platform.windows and ".exe" or ""))
         local function uninstall()
             return strategy:run({ lua, "-E", paths.join(repository, "scripts/titan_install.lua"),
@@ -286,6 +299,10 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         for _, name in ipairs(installer.browser_sdk_owned) do
             assert.is_nil(lfs.symlinkattributes(directory .. "/" .. name), name)
         end
+        for _, relative in ipairs(host_files) do
+            assert.is_nil(lfs.symlinkattributes(paths.join(root, relative)), relative)
+        end
+        if platform.windows then assert.equal("user provider", files.read(user_native)) end
         assert.equal("user archive", files.read(directory .. "/app.a"))
         -- Nothing left to remove succeeds, and the directories go once empty.
         assert(os.remove(directory .. "/app.a"))
@@ -308,7 +325,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         if not info then pending(why) return end
         local peer = paths.join(info.sdk_root, "titan-protobuf.mjs")
         local source = assert(strategy:read_file(paths.join(repository, "titan-runtime/browser/titan-protobuf.mjs")))
-        local rebuild = "staged portable peer is missing or stale; run 'make browser-sdk PREFIX=" .. info.prefix .. "'"
+        local rebuild = "staged portable peer is missing or stale; run '" .. sdk_remedy .. " PREFIX=" .. info.prefix .. "'"
         local staged = assert(strategy:read_file(peer), rebuild)
         assert.equal(source, staged, rebuild)
         local result = strategy:run({
@@ -413,19 +430,17 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
 
     it("bootstraps lfs and compiler modules from TITAN_INSTALL_TREE before PREFIX and rejects incomplete PREFIX browser Lua", function()
         if platform.windows then
-            pending("POSIX browser_sdk.lua bootstrap test")
-            return
+            local info, why = toolchain.require()
+            if not info then pending("capability: Windows bootstrap fixture needs emsdk: " .. why); return end
         end
         local active_prefix = installed_prefix.active()
         local root = new_workspace("-sdk-bootstrap-order")
         local bare_prefix = paths.join(root, "bare-prefix")
         local rocks_tree = paths.join(root, "rocks-tree")
-        local fake_em = paths.join(root, "emscripten")
         files.mkdir(paths.join(bare_prefix, "bin"))
-        files.mkdir(fake_em)
 
-        -- Populate rocks_tree with lfs.so, titan.so, and titan-compiler Lua modules,
-        -- while leaving bare_prefix without lfs.so or titan.so.
+        -- Populate only rocks_tree with the installed Lua modules and DLLs
+        -- (shared objects on POSIX), including lfs and Titan support.
         copy_tree(strategy, paths.join(active_prefix, "lib/lua/5.5"), paths.join(rocks_tree, "lib/lua/5.5"))
         copy_tree(strategy, paths.join(active_prefix, "share/lua/5.5"), paths.join(rocks_tree, "share/lua/5.5"))
         copy_tree(strategy, paths.join(active_prefix, "include"), paths.join(rocks_tree, "include"))
@@ -447,20 +462,21 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
             assert(strategy:write_file(paths.join(rocks_tree, "lib/browser/include/" .. name), content))
         end
 
-        for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do
-            local p = paths.join(fake_em, tool)
-            assert(strategy:write_file(p, "#!/bin/sh\necho 'emcc (Emscripten) 6.0.13'\n"))
-            assert(strategy:run({ "chmod", "0755", p }, { stderr_to_stdout = true }).ok)
+        local env = { PREFIX = bare_prefix, TITAN_INSTALL_TREE = rocks_tree, ROCKS_TREE = rocks_tree }
+        if not platform.windows then
+            local fake_em = paths.join(root, "emscripten")
+            files.mkdir(fake_em)
+            for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do
+                local p = paths.join(fake_em, tool)
+                assert(strategy:write_file(p, "#!/bin/sh\necho 'emcc (Emscripten) 6.0.13'\n"))
+                assert(strategy:run({ "chmod", "0755", p }, { stderr_to_stdout = true }).ok)
+            end
+            env.PATH = fake_em .. ":/usr/bin:/bin"
+            env.EMSDK = ""
         end
 
-        local res = run_with_env(strategy, {
-            PATH = fake_em .. ":/usr/bin:/bin",
-            EMSDK = "",
-            PREFIX = bare_prefix,
-            TITAN_INSTALL_TREE = rocks_tree,
-            ROCKS_TREE = rocks_tree,
-        }, {
-            paths.join(active_prefix, "bin/lua"), "-E",
+        local res = run_with_env(strategy, env, {
+            paths.join(active_prefix, platform.windows and "bin/lua.exe" or "bin/lua"), "-E",
             paths.join(repository, "scripts/browser_sdk.lua"),
             "prepare", paths.join(root, "build"),
         })
@@ -488,14 +504,14 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
         local fork_rev = assert(record_bytes:match("fork_revision=([0-9a-f]+)"))
         local em_dir = paths.dirname(info.tools.cc[1])
         local base_env = {
-            PATH = em_dir .. ":" .. (os.getenv("PATH") or ""),
+            PATH = em_dir .. path_separator .. (os.getenv("PATH") or ""),
             FORK_REVISION = fork_rev,
             CCACHE_DISABLE = "1",
         }
 
         local function run_lua_browser(extra_args)
             local argv = {
-                "make", "--no-print-directory", "lua-browser",
+                toolchain.make, "--no-print-directory", "-f", toolchain.makefile, "lua-browser",
                 "PREFIX=" .. temp_prefix,
                 "LUA_DIR=" .. temp_lua,
                 "FORK_REVISION=" .. fork_rev,
@@ -597,7 +613,7 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
                 "-sNO_WASM_LEGACY_EXCEPTIONS", "-s NO_WASM_LEGACY_EXCEPTIONS=1",
                 "-mno-exception-handling" }) do
             local config = run_with_env(strategy, base_env, {
-                "make", "-s", "--no-print-directory", "-C", paths.join(temp_lua, "src"),
+                toolchain.make, "-s", "--no-print-directory", "-C", paths.join(temp_lua, "src"),
                 "browser-config", "BROWSER_CC=" .. info.tools.cc[1], "MYCFLAGS=" .. flag,
             })
             assert.is_true(config.ok, config.output)
@@ -618,6 +634,10 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
     end)
 
     it("clears ambient EMCC_CFLAGS in fork browser entrypoints and reuse without changing native goals", function()
+        if platform.windows then
+            pending("platform: the flag-isolation fixture uses executable POSIX shebang compiler wrappers")
+            return
+        end
         local info, why = toolchain.require()
         if not info then pending(why) return end
         local root = new_workspace("-lua-browser-ambient")
@@ -692,7 +712,7 @@ exec cc "$@"
         end
     end)
 
-    it("installs browser-sdk into an empty differing ROCKS_TREE, verifies archives/digests/stack size, and keeps compiler SDK emsdk-free", function()
+    it("installs browser-sdk into an empty differing ROCKS_TREE and verifies archives, digests, and stack size", function()
         local info, why = toolchain.require({ node = true })
         if not info then pending(why) return end
 
@@ -707,7 +727,8 @@ exec cc "$@"
         local em_dir = paths.dirname(info.tools.cc[1])
         local node_dir = paths.dirname(info.node.path)
         local sdk_env = {
-            PATH = em_dir .. ":" .. node_dir .. ":" .. (os.getenv("PATH") or ""),
+            PATH = table.concat({ em_dir, node_dir, paths.join(info.prefix, "bin"), os.getenv("PATH") or "" },
+                path_separator),
             TITAN_NODE = info.node.path,
             CCACHE_DISABLE = "1",
         }
@@ -749,7 +770,7 @@ end
             TITAN_ROOT = no_sdk_root,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser",
+            info.compiler, "--target", "browser",
             "--output", app_out, "-c", "--incremental", "--print-c-objects",
             "--c-source", paths.join(app_dir, "helper.c"),
         })
@@ -764,16 +785,16 @@ end
             TITAN_ROOT = no_sdk_root,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser",
+            info.compiler, "--target", "browser",
             "--tree", app_dir .. ";" .. repository, "--output", app_out,
             "--exe", paths.join(app_out, "app.mjs"),
             "--test", "main_app",
         })
         assert.is_false(link_missing_res.ok)
         contains(link_missing_res.output,
-            string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s ROCKS_TREE=%s\'',
+            string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s ROCKS_TREE=%s'",
                 no_sdk_root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a",
-                no_sdk_root, no_sdk_root))
+                sdk_remedy, no_sdk_root, no_sdk_root))
 
         local link_empty_rocks_res = run_with_env(strategy, {
             PATH = sdk_env.PATH,
@@ -782,54 +803,63 @@ end
             TITAN_ROOT = no_sdk_root,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser",
+            info.compiler, "--target", "browser",
             "--tree", app_dir .. ";" .. repository, "--output", app_out,
             "--exe", paths.join(app_out, "app.mjs"),
             "--test", "main_app",
         })
         assert.is_false(link_empty_rocks_res.ok)
         contains(link_empty_rocks_res.output,
-            string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
+            string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s'",
                 no_sdk_root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a",
-                no_sdk_root))
+                sdk_remedy, no_sdk_root))
         assert.is_nil(link_empty_rocks_res.output:find("ROCKS_TREE=", 1, true), link_empty_rocks_res.output)
 
         -- An explicit old Node is diagnosed. An old EMSDK-bundled Node must
         -- not override the qualifying Node selected through ordinary PATH.
-        local fake_node_dir = paths.join(root, "fake-node24")
-        local good_node_dir = paths.join(root, "node26")
-        local fake_emsdk = paths.join(root, "fake-emsdk")
-        local fake_emsdk_node_dir = paths.join(fake_emsdk, "node/24.19.0_64bit/bin")
-        files.mkdir(fake_node_dir)
-        files.mkdir(fake_emsdk_node_dir)
-        files.mkdir(good_node_dir)
-        local bad_node = paths.join(fake_node_dir, "node")
-        assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v24.19.0'\n"))
-        assert(strategy:run({ "chmod", "0755", bad_node }, { stderr_to_stdout = true }).ok)
-        assert(lfs.link(bad_node, paths.join(fake_emsdk_node_dir, "node"), true))
-        assert(lfs.link(info.node.path, paths.join(good_node_dir, "node"), true))
-        assert(lfs.link(paths.dirname(em_dir), paths.join(fake_emsdk, "upstream"), true))
+        local bad_node, bad_version, candidate_path, emsdk
+        if platform.windows then
+            bad_node = assert(os.getenv("EMSDK_NODE"), "activate emsdk to test with its bundled Node")
+            local version_result = strategy:run({ bad_node, "--version" })
+            assert.is_true(version_result.ok, version_result.output or version_result.diagnostic)
+            bad_version = assert(version_result.output:match("^(v24%.[%d.]+)"))
+            candidate_path = table.concat({ node_dir, paths.dirname(bad_node), sdk_env.PATH }, path_separator)
+        else
+            local fake_node_dir = paths.join(root, "fake-node24")
+            local good_node_dir = paths.join(root, "node26")
+            emsdk = paths.join(root, "fake-emsdk")
+            local bundled_node_dir = paths.join(emsdk, "node/24.19.0_64bit/bin")
+            files.mkdir(fake_node_dir)
+            files.mkdir(bundled_node_dir)
+            files.mkdir(good_node_dir)
+            bad_node, bad_version = paths.join(fake_node_dir, "node"), "v24.19.0"
+            assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v24.19.0'\n"))
+            assert(strategy:run({ "chmod", "0755", bad_node }, { stderr_to_stdout = true }).ok)
+            assert(lfs.link(bad_node, paths.join(bundled_node_dir, "node"), true))
+            assert(lfs.link(info.node.path, paths.join(good_node_dir, "node"), true))
+            assert(lfs.link(paths.dirname(em_dir), paths.join(emsdk, "upstream"), true))
+            candidate_path = table.concat({ good_node_dir, fake_node_dir, sdk_env.PATH }, path_separator)
+        end
 
         local bad_node_res = run_with_env(strategy, {
-            PATH = em_dir .. ":" .. (os.getenv("PATH") or ""),
+            PATH = sdk_env.PATH,
             TITAN_NODE = bad_node,
             CCACHE_DISABLE = "1",
         }, {
-            "make", "--no-print-directory", "browser-sdk",
+            toolchain.make, "--no-print-directory", "-f", toolchain.makefile, "browser-sdk",
             "PREFIX=" .. info.prefix,
             "ROCKS_TREE=" .. rocks_tree,
             "TITAN_BROWSER_BUILD_DIR=" .. build_dir,
             "TITAN_BUILD_PROFILE=validation",
         })
         assert.is_false(bad_node_res.ok)
-        contains(bad_node_res.output,
-            string.format('browser provider validation requires Node 26 or newer: %q reports v24.19.0; expected Node 26 or newer; set TITAN_NODE to a Node 26 or newer executable',
-                assert(strategy:realpath(bad_node))))
+        contains(bad_node_res.output, "reports " .. bad_version ..
+            "; expected Node 26 or newer; set TITAN_NODE to a Node 26 or newer executable")
 
         -- Run into an empty differing ROCKS_TREE with Node 26 on PATH.
         local sdk_res = run_with_env(strategy, {
-            PATH = good_node_dir .. ":" .. fake_node_dir .. ":" .. em_dir .. ":" .. (os.getenv("PATH") or ""),
-            EMSDK = fake_emsdk,
+            PATH = candidate_path,
+            EMSDK = emsdk or os.getenv("EMSDK"),
             TITAN_NODE = "",
             CCACHE_DISABLE = "1",
             -- Both ambient spellings must be replaced, not appended to the
@@ -837,7 +867,7 @@ end
             TITAN_EXTRA_CPPFLAGS = "-include /missing/ambient-titan-cppflags.h",
             CPPFLAGS = "-include /missing/ambient-cppflags.h",
         }, {
-            "make", "--no-print-directory", "browser-sdk",
+            toolchain.make, "--no-print-directory", "-f", toolchain.makefile, "browser-sdk",
             "PREFIX=" .. info.prefix,
             "ROCKS_TREE=" .. rocks_tree,
             "TITAN_BROWSER_BUILD_DIR=" .. build_dir,
@@ -845,8 +875,14 @@ end
         })
         assert.is_true(sdk_res.ok, sdk_res.output)
 
-        -- Native provider directory in rocks_tree must remain untouched/absent.
-        assert.is_nil(strategy:stat(paths.join(rocks_tree, "lib/titan")))
+        -- The browser install creates only its own native helper on Windows.
+        local host_files = platform.windows and browserlink.windows_runner_files(version.TITAN_LIBRARY_VERSION) or {}
+        if platform.windows then
+            assert.same({ "windows_browser_job.dll" },
+                strategy:list(paths.join(rocks_tree, "lib/titan", version.TITAN_LIBRARY_VERSION)))
+        else
+            assert.is_nil(strategy:stat(paths.join(rocks_tree, "lib/titan")))
+        end
 
         -- Staged browser Lua in rocks_tree matches PREFIX/lib/browser.
         local browser_paths = driver.installed_paths(rocks_tree, "browser")
@@ -968,6 +1004,9 @@ end
         }) do
             expected_digest_files[#expected_digest_files + 1] = assets[key]
         end
+        for _, relative in ipairs(host_files) do
+            expected_digest_files[#expected_digest_files + 1] = paths.join(rocks_tree, relative)
+        end
         local expected_real_set = {}
         for _, filepath in ipairs(expected_digest_files) do
             local real = assert(strategy:realpath(filepath))
@@ -995,14 +1034,13 @@ end
             TITAN_ROOT = rocks_tree,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            info.compiler, "--target", "browser", "-q",
             "--tree", app_dir, "--output", app_out, "--exe", test_exe,
             "--test", "main_app",
         })
         assert.is_true(build_test.ok, build_test.output)
-        local run_test = run_with_env(strategy, sdk_env, {
-            assets.runner, "--engine", "node", test_exe,
-        })
+        local run_test = run_with_env(strategy, sdk_env,
+            browserlink.runner_argv(assets.runner, "--engine", "node", test_exe))
         assert.is_true(run_test.ok, run_test.output)
         contains(run_test.output, "[       OK ] main_app.test_browser_coroutine_stack")
         contains(run_test.output, "[  PASSED  ] 1 test.")
@@ -1053,7 +1091,7 @@ end
             TITAN_ROOT = rocks_tree,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            info.compiler, "--target", "browser", "-q",
             "--output", sjlj_out, "-c", "--incremental", "--print-c-objects",
             "--c-source", paths.join(sjlj_src, "sjlj_helper.c"),
             "--c-source", paths.join(sjlj_src, "plain_helper.c"),
@@ -1071,7 +1109,7 @@ end
             TITAN_ROOT = rocks_tree,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            info.compiler, "--target", "browser", "-q",
             "--tree", sjlj_src, "--output", sjlj_out, "--incremental",
             "--c-source", paths.join(sjlj_src, "sjlj_helper.c"),
             "--c-source", paths.join(sjlj_src, "plain_helper.c"),
@@ -1103,7 +1141,16 @@ end
         assert.same({ "sjlj_pkg.catcher", "sjlj_pkg.plain" }, scanned_untargeted.key_order)
         assert.equal(4, #scanned_targeted.members)
 
-        -- 4. Native compiler-SDK installation (used by luarocks make) succeeds without emsdk on PATH or EMSDK.
+    end)
+
+    it("installs the native static compiler SDK without emsdk and checks its coroutine stack", function()
+        if platform.windows then
+            pending("platform: this native link fixture uses the Unix static Lua, Titan, and libbacktrace archives")
+            return
+        end
+        local info, why = toolchain.require({ node = true })
+        if not info then pending(why) return end
+        local root = new_workspace("-native-compiler-sdk")
         local native_tree = paths.join(root, "native-compiler-sdk")
         local clean_path = {}
         for entry in (os.getenv("PATH") or ""):gmatch("[^:]+") do

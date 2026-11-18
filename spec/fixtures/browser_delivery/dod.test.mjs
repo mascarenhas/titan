@@ -1,15 +1,11 @@
-// The browser chapter's complete application under Node, run by
-//   titan-browser-run --engine node --root OUTPUT --js-test OUTPUT/dod.test.mjs
-// in the output of spec/browser/build-delivery.lua. It supplies the page's two
-// bindings, serves greeting.txt with the documented http-dev-server, and
-// compares the program's output and trace with the chapter.
-import {spawn} from 'node:child_process';
-import {readFile} from 'node:fs/promises';
-import {dirname, join} from 'node:path';
-import {fileURLToPath, pathToFileURL} from 'node:url';
+// The browser chapter's complete application under Node or Chromium, run by
+// titan-browser-run --js-test in the output of spec/browser/build-delivery.lua.
+// It supplies the page's two bindings and compares the program's output and
+// trace with the chapter. Node uses the documented server for greeting.txt;
+// Chromium uses the runner's loopback server.
 import {errorsViolation, outputViolation} from './expectations.mjs';
 
-const root = dirname(fileURLToPath(import.meta.url));
+const url = new URL('.', import.meta.url);
 const encoder = new TextEncoder();
 
 function text(chunks) {
@@ -20,8 +16,13 @@ function text(chunks) {
 // The documented server on the first free port of a fixed range; it exits
 // with status 1 when the port is taken.
 async function serve(site) {
+  if (url.protocol !== 'file:') return { origin: new URL(`${site}/`, url) };
+  const {spawn} = await import('node:child_process');
+  const {fileURLToPath} = await import('node:url');
+  const root = fileURLToPath(url);
+  const name = process.platform === 'win32' ? 'http-dev-server.exe' : 'http-dev-server';
   for (let port = 28600; port < 28700; port++) {
-    const server = spawn(join(root, 'http-dev-server'), [site, String(port)],
+    const server = spawn(fileURLToPath(new URL(name, url)), [fileURLToPath(new URL(site, url)), String(port)],
       {cwd: root, stdio: ['ignore', 'pipe', 'pipe']});
     let output = '';
     let diagnostics = '';
@@ -31,6 +32,7 @@ async function serve(site) {
         if (output.includes('\n')) resolve('ready');
       });
       server.stderr.on('data', bytes => { diagnostics += bytes; });
+      server.once('error', error => { diagnostics += error.message; resolve(null); });
       server.once('close', code => resolve(code));
     });
     if (outcome === 'ready') return {server, origin: `http://127.0.0.1:${port}/`};
@@ -42,9 +44,8 @@ async function serve(site) {
 }
 
 export async function run(context) {
-  context.assert(context.engine === 'node', 'dod.test.mjs runs under Node');
-  const delivery = JSON.parse(await readFile(join(root, 'delivery.json'), 'utf8'));
-  const {portable} = await import(pathToFileURL(join(root, delivery.site, 'titan-protobuf.mjs')).href);
+  const delivery = JSON.parse(new TextDecoder().decode(await context.bytes('delivery.json')));
+  const {portable} = await import(new URL(`${delivery.site}/titan-protobuf.mjs`, url));
   const image = await context.image(`${delivery.site}/app.mjs`);
   const {server, origin} = await serve(delivery.site);
   const stdout = [], stderr = [];
@@ -81,11 +82,11 @@ export async function run(context) {
     const errors = text(stderr);
     context.stdout(encoder.encode(output));
     context.stderr(encoder.encode(errors));
-    const violation = outputViolation(output, delivery.output) ?? errorsViolation(errors, delivery.errors, 'node');
+    const violation = outputViolation(output, delivery.output) ?? errorsViolation(errors, delivery.errors, context.engine);
     context.assert(violation === undefined, violation);
   } finally {
     await instance.dispose();
-    server.kill('SIGTERM');
+    server?.kill('SIGTERM');
   }
-  context.stdout(encoder.encode(`BROWSER-DELIVERY-NODE {"verdict":"PASS","profile":"${delivery.profile}"}\n`));
+  context.stdout(encoder.encode(`BROWSER-DELIVERY-${context.engine.toUpperCase()} {"verdict":"PASS","profile":"${delivery.profile}"}\n`));
 }

@@ -1,10 +1,9 @@
 local assert = require "luassert"
-local lfs = require "lfs"
 local browserlink = require "titan-compiler.browserlink"
 local files = require "spec.fixtures.target_selection.support"
 local toolchain = require "spec.support.browser_toolchain"
 local checks = dofile("scripts/browser_stdlib.lua")
-local repository = assert(lfs.currentdir())
+local repository = toolchain.repository
 local source = repository .. "/spec/fixtures/browser_scheduler"
 local stdlib_tree = repository .. "/spec/stdlib/titan"
 local fixture
@@ -19,7 +18,7 @@ local function build(info, assertions)
         fixture.collector:init_code() .. string.format(
             ";require('titan-compiler.driver').browser_link_options={purpose='program',assertions=%d};",
             assertions)
-    local result = fixture:run({ info.prefix .. "/bin/lua", "-E", "-e", init, fixture.frontend .. "/titanc",
+    local result = fixture:run({ info.lua, "-E", "-e", init, fixture.frontend .. "/titanc",
         "-q", "--target", "browser", "--incremental", "--no-uv-bootstrap",
         "--tree", source, "--output", output, "--exe", output .. "/mini-driver.mjs",
         "--c-source", source .. "/mini_driver.c", "mini_driver" },
@@ -39,7 +38,7 @@ local function build_image(info, assertions, purpose, name, arguments)
         fixture.collector:init_code() .. string.format(
             ";require('titan-compiler.driver').browser_link_options={purpose=%q,assertions=%d};",
             purpose, assertions)
-    local argv = { info.prefix .. "/bin/lua", "-E", "-e", init, fixture.frontend .. "/titanc",
+    local argv = { info.lua, "-E", "-e", init, fixture.frontend .. "/titanc",
         "-q", "--target", "browser", "--incremental", "--output", output, "--exe", output .. "/" .. name .. ".mjs" }
     for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
     local result = fixture:run(argv, { TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
@@ -65,8 +64,8 @@ local function build_bootstrap(info, assertions)
 end
 
 local function execute(info, engine, argv)
-    local command = { info.sdk_root .. "/titan-browser-run", "--engine", engine,
-        "--timeout", "120000", "--grace", "1500", "--root", fixture.root }
+    local command = toolchain.runner(info, "--engine", engine,
+        "--timeout", "120000", "--grace", "1500", "--root", fixture.root)
     for _, item in ipairs(argv) do command[#command + 1] = item end
     return fixture:run(command, { TITAN_NODE = info.node.path, TITAN_CHROME = info.chrome.path,
         TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" })

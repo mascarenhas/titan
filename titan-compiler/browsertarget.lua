@@ -414,7 +414,7 @@ local function resolution_error(filename, reason)
         string.format("%q", filename) .. ": " .. reason .. INSTALL
 end
 
-local function tools(context)
+function M.discover_tools(context)
     local strategy = context.io
     local emsdk, cc = platform.getenv("EMSDK")
     if emsdk and emsdk ~= "" then
@@ -627,7 +627,7 @@ function M.build(context, inputs)
             inputs.trace_control == true, build_profile)
         if not tail then return nil, tail_error end
         local paths = inputs.paths
-        local tool, tool_error = tools(context)
+        local tool, tool_error = M.discover_tools(context)
         if not tool then return nil, tool_error end
         local bytes, read_error = context.io:read_file(paths.lua_record)
         if not bytes then return nil, record_error(paths, "is unavailable", tostring(read_error)) end

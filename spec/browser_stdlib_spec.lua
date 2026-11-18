@@ -67,7 +67,6 @@ plan:
     end
 
     it("keeps all twenty-three portable owners in the single-image root inventory", function()
-        if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local result = root_plan()
         assert.is_true(result.ok, result.output)
         local roots, count = {}, 0
@@ -89,7 +88,6 @@ plan:
     end)
 
     it("rejects empty and duplicate owner inventories before build setup", function()
-        if platform.windows then pending("browser suite Make target is Unix-only"); return end
         assert.is_true(root_plan({"TITAN_STDLIB_BROWSER_TEST_ROOTS=first.tests second.tests"}).ok)
         local guard = temporary.name("-browser-root-preflight")
         scratch[#scratch + 1] = guard
@@ -102,7 +100,7 @@ plan:
             local rejected = strategy:run({
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
                 "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "make", "--no-print-directory",
-                "-f", "Makefile", "titan-stdlib-browser-test",
+                "-f", platform.windows and "Makefile.win" or "Makefile", "titan-stdlib-browser-test",
                 "TITAN_BROWSER_TEST_BUILD_DIR=" .. guard,
                 "TITAN_STDLIB_BROWSER_TEST_ROOTS=" .. case[1],
             }, {stderr_to_stdout = true})
@@ -155,7 +153,7 @@ plan:
     end)
 
     it("keeps native stdlib dependencies out of the browser provider recipe", function()
-        local makefile = assert(strategy:read_file("Makefile"))
+        local makefile = assert(strategy:read_file("scripts/browser.mk"))
         local environment = assert(makefile:match("\nBROWSER_SDK_ENV%s*[:?+]?=%s*(.-)\n\nbrowser%-sdk:"))
         local recipe = assert(makefile:match("\nbrowser%-sdk:[^\n]*\n(.-)\n\n"))
         for _, forbidden in ipairs({ "STDLIB_EXTRA_OBJECTS", "LIBUV_", "OPENSSL_", "LLHTTP_", "SQLITE3_" }) do
@@ -393,7 +391,6 @@ plan:
     end)
 
     it("rejects every absent import only from compiler-selected browser files", function()
-        if platform.windows then pending("browser source resolution requires a supported host"); return end
         for _, module in ipairs(checks.absent_modules) do
             local bad = "local missing = import " .. string.format("%q", module:sub(7)) .. "\n"
             local good = "function value(): integer return 1 end\n"
@@ -427,7 +424,6 @@ plan:
     end)
 
     it("uses folder-before-flat and inactive-main fallback in the source audit", function()
-        if platform.windows then pending("browser source resolution requires a supported host"); return end
         local root = source_fixture()
         files.write(root .. "/titan/owner.titan", 'local missing = import "fs"\n')
         files.write(root .. "/titan/owner/owner.titan", "function value(): integer return 1 end\n")
@@ -1051,11 +1047,10 @@ end
     -- OS stream harness case is registered by its driver, and every harness
     -- gate runs in one of the browser-stdlib matrix shards.
     it("names only tests that exist in the browser test sources", function()
-        if platform.windows then pending("browser source resolution requires a supported host"); return end
         local plan = root_plan()
         assert.is_true(plan.ok, plan.output)
         local owners = {}
-        for root in assert(plan.output:match("roots=([^\n]*)")):gmatch("%S+") do owners[root] = true end
+        for root in assert(plan.output:match("roots=([^\r\n]*)")):gmatch("%S+") do owners[root] = true end
         for owner in pairs(checks.harness_owners) do owners[owner] = true end
         local ci = assert(strategy:read_file(".github/workflows/ci.yml"))
         local gate = assert(ci:match("\n  browser%-stdlib:\n(.-)\n  [%w_-]+:\n"))
@@ -1231,10 +1226,6 @@ end
     end)
 
     it("audits a case emitting stderr in the middle of a report line from stdout alone", function()
-        if platform.windows then
-            pending("browser suite shell wrapper is Unix-only")
-            return
-        end
         local log = temporary.name("-browser-stdout.log")
         local diagnostics = temporary.name("-browser-stderr.log")
         local roots = temporary.name("-browser-roots.txt")
@@ -1258,13 +1249,14 @@ io.stderr:flush()
 io.stdout:write("test_stderr\n[       OK ] fixture.tests.test_stderr (1.25 ms)\n[----------] fixture.tests (1.25 ms total)\n[==========] 1 test ran. (1.50 ms total)\n[  PASSED  ] 1 test.\n")
 if arg[1] == "fail" then os.exit(7) end
 ]], warning)))
-        local lua = installed_prefix.active() .. "/bin/lua"
+        local lua = installed_prefix.active() .. "/bin/lua" .. (platform.windows and ".exe" or "")
+        local function canonical(text) return (text:gsub("\r\n", "\n")) end
         local captured = strategy:run({"bash", "scripts/run_browser_stdlib.sh",
             log, diagnostics, lua, producer}, {stderr_to_stdout = true})
         assert.is_true(captured.ok, captured.output)
-        assert.equal(report, assert(strategy:read_file(log)))
-        assert.equal(warning, assert(strategy:read_file(diagnostics)))
-        assert.truthy(captured.output:find(warning, 1, true), captured.output)
+        assert.equal(report, canonical(assert(strategy:read_file(log))))
+        assert.equal(warning, canonical(assert(strategy:read_file(diagnostics))))
+        assert.truthy(canonical(captured.output):find(warning, 1, true), captured.output)
         local audited = strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua",
             "output", roots, "", log}, {stderr_to_stdout = true})
         assert.is_true(audited.ok, audited.output)
@@ -1275,8 +1267,8 @@ if arg[1] == "fail" then os.exit(7) end
         local failed = strategy:run({"bash", "scripts/run_browser_stdlib.sh",
             log, diagnostics, lua, producer, "fail"}, {stderr_to_stdout = true})
         assert.is_false(failed.ok, "a positive report must not hide a nonzero image status")
-        assert.equal(report, assert(strategy:read_file(log)))
-        assert.equal(warning, assert(strategy:read_file(diagnostics)))
+        assert.equal(report, canonical(assert(strategy:read_file(log))))
+        assert.equal(warning, canonical(assert(strategy:read_file(diagnostics))))
     end)
 
     it("audits one complete image with strict timing, owner, failure, skip and filter accounting", function()

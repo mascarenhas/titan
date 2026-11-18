@@ -2,6 +2,7 @@
 local lfs = require "lfs"
 local process = require "titan-compiler.process"
 local path = require "titan-compiler.path"
+local suffix = require("titan-compiler.platform").windows and ".exe" or ""
 local repository = assert(lfs.currentdir())
 local output = assert(arg[1], "usage: lua -E spec/browser/build-net.lua OUTPUT")
 assert(not arg[2], "build-net.lua accepts exactly one output directory")
@@ -22,7 +23,7 @@ local function copy(name)
     assert(file:write(bytes)); assert(file:close())
 end
 local function compile(arguments, browser)
-    local argv = {path.join(prefix, "bin/titanc"), "-q", "--incremental"}
+    local argv = {path.join(prefix, "bin/titanc" .. suffix), "-q", "--incremental"}
     for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
     local result = process.capture(argv, {cwd = repository, env = {
         TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_PATH_0_6 = browser and "" or nil,
@@ -33,7 +34,7 @@ end
 mkdir(output)
 mkdir(images)
 compile({"--tree", fixture, "--output", path.join(output, "native"),
-    "--exe", path.join(output, "native/server"), "server"})
+    "--exe", path.join(output, "native/server" .. suffix), "server"})
 compile({"--target", "browser", "--no-uv-bootstrap", "--test", "--tree", path.join(repository, "spec/stdlib/titan"),
     "--output", path.join(output, "objects/http"), "--exe", path.join(images, "http.mjs"), "http.browser_tests"}, true)
 compile({"--target", "browser", "--no-uv-bootstrap", "--test", "--tree", path.join(repository, "spec/stdlib/titan"),

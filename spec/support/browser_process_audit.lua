@@ -49,6 +49,10 @@ function M.install(options)
             assert(#argv == 3, "browser process audit rejected shell argv")
             return normalize(argv[3])
         end
+        if argv[1] == "sh.exe" and options.runner and
+                argv[2] == options.runner:gsub("\\", "/") then
+            return { options.runner, table.unpack(argv, 3) }
+        end
         if argv[1] == "env" or argv[1] == "/usr/bin/env" then
             local index = 2
             while argv[index] and argv[index]:match("^[A-Za-z_][A-Za-z_0-9]*=") do index = index + 1 end
@@ -75,12 +79,14 @@ function M.install(options)
             -- The module check reads two emcc settings, then runs emcc's Node
             -- with emcc's acorn over the staged module.
             local emcc = options.tools.cc and options.tools.cc[#options.tools.cc]
-            if emcc and #argv == 2 and argv[1] == (emcc:gsub("emcc$", "em-config")) and
+            local em_config = emcc and emcc:gsub("emcc%.exe$", "em-config.exe"):gsub("emcc$", "em-config")
+            if emcc and #argv == 2 and argv[1]:gsub("\\", "/") == em_config:gsub("\\", "/") and
                 (argv[2] == "NODE_JS" or argv[2] == "EMSCRIPTEN_ROOT") then
                 operation, tool = "query", "em-config"
             end
             if options.module_check and #argv >= 4 and argv[#argv - 2] == options.module_check and
-                argv[#argv - 1]:match("/node_modules/acorn/dist/acorn[.]mjs$") and argv[#argv]:match("[.]mjs$") then
+                argv[#argv - 1]:gsub("\\", "/"):match("/node_modules/acorn/dist/acorn[.]mjs$") and
+                argv[#argv]:match("[.]mjs$") then
                 operation, tool = "check", "module-check"
             end
             for _, entry in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
@@ -92,6 +98,12 @@ function M.install(options)
                 if matches then
                     tool = entry[2]
                     local args = { table.unpack(argv, #prefix + 1) }
+                    if entry[1] == "cc" and #args == 1 and args[1]:match("^@.+[.]mjs[.]rsp$") then
+                        local file = assert(io.open(args[1]:sub(2), "rb"))
+                        local bytes = assert(file:read("a"))
+                        assert(file:close())
+                        args = assert(cdriver.split_shell_words(bytes))
+                    end
                     if #args == 1 and args[1] == "--version" then operation = "query"
                     elseif entry[1] == "cc" then
                         for index, flag in ipairs(args) do
