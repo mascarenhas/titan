@@ -1,14 +1,22 @@
 foreign import "windows.h"
 foreign import "string.h"
-foreign import "stdio.h"
 
 local const failed = 125
 local const stop_wait_ms = 2000
 
+-- The Windows SDK defines these through the function-like
+-- ProcThreadAttributeValue macro, which is not available through the FFI.
+local const PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x2000d
+local const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002
+-- FOPEN in the CRT's inherited descriptor table.
+local const crt_fopen = 0x01
+
 local function diagnostic(text: string)
-  local stderr = ffi.__acrt_iob_func(2)
-  ffi.fputs("Windows browser job: " .. text .. "\n", stderr)
-  ffi.fflush(stderr)
+  -- Use the inherited Win32 stderr directly: the helper has no Titan
+  -- standard-library dependency and does not need a CRT stream or buffer.
+  local message = "Windows browser job: " .. text .. "\n"
+  local written = foreign DWORD.new_array(1)
+  ffi.WriteFile(ffi.GetStdHandle(ffi.STD_ERROR_HANDLE), message, #message, written, nil)
 end
 
 local function problem(operation: string, code: integer): integer
@@ -114,6 +122,19 @@ function main(_args: {string}): integer
   local handle_bytes = count * foreign HANDLE.sizeof
   local handle_table = (reserved + header + count) as foreign *void
   ffi.memcpy(handles as foreign *void, handle_table, handle_bytes)
+  for slot = 0, count - 1 do
+    local handle = handles[slot]
+    if reserved[header + slot] & crt_fopen == 0 or not handle or handle == ffi.INVALID_HANDLE_VALUE then
+      diagnostic("invalid inherited descriptor slot " .. slot)
+      return failed
+    end
+    for prior = 0, slot - 1 do
+      if handles[prior] == handle then
+        diagnostic("inherited descriptor slot " .. slot .. " duplicates slot " .. prior)
+        return failed
+      end
+    end
+  end
   local owner = handles[count - 1]
   local acknowledgement = handles[count - 2]
   local inherited = count - 2
@@ -151,13 +172,11 @@ function main(_args: {string}): integer
   startup.StartupInfo.cb = foreign STARTUPINFOEXW.sizeof
   local job_list = foreign HANDLE.new_array(1)
   job_list[0] = job
-  -- The two Windows SDK macros wrap ProcThreadAttributeValue; spell their
-  -- attribute identifiers because the FFI cannot expand that macro call.
-  if ffi.UpdateProcThreadAttribute(attributes, 0, 0x2000d, job_list as foreign *void,
+  if ffi.UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, job_list as foreign *void,
       foreign HANDLE.sizeof, nil, nil) == 0 then
     return problem("UpdateProcThreadAttribute (job list)", ffi.GetLastError())
   end
-  if ffi.UpdateProcThreadAttribute(attributes, 0, 0x20002, handles as foreign *void,
+  if ffi.UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles as foreign *void,
       inherited * foreign HANDLE.sizeof, nil, nil) == 0 then
     return problem("UpdateProcThreadAttribute (handle list)", ffi.GetLastError())
   end
@@ -175,7 +194,8 @@ function main(_args: {string}): integer
   local status = 0
   while true do
     local waited = ffi.WaitForSingleObject(child.hProcess, 25)
-    if waited == 0 then
+    -- WAIT_OBJECT_0 aliases STATUS_WAIT_0 in the Windows headers.
+    if waited == ffi.STATUS_WAIT_0 then
       local code = foreign DWORD.new_array(1)
       if ffi.GetExitCodeProcess(child.hProcess, code) == 0 then
         status = problem("GetExitCodeProcess", ffi.GetLastError())
@@ -183,13 +203,13 @@ function main(_args: {string}): integer
         status = code[0]
       end
       break
-    elseif waited ~= 258 then
+    elseif waited ~= ffi.WAIT_TIMEOUT then
       status = problem("WaitForSingleObject", ffi.GetLastError())
       break
     end
     if ffi.PeekNamedPipe(owner, nil, 0, nil, nil, nil) == 0 then
       local code = ffi.GetLastError()
-      if code ~= 109 and code ~= 232 then status = problem("engine owner pipe", code) end
+      if code ~= ffi.ERROR_BROKEN_PIPE and code ~= ffi.ERROR_NO_DATA then status = problem("engine owner pipe", code) end
       break
     end
   end

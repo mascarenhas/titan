@@ -29,9 +29,10 @@ function M.runner_argv(launcher, ...)
     return { launcher, ... }
 end
 
--- The native pair stays in the ordinary Windows executable/provider layout.
+-- Keep the normal Windows launcher/provider layout with a private module name.
 function M.windows_runner_files(release)
-    return { "bin/titan-browser-job.exe", "lib/titan/" .. release .. "/windows_browser_job.dll" }
+    return { "bin/titan-browser-job.exe",
+        "lib/titan/" .. release .. "/_titan_browser/windows_job.dll" }
 end
 
 -- Keep diagnostics usable from the same host shell as the failed build.

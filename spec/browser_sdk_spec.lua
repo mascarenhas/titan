@@ -137,10 +137,11 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local fragment = assert(strategy:read_file(paths.join(repository, "scripts/browser.mk")))
         for _, host in ipairs({ makefile, makefile_win }) do contains(host, "scripts/browser.mk") end
         contains(fragment, "lua-browser:")
-        contains(fragment, "browser-sdk:")
         contains(fragment, "scripts/lua_browser.sh")
-        contains(fragment, "scripts/browser_sdk.lua")
-        contains(fragment, "--print-c-objects")
+        local sdk_recipe = assert(fragment:match("\nbrowser%-sdk:[^\n]*\n(.-)\n\n"))
+        assert.truthy(sdk_recipe:match("^\t%+@%$%(RECURSIVE_WRAPPER_GUARD%)"),
+            "browser-sdk must preserve the dry-run/query guard")
+        contains(sdk_recipe, "scripts/build_browser_sdk.sh")
 
         -- Ordinary Make targets must not invoke lua-browser or browser-sdk or inherit TITAN_TARGET.
         local all_rule = assert(makefile:match("\nall:[^\n]*\n\t([^\n]+)"))
@@ -319,7 +320,12 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             files.write(filename, relative)
         end
         local user_native = root .. "/lib/titan/" .. release .. "/app.dll"
-        if platform.windows then files.write(user_native, "user provider") end
+        local private_dir = root .. "/lib/titan/" .. release .. "/_titan_browser"
+        local neighbor = private_dir .. "/neighbor.dll"
+        if platform.windows then
+            files.write(user_native, "user provider")
+            files.write(neighbor, "private neighbor")
+        end
         local lua = paths.join(installed_prefix.active(), "bin/lua" .. (platform.windows and ".exe" or ""))
         local function uninstall()
             return strategy:run({ lua, "-E", paths.join(repository, "scripts/titan_install.lua"),
@@ -333,12 +339,17 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         for _, relative in ipairs(host_files) do
             assert.is_nil(lfs.symlinkattributes(paths.join(root, relative)), relative)
         end
-        if platform.windows then assert.equal("user provider", files.read(user_native)) end
+        if platform.windows then
+            assert.equal("user provider", files.read(user_native))
+            assert.equal("private neighbor", files.read(neighbor))
+            assert(os.remove(neighbor))
+        end
         assert.equal("user archive", files.read(directory .. "/app.a"))
         -- Nothing left to remove succeeds, and the directories go once empty.
         assert(os.remove(directory .. "/app.a"))
         result = uninstall()
         assert.is_true(result.ok, result.output)
+        if platform.windows then assert.is_nil(lfs.attributes(private_dir)) end
         assert.is_nil(lfs.attributes(root .. "/lib/titan-browser"))
         assert.equal("directory", lfs.attributes(root .. "/lib", "mode"))
         -- A directory where an SDK file belongs stops the removal before it starts.
@@ -910,8 +921,9 @@ end
         -- The browser install creates only its own native helper on Windows.
         local host_files = platform.windows and browserlink.windows_runner_files(version.TITAN_LIBRARY_VERSION) or {}
         if platform.windows then
-            assert.same({ "windows_browser_job.dll" },
-                strategy:list(paths.join(rocks_tree, "lib/titan", version.TITAN_LIBRARY_VERSION)))
+            local native_tree = paths.join(rocks_tree, "lib/titan", version.TITAN_LIBRARY_VERSION)
+            assert.same({ "_titan_browser" }, strategy:list(native_tree))
+            assert.same({ "windows_job.dll" }, strategy:list(paths.join(native_tree, "_titan_browser")))
         else
             assert.is_nil(strategy:stat(paths.join(rocks_tree, "lib/titan")))
         end

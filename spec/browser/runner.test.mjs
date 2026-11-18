@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, execFile } from "node:child_process";
+import { spawn, spawnSync, execFile } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -106,9 +106,24 @@ async function cleanChromium(result) {
     }
 }
 
-test("Windows engine jobs retain native IPC and retire engine on either owner loss",
+test("Windows engine jobs validate descriptors, retain native IPC and retire engine on either owner loss",
     { skip: !windows && "platform: requires Windows Job Objects" }, async t => {
     const helper = resolve(dirname(runner), "../../../bin/titan-browser-job.exe");
+    const providerPath = resolve(dirname(runner), "../../titan/0.6");
+    for (const [name, slot] of [["engine", 3], ["acknowledgement", 4], ["owner", 5]]) {
+        await t.test(`rejects unopened ${name} descriptor`, () => {
+            const stdio = ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe"];
+            stdio[slot] = "ignore";
+            const result = spawnSync(helper, [process.execPath, "-e", "console.log('engine reached')"], {
+                windowsHide: true, stdio, timeout: 10000, encoding: "utf8",
+                env: { ...process.env, TITAN_PATH_0_6: providerPath },
+            });
+            assert.ifError(result.error);
+            assert.equal(result.status, 125, result.stderr);
+            assert.equal(result.stdout, "");
+            assert.match(result.stderr, new RegExp(`^Windows browser job: invalid inherited descriptor slot ${slot}\\r?\\n$`));
+        });
+    }
     for (const mode of ["ipc", "ipc-empty", "ipc-absent", "supervisor-pipe", "helper-death"]) await t.test(mode, async () => {
         const ipc = mode.startsWith("ipc");
         const argv = ["", "λ with spaces", 'quote"then slash\\', "C:\\tools\\with space\\"];
@@ -123,7 +138,7 @@ test("Windows engine jobs retain native IPC and retire engine on either owner lo
         const child = spawn(helper, [process.execPath, "-e", worker, "--", ...argv], {
             windowsHide: true,
             stdio: ["ignore", "pipe", "pipe", ...(ipc ? ["ipc"] : []), "pipe", "pipe"],
-            env: { ...process.env, TITAN_PATH_0_6: resolve(dirname(runner), "../../titan/0.6"),
+            env: { ...process.env, TITAN_PATH_0_6: providerPath,
                 TITAN_BROWSER_JOB_SAVED_PATH: path === undefined ? "0" : `1${path}` },
         });
         const closed = new Promise((resolve, reject) => {

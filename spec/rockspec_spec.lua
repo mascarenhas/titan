@@ -1150,7 +1150,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         for _, expected in ipairs(derived) do
             assert.truthy(contains_suffix(expected), expected)
         end
-        assert.truthy(contains_suffix("titan-runtime/browser/windows_browser_job.titan"))
+        assert.truthy(contains_suffix("titan-runtime/browser/_titan_browser/windows_job.titan"))
         for _, retired in ipairs({
             "titan/lua.titan",
             "titan/uv/file.titan",
@@ -1205,7 +1205,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             local file = relative(path)
             local top = file and file:match("^([^/]+)/")
             if top and top ~= "titan" and top ~= "spec" and top ~= "doc" then
-                if file ~= "titan-runtime/browser/windows_browser_job.titan" then
+                if file ~= "titan-runtime/browser/_titan_browser/windows_job.titan" then
                     assert.falsy(file:match("%.titan$"), file)
                 end
                 local duplicated = stdlib_files[file:match("[^/]+$")]

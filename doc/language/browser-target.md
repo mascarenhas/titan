@@ -546,7 +546,7 @@ root; other chapters refer to this list:
 
 On Windows, the SDK also installs the native runner helper
 `bin/titan-browser-job.exe` and its provider
-`lib/titan/0.6/windows_browser_job.dll` in the same prefix. Neither file
+`lib/titan/0.6/_titan_browser/windows_job.dll` in the same prefix. Neither file
 is part of an image or page deployment.
 
 The directory is a sibling of the native `lib/titan/0.6/`, never inside it,

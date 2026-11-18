@@ -3962,12 +3962,16 @@ with a `realpath(process.argv[1])` check so that importing it from tests or
 On Windows, Node spawns a native Titan helper for each engine, compiled by
 `Makefile.win browser-sdk`. The helper attaches an unnamed, non-breakaway
 Job Object atomically at `CreateProcessW` and owns its only handle. It
-forwards Node's inherited CRT stdio table with only the engine handles in
-the allowlist, preserving the worker IPC descriptor and Chromium pipe
-descriptors 3/4. Two private slots carry the supervisor's lifetime and the
-helper's post-drain acknowledgement; neither is inherited by the engine.
-The helper resolves its own provider in the installed native tree, then
-restores the supervisor's original `TITAN_PATH_0_6` for the engine.
+validates each inherited CRT slot and forwards the stdio table with only the
+engine handles in the allowlist, preserving the worker IPC descriptor and
+Chromium pipe descriptors 3/4. Two private slots carry the supervisor's
+lifetime and the helper's post-drain acknowledgement; neither is inherited
+by the engine.
+The launcher is installed as `bin/titan-browser-job.exe`; its provider is
+`lib/titan/0.6/_titan_browser/windows_job.dll`, under a private module
+namespace in the normal Windows native provider layout. The helper loads it
+from the installed tree, then restores the supervisor's original
+`TITAN_PATH_0_6` for the engine.
 If Node disappears, the lifetime pipe closes; if the helper disappears,
 Windows closes the job handle and kills its members. The runner removes a
 Chromium profile only after the helper confirms no processes remain.

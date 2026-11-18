@@ -465,9 +465,10 @@ function installer.uninstall_browser_sdk(sdk_tree, release)
         paths[#paths + 1] = destination .. "/" .. asset
     end
     for _, name in ipairs(installer.browser_sdk_owned) do append(relative .. "/" .. name) end
-    if windows then
+    local windows_provider = windows and "lib/titan/" .. release .. "/_titan_browser"
+    if windows_provider then
         append("bin/titan-browser-job.exe")
-        append("lib/titan/" .. release .. "/windows_browser_job.dll")
+        append(windows_provider .. "/windows_job.dll")
     end
     for _, path in ipairs(paths) do
         local mode = lfs.symlinkattributes(path, "mode")
@@ -481,6 +482,7 @@ function installer.uninstall_browser_sdk(sdk_tree, release)
             if not deleted then return nil, "cannot remove " .. path .. ": " .. tostring(message) end
         end
     end
+    if windows_provider then lfs.rmdir(destination .. "/" .. windows_provider) end
     lfs.rmdir(destination .. "/" .. relative)
     lfs.rmdir(destination .. "/lib/titan-browser")
     return true

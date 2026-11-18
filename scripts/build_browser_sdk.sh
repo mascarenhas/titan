@@ -27,7 +27,7 @@ if [ "$exe_suffix" = .exe ]; then
         env -u LUA_PATH -u LUA_CPATH "$path_key=$PREFIX/lib/titan/$release" \
         "$titanc" --target windows --no-uv-bootstrap --incremental "-j$TITAN_JOBS" \
         --tree "$repository/titan-runtime/browser" --output "$build_dir.windows-host" \
-        --exe "$build_dir.windows-host/bin/titan-browser-job.exe" windows_browser_job
+        --exe "$build_dir.windows-host/bin/titan-browser-job.exe" _titan_browser.windows_job
 fi
 
 verbosity=-q
