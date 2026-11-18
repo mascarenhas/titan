@@ -68,3 +68,84 @@ function test_live_browser_origin_acceptance_and_denial(_context: test.Context)
     end
   end)
 end
+
+-- Asks the burst peer for `count` numbered messages, and waits until the
+-- client holds all of them unread.
+local function queue_burst(connection: websocket.Connection, source: string, count: integer)
+  local before = metric("holders", source)
+  connection:write(websocket.TEXT, "" .. count)
+  wait_for(function (): boolean return metric("holders", source) >= before + count end,
+    "the burst peer's messages did not arrive")
+  -- Deliveries queued before this turn reach the connection before it resumes.
+  async.yield()
+end
+
+local function read_numbered(connection: websocket.Connection, first: integer, last: integer)
+  for number = first, last do
+    local kind?, data? = connection:read()
+    test.assert(same_message_kind(kind, websocket.TEXT) and data == "message " .. number,
+      "burst message " .. number .. " arrived as " .. (data or "nil"))
+  end
+end
+
+-- Reading most of a queued burst moves the unread suffix into fresh storage;
+-- the messages keep their order and bytes, and each holder retires with its
+-- message.
+function test_live_unread_suffix_survives_queue_compaction(_context: test.Context)
+  runtime_test.run(function ()
+    local source = live("burst")
+    local connection = websocket.connect(source)
+    defer connection:close()
+    local holders = metric("holders", source)
+    local takes = metric("takes", source)
+    queue_burst(connection, source, 100)
+    read_numbered(connection, 1, 60)
+    test.assert(metric("holders", source) == holders + 40, "consumed holders were not released")
+    read_numbered(connection, 61, 100)
+    test.assert(metric("holders", source) == holders, "a holder outlived its message")
+    test.assert(metric("takes", source) == takes + 100, "a read message did not take its bytes once")
+  end)
+end
+
+-- Closing with an unread backlog releases every queued holder without
+-- copying its bytes.
+function test_live_close_releases_unread_holders(_context: test.Context)
+  runtime_test.run(function ()
+    local source = live("burst")
+    local connection = websocket.connect(source)
+    defer connection:close()
+    local holders = metric("holders", source)
+    local takes = metric("takes", source)
+    queue_burst(connection, source, 100)
+    read_numbered(connection, 1, 60)
+    connection:close()
+    test.assert(metric("holders", source) == holders, "close kept unread holders")
+    test.assert(metric("takes", source) == takes + 60, "close took the bytes of unread messages")
+  end)
+end
+
+-- Bursts read while one message always stays queued never empty the queue,
+-- so only compaction drops the consumed prefix: the queue's storage stays
+-- bounded instead of growing with every message ever read.
+function test_live_queue_storage_stays_bounded_while_never_empty(_context: test.Context)
+  runtime_test.run(function ()
+    local source = live("burst")
+    local connection = websocket.connect(source)
+    defer connection:close()
+    queue_burst(connection, source, 150)
+    read_numbered(connection, 1, 149)
+    gc.collect()
+    gc.collect()
+    local baseline = gc.count()
+    for _ = 1, 40 do
+      queue_burst(connection, source, 150)
+      read_numbered(connection, 150, 150)
+      read_numbered(connection, 1, 149)
+    end
+    gc.collect()
+    gc.collect()
+    local growth = gc.count() - baseline
+    test.assert(growth < 16384, "40 bursts read past an unread message grew memory by " .. growth .. " bytes")
+    read_numbered(connection, 150, 150)
+  end)
+end

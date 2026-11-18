@@ -542,63 +542,8 @@ local function local_union_declarations(path)
     return unions
 end
 
--- A literal Lua-pattern spelling of a Makefile variable or target name, which
--- may contain `-` (a quantifier outside a set).
-local function pattern_literal(text)
-    return (text:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"))
-end
-
--- Collect the words of the first assignment whose left-hand side matches
--- `pattern`, joining continuation lines.
-local function makefile_assignment_words(label, filename, pattern)
-    local values = {}
-    local collecting = false
-    local found = false
-    for line in (read_file(filename) .. "\n"):gmatch("(.-)\n") do
-        local value
-        if collecting then
-            value = line
-        else
-            value = line:match(pattern)
-            if value then found = true end
-        end
-        if value then
-            local continued = value:match("\\%s*$") ~= nil
-            value = value:gsub("\\%s*$", "")
-            for word in value:gmatch("%S+") do values[#values + 1] = word end
-            collecting = continued
-            if not collecting then break end
-        end
-    end
-    assert.truthy(found, "missing Makefile variable " .. label)
-    assert.falsy(collecting, "unterminated Makefile variable " .. label)
-    local result = {}
-    local prefixing = false
-    for _, word in ipairs(values) do
-        if word == "$(addprefix" then
-            prefixing = true
-        elseif prefixing then
-            word = word:gsub("^%$%(TITAN_OUTPUT_DIR%)/,", ""):gsub("%)$", "")
-            result[#result + 1] = "out/" .. word
-        else
-            result[#result + 1] = word:gsub("%$%(TITAN_OUTPUT_DIR%)", "out")
-        end
-    end
-    return result
-end
-
-local function makefile_words(name, filename)
-    return makefile_assignment_words(name, filename or "Makefile",
-        "^" .. pattern_literal(name) .. "%s*:=%s*(.*)$")
-end
-
--- Target-specific `export NAME = ...` assignments, which Makefile.win uses for
--- the per-target Busted spec lists no ordinary variable declares.
-local function makefile_target_export_words(filename, target, name)
-    return makefile_assignment_words(name, filename,
-        "^" .. pattern_literal(target) .. "%s*:%s*export%s+"
-        .. pattern_literal(name) .. "%s*[:+%?]?=%s*(.*)$")
-end
+local makefile_words = source_inventory.makefile_words
+local makefile_target_export_words = source_inventory.makefile_target_export_words
 
 -- Sorted paths of an inventory domain, which the loader builds in discovery
 -- order rather than in its declaring list's order.
@@ -623,67 +568,8 @@ local function declared_spec_paths(filename)
     return paths
 end
 
-local function stdlib_source_files(filename)
-    local sources = {}
-    local source_ensembles = {
-        ["$(UV_TITAN_SOURCES)"] = "UV_TITAN_SOURCES",
-        ["$(ASYNC_TITAN_SOURCES)"] = "ASYNC_TITAN_SOURCES",
-        ["$(OS_TITAN_SOURCES)"] = "OS_TITAN_SOURCES",
-        ["$(STDLIB_HTTP_SOURCES)"] = "STDLIB_HTTP_SOURCES",
-        ["$(WEBSOCKET_TITAN_SOURCES)"] = "WEBSOCKET_TITAN_SOURCES",
-        ["$(SQLITE3_TITAN_SOURCES)"] = "SQLITE3_TITAN_SOURCES",
-        ["$(JSON_TITAN_SOURCES)"] = "JSON_TITAN_SOURCES",
-        ["$(PROTOBUF_TITAN_SOURCES)"] = "PROTOBUF_TITAN_SOURCES",
-        ["$(LUA_TITAN_SOURCES)"] = "LUA_TITAN_SOURCES",
-        ["$(THREAD_TITAN_SOURCES)"] = "THREAD_TITAN_SOURCES",
-    }
-    for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES", filename)) do
-        local ensemble = source_ensembles[source]
-        if ensemble then
-            for _, constituent in ipairs(makefile_words(ensemble, filename)) do
-                sources[#sources + 1] = constituent
-            end
-        else
-            sources[#sources + 1] = source
-        end
-    end
-    return sources
-end
-
--- The declared native inventory plus the browser-only standard-library
--- sources, which no native Make list names: the compiler's browser selection
--- of the standard tree supplies them, and each must belong to a module that
--- the browser status inventory marks browser-only. Browser builds need a
--- Linux or macOS host, so Windows audits the native inventory alone.
-local function audited_stdlib_sources()
-    local sources = stdlib_source_files()
-    if platform.windows then return sources end
-    local declared, browser_only = {}, {}
-    for _, source in ipairs(sources) do declared[source] = true end
-    for _, row in ipairs(browser_checks.status_inventory.modules) do
-        if row[2] == "browser-only" then browser_only[row[1]] = true end
-    end
-    local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
-    local context = driver._new_resolver_context({ target = "browser" }, descriptor)
-    local called, selected, err = pcall(browser_checks.check_sources, context, ".")
-    local closed, close_error = driver.close_resolver_context(context)
-    assert.is_true(called, selected)
-    assert.is_true(closed, close_error)
-    assert.is_table(selected, err)
-    local covered = {}
-    for _, file in ipairs(selected) do
-        local source = paths.to_slash(file):gsub("^%./", "")
-        if not declared[source] then
-            local modname = "titan." .. assert(source:match("^titan/([^/.]+)"), source)
-            assert.truthy(browser_only[modname], source .. " is a browser-only source outside a browser-only module")
-            covered[modname] = true
-            sources[#sources + 1] = source
-        end
-    end
-    -- Every browser-only module is audited through at least one source.
-    assert.same(browser_only, covered)
-    return sources
-end
+local stdlib_source_files = source_inventory.stdlib_source_files
+local audited_stdlib_sources = source_inventory.audited_stdlib_sources
 
 -- The host's own source label, which selects a family's variant. A native
 -- host without an OS label selects `native` first and the default last.
@@ -5937,6 +5823,7 @@ printf '%s\n' "${schedule[@]}"
             local browser_job = named_job(linux_workflow, "browser-toolchain")
             local browser_stdlib_job = named_job(linux_workflow, "browser-stdlib")
             local playwright_job = named_job(linux_workflow, "browser-playwright")
+            local packaging_job = named_job(linux_workflow, "browser-packaging")
             local native_coverage_job = named_job(linux_workflow, "native-coverage")
             local macos_job = named_job(macos_workflow, "test-macos")
             local sanitizer_job = named_job(linux_workflow, "sanitizer")
@@ -5948,18 +5835,18 @@ printf '%s\n' "${schedule[@]}"
             local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
             assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
                 macos_events)
-            assert.equal(7, count_literal(linux_workflow,
+            assert.equal(8, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
             assert.equal(1, count_literal(macos_workflow,
                 "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
-            assert.equal(7, count_literal(linux_workflow, "\n    runs-on:"),
+            assert.equal(8, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
             assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
                 macos_workflow)
             for _, job_name in ipairs({
                 "build-compiler", "test-linux-compiler", "browser-toolchain",
                 "browser-stdlib",
-                "browser-playwright", "native-coverage", "sanitizer",
+                "browser-playwright", "browser-packaging", "native-coverage", "sanitizer",
             }) do
                 assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -6120,7 +6007,8 @@ printf '%s\n' "${schedule[@]}"
                 "- name: Upload prepared Linux tree", pack_index, true))
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
-            assert.equal(13, count_literal(workflow,
+            -- browser-packaging restores the emsdk and Playwright caches.
+            assert.equal(15, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/restore@v4"), workflow)
@@ -6477,7 +6365,7 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(browser_stdlib_job:find("out/browser-net/**", 1, true))
             assert.falsy(linux_workflow:find("HigherRendererMemoryLimit", 1, true))
             assert.falsy(browser_stdlib_job:find("titan-stdlib-chrome", 1, true))
-            for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job }) do
+            for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job, packaging_job }) do
                 assert.truthy(job:find('TITAN_NODE_VERSION: "26.13.0"', 1, true))
                 local install_node = named_step(job, "Install the pinned Node 26 runtime")
                 assert.truthy(install_node:find("uses: actions/setup-node@v6", 1, true))
@@ -6555,6 +6443,9 @@ printf '%s\n' "${schedule[@]}"
                 "${{ env.TITAN_BRIDGE_OUTPUT }}",
                 "${{ env.TITAN_NET_OUTPUT }}",
                 "spec/browser/build-net.lua",
+                "${{ env.TITAN_DELIVERY_OUTPUT }}",
+                "spec/browser/build-delivery.lua",
+                "spec/fixtures/browser_delivery/hosted.mjs",
                 "spec/fixtures/browser_net/run.mjs",
                 "spec/browser/playwright-run.mjs",
                 "spec/browser/playwright-runner.test.mjs",
@@ -6630,19 +6521,78 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(vite_install:find(
                 'PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT"', 1, true))
             assert.truthy(vite_install:find('"vite@$TITAN_VITE_VERSION"', 1, true))
-            local deployment_gate = named_step(playwright_job,
-                "Run self-contained HTTP and Vite deployment gate")
+            local docs_gate = named_step(playwright_job,
+                "Run the browser chapter's documented page, server and Vite examples")
             for _, contract in ipairs({
                 "if: matrix.engine == 'chromium'",
                 'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"',
                 'TITAN_REQUIRE_BROWSER_DEPLOYMENT: "1"',
                 'TITAN_PROBE_CACHE_DISABLE: "1"',
                 'source "$TITAN_EMSDK_ROOT/emsdk_env.sh"',
-                '"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_deployment_spec.lua',
-                "browser-playwright-deployment.log",
+                '"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_docs_spec.lua',
+                "browser-playwright-docs.log",
             }) do
-                assert.truthy(deployment_gate:find(contract, 1, true), contract)
+                assert.truthy(docs_gate:find(contract, 1, true), contract)
             end
+            -- The complete application: every cell builds it by its section's
+            -- commands and runs the hosted test; production cells keep records.
+            local delivery_build = named_step(playwright_job,
+                "Build the browser chapter's complete application and its server")
+            assert.falsy(delivery_build:find("if:", 1, true), delivery_build)
+            assert.truthy(delivery_build:find(
+                'lua -E spec/browser/build-delivery.lua "$TITAN_DELIVERY_OUTPUT"', 1, true), delivery_build)
+            local hosted = named_step(playwright_job, "Run the complete application's hosted deployment test")
+            assert.falsy(hosted:find("if:", 1, true), hosted)
+            for _, contract in ipairs({
+                '"$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE"',
+                '--root "$TITAN_DELIVERY_OUTPUT" "${records[@]}"',
+                'if [ "$TITAN_BUILD_PROFILE" = production ]; then',
+                'records=(--records "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json")',
+            }) do
+                assert.truthy(hosted:find(contract, 1, true), contract)
+            end
+            local delivery_node = named_step(playwright_job, "Run the complete application under Node")
+            assert.truthy(delivery_node:find("if: matrix.engine == 'chromium'", 1, true), delivery_node)
+            assert.truthy(delivery_node:find(
+                '--root "$TITAN_DELIVERY_OUTPUT" --js-test "$TITAN_DELIVERY_OUTPUT/dod.test.mjs"', 1, true),
+                delivery_node)
+            local records = named_step(playwright_job, "Upload browser records")
+            for _, contract in ipairs({
+                "if: always() && matrix.profile == 'production'",
+                "name: browser-records-playwright-${{ matrix.engine }}",
+                "path: out/browser-records/",
+            }) do
+                assert.truthy(records:find(contract, 1, true), contract)
+            end
+            -- browser-packaging records Node and Chromium; the production
+            -- Firefox and WebKit cells add their engine's memory and recursion.
+            local engine_records = named_step(playwright_job,
+                "Record memory, Task scaling and recursion depth on the managed engine")
+            for _, contract in ipairs({
+                "if: matrix.profile == 'production' && matrix.engine != 'chromium'",
+                'lua -E spec/browser/build-records.lua "$RUNNER_TEMP/browser-records"',
+                '--engines "$TITAN_TRACE_ENGINE" --measure memory,recursion',
+                '--out "$PWD/out/browser-records/records-$TITAN_TRACE_ENGINE.json"',
+            }) do
+                assert.truthy(engine_records:find(contract, 1, true), contract)
+            end
+            -- Every validation cell runs the stdlib aggregate on its engine,
+            -- last, so that failing cases leave the earlier gates' receipts.
+            local playwright_suite = named_step(playwright_job,
+                "Run the complete browser core stdlib suite on the managed engine")
+            for _, contract in ipairs({
+                "if: matrix.profile == 'validation'",
+                'make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE"',
+                'TITAN_BROWSER_TEST_RUNNER="\\"$TITAN_NODE\\" spec/browser/playwright-run.mjs --image --sdk',
+                'tee "$RUNNER_TEMP/browser-playwright-stdlib.log"',
+            }) do
+                assert.truthy(playwright_suite:find(contract, 1, true), contract)
+            end
+            assert.equal(1, count_literal(playwright_job, "make titan-stdlib-browser-test"), playwright_job)
+            local _, later = playwright_job:match("()%- name: Run the complete browser core stdlib suite.-\n()%s*%- name:")
+            assert.truthy(later and playwright_job:sub(later):match("^%s*%- name: Upload Playwright trace receipts"),
+                "the stdlib aggregate is the last test step")
+            assert.falsy(playwright_job:find("browser_deployment_spec", 1, true), playwright_job)
             assert.falsy(browser_job:find("TITAN_VITE_VERSION", 1, true))
             assert.falsy(browser_stdlib_job:find("TITAN_VITE_VERSION", 1, true))
             assert.falsy(browser_job:find("TITAN_PLAYWRIGHT_VERSION", 1, true),
@@ -6676,6 +6626,45 @@ printf '%s\n' "${schedule[@]}"
                 assert(playwright_job:find(
                 "- name: Install the selected native compiler and SDK profile",
                 1, true)), playwright_job)
+
+            -- The clean checkout starts from nothing another job made, sets no
+            -- Titan variable of its own, and runs the two chapters as one
+            -- reader would (doc_check unsets the workflow's).
+            for _, forbidden in ipairs({
+                "\n    needs:", "actions/download-artifact", "titan-probes", "TITAN_BUILD_PROFILE",
+                "\n      PREFIX:", "TITAN_ROOT", "TITAN_PREFIX", "\n      CC:", "TITAN_CHROME",
+            }) do
+                assert.falsy(packaging_job:find(forbidden, 1, true), forbidden)
+            end
+            local clean_checkout = named_step(packaging_job,
+                "Install from a fresh clone and build exactly as the manuals document")
+            for _, contract in ipairs({
+                "lua5.4 scripts/doc_check.lua --clean-checkout",
+                '--checkout "$GITHUB_WORKSPACE" --vite-root "$TITAN_VITE_ROOT"',
+                "doc/language/installation.md doc/language/browser-target.md",
+            }) do
+                assert.truthy(clean_checkout:find(contract, 1, true), contract)
+            end
+            local packaged_app = named_step(packaging_job,
+                "Check the documented images and run the complete application")
+            for _, contract in ipairs({
+                'PREFIX="$workspace/prefix" lua -E spec/browser/build-delivery.lua --built "$workspace"',
+                'hosted.mjs --engine chromium --root "$workspace"',
+                '--root "$workspace" --js-test "$workspace/dod.test.mjs"',
+            }) do
+                assert.truthy(packaged_app:find(contract, 1, true), contract)
+            end
+            local packaging_records = named_step(packaging_job,
+                "Record sizes, startup, memory, Task scaling and recursion depth")
+            for _, contract in ipairs({
+                "spec/browser/build-records.lua",
+                "spec/fixtures/browser_records/collect.mjs",
+                "--engines node,chromium --out out/browser-records/packaging.json",
+            }) do
+                assert.truthy(packaging_records:find(contract, 1, true), contract)
+            end
+            local packaging_upload = step_containing(packaging_job, "name: browser-records-packaging")
+            assert.truthy(packaging_upload:find("if: always()", 1, true), packaging_upload)
 
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",

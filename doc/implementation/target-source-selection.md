@@ -457,8 +457,9 @@ and `client.browser.titan` is browser-only. `STDLIB_HTTP_SOURCES` and
   certifies the module graph. The browser provider instead names logical
   roots in `BROWSER_STDLIB_ROOTS`, so the browser-only
   `titan/browser.browser.titan` appears in no native source list.
-* `spec/libuv_build_spec.lua` reads the inventory with `stdlib_source_files()`
-  and groups it with `source_families()`, which uses
+* `spec/support/source_inventory.lua` reads the inventory with
+  `stdlib_source_files()`, and `spec/libuv_build_spec.lua` groups it with
+  `source_families()`, which uses
   `driver.classify_source_filename`. Source-policy audits (no explicit source
   imports, foreign-header expectations, the single `lua_setmetatable` owner, no
   uv FFI outside `titan.uv`) iterate every declared file, variants included.
@@ -478,6 +479,10 @@ and `client.browser.titan` is browser-only. `STDLIB_HTTP_SOURCES` and
   for the host. The list-versus-disk audits (`undeclared_folder_sources`,
   `discovered_uv_sources`, `discovered_http_sources`) fail on a folder file,
   including a variant, that no entry declares.
+  `spec/rockspec_spec.lua` uses the same `audited_stdlib_sources()`, with
+  the Make header, runtime, and LPegLabel lists, to check that the source
+  rock carries every input ([build and installation
+  responsibilities](build-script-audit.md#checks)).
 * The native recipes that invoke `titanc` (`stdlib`, `stdlib-objects`,
   `titan-stdlib-test-objects`, `titan-stdlib-test-build`, the native fixture
   rule, and `titan-native-coverage-build`) unset `TITAN_TARGET`, as do the

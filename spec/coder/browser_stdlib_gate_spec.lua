@@ -70,6 +70,9 @@ describe("browser stdlib initialization and byte fidelity gate", function()
         for _, result in ipairs(results) do
             assert.is_true(result.started and result.ok, result.output or result.diagnostic)
         end
+        local names = { "init_subset", "init_lua_states", "init_async_bootstrap", "fidelity_test" }
+        for _, module in ipairs(modules) do names[#names + 1] = "init_" .. module end
+        for _, name in ipairs(names) do toolchain.check_imports(workspace .. "/" .. image(name), { "entry" }) end
         for _, engine in ipairs({ "node", "chromium" }) do
             local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine,
                 "--timeout", "120000", "--grace", "1500", "--root", workspace,

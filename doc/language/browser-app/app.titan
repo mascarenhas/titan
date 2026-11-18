@@ -1,0 +1,158 @@
+-- A complete browser application. It reads a file from its own web site,
+-- copies typed data to the page and back, lets the page call it back, runs
+-- concurrent Tasks with timers, writes to both output streams, meets an
+-- operation that the browser cannot provide, and reports an error raised
+-- through Lua with its Titan and Lua frames.
+local async = import "async"
+local browser = import "browser"
+local http = import "http"
+local io = import "io"
+local lua = import "lua"
+local os = import "os"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+local string = import "string"
+local timer = import "timer"
+
+local type Value = browser.BrowserValue
+
+record Card
+  title: string
+  visits: integer
+end
+
+-- Copies of a Card, with its title as JavaScript text.
+local codec = protobuf.portable({reflect.Type.is_named(reflect.NamedType("app.Card"))}, nil,
+                                {"app.Card.title"})
+
+local function integer_of(item: Value): integer
+  case item
+  when is_integer(number) then return number
+  end
+  raise "the page must pass an integer"
+end
+
+-- The first line of a file on the page's own server. Reading the body to its
+-- end lets the request finish; closing it earlier would cancel it.
+local function fetch_greeting(url: string): string
+  local response = http.get(url)
+  defer response:close()
+  local body = string.writer()
+  for chunk in response:read do body:write(chunk) end
+  local line = string.match(body:drain(), "[^\n]*"):whole()
+  io.print("GET greeting.txt: " .. response.status .. " " .. line)
+  return line
+end
+
+-- The page's `publish` binding decodes a copy of the card and returns a
+-- changed copy.
+local function share(card: Card): Card
+  local publish = browser.binding("publish")
+  defer publish:close()
+  case publish:call(Value.is_string(codec:describe()), Value.is_bytes(codec:encode(card)))
+  when is_bytes(bytes) then
+    local copy: Card = codec:decode(bytes)
+    return copy
+  end
+  raise "publish must return an encoded card"
+end
+
+-- The page's `visit` binding calls `bump` back twice and then settles the
+-- request. `bump` and the completion share the captured count.
+local function visit_page(): integer
+  local count = 0
+  local bump = function (...: Value): Value
+    count = count + integer_of(...[1])
+    return Value.is_integer(count)
+  end
+  local visit = browser.binding("visit")
+  defer visit:close()
+  local request: browser.BrowserRequest? = nil
+  defer do
+    local open? = request
+    if open then open:close() end
+  end
+  case async.await<|integer, string|>(function (resolve, reject, _)
+    request = visit:start(function (...: Value): Value
+      resolve(count)
+      return Value.is_nil()
+    end, function (...: Value): Value
+      reject(browser.failure_text(...[1], ...[2]) or "visit failed")
+      return Value.is_nil()
+    end, Value.is_callable(bump))
+  end)
+  when success(total) then return total
+  when error(message) then raise message
+  end
+end
+
+-- A Task that sleeps for a time of its own and returns its number.
+local function sleeper(number: integer): async.Task<|integer, value|>
+  return async.run<|integer, value|>(function (): integer
+    local milliseconds = (6 - number) * 50
+    timer.sleep(milliseconds)
+    io.print("Task " .. number .. " woke after " .. milliseconds .. " ms")
+    return number
+  end)
+end
+
+-- Five Tasks sleep while a sixth waits on a ticker, and async.all_five joins
+-- the five. The page keeps drawing frames meanwhile.
+local function run_tasks()
+  local sleeping = true
+  local ticks = 0
+  local counter = async.run<|nil, value|>(function (): nil
+    local ticker = timer.ticker(10)
+    defer ticker:close()
+    while sleeping and ticker:tick() do ticks = ticks + 1 end
+    return nil
+  end)
+  local first, second, third, fourth, fifth = async.all_five(
+      sleeper(1), sleeper(2), sleeper(3), sleeper(4), sleeper(5))
+  sleeping = false
+  async.join(counter)
+  io.print("All five Tasks returned " .. first .. ", " .. second .. ", " .. third .. ", " ..
+           fourth .. ", " .. fifth)
+  if ticks > 0 then io.print("The ticker ticked while they slept") end
+end
+
+-- The page supplies no standard input, so reading it raises.
+local function read_input()
+  os.stdin:read()
+catch
+  if error is async.OperationError then
+    local failure: async.OperationError = error
+    io.print("os.stdin:read() raised " .. failure.name .. " in " .. failure.operation)
+    return
+  end
+  raise
+end
+
+local function fail()
+  raise "an error raised by Titan code that Lua called"
+end
+
+-- Lua calls `fail` from a function of its own; the trace shows both languages.
+local function report_lua_error()
+  local chunk = lua.load([[
+local fail = ...
+local function relay()
+  fail()
+end
+relay()
+]], "=relay.lua", nil)
+  chunk(fail)
+catch
+  os.stderr:write("caught: " .. string.tostring(error) .. "\n" .. traceback .. "\n")
+end
+
+function main(args: {string}): integer
+  local card = share(Card(fetch_greeting(args[1]), 1))
+  io.print("The page sent back \"" .. card.title .. "\", visits " .. card.visits)
+  io.print("The page called back twice, and the count is " .. visit_page())
+  run_tasks()
+  read_input()
+  os.stderr:write("This line goes to standard error.\n")
+  report_lua_error()
+  return 0
+end

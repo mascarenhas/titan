@@ -1,0 +1,117 @@
+-- The browser records program. spec/fixtures/browser_records/collect.mjs runs
+-- each mode in a fresh instance:
+--
+--   start     prints the memory use at start
+--   memory    prints the memory use at start, after a warm-up, after each
+--             batch of 256 parked Tasks until creating one fails, and after
+--             the parked Tasks finish
+--   task N    recurses to depth N in main's Task
+--   sleep N   recurses to depth N in main's Task and sleeps at the deepest call
+--
+-- A recursion mode returns 0 when it reaches depth N; a deeper recursion than
+-- the stacks hold fails the run.
+local async = import "async"
+local gc = import "gc"
+local io = import "io"
+local math = import "math"
+local string = import "string"
+local timer = import "timer"
+
+foreign import "emscripten/heap.h"
+foreign import "malloc.h"
+
+local type Release = function (boolean): ()
+
+-- One `RECORD` line: the WebAssembly memory size, which never shrinks, the
+-- bytes malloc has handed out, and the Lua state's own count.
+local function report(phase: string, extra: string)
+  local allocator = ffi.mallinfo()
+  io.print("RECORD " .. phase .. " heap=" .. (ffi.emscripten_get_heap_size() as integer) ..
+    " used=" .. (allocator.uordblks as integer) .. " lua=" .. gc.count() .. extra)
+end
+
+-- Starts `count` Tasks that each wait on a channel of their own, and returns
+-- once every one of them waits. Creating a Task raises when its coroutine
+-- stack cannot be allocated.
+local function park(tasks: {async.Task<|boolean, value|>}, releases: {Release}, count: integer)
+  local started = 0
+  for _ = 1, count do
+    local send, receive, close = async.channel<|boolean|>()
+    tasks[#tasks + 1] = async.run<|boolean, value|>(function (): boolean
+      started = started + 1
+      defer close()
+      return receive()
+    end)
+    releases[#releases + 1] = send
+  end
+  while started < count do async.yield() end
+end
+
+-- One batch of Tasks that start, sleep and finish.
+local function warm_up()
+  local warm: {async.Task<|boolean, value|>} = {}
+  for index = 1, 256 do
+    warm[index] = async.run<|boolean, value|>(function (): boolean
+      timer.sleep(0)
+      return true
+    end)
+  end
+  for index = 1, #warm do async.join(warm[index]) end
+end
+
+-- Parks Tasks in batches until creating one fails, then lets them finish.
+local function scale()
+  local tasks: {async.Task<|boolean, value|>} = {}
+  local releases: {Release} = {}
+  local failure = "none"
+  do
+    while true do
+      park(tasks, releases, 256)
+      report("parked", " tasks=" .. #tasks)
+    end
+  catch
+    failure = string.tostring(error)
+  end
+  -- The Task whose creation failed is not in `tasks`.
+  report("limit", " tasks=" .. #tasks .. " error=" .. failure)
+  for index = 1, #releases do releases[index](true) end
+  for index = 1, #tasks do async.join(tasks[index]) end
+end
+
+-- Each phase runs in a function of its own, so that nothing of it stays
+-- reachable from this frame when the collector runs.
+local function memory(): integer
+  report("start", "")
+  warm_up()
+  gc.collect()
+  gc.collect()
+  report("steady", "")
+  scale()
+  gc.collect()
+  gc.collect()
+  report("end", "")
+  return 0
+end
+
+local function recurse(depth: integer, sleep: boolean): integer
+  if depth == 0 then
+    if sleep then timer.sleep(0) end
+    return 0
+  end
+  return recurse(depth - 1, sleep) + 1
+end
+
+function main(args: {string}): integer
+  local mode = args[1]
+  if mode == "start" then
+    report("start", "")
+    return 0
+  end
+  if mode == "memory" then return memory() end
+  local depth? = math.tointeger(args[2] or "")
+  if not depth or mode ~= "task" and mode ~= "sleep" then
+    raise "usage: records start | memory | task N | sleep N"
+  end
+  if recurse(depth, mode == "sleep") ~= depth then return 1 end
+  return 0
+end

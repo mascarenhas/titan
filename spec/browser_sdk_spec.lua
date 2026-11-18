@@ -168,6 +168,8 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             runner_module = expected_bin .. "/titan-browser-run.mjs",
             node_worker = expected_bin .. "/titan-browser-node-worker.mjs",
             page = expected_bin .. "/titan-browser-page.mjs",
+            module_check = expected_bin .. "/titan-browser-module-check.mjs",
+            build_profile = expected_bin .. "/build-profile",
             lpeglabel = expected_bin .. "/libtitan-lpeglabel.a",
             provider = expected_bin .. "/titan.a",
             sdk_digests = expected_bin .. "/sdk-digests",
@@ -192,7 +194,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         }
         local required_order = {
             "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
-            "runner_module", "node_worker", "page",
+            "runner_module", "node_worker", "page", "module_check", "build_profile",
         }
         for _, key in ipairs(required_order) do
             local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
@@ -219,12 +221,72 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
                 string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s ROCKS_TREE=%s\'',
                     descriptor_assets[key], root, root .. "-rocks"),
                 err_tree)
-            present[norm_key(descriptor_assets[key])] = "ok"
+            present[norm_key(descriptor_assets[key])] = key == "build_profile" and descriptor.build_profile .. "\n" or "ok"
         end
 
         -- lpeglabel, provider, and sdk_digests are not bootstrap readiness prerequisites.
         local ready, ready_err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
         assert.same(descriptor_assets, ready, ready_err)
+
+        -- The SDK must follow the build's profile.
+        local record = norm_key(descriptor_assets.build_profile)
+        local other = descriptor.build_profile == "production" and "validation" or "production"
+        present[record] = other .. "\n"
+        local mismatch, mismatch_err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
+        assert.is_nil(mismatch)
+        assert.equal(string.format("browser SDK %q was built with the %s profile, but this build uses %s; " ..
+            "set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
+            "'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin, other,
+            descriptor.build_profile, other, descriptor.build_profile, descriptor.build_profile), mismatch_err)
+        local _, tree_err = browserlink.require_sdk({ io = fake_io }, descriptor,
+            { prefix = root, rocks_tree = root .. "-rocks" })
+        assert.truthy(tree_err:find("'make browser-sdk PREFIX=<prefix> ROCKS_TREE=<tree> TITAN_BUILD_PROFILE=" ..
+            descriptor.build_profile .. "'", 1, true), tree_err)
+        for _, content in ipairs({ "", "debug\n", descriptor.build_profile, descriptor.build_profile .. "\n\n" }) do
+            present[record] = content
+            local invalid, invalid_err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
+            assert.is_nil(invalid)
+            assert.equal(string.format("browser SDK build profile %q is invalid; run 'make browser-sdk PREFIX=%s'",
+                descriptor_assets.build_profile, root), invalid_err)
+        end
+    end)
+
+    it("removes only the files browser-sdk installed with make uninstall-browser-sdk", function()
+        local makefile = assert(strategy:read_file(paths.join(repository, "Makefile")))
+        contains(makefile, "uninstall-browser-sdk:")
+        contains(makefile, "scripts/titan_install.lua uninstall-browser-sdk")
+        local installer = assert(loadfile(paths.join(repository, "scripts/titan_install.lua")))()
+        local root = new_workspace("-sdk-uninstall")
+        local release = version.TITAN_LIBRARY_VERSION
+        local directory = root .. "/lib/titan-browser/" .. release
+        files.mkdir(directory)
+        for _, name in ipairs(installer.browser_sdk_owned) do files.write(directory .. "/" .. name, name) end
+        files.write(directory .. "/app.a", "user archive")
+        local lua = paths.join(installed_prefix.active(), "bin/lua" .. (platform.windows and ".exe" or ""))
+        local function uninstall()
+            return strategy:run({ lua, "-E", paths.join(repository, "scripts/titan_install.lua"),
+                "uninstall-browser-sdk", root, release }, { stderr_to_stdout = true })
+        end
+        local result = uninstall()
+        assert.is_true(result.ok, result.output)
+        for _, name in ipairs(installer.browser_sdk_owned) do
+            assert.is_nil(lfs.symlinkattributes(directory .. "/" .. name), name)
+        end
+        assert.equal("user archive", files.read(directory .. "/app.a"))
+        -- Nothing left to remove succeeds, and the directories go once empty.
+        assert(os.remove(directory .. "/app.a"))
+        result = uninstall()
+        assert.is_true(result.ok, result.output)
+        assert.is_nil(lfs.attributes(root .. "/lib/titan-browser"))
+        assert.equal("directory", lfs.attributes(root .. "/lib", "mode"))
+        -- A directory where an SDK file belongs stops the removal before it starts.
+        files.mkdir(directory .. "/titan.a")
+        files.write(directory .. "/libtitan.a", "runtime")
+        result = uninstall()
+        assert.is_false(result.ok)
+        assert.truthy(result.output:find("browser SDK file is not a file: " .. directory .. "/titan.a", 1, true),
+            result.output)
+        assert.equal("runtime", files.read(directory .. "/libtitan.a"))
     end)
 
     it("runs the portable peer tests against the staged SDK module under Node", function()
@@ -888,7 +950,7 @@ end
         end
         for _, key in ipairs({
             "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
-            "runner_module", "node_worker", "page", "lpeglabel", "provider",
+            "runner_module", "node_worker", "page", "module_check", "build_profile", "lpeglabel", "provider",
         }) do
             expected_digest_files[#expected_digest_files + 1] = assets[key]
         end

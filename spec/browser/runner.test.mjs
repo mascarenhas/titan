@@ -25,7 +25,7 @@ function testImage(t) {
     return null;
 }
 
-async function missingMapImage(t) {
+async function missingTableImage(t) {
     const image = testImage(t);
     if (!image) return null;
     const directory = await mkdtemp(join(dirname(image), "trace-policy-"));
@@ -824,7 +824,7 @@ test("exact-profile PID EPERM ignores only retired processes", { skip: !supporte
 for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium", "port"]]) {
     test(`required trace fails before main for direct and host-test images (${engine}/${cdp})`,
         {skip: !supported}, async t => {
-        const image = await missingMapImage(t);
+        const image = await missingTableImage(t);
         if (!image || (engine === "chromium" && !await chromium(t))) return;
         const directory = fixtureRoot(image.file);
         const imageArg = relative(directory, image.file).split(sep).join("/");
@@ -850,7 +850,7 @@ for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium"
 }
 
 test("required trace uses the existing lazy initialization and disposal lifecycle", {skip: !supported}, async t => {
-    const image = await missingMapImage(t);
+    const image = await missingTableImage(t);
     if (!image) return;
     const {default: createImage} = await import(pathToFileURL(image.file).href);
     const decoder = new TextDecoder();
@@ -1004,6 +1004,11 @@ test("direct invocation through a symlink still runs the runner CLI", {skip: !su
     } finally { await rm(directory, {recursive: true, force: true}); }
 });
 
+// The identity these fake images export, as a linked image's Wasm does, and
+// the image description that the generated module passes to the loader.
+const IMAGE = "0123456789abcdef".repeat(4);
+const LINKED = {identity: IMAGE, wasm: "app.wasm"};
+
 // Transport-only unit fixture, not linked-image acceptance evidence. Each
 // promised gateway uses the current operation-id/kind completion protocol.
 function entryOutcomeFactory(entry) {
@@ -1014,7 +1019,8 @@ function entryOutcomeFactory(entry) {
             options.titanBrowserComplete({id, kind, failed: false, status, bytes,
                 trace: new Uint8Array(), values: []});
         return {
-            HEAPU8: new Uint8Array(0),
+            HEAPU8: new TextEncoder().encode(IMAGE),
+            _titan_browser_trace_identity() { return 0; },
             _titan_browser_initialize(id) { complete(id, 1); return Promise.resolve(0); },
             _titan_browser_entry(id) { return entry(options, id); },
             _titan_browser_close(id) { complete(id, 5); return Promise.resolve(0); },
@@ -1022,13 +1028,49 @@ function entryOutcomeFactory(entry) {
     };
 }
 
+test("a Wasm from another link is a protocol failure before Lua", {timeout: 1000}, async () => {
+    let entered = false;
+    const other = "f".repeat(64);
+    const instance = create(options => {
+        const image = entryOutcomeFactory(() => Promise.resolve(0))(options);
+        image._titan_browser_initialize = () => { entered = true; return Promise.resolve(0); };
+        return image;
+    }, {}, {identity: other, wasm: "app.wasm"});
+    try {
+        const expected = {code: "TITAN_BROWSER_PROTOCOL", message: "browser image mismatch: app.mjs belongs to image " +
+            `${other.slice(0, 12)}, app.wasm is image ${IMAGE.slice(0, 12)}`};
+        await assert.rejects(instance.initialize(), expected);
+        await assert.rejects(instance.run(), expected);
+        assert.equal(entered, false);
+    } finally { await instance.dispose(); }
+});
+
+test("the loader refuses a malformed image binding and a Wasm without its identity export", {timeout: 1000}, async () => {
+    const factory = entryOutcomeFactory(() => Promise.resolve(0));
+    for (const image of [undefined, {}, {identity: IMAGE.toUpperCase(), wasm: "app.wasm"},
+        {identity: IMAGE}, {identity: IMAGE, wasm: "app.mjs"}]) {
+        assert.throws(() => create(factory, {}, image), {name: "TypeError",
+            message: "browser image binding must name a 64-digit identity and its .wasm"});
+    }
+    const instance = create(options => {
+        const image = factory(options);
+        delete image._titan_browser_trace_identity;
+        return image;
+    }, {}, LINKED);
+    try {
+        const expected = {code: "TITAN_BROWSER_PROTOCOL", message: "browser image does not provide Titan channels"};
+        await assert.rejects(instance.initialize(), expected);
+        await assert.rejects(instance.run(), expected);
+    } finally { await instance.dispose(); }
+});
+
 for (const mode of ["synchronous throw", "promise rejection"]) {
     test(`promised export ${mode} preserves its original RangeError`, {timeout: 1000}, async () => {
         const cause = new RangeError("entry stack exhausted");
         const instance = create(entryOutcomeFactory(() => {
             if (mode === "synchronous throw") throw cause;
             return Promise.reject(cause);
-        }));
+        }), {}, LINKED);
         try {
             await assert.rejects(instance.run(), error =>
                 error.code === "TITAN_BROWSER_PROTOCOL" &&
@@ -1038,7 +1080,7 @@ for (const mode of ["synchronous throw", "promise rejection"]) {
 }
 
 test("fulfilled export without completion still reports protocol failure", {timeout: 1000}, async () => {
-    const instance = create(entryOutcomeFactory(() => Promise.resolve(0)));
+    const instance = create(entryOutcomeFactory(() => Promise.resolve(0)), {}, LINKED);
     try {
         await assert.rejects(instance.run(), {
             code: "TITAN_BROWSER_PROTOCOL", message: "browser entry returned without completion",
@@ -1049,7 +1091,7 @@ test("fulfilled export without completion still reports protocol failure", {time
 test("loader refuses missing JSPI and memoizes failure for initialize and run", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(WebAssembly, "promising");
     let calls = 0;
-    const instance = create(() => { calls++; });
+    const instance = create(() => { calls++; }, {}, LINKED);
     try {
         Object.defineProperty(WebAssembly, "promising", {...descriptor, value: undefined});
         const initializing = instance.initialize();
@@ -1074,7 +1116,7 @@ test("completion waits for promised retirement and ignores numeric fulfillment",
         options.titanBrowserComplete({id, kind: 2, failed: false, status: 17,
             bytes: new Uint8Array([0, 255]), trace: new Uint8Array(), values: []});
         return retired;
-    }));
+    }), {}, LINKED);
     let settled = false;
     const running = instance.run();
     running.then(() => { settled = true; }, () => { settled = true; });
@@ -1094,7 +1136,7 @@ test("dispose waits accepted retirement but interrupts the application result", 
         options.titanBrowserComplete({id, kind: 2, failed: false, status: 17,
             bytes: new Uint8Array(), trace: new Uint8Array(), values: []});
         return retired;
-    }));
+    }), {}, LINKED);
     const running = instance.run();
     const interrupted = assert.rejects(running, {code: "TITAN_BROWSER_DISPOSED"});
     let disposed = false;

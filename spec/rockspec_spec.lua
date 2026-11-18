@@ -1,4 +1,5 @@
 local assert = require "luassert"
+local browserlink = require "titan-compiler.browserlink"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
@@ -576,6 +577,34 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.falsy(deployed_native[image], manifest)
             assert.falsy((deployed_native.titan or {})[image], manifest)
         end
+        -- `make binary-rock` (`luarocks pack`) copies the retained rock
+        -- directory and the manifest's deployed files. Neither carries
+        -- standard-library source or any part of the browser SDK, which `make
+        -- browser-sdk` installs outside LuaRocks; documentation examples are
+        -- the only Titan source.
+        local function assert_binary_payload(path, name)
+            assert.falsy(name:match("^titan%-browser") or name == "titan-protobuf.mjs", path)
+            assert.falsy(name:match("%.browser%.titan$"), path)
+            assert.truthy(not name:match("%.titan$") or path:match("^doc/"), path)
+        end
+        local function audit_manifest(entries, prefix)
+            for name, entry in pairs(entries) do
+                assert_binary_payload(prefix .. name, name)
+                if type(entry) == "table" then audit_manifest(entry, prefix .. name .. "/") end
+            end
+        end
+        audit_manifest(manifest_table, "")
+        local function audit_tree(directory, prefix)
+            for name in lfs.dir(directory) do
+                if name ~= "." and name ~= ".." then
+                    assert_binary_payload(prefix .. name, name)
+                    if lfs.symlinkattributes(directory .. "/" .. name, "mode") == "directory" then
+                        audit_tree(directory .. "/" .. name, prefix .. name .. "/")
+                    end
+                end
+            end
+        end
+        audit_tree(PREFIX .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1", "")
 
         -- The installer recorded every approved SDK native link input,
         -- including the selected Lua archive; titanc admits and reuses each
@@ -722,14 +751,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             ".gitmodules",
             ".agents/skills/titan-programmer/SKILL.md",
             "Makefile.win",
-            "scripts/install_windows_luarocks.sh",
-            "scripts/install_compiler.mk",
-            "scripts/titan_install.lua",
-            "scripts/titan-uninstall",
-            "scripts/prepare_windows_native.pl",
             "scripts/WindowsLibbacktraceAllocator.pm",
-            "scripts/build_windows_libbacktrace.sh",
-            "scripts/windows_native_coverage.sh",
             "vendor/libbacktrace/libbacktrace-0b9b49c-alloc-growth.patch",
             "spec/fixtures/libbacktrace/allocator_vector_probe.c",
             "spec/support/check_libbacktrace_allocator.sh",
@@ -744,94 +766,16 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "lua-5.5.1/src/lua.h",
             "lua-5.5.1/src/luaconf.h",
             "lua-5.5.1/src/loadlib.c",
-            "vendor/lpeglabel/lplcap.c",
-            "vendor/lpeglabel/lplcap.h",
-            "vendor/lpeglabel/lplcode.c",
-            "vendor/lpeglabel/lplcode.h",
-            "vendor/lpeglabel/lplprint.c",
-            "vendor/lpeglabel/lplprint.h",
-            "vendor/lpeglabel/lpltree.c",
-            "vendor/lpeglabel/lpltree.h",
-            "vendor/lpeglabel/lpltypes.h",
-            "vendor/lpeglabel/lplvm.c",
-            "vendor/lpeglabel/lplvm.h",
-            "vendor/lpeglabel/titan_lpeglabel_namespace.h",
-            "vendor/lpeglabel/titan_lpeglabel.h",
             "vendor/lpeglabel/relabel.lua",
             "vendor/lpeglabel/test.lua",
             "vendor/lpeglabel/testlabel.lua",
             "vendor/lpeglabel/testrelabelparser.lua",
             "vendor/lpeglabel/LICENSE",
             "vendor/lpeglabel/UPSTREAM.md",
-            "titan/coroutine.titan",
-            "titan/uv/uv.native.titan",
-            "titan/uv/address.titan",
-            "titan/uv/callbacks.titan",
-            "titan/uv/capabilities.titan",
-            "titan/uv/constants.titan",
-            "titan/uv/data.titan",
-            "titan/uv/dll.titan",
-            "titan/uv/dns.titan",
-            "titan/uv/external_wake.titan",
-            "titan/uv/fd.titan",
-            "titan/uv/identifiers.titan",
-            "titan/uv/pipe_tty.titan",
-            "titan/uv/platform_constants.titan",
-            "titan/uv/process.titan",
-            "titan/uv/startup.titan",
-            "titan/uv/stream_ops.titan",
-            "titan/uv/stream_owners.titan",
-            "titan/uv/sync.titan",
-            "titan/uv/tcp.titan",
-            "titan/uv/threading.titan",
-            "titan/uv/udp.titan",
-            "titan/uv/utilities.titan",
-            "titan/uv/address-native.h",
-            "titan/uv/callback.h",
-            "titan/uv/data_native.h",
-            "titan/uv/external-wake-native.h",
-            "titan/uv/fd-native.h",
-            "titan/uv/network-native.h",
-            "titan/uv/platform-constants.h",
-            "titan/uv/sync_storage.h",
-            "titan/uv/thread-native.h",
-            "titan/uv/utility_bits.h",
-            "titan/uv/version-native.h",
-            "titan/uv/work-data.h",
-            "titan/async/async.titan",
-            "titan/async/external.native.titan",
-            "titan/async/external.browser.titan",
-            "titan/async/foreign.native.titan",
-            "titan/async/receiver.native.titan",
-            "titan/async/runtime.native.titan",
-            "titan/async/runtime.browser.titan",
-            "titan/async/async_signal_platform.h",
-            "titan/async/async_receiver_native.h",
-            "titan/transfer_native.h",
-            "titan/timer.native.titan",
-            "titan/timer.browser.titan",
-            "titan/io.titan",
-            "titan/fs.native.titan",
-            "titan/fs_platform.h",
-            "titan/net.native.titan",
-            "titan/ssl.native.titan",
-            "titan/url.titan",
-            "titan/http/http.titan",
-            "titan/http/client.native.titan",
-            "titan/http/client.browser.titan",
-            "titan/http/native_imports.native.titan",
-            "titan/http/headers.titan",
-            "titan/http/options.titan", "titan/http/parser.native.titan",
-            "titan/http/pool.native.titan",
-            "titan/http/server.native.titan",
-            "titan/http/transfer.native.titan", "titan/http/upgrade.native.titan",
-            "titan/websocket/websocket.native.titan",
-            "titan/websocket/handshake.native.titan",
-            "titan/websocket/connection.native.titan",
-            "titan/websocket/frames.native.titan",
-            "titan/websocket/types.titan", "titan/websocket/utf8.titan",
-            "titan/websocket/crypto.native.titan",
-            "titan/websocket/websocket.browser.titan", "titan/websocket/client.browser.titan",
+            -- Loaded by scripts/browser_stdlib.lua beside itself.
+            "scripts/browser_stdlib_inventory.lua",
+            -- Copied by `make browser-sdk` beside the compiler's SDK assets.
+            "titan-runtime/browser/titan-protobuf.mjs",
             "spec/stdlib/titan/async/test_support/test_support.titan",
             "spec/stdlib/titan/async/test_support/sleep.titan",
             "spec/stdlib/titan/async/tests/all_join_test.titan",
@@ -1061,79 +1005,20 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/fixtures/ssl/coverage-trusted-ca.pem",
             "spec/fixtures/ssl/coverage-unsupported-certificate.pem",
             "spec/fixtures/ssl/coverage-unsupported-key.pem",
-            "titan/os/os.titan",
-            "titan/os/clock.native.titan",
-            "titan/os/clock.browser.titan",
-            "titan/os/environment.native.titan",
-            "titan/os/environment.browser.titan",
-            "titan/os/process.native.titan",
-            "titan/os/process.browser.titan",
-            "titan/os/stdio.native.titan",
-            "titan/os/stdio.browser.titan",
-            "titan/os/os_platform.h",
-            "titan/os/os_environment.h",
-            "titan/os/environment.browser.h",
-            "titan/peg/peg.titan",
-            "titan/peg/combinators.titan",
-            "titan/peg/native.titan",
-            "titan/peg/relabel.titan",
-            "titan/peg/relabel_parser.titan",
-            "titan/string/string.titan",
-            "titan/string/bytes.titan",
-            "titan/string/format.titan",
-            "titan/string/format_native.h",
-            "titan/string/pack.titan",
-            "titan/string/regex_api.titan",
-            "titan/string/regex_compile.titan",
-            "titan/string/regex_parser.titan",
-            "titan/path.titan",
-            "titan/path_platform.h",
             "spec/stdlib/titan/path/tests.titan",
             "spec/path_spec.lua",
             "spec/support/path_cases.lua",
             "doc/language/standard-library-path.md",
             "doc/implementation/standard-library-path.md",
             "LICENSES/go-LICENSE",
-            "titan/math.titan",
-            "titan/lua/lua.titan",
-            "titan/lua/background.native.titan",
-            "titan/lua/loading.browser.titan",
-            "titan/lua/loading.native.titan",
-            "titan/lua/worker.titan",
-            "titan/lua/native.h",
-            "titan/iteration.titan",
-            "titan/gc.titan",
-            "titan/test.titan",
-            "titan/sqlite3/sqlite3.native.titan",
-            "titan/sqlite3/bindings.titan",
-            "titan/sqlite3/row.titan",
-            "titan/sqlite3/worker.titan",
-            "titan/sqlite3/native.h",
-            "titan/json/json.titan",
-            "titan/json/parser.titan",
-            "titan/json/decoder.titan",
-            "titan/json/writer.titan",
-            "titan/json/numbers.titan",
             "spec/stdlib/titan/json/tests/tests.titan",
             "spec/stdlib/titan/json/tests/parser_test.titan",
             "spec/stdlib/titan/json/tests/mapping_test.titan",
             "spec/stdlib/titan/json/tests/core_test.titan",
             "doc/language/standard-library-json.md",
             "doc/implementation/json-library.md",
-            "titan/protobuf/protobuf.titan",
-            "titan/protobuf/encoder.titan",
-            "titan/protobuf/decoder.titan",
-            "titan/protobuf/schema.titan",
-            "titan/protobuf/native.h",
-            "titan/transfer.titan",
-            "titan/uv/transfer-native.h",
             "doc/language/standard-library-transfer.md",
             "doc/implementation/transfer-library.md",
-            "titan/thread/thread.native.titan",
-            "titan/thread/channel.titan",
-            "titan/thread/spawn.titan",
-            "titan/thread/group.titan",
-            "titan/thread/native.h",
             "spec/stdlib/titan/thread/tests/tests.titan",
             "spec/stdlib/titan/thread/tests/ownership_test.titan",
             "spec/stdlib/titan/thread/tests/wake_test.titan",
@@ -1145,8 +1030,6 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "doc/implementation/protobuf-library.md",
             "titan-compiler/test_runner.lua",
             "titan-compiler/coder/closure_transfer.lua",
-            "titan-runtime/transfer.h",
-            "titan-runtime/titan_path.c",
             "titan-compiler/ffiheaders.lua",
             "titan-compiler/objectmetadata.lua",
             "spec/support/stdlib_test_modules.mk",
@@ -1180,6 +1063,93 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         }) do
             assert.truthy(contains_suffix(expected), expected)
         end
+        -- The Make lists name the standard-library, runtime, and LPegLabel
+        -- sources and headers, and the scripts a recipe runs, which name the
+        -- scripts they run in turn. The compiler's browser selection adds the
+        -- browser-only standard-library sources (`audited_stdlib_sources`),
+        -- the sources' quoted includes and foreign imports name their
+        -- checkout headers, and `make browser-sdk` copies the compiler's SDK
+        -- assets from titan-runtime/browser. The hand list above keeps only
+        -- files that none of these name.
+        local makefile = read_file("Makefile")
+        local stdlib_sources = source_inventory.audited_stdlib_sources()
+        local derived = { table.unpack(stdlib_sources) }
+        local function add_make_list(name)
+            for _, word in ipairs(source_inventory.makefile_words(name)) do
+                local nested = word:match("^%$%(([%w_]+)%)$")
+                if nested then add_make_list(nested) else derived[#derived + 1] = word end
+            end
+        end
+        local header_lists = 0
+        for name in ("\n" .. makefile):gmatch("\n([%w_]+_TITAN_HEADERS)%s*:=") do
+            add_make_list(name)
+            header_lists = header_lists + 1
+        end
+        assert.truthy(header_lists > 0)
+        for _, name in ipairs({ "TITAN_RUNTIME_SOURCES", "BROWSER_RUNTIME_SOURCES",
+                "TITAN_SDK_ROOT_HEADERS", "TITAN_SDK_NAMESPACED_HEADERS" }) do
+            add_make_list(name)
+        end
+        local lpeglabel = assert(makefile:match("\nLPEGLABEL_VENDOR_DIR %?= (%S+)\n"))
+        for _, name in ipairs({ "LPEGLABEL_SOURCE_NAMES", "LPEGLABEL_HEADER_NAMES" }) do
+            for _, word in ipairs(source_inventory.makefile_words(name)) do
+                derived[#derived + 1] = lpeglabel .. "/" .. word
+            end
+        end
+        local scripts, named = { "Makefile", "Makefile.win", "scripts/install_compiler.mk" }, {}
+        local index = 1
+        while scripts[index] do
+            for script in read_file(scripts[index]):gmatch("scripts/[%w_.-]+") do
+                if not named[script] then
+                    named[script] = true
+                    scripts[#scripts + 1] = script
+                    derived[#derived + 1] = script
+                end
+            end
+            index = index + 1
+        end
+        -- A quoted include or foreign import names a checkout header beside
+        -- its includer (`..` and `.` allowed) or, for the standard library,
+        -- below titan/; anything else is a system, Lua, or dependency header.
+        local function checkout_header(directory, name)
+            local path = (directory .. "/" .. name):gsub("/%./", "/"):gsub("^%./", "")
+            local previous
+            repeat previous = path; path = path:gsub("[^/]+/%.%./", "", 1) until path == previous
+            return lfs.attributes(path, "mode") == "file" and path or nil
+        end
+        local headers, unread = {}, {}
+        local function include(path)
+            if path and not headers[path] then
+                headers[path] = true
+                unread[#unread + 1] = path
+                derived[#derived + 1] = path
+            end
+        end
+        local function includes(filename)
+            for name in read_file(filename):gmatch('#%s*include%s*"([^"]+)"') do
+                include(checkout_header(filename:match("^(.*)/"), name))
+            end
+        end
+        for _, source in ipairs(source_inventory.makefile_words("TITAN_RUNTIME_SOURCES")) do
+            includes(source)
+        end
+        for _, source in ipairs(stdlib_sources) do
+            for name in read_file(source):gmatch('foreign%s+import%s+"([^"]+)"') do
+                include(checkout_header(source:match("^(.*)/"), name) or checkout_header("titan", name))
+            end
+        end
+        while #unread > 0 do includes(table.remove(unread)) end
+        assert.truthy(headers["titan-runtime/titan_winloader.h"])
+        assert.truthy(headers["titan/transfer_native.h"])
+        local assets = browserlink.sdk_assets({ titan_bin = "sdk", libtitan = "sdk/libtitan.a",
+            sdk_digests = "sdk/sdk-digests" })
+        for _, key in ipairs({ "js_library", "bridge_library", "trace_library", "loader",
+                "runner", "runner_module", "node_worker", "page", "module_check" }) do
+            derived[#derived + 1] = "titan-runtime/browser/" .. assets[key]:match("[^/\\]+$")
+        end
+        for _, expected in ipairs(derived) do
+            assert.truthy(contains_suffix(expected), expected)
+        end
         for _, retired in ipairs({
             "titan/lua.titan",
             "titan/uv/file.titan",
@@ -1211,6 +1181,34 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.falsy(path:find("/llhttp-release-v", 1, true), path)
             assert.falsy(path:find("/openssl-build/", 1, true), path)
             assert.falsy(path:match("/openssl%-%d"), path)
+        end
+        -- One standard-library tree: outside titan/, only tests and
+        -- documentation may hold Titan source or reuse a standard-library
+        -- file's basename.
+        local root
+        for path in pairs(unpacked_files) do
+            if path == "Makefile.win" or path:sub(-#"/Makefile.win") == "/Makefile.win" then
+                assert.is_nil(root, path)
+                root = path:sub(1, -#"Makefile.win" - 1)
+            end
+        end
+        assert.is_string(root)
+        local function relative(path)
+            return path:sub(1, #root) == root and path:sub(#root + 1) or nil
+        end
+        local stdlib_files = {}
+        for path in pairs(unpacked_files) do
+            local file = relative(path)
+            if file and file:match("^titan/") then stdlib_files[file:match("[^/]+$")] = file end
+        end
+        for path in pairs(unpacked_files) do
+            local file = relative(path)
+            local top = file and file:match("^([^/]+)/")
+            if top and top ~= "titan" and top ~= "spec" and top ~= "doc" then
+                assert.falsy(file:match("%.titan$"), file)
+                local duplicated = stdlib_files[file:match("[^/]+$")]
+                assert.is_nil(duplicated, file .. " duplicates " .. tostring(duplicated))
+            end
         end
     end)
 

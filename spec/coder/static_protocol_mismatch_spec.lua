@@ -142,8 +142,8 @@ local function scan_archive(path)
 end
 
 local function metadata_initializer(csource, modname)
-    local symbol =
-        driver.mangle_module_name(modname) .. "_titan_metadata"
+    local symbol = require("titan-compiler.coder.core").coder
+        ._private_symbol(modname, "titan_metadata")
     local header = symbol .. "[] = "
     local _, header_end = csource:find(header, 1, true)
     assert.truthy(header_end, "missing generated metadata array " .. symbol)

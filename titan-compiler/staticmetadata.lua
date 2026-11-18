@@ -27,6 +27,11 @@ local WASM_SECTION_ORDER = {
 local WASM_IMPORT_KINDS = {
     [0] = "function", [1] = "table", [2] = "memory", [3] = "global", [4] = "tag",
 }
+-- Final-image value types: numeric, vector and the reference shorthands.
+local WASM_VALUE_TYPES = {
+    [0x7f] = "i32", [0x7e] = "i64", [0x7d] = "f32", [0x7c] = "f64",
+    [0x7b] = "v128", [0x70] = "funcref", [0x6f] = "externref",
+}
 local WASM_SYMBOL_KINDS = {
     [0] = "function", [1] = "data", [2] = "global",
     [3] = "section", [4] = "tag", [5] = "table",
@@ -208,19 +213,29 @@ end
 
 -- Source records are independent of the canonical public archive section.
 -- Keep their bytes equally relocation-free and immune to Clang ASan global
--- redzones, which would otherwise become part of the serialized payload.
+-- redzones, which would otherwise become part of the serialized payload. As
+-- with the archive metadata, a Wasm record is an unreferenced external
+-- definition that wasm-ld drops from final images.
 function staticmetadata.source_declaration(payload, symbol)
     local initializer, err = staticmetadata.c_initializer(payload)
     if not initializer then return nil, err end
-    assert(type(symbol) == "string" and symbol:match("^[A-Za-z_][A-Za-z0-9_]*$"),
+    -- The compiler's private symbols spell their separator as a UCN.
+    assert(type(symbol) == "string" and
+        symbol:gsub("\\u2119", "_"):match("^[A-Za-z_][A-Za-z0-9_]*$"),
         "source metadata symbol must be a C identifier")
     return [[
 #if defined(__APPLE__)
 #define TITAN_SOURCE_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titansrc")))
-#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)
+#define TITAN_SOURCE_META_LINKAGE static
+#elif defined(__wasm__)
+#define TITAN_SOURCE_META_SECTION \
+    __attribute__((aligned(1), section(".titan.source")))
+#define TITAN_SOURCE_META_LINKAGE
+#elif defined(__ELF__) || defined(_WIN32)
 #define TITAN_SOURCE_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.source")))
+#define TITAN_SOURCE_META_LINKAGE static
 #else
 #error unsupported object format for Titan source metadata
 #endif
@@ -233,7 +248,7 @@ function staticmetadata.source_declaration(payload, symbol)
 #endif
 
 TITAN_SOURCE_META_SECTION TITAN_SOURCE_META_NO_ADDRESS_SANITIZE
-static const unsigned char ]] .. symbol .. "[] = " .. initializer .. ";\n"
+TITAN_SOURCE_META_LINKAGE const unsigned char ]] .. symbol .. "[] = " .. initializer .. ";\n"
 end
 
 local function public_origin(origin)
@@ -1279,6 +1294,8 @@ function staticmetadata.browser_trace_image(bytes, origin)
         end
         local result = { imports = {}, exports = {}, function_imports = 0,
             function_ranges = {}, function_names = {} }
+        -- Function signatures by type index, as "(i32,i64)->(f64)".
+        local signatures = {}
         local seen, last_order, function_count, code_count = {}, 0, 0, 0
         local names_seen, named = false, {}
         local function text(pos, limit)
@@ -1310,7 +1327,7 @@ function staticmetadata.browser_trace_image(bytes, origin)
                 if order < last_order then fail(origin, "out-of-order final Wasm section " .. id) end
                 seen[id], last_order = true, order
             end
-            local relevant = id == 2 or id == 3 or id == 7 or id == 10
+            local relevant = id == 1 or id == 2 or id == 3 or id == 7 or id == 10
             if id == 0 then
                 local name
                 name, pos = text(pos, finish)
@@ -1346,7 +1363,29 @@ function staticmetadata.browser_trace_image(bytes, origin)
                 local count
                 count, pos = wasm_u32_leb(reader, pos, finish, origin)
                 if count > finish - pos then fail(origin, "invalid final Wasm section count") end
-                if id == 2 then
+                if id == 1 then
+                    for index = 1, count do
+                        if pos >= finish or byte(bytes, pos + 1) ~= 0x60 then
+                            fail(origin, "unsupported final Wasm type form")
+                        end
+                        pos = pos + 1
+                        local lists = {}
+                        for list = 1, 2 do
+                            local length
+                            length, pos = wasm_u32_leb(reader, pos, finish, origin)
+                            if length > finish - pos then fail(origin, "invalid final Wasm type length") end
+                            local names = {}
+                            for position = 1, length do
+                                local code = byte(bytes, pos + position)
+                                names[position] = WASM_VALUE_TYPES[code] or
+                                    fail(origin, string.format("unsupported final Wasm value type 0x%02x", code))
+                            end
+                            pos = pos + length
+                            lists[list] = table.concat(names, ",")
+                        end
+                        signatures[index] = "(" .. lists[1] .. ")->(" .. lists[2] .. ")"
+                    end
+                elseif id == 2 then
                     for _ = 1, count do
                         local module, name
                         module, pos = text(pos, finish)
@@ -1354,23 +1393,27 @@ function staticmetadata.browser_trace_image(bytes, origin)
                         if pos >= finish then fail(origin, "truncated Wasm import kind") end
                         local kind = byte(bytes, pos + 1)
                         pos = pos + 1
-                        result.imports[#result.imports + 1] = { module = module, name = name, kind = kind }
-                        if kind == 0 then
-                            local ignored
-                            ignored, pos = wasm_u32_leb(reader, pos, finish, origin)
-                            result.function_imports = result.function_imports + 1
-                        elseif kind == 1 or kind == 3 or kind == 4 then
+                        local record = { module = module, name = name, kind = kind }
+                        result.imports[#result.imports + 1] = record
+                        if kind == 0 or kind == 4 then
+                            if kind == 4 then
+                                if pos >= finish then fail(origin, "truncated Wasm import type") end
+                                pos = pos + 1
+                            end
+                            local type_index
+                            type_index, pos = wasm_u32_leb(reader, pos, finish, origin)
+                            record.signature = signatures[type_index + 1] or
+                                fail(origin, "Wasm import type index is out of range")
+                            if kind == 0 then result.function_imports = result.function_imports + 1 end
+                        elseif kind == 1 or kind == 3 then
                             if pos >= finish then fail(origin, "truncated Wasm import type") end
                             pos = pos + 1
                             if kind == 1 then pos = limits(pos, finish)
-                            elseif kind == 3 then
+                            else
                                 if pos >= finish or byte(bytes, pos + 1) > 1 then
                                     fail(origin, "invalid Wasm global mutability")
                                 end
                                 pos = pos + 1
-                            else
-                                local ignored
-                                ignored, pos = wasm_u32_leb(reader, pos, finish, origin)
                             end
                         elseif kind == 2 then pos = limits(pos, finish)
                         else fail(origin, "invalid Wasm import kind") end

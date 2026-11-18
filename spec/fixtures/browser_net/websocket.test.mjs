@@ -134,7 +134,7 @@ async function suite(context, image, env) {
     const output = text(state.stdout), errors = text(state.stderr);
     context.assert(result.kind === 'returned' && result.status === 0, 'live WebSocket suite failed:\n' + output + errors);
     const passed = output.match(/\[  PASSED  \] (\d+) tests?\./);
-    context.assert(passed && Number(passed[1]) === 26, 'live WebSocket suite did not pass its 26 cases:\n' + output);
+    context.assert(passed && Number(passed[1]) === 29, 'live WebSocket suite did not pass its 29 cases:\n' + output);
     return Number(passed[1]);
   } finally { await close(context, state, env); }
 }

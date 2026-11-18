@@ -1,9 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import {readFile, writeFile, mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import vm from 'node:vm';
 
 const source = await readFile(new URL('../../titan-runtime/browser/titan-browser-trace.js', import.meta.url), 'utf8');
@@ -25,7 +26,19 @@ function map(overrides = {}) {
         x_titan_function_ranges: [[100, 120], [120, 130], [140, 160]],
         x_titan_function_names: [null, 'one_titan', 'dynCall_v', 'two_titan'], ...overrides};
 }
-function adapter({realError = false, data = map(), node = true, fetch: fetcher} = {}) {
+// The compiler's writer turns an extended map into the published table, so
+// these units read exactly what a link writes (TITAN_LUA selects the Lua).
+const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const tables = new Map();
+function table(data) {
+    const input = JSON.stringify(data);
+    if (!tables.has(input)) tables.set(input, new Uint8Array(execFileSync(process.env.TITAN_LUA ?? 'lua', ['-E', '-e',
+        `package.path = ${JSON.stringify(repository + '/?.lua;')} .. package.path
+        local bytes = assert(require("titan-compiler.browsertrace").trace_table(io.read("a")))
+        io.stdout:write(bytes)`], {input})));
+    return tables.get(input);
+}
+function adapter({realError = false, bytes = table(map()), node = true, fetch: fetcher} = {}) {
     const hooks = [], dependencies = new Set(), warnings = [], reads = [];
     const heap = new Uint8Array(16384);
     let library;
@@ -38,7 +51,7 @@ function adapter({realError = false, data = map(), node = true, fetch: fetcher} 
         removeRunDependency(name) { dependencies.delete(name); },
         ENVIRONMENT_IS_NODE: node,
         locateFile(name) { reads.push(name); return '/maps/' + name; },
-        readBinary(path) { reads.push(path); return new TextEncoder().encode(JSON.stringify(data)); },
+        readBinary(path) { reads.push(path); return bytes; },
         fetch: fetcher,
         wasmExports: {titan_browser_trace_identity() { return 64; }},
         UTF8ToString(pointer) { assert.equal(pointer, 64); return identity; },
@@ -70,7 +83,7 @@ function adapter({realError = false, data = map(), node = true, fetch: fetcher} 
     `, context);
     const api = context.TitanBrowserTrace;
     vm.runInContext(library.$TitanBrowserTrace__postset, context);
-    api.index = api.buildIndex(data, identity);
+    api.index = api.readTable(bytes, identity);
     return {context, api, library, heap, hooks, dependencies, warnings, reads,
         evaluate(code) { return vm.runInContext(code, context); },
         capture(capacity = 512) { return library.titan_browser_trace_capture(1024, capacity); },
@@ -238,13 +251,13 @@ test('a frame takes its file and line from .titan segments only', () => {
     // the body's own line (coroutine.titan:44), then inlined C again.
     // Body 2 (120..130): its own line (coroutine.titan:10), then Titan code
     // inlined from another file (other.titan:5). Body 3 (140..160): C only.
-    const {api} = adapter({data: map({
+    const {api} = adapter({bytes: table(map({
         sources: ['path/coroutine.titan', 'runtime/minicoro.c', 'path/other.titan'],
         mappings: [[100, 1, 65, 0], [5, -1, -22, 0], [5, 1, 22, 0],
             [10, -1, -56, 0], [5, 2, -5, 0], [15, -1, -4, 0]]
             .map(row => row.map(vlq).join('')).join(','),
         x_titan_function_names: [null, 'trampoline_titan', 'caller_titan', 'c_helper'],
-    })});
+    }))});
     for (const [pc, index, flags, base, line] of [
         // A PC in inlined C: the declaring basename and no line, also when
         // the C comes first in the body.
@@ -264,17 +277,43 @@ test('a frame takes its file and line from .titan segments only', () => {
     assert.equal(api.lookup(145, 3, 3).symbol, 'c_helper');
 });
 
-for (const [name, overrides] of [
-    ['extensions absent', {x_titan_image: undefined}], ['identity mismatch', {x_titan_image: 'b'.repeat(64)}],
-    ['overlapping bodies', {x_titan_function_ranges: [[100, 121], [120, 130], [140, 160]]}],
-    ['fractional index', {x_titan_function_imports: 1.5}], ['short names', {x_titan_function_names: [null]}],
-    ['bad segment arity', {mappings: 'AA'}], ['bad VLQ', {mappings: '!'}], ['unfinished VLQ', {mappings: 'g'}],
-    ['overflow VLQ', {mappings: 'ggggggggA'}], ['decreasing PC', {mappings: 'oGAAA,D'}],
-    ['source index overflow', {mappings: 'oGEAA'}], ['negative original line', {mappings: 'oGADA'}],
-    ['indexed map', {sections: []}], ['second generated line', {mappings: ';AAAA'}],
-]) test('rejects malformed map: ' + name, () => {
+// The writer refuses malformed maps (spec/browser_trace_map_spec.lua); the
+// reader checks only what a damaged or foreign table could get wrong.
+const valid = table(map());
+function damaged(edit) {
+    const bytes = new Uint8Array(valid);
+    edit(new DataView(bytes.buffer), bytes);
+    return bytes;
+}
+// Header words: imports 72, bodies 76, rows 80, bases 84, string bytes 88;
+// then bodies, rows, offsets and the i16 sources and declaring files.
+const rowsAt = 92 + 4 * 2 * 3, offsetsAt = rowsAt + 4 * 2 * 4, sourcesAt = offsetsAt + 4 * (2 + 1 + 3 + 1);
+for (const [name, bytes, message = 'invalid trace table'] of [
+    ['short', valid.subarray(0, 91)], ['magic', damaged((_, b) => { b[0] = 0x58; })],
+    ['version', damaged(v => v.setUint32(4, 2, true))],
+    ['image', damaged((_, b) => { b[8] = 0x62; }), 'trace table image does not match'],
+    ['truncated', valid.subarray(0, valid.length - 1)], ['trailing byte', new Uint8Array([...valid, 0])],
+    ['row count', damaged(v => v.setUint32(80, 5, true))],
+    ['empty body', damaged(v => v.setUint32(92 + 4 * 3, 0, true))],
+    ['body overflow', damaged(v => v.setUint32(92, 0xffffffff, true))],
+    ['offset overflow', damaged(v => v.setUint32(rowsAt + 4, 0xffffffff, true))],
+    ['repeated row offset', damaged(v => v.setUint32(rowsAt + 4, 0, true))],
+    ['Titan row without a line', damaged(v => v.setUint32(rowsAt + 4 * 4, 0, true))],
+    ['row source', damaged(v => v.setInt16(sourcesAt, 2, true))],
+    ['negative row source', damaged(v => v.setInt16(sourcesAt, -2, true))],
+    ['declaring file', damaged(v => v.setInt16(sourcesAt + 2 * 4, 2, true))],
+    ['decreasing string offset', damaged(v => v.setUint32(offsetsAt + 4, 0xffff, true))],
+    ['string end', damaged(v => v.setUint32(offsetsAt + 4 * 6, 0, true))],
+]) test('rejects malformed table: ' + name, () => {
+    const {api} = adapter({realError: true});
+    assert.throws(() => api.readTable(bytes, identity), {message});
+});
+
+test('reads a table at any byte offset', () => {
     const {api} = adapter();
-    assert.throws(() => api.buildIndex(map(overrides), identity));
+    const shifted = new Uint8Array(valid.length + 1);
+    shifted.set(valid, 1);
+    assert.equal(api.readTable(shifted.subarray(1), identity).lines[2], 8);
 });
 
 const descriptorCases = [
@@ -378,8 +417,7 @@ for (const key of ['stackTraceLimit', 'prepareStackTrace']) test('absent descrip
 });
 
 test('symbolization writes bounded UTF-8 and contains output failures', () => {
-    const unit = adapter();
-    unit.api.index.names[1] = 'ℳ'.repeat(100);
+    const unit = adapter({bytes: table(map({x_titan_function_names: [null, 'ℳ'.repeat(100), 'dynCall_v', 'two_titan']}))});
     assert.equal(unit.capture(), 0);
     assert.equal(unit.library.titan_browser_trace_symbolize(1032, 8000, 9, 8100, 8, 8200), 1);
     assert.equal(unit.text(8000), 'one.brow');
@@ -410,33 +448,35 @@ async function settle(unit) {
 test('eager preRun dependency gates readiness until exports-verified browser fetch finishes', async () => {
     let deliver;
     const unit = adapter({node: false, fetch: path => {
-        assert.equal(path, '/maps/image.wasm.map');
+        assert.equal(path, '/maps/image.wasm.trace');
         return new Promise(resolve => { deliver = resolve; });
     }});
     unit.api.index = null;
     assert.equal(unit.hooks.length, 1);
     unit.hooks[0]();
-    assert.equal(unit.dependencies.has('titan-trace-map'), true);
+    assert.equal(unit.dependencies.has('titan-trace-table'), true);
     await Promise.resolve();
     assert.equal(unit.context.Module.titanBrowserTrace, undefined);
     assert.equal(unit.capture(), 1);
-    deliver({ok: true, arrayBuffer: async () => new TextEncoder().encode(JSON.stringify(map())).buffer});
+    deliver({ok: true, arrayBuffer: async () => valid.slice().buffer});
     await settle(unit);
     const result = unit.context.Module.titanBrowserTrace;
     assert.equal(result.state, 'ready');
     assert.equal(result.reason, null);
-    assert.equal(result.mapBytes, new TextEncoder().encode(JSON.stringify(map())).length);
-    assert.equal(result.indexBytes, 4 * 12 + 3 * 12);
+    assert.equal(result.traceBytes, valid.length);
+    // The table itself, then four rows of offsets and lines, three bodies of starts and ends.
+    assert.equal(result.indexBytes, valid.length + 2 * 4 * 4 + 2 * 3 * 4);
     assert.ok(result.loadMilliseconds >= 0);
     assert.equal(unit.capture(), 0);
     assert.equal(unit.warnings.length, 0);
 });
 
-for (const [name, data] of [['ready', map()], ['extensions absent', {version: 3, sources: [], names: [], mappings: ''}], ['wrong image', map({x_titan_image: 'b'.repeat(64)})]]) {
+for (const [name, bytes] of [['ready', valid], ['a map instead of a table', new TextEncoder().encode(JSON.stringify(map()))],
+    ['wrong image', table(map({x_titan_image: 'b'.repeat(64)}))]]) {
     test('Node eager load: ' + name, async () => {
         // Build a valid unit first; the eager loader reads the independently supplied bytes.
         const unit = adapter();
-        unit.context.readBinary = path => { unit.reads.push(path); return new TextEncoder().encode(JSON.stringify(data)); };
+        unit.context.readBinary = path => { unit.reads.push(path); return bytes; };
         unit.api.index = null;
         unit.hooks[0]();
         await settle(unit);
@@ -446,7 +486,7 @@ for (const [name, data] of [['ready', map()], ['extensions absent', {version: 3,
         const requests = unit.reads.length;
         assert.equal(unit.capture(), name === 'ready' ? 0 : 1);
         assert.equal(unit.capture(), name === 'ready' ? 0 : 1);
-        assert.equal(unit.reads.length, requests, 'capture never reloads a map');
+        assert.equal(unit.reads.length, requests, 'capture never reloads a table');
     });
 }
 
@@ -457,31 +497,23 @@ test('pinned generated Emscripten factory waits for trace initialization with in
     const directory = await mkdtemp(join(tmpdir(), 'titan-trace-lifecycle-'));
     try {
         const originalMap = JSON.parse(await readFile(image.replace(/\.mjs$/, '.wasm.map'), 'utf8'));
-        const extendedMap = {...originalMap, x_titan_image: identity, x_titan_function_imports: 0,
-            x_titan_function_ranges: [], x_titan_function_names: []};
-        const mapPath = join(directory, 'lifecycle.wasm.map');
-        await writeFile(mapPath, JSON.stringify(extendedMap));
+        const tablePath = join(directory, 'lifecycle.wasm.trace');
+        await writeFile(tablePath, table({...originalMap, x_titan_image: identity, x_titan_function_imports: 0,
+            x_titan_function_ranges: [], x_titan_function_names: []}));
         const {default: factory} = await import(pathToFileURL(image).href);
-        let mapRequested = 0;
+        let tableRequested = 0;
         const module = await factory({locateFile(name) {
-            if (name.endsWith('.map')) { ++mapRequested; return mapPath; }
+            if (name.endsWith('.trace')) { ++tableRequested; return tablePath; }
             return join(dirname(image), name);
         }});
-        assert.equal(mapRequested, 1);
+        assert.equal(tableRequested, 1);
         assert.equal(module.titanBrowserTrace.state, 'ready', module.titanBrowserTrace.reason);
         assert.equal(module._trace_capture_once(), 0);
-        // The unextended emcc map is intentionally accepted only as degraded.
+        // Without its table the image runs degraded.
         const degraded = await factory({locateFile: name => join(dirname(image), name)});
         assert.equal(degraded.titanBrowserTrace.state, 'degraded');
         assert.equal(degraded._trace_capture_once(), 1);
     } finally { await rm(directory, {recursive: true, force: true}); }
-});
-
-test('pinned emcc empty sourcesContent table needs no source text', () => {
-    const {api} = adapter();
-    const index = api.buildIndex(map({sourcesContent: []}), identity);
-    assert.equal(index.bases[0], 'one.browser.titan');
-    assert.throws(() => api.buildIndex(map({sourcesContent: ['only one source']}), identity));
 });
 
 test('C merge keeps entry and known names and drops symbols with no .titan source', {
@@ -498,10 +530,10 @@ test('C merge keeps entry and known names and drops symbols with no .titan sourc
                 [130, 140], [140, 150], [150, 160]],
             x_titan_function_names: [null, 'filter_inner_native', 'filter_inner_titanentry_lua',
                 'filter_outer_native', 'filter_outer_titanentry_lua', 'unregistered_titan', 'lua_helper']});
-        const mapPath = join(directory, 'filter.wasm.map');
-        await writeFile(mapPath, JSON.stringify(index));
+        const tablePath = join(directory, 'filter.wasm.trace');
+        await writeFile(tablePath, table(index));
         const {default: factory} = await import(pathToFileURL(image).href);
-        const module = await factory({locateFile: name => name.endsWith('.map') ? mapPath : join(dirname(image), name)});
+        const module = await factory({locateFile: name => name.endsWith('.trace') ? tablePath : join(dirname(image), name)});
         assert.equal(module.titanBrowserTrace.state, 'ready', module.titanBrowserTrace.reason);
         const original = Object.getOwnPropertyDescriptor(globalThis, 'Error');
         const captured = 'Error\n' + [

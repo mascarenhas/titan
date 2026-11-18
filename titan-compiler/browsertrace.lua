@@ -119,7 +119,9 @@ local base64 = {}
 for index = 1, 64 do
     base64[("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"):byte(index)] = index - 1
 end
-local function mappings(map, range)
+-- Validates every segment; `visit(generated, source, line)` sees each one in
+-- order, with a nil source for an unmapped segment (0-based indexes).
+local function mappings(map, range, visit)
     local bytes, pos = map.mappings, 1
     local source, line, column, name, generated = 0, 0, 0, 0, 0
     local first
@@ -170,6 +172,7 @@ local function mappings(map, range)
                     require_value(name >= 0 and name < #map.names, "source-map name index is out of range")
                 end
             end
+            if visit then visit(generated, count > 0 and source or nil, line) end
             if range and generated >= range[1] and generated < range[2] and
                     (not first or generated == first.generated) then
                 first = count > 0 and { source = source, line = line, column = column,
@@ -184,7 +187,11 @@ local function mappings(map, range)
     return first
 end
 
-local function validate_map(map, range)
+local EXTENSIONS = { "x_titan_image", "x_titan_function_imports", "x_titan_function_ranges",
+    "x_titan_function_names" }
+
+-- A standard map, optionally already carrying Titan's extensions.
+local function check_map(map, extended)
     require_value(map.version == 3, "source-map version must be 3")
     require_value(map.sections == nil, "indexed source maps are unsupported")
     for _, key in ipairs({ "sources", "names" }) do
@@ -203,10 +210,139 @@ local function validate_map(map, range)
             require_value(text == NULL or type(text) == "string", "invalid source-map sourcesContent entry")
         end
     end
-    for _, key in ipairs({ "x_titan_image", "x_titan_function_imports", "x_titan_function_ranges", "x_titan_function_names" }) do
-        require_value(map[key] == nil, "source map already contains " .. key)
+    if not extended then
+        for _, key in ipairs(EXTENSIONS) do
+            require_value(map[key] == nil, "source map already contains " .. key)
+        end
     end
+end
+
+local function validate_map(map, range)
+    check_map(map)
     return mappings(map, range)
+end
+
+-- The runtime trace table, `<stem>.wasm.trace`. A row starts where the
+-- location of a defined body's code changes: to a `.titan` source line, or to
+-- a gap (an unmapped or non-`.titan` segment, such as inlined C). Each body
+-- starts in a gap, the last of several segments at one offset wins, and rows
+-- never cross a body boundary, so a lookup that takes the last row at or
+-- before an offset in its body sees exactly what the map's segments say there.
+-- Implementation notes: doc/implementation/browser-target.md#the-trace-table
+local TABLE_MAGIC, TABLE_VERSION, TABLE_BASES, CHUNK = "TTRC", 1, 32767, 4096
+
+-- A little-endian array packed in chunks, so a large image never holds one
+-- Lua value per row.
+local function packed(format)
+    local parts, values, count = {}, {}, 0
+    local chunk = "<" .. string.rep(format, CHUNK)
+    local array = {}
+    function array.add(value)
+        count = count + 1
+        values[#values + 1] = value
+        if #values == CHUNK then
+            parts[#parts + 1] = string.pack(chunk, table.unpack(values))
+            values = {}
+        end
+    end
+    function array.count() return count end
+    function array.bytes()
+        parts[#parts + 1] = string.pack("<" .. string.rep(format, #values), table.unpack(values))
+        return table.concat(parts)
+    end
+    return array
+end
+
+local function pack(format, values)
+    local array = packed(format)
+    for _, value in ipairs(values) do array.add(value) end
+    return array.bytes()
+end
+
+-- `ranges` are the defined bodies, ordered and disjoint; returns the segment
+-- visitor and the encoder that completes the table.
+local function trace_table(map, ranges)
+    local base_index, bases, titan = {}, {}, {}
+    for index, path in ipairs(map.sources) do
+        titan[index - 1] = path:sub(-6) == ".titan" and path:match("[^/\\]*$")
+    end
+    -- The basename index of a `.titan` source a body uses, or -1.
+    local function base_of(source)
+        local name = source and titan[source]
+        if not name then return -1 end
+        local index = base_index[name]
+        if not index then
+            require_value(#bases < TABLE_BASES, "too many Titan source names for the trace table")
+            bases[#bases + 1] = name
+            index = #bases - 1
+            base_index[name] = index
+        end
+        return index
+    end
+    local pc_deltas, line_deltas, sources = packed("I4"), packed("I4"), packed("i2")
+    local first = {}
+    for body = 1, #ranges do first[body] = -1 end
+    local body, last_pc, last_line = 1, 0, 0
+    local state_source, state_line = -1, 0
+    -- The last segment seen at `pending_pc`; a later one at the same offset
+    -- replaces it before it can name a basename, a row or a declaring file.
+    local pending_pc, pending_source, pending_line
+    local function flush()
+        if not pending_pc then return end
+        local base = base_of(pending_source)
+        local line = base >= 0 and pending_line + 1 or 0
+        if base >= 0 and first[body] < 0 then first[body] = base end
+        if base ~= state_source or (base >= 0 and line ~= state_line) then
+            -- A gap repeats the previous line, so its delta is zero.
+            local row_line = base >= 0 and line or last_line
+            pc_deltas.add(pending_pc - last_pc)
+            line_deltas.add((row_line - last_line) & U32)
+            sources.add(base)
+            last_pc, last_line = pending_pc, row_line
+            state_source, state_line = base, line
+        end
+        pending_pc = nil
+    end
+    local function visit(generated, source, line)
+        if pending_pc and generated ~= pending_pc then flush() end
+        while ranges[body] and generated >= ranges[body][2] do
+            body, state_source, state_line = body + 1, -1, 0
+        end
+        local range = ranges[body]
+        if not range or generated < range[1] then return end
+        pending_pc, pending_source, pending_line = generated, source, line
+    end
+    -- `names[index]` is function `index - 1`'s name, or nil or NULL when it
+    -- has none, for `count` functions; both callers read names as UTF-8.
+    local function encode(identity, imports, names, count)
+        flush()
+        require_value(count == imports + #ranges, "trace names do not match the image's functions")
+        local strings, offsets, size = {}, {}, 0
+        local function add(text)
+            offsets[#offsets + 1] = size
+            strings[#strings + 1] = text
+            size = size + #text
+        end
+        for _, base in ipairs(bases) do add(base) end
+        for index = 1, count do
+            local name = names[index]
+            add(type(name) == "string" and name or "")
+        end
+        offsets[#offsets + 1] = size
+        local gaps, lengths, previous = {}, {}, 0
+        for index, range in ipairs(ranges) do
+            gaps[index], lengths[index], previous = range[1] - previous, range[2] - range[1], range[2]
+        end
+        return TABLE_MAGIC .. string.pack("<I4", TABLE_VERSION) .. identity ..
+            string.pack("<I4I4I4I4I4", imports, #ranges, sources.count(), #bases, size) ..
+            pack("I4", gaps) .. pack("I4", lengths) .. pc_deltas.bytes() .. line_deltas.bytes() ..
+            pack("I4", offsets) .. sources.bytes() .. pack("i2", first) .. table.concat(strings)
+    end
+    return visit, encode
+end
+
+local function valid_identity(identity)
+    return type(identity) == "string" and #identity == 64 and not identity:find("[^0-9a-f]")
 end
 
 local function quote(value)
@@ -236,14 +372,17 @@ function M.function_source(bytes, range)
     return result
 end
 
+-- Returns the final map, with the Titan extensions that bind it to `wasm`,
+-- and the runtime trace table derived from the same segment walk.
 function M.rewrite(wasm, bytes, identity, origin)
-    local ok, result = pcall(function()
-        require_value(type(identity) == "string" and #identity == 64 and not identity:find("[^0-9a-f]"),
-            "invalid browser trace image identity")
+    local ok, result, trace = pcall(function()
+        require_value(valid_identity(identity), "invalid browser trace image identity")
         local image, err = staticmetadata.browser_trace_image(wasm, origin)
         require_value(image, err)
         local map, close = json(bytes)
-        validate_map(map)
+        check_map(map)
+        local visit, encode = trace_table(map, image.function_ranges)
+        mappings(map, nil, visit)
         local ranges, names = {}, {}
         for index, range in ipairs(image.function_ranges) do
             ranges[index] = "[" .. range[1] .. "," .. range[2] .. "]"
@@ -256,12 +395,46 @@ function M.rewrite(wasm, bytes, identity, origin)
             ',"x_titan_function_imports":' .. image.function_imports ..
             ',"x_titan_function_ranges":[' .. table.concat(ranges, ",") ..
             '],"x_titan_function_names":[' .. table.concat(names, ",") .. ']\n'
-        return bytes:sub(1, close - 1) .. "," .. fields .. bytes:sub(close)
+        return bytes:sub(1, close - 1) .. "," .. fields .. bytes:sub(close),
+            encode(identity, image.function_imports, image.function_names, image.function_count)
     end)
     if not ok then
         return nil, (origin or "browser trace") .. ": " ..
             (type(result) == "table" and result.browsertrace or tostring(result))
     end
+    return result, trace
+end
+
+-- The trace table of a final map that already carries the Titan extensions,
+-- as `rewrite` produced it.
+function M.trace_table(bytes)
+    local ok, result = pcall(function()
+        local map = json(bytes)
+        check_map(map, true)
+        local identity, imports = map.x_titan_image, map.x_titan_function_imports
+        local ranges, names = map.x_titan_function_ranges, map.x_titan_function_names
+        require_value(valid_identity(identity), "invalid x_titan_image")
+        require_value(math.type(imports) == "integer" and imports >= 0 and imports <= U32,
+            "invalid x_titan_function_imports")
+        require_value(type(ranges) == "table" and getmetatable(ranges) == ARRAY, "invalid x_titan_function_ranges")
+        local previous = 0
+        for _, range in ipairs(ranges) do
+            require_value(type(range) == "table" and getmetatable(range) == ARRAY and #range == 2 and
+                math.type(range[1]) == "integer" and math.type(range[2]) == "integer" and
+                range[1] >= previous and range[1] < range[2] and range[2] <= U32,
+                "invalid x_titan_function_ranges entry")
+            previous = range[2]
+        end
+        require_value(type(names) == "table" and getmetatable(names) == ARRAY, "invalid x_titan_function_names")
+        local count = #names
+        for index = 1, count do
+            require_value(names[index] == NULL or type(names[index]) == "string", "invalid x_titan_function_names entry")
+        end
+        local visit, encode = trace_table(map, ranges)
+        mappings(map, nil, visit)
+        return encode(identity, imports, names, count)
+    end)
+    if not ok then return nil, type(result) == "table" and result.browsertrace or tostring(result) end
     return result
 end
 

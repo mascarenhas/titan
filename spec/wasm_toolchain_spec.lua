@@ -55,9 +55,8 @@ local function generate_titan_c(modname, root, stem, source)
         local source_payload = assert(objectmetadata.encode(source_entry, {
             layouts = generated.encoded_layouts,
         }))
-        local source_decl = assert(objectmetadata.render(
-            source_payload,
-            "titan_object_source_" .. driver.mangle_module_name(modname)))
+        local source_decl = assert(objectmetadata.render(source_payload,
+            require("titan-compiler.coder.core").coder._private_symbol(modname, "titan_source")))
         return generated.parts[1].code .. "\n" .. source_decl,
             source_entry, generated.encoded_layouts, ffi_header
     end, debug.traceback)
@@ -120,7 +119,12 @@ end
         local c_code, source_entry, expected_layouts, alpha_ffi = generate_titan_c(
             "wasm_alpha", root, "wasm_alpha", alpha_source)
         track_file(alpha_ffi)
-        assert.matches("#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)", c_code, 1, true)
+        -- Wasm payloads are unreferenced external definitions, so final images drop them.
+        assert.matches("#elif defined(__wasm__)\n#define TITAN_META_SECTION \\\n" ..
+            "    __attribute__((aligned(1), section(\".titan.meta\")))\n#define TITAN_META_LINKAGE\n", c_code, 1, true)
+        assert.matches("#elif defined(__wasm__)\n#define TITAN_SOURCE_META_SECTION \\\n" ..
+            "    __attribute__((aligned(1), section(\".titan.source\")))\n#define TITAN_SOURCE_META_LINKAGE\n",
+            c_code, 1, true)
         assert.matches("TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE", c_code, 1, true)
         assert.matches("TITAN_SOURCE_META_SECTION TITAN_SOURCE_META_NO_ADDRESS_SANITIZE", c_code, 1, true)
 
@@ -147,10 +151,10 @@ static const unsigned char wasm_probe_bytes[] = {
             layouts = expected_layouts,
         }))
         local clang_fixture_code = util.render(core.coder.modmetadata, {
-            METADATANAME = "wasm_alpha_metadata",
+            METADATANAME = core.coder._private_symbol("wasm_alpha", "titan_metadata"),
             METADATA = assert(staticmetadata.c_initializer(public_payload)),
-        }) .. assert(objectmetadata.render(
-            source_payload, "titan_object_source_wasm_alpha")) .. "\n" .. probe_tail
+        }) .. assert(objectmetadata.render(source_payload,
+            core.coder._private_symbol("wasm_alpha", "titan_source"))) .. "\n" .. probe_tail
         local clang_c_path = track_file(root .. "/wasm_alpha_clang_fixture.c")
         assert(util.set_file_contents(clang_c_path, clang_fixture_code, "wb"))
 

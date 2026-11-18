@@ -146,6 +146,7 @@ plan:
             "${{ runner.temp }}/browser-*.log",
             "out/browser-stdlib/*.log", "out/browser-stdlib/images/*.mjs",
             "out/browser-stdlib/images/*.wasm", "out/browser-stdlib/images/*.wasm.map",
+            "out/browser-stdlib/images/*.wasm.trace",
             "out/browser-stdlib/*roots.txt", "out/browser-stdlib/members.md",
         }) do
             assert.truthy(artifact:find(contract, 1, true), contract)
@@ -280,6 +281,115 @@ plan:
         local ok, err = checks.check_image(image("uv_closure_intruder"), "intruder.wasm")
         assert.is_nil(ok)
         assert.equal("intruder.wasm: forbidden browser stdlib symbol uv_closure_intruder", err)
+    end)
+
+    -- A final image whose only content is its import section: `imports` rows
+    -- are { module, name, params, results } functions, { module, name,
+    -- "table" | "memory" | "global" }, or { module, name, "tag", params }.
+    local function import_image(imports)
+        local function leb(value)
+            local bytes = {}
+            repeat
+                local digit = value & 127
+                value = value >> 7
+                bytes[#bytes + 1] = string.char(digit | (value > 0 and 128 or 0))
+            until value == 0
+            return table.concat(bytes)
+        end
+        local function text(value) return leb(#value) .. value end
+        local function section(id, bytes) return string.char(id) .. leb(#bytes) .. bytes end
+        local codes = { i32 = "\127", i64 = "\126", f64 = "\124" }
+        local function vector(names)
+            local bytes = {}
+            for index, name in ipairs(names) do bytes[index] = codes[name] end
+            return leb(#names) .. table.concat(bytes)
+        end
+        local types, entries = {}, {}
+        for index, row in ipairs(imports) do
+            if row[3] == "table" then
+                entries[index] = text(row[1]) .. text(row[2]) .. "\1\112\0\0"
+            elseif row[3] == "memory" then
+                entries[index] = text(row[1]) .. text(row[2]) .. "\2\0\1"
+            elseif row[3] == "global" then
+                entries[index] = text(row[1]) .. text(row[2]) .. "\3\127\0"
+            elseif row[3] == "tag" then
+                types[#types + 1] = "\96" .. vector(row[4]) .. vector({})
+                entries[index] = text(row[1]) .. text(row[2]) .. "\4\0" .. leb(#types - 1)
+            else
+                types[#types + 1] = "\96" .. vector(row[3]) .. vector(row[4])
+                entries[index] = text(row[1]) .. text(row[2]) .. "\0" .. leb(#types - 1)
+            end
+        end
+        return "\0asm\1\0\0\0" .. section(1, leb(#types) .. table.concat(types)) ..
+            section(2, leb(#entries) .. table.concat(entries))
+    end
+    local completion = { "env", "titan_browser_complete", { "i32" }, {} }
+    local clock = { "wasi_snapshot_preview1", "clock_time_get", { "i32", "i64", "i32" }, { "i32" } }
+    local fixture_sleep = { "env", "emscripten_sleep", { "i32" }, {} }
+    local fixture_click = { "env", "emscripten_set_click_callback_on_thread",
+        { "i32", "i32", "i32", "i32", "i32" }, { "i32" } }
+
+    it("accepts an image whose imports the reviewed allowlist lists for its classes", function()
+        assert.is_true(checks.check_imports(import_image({ completion, clock }), "entry.wasm", { "entry" }))
+        assert.is_true(checks.check_imports(import_image({ completion, fixture_sleep }), "test.wasm",
+            { "entry", "fixture:trace" }))
+    end)
+
+    it("rejects an injected unlisted import, a changed signature and every unlisted import kind", function()
+        local ok, err = checks.check_imports(import_image({ completion,
+            { "env", "titan_injected", { "i32" }, {} } }), "injected.wasm", { "entry" })
+        assert.is_nil(ok)
+        assert.equal("injected.wasm: unlisted browser import env.titan_injected (i32)->() (classes entry)\n" ..
+            "add a reviewed row for each to scripts/browser_imports.lua", err)
+        ok, err = checks.check_imports(import_image({ { "env", "titan_browser_complete", { "i64" }, {} },
+            { "env", "__indirect_function_table", "table" }, { "env", "memory", "memory" },
+            { "env", "__stack_pointer", "global" }, { "env", "__cpp_exception", "tag", { "i32" } } }),
+            "changed.wasm", { "entry" })
+        assert.is_nil(ok)
+        assert.equal("changed.wasm: unlisted browser import env.titan_browser_complete (i64)->() (classes entry)\n" ..
+            "changed.wasm: unlisted browser import env.__indirect_function_table table (classes entry)\n" ..
+            "changed.wasm: unlisted browser import env.memory memory (classes entry)\n" ..
+            "changed.wasm: unlisted browser import env.__stack_pointer global (classes entry)\n" ..
+            "changed.wasm: unlisted browser import env.__cpp_exception tag (i32)->() (classes entry)\n" ..
+            "add a reviewed row for each to scripts/browser_imports.lua", err)
+    end)
+
+    it("keeps a test fixture's imports out of entry images and other fixtures' images", function()
+        local ok, err = checks.check_imports(import_image({ completion, fixture_sleep }), "program.wasm", { "entry" })
+        assert.is_nil(ok)
+        assert.truthy(err:find("unlisted browser import env.emscripten_sleep (i32)->() (classes entry)", 1, true), err)
+        ok, err = checks.check_imports(import_image({ completion, fixture_click }), "trace.wasm",
+            { "entry", "fixture:trace" })
+        assert.is_nil(ok)
+        assert.truthy(err:find("unlisted browser import env.emscripten_set_click_callback_on_thread " ..
+            "(i32,i32,i32,i32,i32)->(i32) (classes entry,fixture:trace)", 1, true), err)
+        assert.is_true(checks.check_imports(import_image({ completion, fixture_click }), "counter.wasm",
+            { "entry", "fixture:html5" }))
+    end)
+
+    it("rejects an empty or unknown class list and malformed or duplicate allowlist rows", function()
+        local row = { "entry", "env", "f", "()->()", provider = "titan-browser-library.js", reason = "test" }
+        local function allowlist(rows) return { classes = { entry = "every image" }, imports = rows } end
+        local image = import_image({})
+        local ok, err = checks.check_imports(image, "x.wasm", {}, allowlist({ row }))
+        assert.is_nil(ok)
+        assert.equal("no browser import classes", err)
+        ok, err = checks.check_imports(image, "x.wasm", { "other" }, allowlist({ row }))
+        assert.is_nil(ok)
+        assert.equal("unknown browser import class other", err)
+        for _, malformed in ipairs({
+            { "fixture", "env", "f", "()->()", provider = "p", reason = "r" },
+            { "entry", "env", "f", provider = "p", reason = "r" },
+            { "entry", "env", "f", "()->()", reason = "r" },
+            { "entry", "env", "f", "()->()", provider = "p", reason = "" },
+        }) do
+            ok, err = checks.check_imports(image, "x.wasm", { "entry" }, allowlist({ row, malformed }))
+            assert.is_nil(ok)
+            assert.equal("malformed browser import allowlist row 2", err)
+        end
+        ok, err = checks.check_imports(image, "x.wasm", { "entry" }, allowlist({ row, row }))
+        assert.is_nil(ok)
+        assert.equal("duplicate browser import allowlist row entry env.f", err)
     end)
 
     it("rejects every absent import only from compiler-selected browser files", function()

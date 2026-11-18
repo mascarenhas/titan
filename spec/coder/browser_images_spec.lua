@@ -55,7 +55,7 @@ local function cli(info, ...)
         repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. (info.compiler_setup or "")
     local argv = { "env", "TITAN_ROOT=" .. (info.sdk_prefix or info.prefix), "TITAN_TARGET=", "TITAN_PATH_0_6=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=" .. (info.extra_cflags or ""),
-        "TITAN_EXTRA_LDFLAGS=",
+        "TITAN_EXTRA_LDFLAGS=", "TITAN_BUILD_PROFILE=" .. (info.profile or driver.BUILD_PROFILE),
         info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
         "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", info.output or workspace .. "/out" }
     for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
@@ -183,14 +183,15 @@ describe("browser stock Lua initialization", function()
 end)
 
 describe("browser image profile and SDK readiness", function()
+    local IDENTITY = string.rep("0123456789abcdef", 4)
     it("embeds one private factory and exposes only the persistent image creator", function()
         local image = "async function Module(options) { return options; }\n" ..
             "const wasm = new URL('app.wasm', import.meta.url);\nexport default Module;\n"
         local loader = "export function create(factory, options) { return {factory, options}; }\n"
-        local embedded = assert(browserlink.embed(image, loader, "app.wasm"))
+        local embedded = assert(browserlink.embed(image, loader, "app.wasm", IDENTITY))
         assert.truthy(embedded:find("async function Module(options)", 1, true))
         assert.truthy(embedded:find("new URL('app.wasm', import.meta.url)", 1, true))
-        assert.truthy(embedded:find('new URL("app.wasm.map", import.meta.url)', 1, true))
+        assert.truthy(embedded:find('new URL("app.wasm.trace", import.meta.url)', 1, true))
         assert.truthy(embedded:find("options.locateFile ??", 1, true))
         assert.truthy(embedded:find("export default function create(options = {})", 1, true))
         assert.is_nil(embedded:find("export default Module", 1, true))
@@ -207,7 +208,7 @@ describe("browser image profile and SDK readiness", function()
             "\nexport default First;\nexport default Module;\n",
             "\nexport default function Module() {}\n",
         }) do
-            local embedded, err = browserlink.embed(image, loader, "app.wasm")
+            local embedded, err = browserlink.embed(image, loader, "app.wasm", IDENTITY)
             assert.is_nil(embedded)
             assert.equal("browser image has no unique default factory export", err)
         end
@@ -216,12 +217,144 @@ describe("browser image profile and SDK readiness", function()
             "export function create() {}\nexport const module = {};\n",
             "import runtime from './runtime.mjs';\nexport function create() {}\n",
         }) do
-            local embedded, err = browserlink.embed("\nexport default Module;\n", source, "app.wasm")
+            local embedded, err = browserlink.embed("\nexport default Module;\n", source, "app.wasm", IDENTITY)
             assert.is_nil(embedded)
             assert.equal("browser loader has an unsupported module surface", err)
         end
-        local embedded = assert(browserlink.embed("\nexport default Module;\n", loader, 'a"b\n.wasm'))
+        for _, identity in ipairs({ IDENTITY:upper(), IDENTITY:sub(2), IDENTITY .. "0", "" }) do
+            local embedded, err = browserlink.embed("\nexport default Module;\n", loader, "app.wasm", identity)
+            assert.is_nil(embedded)
+            assert.equal("browser image identity must be 64 lowercase hexadecimal digits", err)
+        end
+        local embedded = assert(browserlink.embed("\nexport default Module;\n", loader, 'a"b\n.wasm', IDENTITY))
         assert.truthy(embedded:find('a\\u0022b\\u000a.wasm', 1, true))
+    end)
+
+    it("rewrites the pinned Node shell to process.getBuiltinModule in every printed form", function()
+        local loader = "export function create(factory, options) { return options; }\n"
+        for _, shell in ipairs({
+            -- As Emscripten 6.0.13 prints it unoptimized, at -O2, at -Os or -O3,
+            -- and without -g2.
+            "if (ENVIRONMENT_IS_NODE) {\n" ..
+            "  // We need to use `createRequire()` to construct the require()` function.\n" ..
+            "  const { createRequire } = await import('node:module');\n" ..
+            "  /** @suppress{duplicate} */\n" ..
+            "  var require = createRequire(import.meta.url);\n}\n" ..
+            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require('node:fs');\n" ..
+            "  scriptDirectory = require('node:path').dirname(require('node:url').fileURLToPath(_scriptName)) + '/';\n}\n",
+            "if (ENVIRONMENT_IS_NODE) {\n" ..
+            "  const {createRequire} = await (import(\"node:module\"));\n" ..
+            "  /** @suppress{duplicate} */ var require = createRequire(import.meta.url);\n}\n" ..
+            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require(\"node:fs\");\n" ..
+            "  scriptDirectory = require(\"node:path\").dirname(require(\"node:url\").fileURLToPath(_scriptName)) + \"/\";\n}\n",
+            "if (ENVIRONMENT_IS_NODE) {\n" ..
+            "  const {createRequire} = await ((import(\"node:module\")));\n" ..
+            "  /** @suppress{duplicate} */ var require = createRequire(import.meta.url);\n}\n" ..
+            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require(\"node:fs\");\n" ..
+            "  scriptDirectory = require(\"node:path\").dirname(require(\"node:url\").fileURLToPath(_scriptName)) + \"/\";\n}\n",
+            "if(ENVIRONMENT_IS_NODE){const{createRequire}=await(import(\"node:module\"));" ..
+            "var require=createRequire(import.meta.url)}if(ENVIRONMENT_IS_NODE){var fs=require(\"node:fs\");" ..
+            "if(_scriptName.startsWith(\"file:\"))scriptDirectory=require(\"node:path\")" ..
+            ".dirname(require(\"node:url\").fileURLToPath(_scriptName))+\"/\"}\n",
+        }) do
+            local embedded = assert(browserlink.embed(shell .. "\nexport default Module;\n", loader,
+                "app.wasm", IDENTITY))
+            assert.is_nil(embedded:find("= createRequire(", 1, true))
+            assert.is_nil(embedded:find("import(", 1, true))
+            assert.is_nil(embedded:find("node:", 1, true))
+            local quote = shell:find('"node:fs"', 1, true) and '"' or "'"
+            assert.truthy(embedded:find("var fs = process.getBuiltinModule(" .. quote .. "fs" .. quote .. ");",
+                1, true))
+            assert.truthy(embedded:find("process.getBuiltinModule(" .. quote .. "path" .. quote ..
+                ").dirname(process.getBuiltinModule(" .. quote .. "url" .. quote ..
+                ").fileURLToPath(_scriptName))", 1, true))
+        end
+    end)
+
+    it("refuses a Node shell that it recognizes only in part", function()
+        local loader = "export function create(factory, options) { return options; }\n"
+        -- An unrecognized printing of one statement would leave its `require`.
+        local shell = "if (ENVIRONMENT_IS_NODE) {\n" ..
+            "  const { createRequire } = await import('node:module');\n" ..
+            "  var require = createRequire((import.meta.url));\n}\n" ..
+            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require('node:fs');\n" ..
+            "  scriptDirectory = require('node:path').dirname(require('node:url').fileURLToPath(_scriptName)) + '/';\n}\n"
+        local embedded, err = browserlink.embed(shell .. "\nexport default Module;\n", loader, "app.wasm", IDENTITY)
+        assert.is_nil(embedded)
+        assert.equal("browser image has an unrecognized Emscripten Node shell", err)
+    end)
+
+    it("refuses every way a module loads another and accepts look-alike prose", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local context = { io = compiler_io.new_sync() }
+        local tools = { location = require("titan-compiler.path").dirname(info.tools.cc[1]) }
+        local checker = repository .. "/titan-runtime/browser/titan-browser-module-check.mjs"
+        local module = workspace .. "/module.mjs"
+        local function check(body)
+            files.write(module, "async function Module(options) { return options; }\n" .. body ..
+                "\nexport default function create() {}\n")
+            return browserlink.check_module(context, tools, checker, module)
+        end
+        local bridge = "pass page JavaScript to Titan as create({bindings}) values through titan.browser"
+        local self_contained = "the image module is self-contained; " .. bridge
+        local no_node = "browser images load no Node module; " .. bridge
+        local builtin = 'uses getBuiltinModule beyond the shell\'s "fs", "path" and "url" calls'
+        for _, case in ipairs({
+            -- A postfix operator, a statement header and a block before `/`
+            -- decide between division and a regular expression.
+            { "let a = 1, b = 2, x = a++ / b; require('fs'); let q = a / b;", "uses require at line 2 (require)", no_node },
+            { "if (a) /'/.test(b); import('node:fs'); if (b) /'/.test(a);",
+                "uses dynamic import() at line 2 (import('node:fs'))", self_contained },
+            { "if (a) { b() }\n/'/.test(a); require('fs');", "uses require at line 3 (require)", no_node },
+            { "const s = 'a\\\r\nb'; require('fs');", "uses require at line 3 (require)", no_node },
+            -- Escaped specifiers name the same module.
+            { 'import("\\x6eode:fs");', 'uses dynamic import() at line 2 (import("\\x6eode:fs"))', self_contained },
+            { 'import("\\u{6e}ode:fs");', 'uses dynamic import() at line 2 (import("\\u{6e}ode:fs"))', self_contained },
+            { 'import("node\\:fs");', 'uses dynamic import() at line 2 (import("node\\:fs"))', self_contained },
+            { "import(`\\x6eode:${name}`);", "uses dynamic import() at line 2 (import(`\\x6eode:${name}`))", self_contained },
+            { "import('./page.mjs');", "uses dynamic import() at line 2 (import('./page.mjs'))", self_contained },
+            -- Every spelling of a call through `require`, and an alias.
+            { "(require)('fs');", "uses require at line 2 (require)", no_node },
+            { "(0, require)('fs');", "uses require at line 2 (require)", no_node },
+            { "require?.('fs');", "uses require at line 2 (require)", no_node },
+            { "require`fs`;", "uses require at line 2 (require)", no_node },
+            { "const load = require; load('fs');", "uses require at line 2 (require)", no_node },
+            { "(module.require)('node:fs');", "reads require at line 2 (module.require)", no_node },
+            { "module['require']('fs');", "reads require at line 2 (module['require'])", no_node },
+            { "const { require: load } = module;", "reads require at line 2 (require: load)", no_node },
+            { "process.getBuiltinModule('os');", builtin .. " at line 2 (process.getBuiltinModule('os'))", no_node },
+            { "process.getBuiltinModule('node:fs');",
+                builtin .. " at line 2 (process.getBuiltinModule('node:fs'))", no_node },
+            { "process.getBuiltinModule(name);", builtin .. " at line 2 (process.getBuiltinModule(name))", no_node },
+            { "const get = process.getBuiltinModule; get('fs');",
+                builtin .. " at line 2 (process.getBuiltinModule)", no_node },
+            { "const { getBuiltinModule } = process;", builtin .. " at line 2 (getBuiltinModule)", no_node },
+            { "import fs from 'node:fs';", "imports \"node:fs\" at line 2 (import fs from 'node:fs';)", self_contained },
+            { "import './page.mjs';", "imports \"./page.mjs\" at line 2 (import './page.mjs';)", self_contained },
+            { "export * from './page.mjs';", "re-exports from \"./page.mjs\" at line 2 (export * from './page.mjs';)",
+                self_contained },
+            { "export { value } from './page.mjs';",
+                "re-exports from \"./page.mjs\" at line 2 (export { value } from './page.mjs';)", self_contained },
+        }) do
+            local ok, err = check(case[1])
+            assert.is_nil(ok, case[1])
+            assert.equal("browser image module " .. case[2] .. "; " .. case[3], err)
+        end
+        local ok, err = check("const broken = 'node")
+        assert.is_nil(ok)
+        assert.equal("browser image module does not parse as an ES module: Unterminated string constant (2:15)", err)
+        assert.is_true(check(table.concat({
+            "// We need `createRequire()` to construct the require() function; import('node:fs').",
+            "/* const fs = await import('node:fs'); require('fs'); */",
+            "const help = 'pass require(\"node:fs\") nothing', ratio = total / 2 / count;",
+            "const options = { require: false, requireTrace: true }, more = options.requires;",
+            "const quote = /['\"`]/g, text = `a ${ {b: '}'}.b } c`;",
+            "here: for (;;) break here;",
+            "const url = new URL('app.wasm', import.meta.url);",
+            "var fs = process.getBuiltinModule('fs');",
+            "var directory = process.getBuiltinModule(\"path\").dirname(process.getBuiltinModule(\"url\").fileURLToPath(url));",
+        }, "\n")))
     end)
 
     it("derives the closed SDK asset set without extending BrowserPaths", function()
@@ -232,8 +365,9 @@ describe("browser image profile and SDK readiness", function()
         local keys = {}
         for key in pairs(assets) do keys[#keys + 1] = key end
         table.sort(keys)
-        assert.same({ "bridge_library", "js_library", "loader", "lpeglabel", "node_worker", "page", "provider",
-            "runner", "runner_module", "runtime", "sdk_digests", "trace_library" }, keys)
+        assert.same({ "bridge_library", "build_profile", "js_library", "loader", "lpeglabel", "module_check",
+            "node_worker", "page", "provider", "runner", "runner_module", "runtime", "sdk_digests", "trace_library" },
+            keys)
     end)
 
     it("requires only readable runtime and JS assets, in bootstrap order", function()
@@ -242,10 +376,12 @@ describe("browser image profile and SDK readiness", function()
         local present = {}
         local context = { io = {
             stat = function(_, filename) return present[filename] and { kind = "file" } end,
-            read_file = function(_, filename) return present[filename] and "bytes" end,
+            read_file = function(_, filename)
+                return present[filename] and (filename == assets.build_profile and descriptor.build_profile .. "\n" or "bytes")
+            end,
         } }
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page" }) do
+                "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
@@ -289,7 +425,7 @@ describe("browser image profile and SDK readiness", function()
             "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
+            "-sMIN_NODE_VERSION=260000", "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
                 '"_titan_browser_release_callable","_titan_browser_close",' ..
                 '"_malloc","_free","_titan_browser_trace_identity"]',
@@ -319,7 +455,7 @@ describe("browser image profile and SDK readiness", function()
             "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
+            "-sMIN_NODE_VERSION=260000", "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
                 '"_titan_browser_release_callable","_titan_browser_close",' ..
                 '"_malloc","_free","_titan_browser_trace_identity"]',
@@ -525,7 +661,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({ "-Wl,--trace" }, policy.argv)
     end)
 
-    it("owns the browser artifact triple at final validation even on a Darwin host", function()
+    it("owns the browser artifact set at final validation even on a Darwin host", function()
         local root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
         local previous = driver.IS_DARWIN
         local cleanup <close> = setmetatable({}, { __close = function()
@@ -538,12 +674,12 @@ describe("browser image profile and SDK readiness", function()
         local dsym, entrypoint = executable .. ".dSYM", root .. "/entrypoint.c"
         files.write(dsym, "unrelated user file")
         local ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
-            { dsym }, { wasm, wasm .. ".map" }, {}, context)
+            { dsym }, { wasm, wasm .. ".map", wasm .. ".trace" }, {}, context)
         assert.is_true(ok, why)
         assert.equal("unrelated user file", read(dsym))
-        for _, input in ipairs({ wasm, wasm .. ".map" }) do
+        for _, input in ipairs({ wasm, wasm .. ".map", wasm .. ".trace" }) do
             ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
-                { input }, { wasm, wasm .. ".map" }, {}, context)
+                { input }, { wasm, wasm .. ".map", wasm .. ".trace" }, {}, context)
             assert.is_nil(ok)
             assert.truthy(why:find("aliases input", 1, true), why)
         end
@@ -558,6 +694,23 @@ describe("browser image profile and SDK readiness", function()
             { header }, { wasm }, {}, context)
         assert.is_true(ok, why)
         assert.equal("/* user header */", read(header))
+    end)
+
+    it("refuses to link under a build profile other than the SDK's", function()
+        local info, why = toolchain.require({ sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/plain.titan", "function main(args: {string}): integer\n    return 0\nend\n")
+        local sdk = read(info.sdk_root .. "/build-profile"):match("^(%l+)\n$")
+        local other = sdk == "production" and "validation" or "production"
+        local result = cli({ prefix = info.prefix, profile = other }, "plain")
+        assert.is_false(result.ok, "a link under another profile was accepted")
+        local log = result.output or result.diagnostic or ""
+        -- The SDK path is the descriptor's spelling of the installation root.
+        assert.truthy(log:find(string.format("/lib/titan-browser/0.6\" was built with the %s profile, but this build " ..
+            "uses %s; set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
+            "'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", sdk, other, sdk, other, other), 1, true), log)
+        assert.is_nil(lfs.attributes(workspace .. "/out/plain.mjs"))
     end)
 
     it("refuses a preset link profile that names no purpose", function()
@@ -593,6 +746,8 @@ describe("browser image profile and SDK readiness", function()
             -- cases run the ordinary build and stop at the ownership check.
             { arguments = { "plain", "--ldflag=-O3" }, expected = link .. "-O3" },
             { arguments = { "plain", "--ldflag=-fno-optimize-sibling-calls" }, expected = link .. "-fno-optimize-sibling-calls" },
+            { arguments = { "plain", "--ldflag=--pre-js=pre.js" }, expected = "browser " .. profile ..
+                " link profile does not accept --pre-js; add JavaScript with EM_JS or EM_ASM in a --c-source helper" },
         }) do
             local result = cli({ prefix = info.prefix, extra_cflags = case.extra_cflags },
                 table.unpack(case.arguments))
@@ -604,6 +759,24 @@ describe("browser image profile and SDK readiness", function()
         end
     end)
 
+    it("refuses link options whose files the image identity does not record", function()
+        local javascript = "add JavaScript with EM_JS or EM_ASM in a --c-source helper"
+        for _, case in ipairs({
+            { { "--pre-js", "pre.js" }, "--pre-js; " .. javascript },
+            { { "--post-js=post.js" }, "--post-js; " .. javascript },
+            { { "-lm", "--extern-pre-js", "pre.js" }, "--extern-pre-js; " .. javascript },
+            { { "--extern-post-js=post.js" }, "--extern-post-js; " .. javascript },
+            { { "--js-transform", "cat" }, "--js-transform; the generated module is Titan's" },
+            { { "--embed-file", "data" }, "--embed-file; browser images have no filesystem" },
+            { { "--preload-file=data" }, "--preload-file; browser images have no filesystem" },
+            { { "--exclude-file", "*.tmp" }, "--exclude-file; browser images have no filesystem" },
+        }) do
+            local ok, err = browserlink.validate_extras(case[1], nil, "production")
+            assert.is_nil(ok)
+            assert.equal("browser production link profile does not accept " .. case[2], err)
+        end
+    end)
+
     it("rejects trailing attempts to override profile-owned settings", function()
         for _, flags in ipairs({ { "-sASYNCIFY=0" }, { "-s", "ASYNCIFY_IGNORE_INDIRECT=1" },
             { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "-UTITAN_TARGET_BROWSER" }, { "-sNO_ASYNCIFY=1" },
@@ -611,6 +784,7 @@ describe("browser image profile and SDK readiness", function()
             { "-sJSPI_IMPORTS=[]" }, { "-DJSPI=0" }, { "-U", "JSPI_EXPORTS" },
             { "-sFORCE_FILESYSTEM=0" }, { "-sFILESYSTEM=0" }, { "-sMINIMAL_RUNTIME=1" },
             { "-sINITIAL_MEMORY=33554432" }, { "-sINITIAL_HEAP=33554432" },
+            { "-sMIN_NODE_VERSION=180300" }, { "-s", "MIN_NODE_VERSION=220000" },
             { "--js-library=x.js" }, { "--no-entry" } }) do
             assert.is_nil(browserlink.validate_extras(flags))
         end
@@ -806,6 +980,37 @@ describe("real browser test image", function()
         assert.is_nil(program_link:find("--skip-pass", 1, true), program_link)
     end)
 
+    -- Runs in both installations (CI's production cell selects it by name), so
+    -- each profile links a real image through the module check.
+    it("checks the linked module: accepts a real image and refuses an EM_JS import", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/checked.titan", "function main(args: {string}): integer\n    return #args\nend\n")
+        local helper = workspace .. "/helper.c"
+        local function link(body)
+            files.write(helper, "#include <emscripten.h>\nEM_JS(int, page_value, (void), {\n" .. body ..
+                "\n});\n__attribute__((constructor)) static void load(void) { page_value(); }\n")
+            return cli(info, "--c-source", helper, "checked")
+        end
+        local result = link("  import('./page.mjs');\n  return 1;")
+        assert.is_false(result.ok, "an EM_JS dynamic import was published")
+        local log = result.output or result.diagnostic or ""
+        assert.truthy(log:find("browser image module uses dynamic import() at line ", 1, true), log)
+        -- The diagnostic quotes the final module, whose string quotes the
+        -- profile's minifier may rewrite.
+        assert.truthy(log:find("%(import%((['\"])%./page%.mjs%1%)%); the image module is self%-contained; " ..
+            "pass page JavaScript to Titan as create%({bindings}%) values through titan%.browser"), log)
+        for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.trace", ".wasm.map" }) do
+            assert.is_nil(lfs.attributes(workspace .. "/out/checked" .. suffix), suffix)
+        end
+        result = link("  return globalThis.pageValue ?? 1;")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.trace", ".wasm.map" }) do
+            assert.equal("file", lfs.attributes(workspace .. "/out/checked" .. suffix, "mode"), suffix)
+        end
+    end)
+
     it("raises the five dynamic-provider guard diagnostics without native loader imports", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
@@ -839,6 +1044,9 @@ describe("real browser test image", function()
         for index, member in ipairs(runtime.members) do members[index] = member.display_name end
         assert.same({ "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }, members)
         assert.is_true(driver.validate_browser_provider(runtime))
+        -- Only objects and archives carry the compiler's metadata payloads.
+        local objdump = require("titan-compiler.path").join(
+            require("titan-compiler.path").dirname(info.tools.clang[1]), "llvm-objdump")
         for _, image in ipairs({ "image_main", "explicit-program" }) do
             assert.equal("file", lfs.attributes(workspace .. "/out/" .. image .. ".mjs", "mode"))
             local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/" .. image .. ".wasm")))
@@ -850,6 +1058,17 @@ describe("real browser test image", function()
             end
             assert.is_nil(exports.titan_browser_gate_guarded)
             assert.is_nil(exports.main)
+            local segments = run({ objdump, "-t", workspace .. "/out/" .. image .. ".wasm" })
+            assert.is_true(segments.ok, segments.output)
+            assert.truthy(segments.output:find(" DATA", 1, true), segments.output)
+            assert.is_nil(segments.output:find(".titan.", 1, true), segments.output)
+        end
+        local symbols = run({ objdump, "-t", workspace .. "/out/image_main.o" })
+        assert.is_true(symbols.ok, symbols.output)
+        local names = require("titan-compiler.coder.core").coder
+        for _, family in ipairs({ "titan_metadata", "titan_source" }) do
+            local symbol = names._linkage_symbol_name(names._private_symbol("image_main", family))
+            assert.truthy(symbols.output:find(symbol, 1, true), symbols.output)
         end
         local fixture = workspace .. "/out/program-results.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/program-results.mjs"))
@@ -858,6 +1077,36 @@ describe("real browser test image", function()
                 "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--",
                 "image_main.mjs", "explicit-program.mjs" })
             assert.is_true(result.ok, result.output or result.diagnostic)
+        end
+    end)
+
+    -- The payloads are external on Wasm. Their private names meet neither the
+    -- protocol functions of a module named titan_object_source (such as
+    -- titan_object_source_init) nor names that an authored C helper defines.
+    it("links modules and C helpers that spell ASCII metadata payload names", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/titan_object_source.titan", "function value(): integer\n    return 2\nend\n")
+        files.write(workspace .. "/src/init.titan", "function value(): integer\n    return 3\nend\n")
+        files.write(workspace .. "/src/app.titan", [[
+local source = import "titan_object_source"
+local init = import "init"
+function main(args: {string}): integer
+    return source.value() * init.value()
+end
+]])
+        files.write(workspace .. "/src/plain.titan", "function main(args: {string}): integer\n    return 7\nend\n")
+        local helper = workspace .. "/helper.c"
+        files.write(helper, "const unsigned char plain_titan_metadata[] = { 1 };\n" ..
+            "const unsigned char titan_object_source_plain[] = { 2 };\n")
+        for _, case in ipairs({ { "app", 6, {} }, { "plain", 7, { "--c-source", helper } } }) do
+            local name, status, options = case[1], case[2], case[3]
+            options[#options + 1] = name
+            local result = cli(info, table.unpack(options))
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            result = run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", workspace .. "/out/" .. name .. ".mjs" })
+            assert.equal(status, result.status, result.output or result.diagnostic)
         end
     end)
 

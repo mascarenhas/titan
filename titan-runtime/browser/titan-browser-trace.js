@@ -5,13 +5,9 @@ addToLibrary({
   $TitanBrowserTrace__postset: 'TitanBrowserTrace.install();',
   $TitanBrowserTrace: {
     index: null,
-    alphabet: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
     patterns: null,
 
     u32(value) { return Number.isInteger(value) && value >= 0 && value <= 0xffffffff; },
-    basename(path) { return path.replace(/\\/g, '/').split('/').pop() || '?'; },
-    // A frame names a `.titan` location or none.
-    titan(path) { return path.endsWith('.titan'); },
     upper(array, value) {
       var lo = 0, hi = array.length;
       while (lo < hi) {
@@ -22,105 +18,64 @@ addToLibrary({
       return lo - 1;
     },
 
-    buildIndex(map, identity) {
-      var self = TitanBrowserTrace;
-      if (!map || map.version !== 3 || !Array.isArray(map.sources) ||
-          !map.sources.every(x => typeof x === 'string') || map.sources.length > 0x7fffffff ||
-          !Array.isArray(map.names) || !map.names.every(x => typeof x === 'string') ||
-          typeof map.mappings !== 'string' || 'sections' in map ||
-          (map.file !== undefined && typeof map.file !== 'string') ||
-          (map.sourceRoot !== undefined && typeof map.sourceRoot !== 'string') ||
-          (map.sourcesContent !== undefined && (!Array.isArray(map.sourcesContent) ||
-            (map.sourcesContent.length !== 0 && map.sourcesContent.length !== map.sources.length) ||
-            !map.sourcesContent.every(x => x === null || typeof x === 'string')))) {
-        throw new Error('invalid standard trace map');
+    // The compiler validates the map and writes `<stem>.wasm.trace`; this
+    // checks only what the bytes could get wrong: the header, the image, the
+    // counts and every index. Layout: doc/implementation/browser-target.md#the-trace-table
+    readTable(data, identity) {
+      var invalid = function() { return new Error('invalid trace table'); };
+      if (data.byteOffset % 4) data = new Uint8Array(data);
+      if (data.byteLength < 92) throw invalid();
+      var view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      var word = function(at) { return view.getUint32(at, true); };
+      if (String.fromCharCode(data[0], data[1], data[2], data[3]) !== 'TTRC' || word(4) !== 1) throw invalid();
+      if (String.fromCharCode.apply(null, data.subarray(8, 72)) !== identity) {
+        throw new Error('trace table image does not match');
       }
-      var ranges = map.x_titan_function_ranges, names = map.x_titan_function_names;
-      var imports = map.x_titan_function_imports;
-      if (!/^[0-9a-f]{64}$/.test(map.x_titan_image) || map.x_titan_image !== identity ||
-          !self.u32(imports) || !Array.isArray(ranges) || !Array.isArray(names) ||
-          imports + ranges.length > 0xffffffff || names.length !== imports + ranges.length ||
-          !names.every(x => x === null || typeof x === 'string')) {
-        throw new Error('trace map image or extensions do not match');
-      }
-      var starts = new Uint32Array(ranges.length), ends = new Uint32Array(ranges.length);
-      var first = new Int32Array(ranges.length); first.fill(-1);
-      for (var i = 0; i < ranges.length; ++i) {
-        var row = ranges[i];
-        if (!Array.isArray(row) || row.length !== 2 || !self.u32(row[0]) ||
-            !self.u32(row[1]) || row[0] >= row[1] || (i && row[0] < ends[i - 1])) {
-          throw new Error('invalid trace function ranges');
-        }
-        starts[i] = row[0]; ends[i] = row[1];
-      }
-      // Two passes: validate/count first, then fill dense typed arrays directly.
-      // No object per segment and no source text retained in the resulting index.
-      var walk = function(visit) {
-        var cursor = 0, pc = 0, source = 0, line = 0, column = 0, name = 0, count = 0;
-        var text = map.mappings;
-        while (cursor < text.length) {
-          if (text[cursor] === ';') {
-            // A Wasm source map has one generated line (its columns are byte PCs).
-            if (/[^;]/.test(text.slice(cursor))) throw new Error('invalid generated trace line');
-            break;
-          }
-          var values = [];
-          while (cursor < text.length && text[cursor] !== ',' && text[cursor] !== ';') {
-            var value = 0, factor = 1, digit;
-            do {
-              if (cursor >= text.length) throw new Error('unfinished trace VLQ');
-              digit = self.alphabet.indexOf(text[cursor++]);
-              if (digit < 0) throw new Error('invalid trace VLQ');
-              value += (digit & 31) * factor;
-              if (!Number.isSafeInteger(value) || value > 0x1ffffffff) throw new Error('overflowing trace VLQ');
-              factor *= 32;
-              if ((digit & 32) && factor > 0x200000000) throw new Error('overflowing trace VLQ');
-            } while (digit & 32);
-            values.push((value % 2 ? -1 : 1) * Math.floor(value / 2));
-            if (values.length > 5) throw new Error('invalid trace segment');
-          }
-          if (values.length !== 1 && values.length !== 4 && values.length !== 5) throw new Error('invalid trace segment');
-          pc += values[0];
-          if (values[0] < 0 || !self.u32(pc)) throw new Error('unordered trace offsets');
-          var src = -1, original = 0;
-          if (values.length > 1) {
-            source += values[1]; line += values[2]; column += values[3];
-            if (!self.u32(source) || source >= map.sources.length || !self.u32(line) ||
-                line === 0xffffffff || !self.u32(column)) throw new Error('invalid trace source location');
-            if (values.length === 5) {
-              name += values[4];
-              if (!self.u32(name) || name >= map.names.length) throw new Error('invalid trace source name');
-            }
-            src = source; original = line + 1;
-          }
-          if (visit) visit(count, pc, src, original);
-          ++count;
-          if (text[cursor] === ',') {
-            ++cursor;
-            if (cursor === text.length || text[cursor] === ',' || text[cursor] === ';') throw new Error('empty trace segment');
-          }
-        }
-        return count;
+      var imports = word(72), count = word(76), rows = word(80), bases = word(84), text = word(88);
+      var strings = bases + imports + count + 1;
+      if (92 + 4 * (2 * count + 2 * rows + strings) + 2 * (rows + count) + text !== data.byteLength) throw invalid();
+      var at = data.byteOffset + 92;
+      var array = function(Type, length) {
+        var result = new Type(data.buffer, at, length);
+        at += result.byteLength;
+        return result;
       };
-      var count = walk(null);
-      var pcs = new Uint32Array(count), sources = new Int32Array(count), lines = new Uint32Array(count);
-      // A body is declared in its first `.titan` source: C that is inlined
-      // into a Titan body, even before its first statement, declares nothing.
-      var titan = map.sources.map(path => self.titan(path));
-      walk(function(i, pc, source, line) {
-        pcs[i] = pc; sources[i] = source; lines[i] = line;
-        var body = self.upper(starts, pc);
-        if (source >= 0 && titan[source] && body >= 0 && pc < ends[body] && first[body] < 0) first[body] = source;
-      });
-      return { pcs, sources, lines, starts, ends, first, imports,
-        names: names.slice(), bases: map.sources.map(self.basename),
-        bytes: pcs.byteLength + sources.byteLength + lines.byteLength + starts.byteLength + ends.byteLength + first.byteLength };
+      var gaps = array(Uint32Array, count), lengths = array(Uint32Array, count);
+      var pcDeltas = array(Uint32Array, rows), lineDeltas = array(Uint32Array, rows);
+      var offsets = array(Uint32Array, strings), sources = array(Int16Array, rows), first = array(Int16Array, count);
+      var bytes = array(Uint8Array, text);
+      var starts = new Uint32Array(count), ends = new Uint32Array(count), end = 0;
+      for (var i = 0; i < count; ++i) {
+        var start = end + gaps[i];
+        end = start + lengths[i];
+        if (!lengths[i] || end > 0xffffffff || first[i] < -1 || first[i] >= bases) throw invalid();
+        starts[i] = start; ends[i] = end;
+      }
+      var pcs = new Uint32Array(rows), lines = new Uint32Array(rows), pc = 0, line = 0;
+      for (var r = 0; r < rows; ++r) {
+        pc += pcDeltas[r];
+        line = (line + lineDeltas[r]) >>> 0;
+        // Rows strictly ascend, and a `.titan` row names a line.
+        if (pc > 0xffffffff || (r > 0 && !pcDeltas[r]) || sources[r] < -1 || sources[r] >= bases ||
+            (sources[r] >= 0 && line === 0)) throw invalid();
+        pcs[r] = pc; lines[r] = line;
+      }
+      if (offsets[0] !== 0 || offsets[strings - 1] !== text) throw invalid();
+      for (var s = 1; s < strings; ++s) if (offsets[s] < offsets[s - 1]) throw invalid();
+      var decoder = new TextDecoder();
+      var string = function(index) { return decoder.decode(bytes.subarray(offsets[index], offsets[index + 1])); };
+      var names = [];
+      for (var b = 0; b < bases; ++b) names.push(string(b));
+      return {pcs, sources, lines, starts, ends, first, imports, count: imports + count, bases: names,
+        // Decoded on demand: only traced frames need their function names.
+        name: function(index) { return string(bases + index); },
+        bytes: data.byteLength + pcs.byteLength + lines.byteLength + starts.byteLength + ends.byteLength};
     },
 
     lookup(pc, index, flags) {
       var self = TitanBrowserTrace, map = self.index;
       var body = -1, known = -1;
-      if ((flags & 2) && self.u32(index) && index < map.names.length) known = index;
+      if ((flags & 2) && self.u32(index) && index < map.count) known = index;
       if ((flags & 1) && self.u32(pc)) {
         body = self.upper(map.starts, pc);
         if (body < 0 || pc >= map.ends[body]) body = -1;
@@ -129,15 +84,14 @@ addToLibrary({
       var declared = known - map.imports;
       var base = declared >= 0 && declared < map.first.length && map.first[declared] >= 0
         ? map.bases[map.first[declared]] : '?';
-      var symbol = known >= 0 ? map.names[known] || '?' : '?';
+      var symbol = known >= 0 ? map.name(known) || '?' : '?';
       var line = 0;
       if (body >= 0 && (!(flags & 2) || index === map.imports + body)) {
         var segment = self.upper(map.pcs, pc);
-        // Only a `.titan` segment locates the frame. A PC in C that was
-        // inlined into the body keeps the declaring basename and no line.
+        // Only a `.titan` row locates the frame. A PC in a gap, such as C
+        // inlined into the body, keeps the declaring basename and no line.
         if (segment >= 0 && map.pcs[segment] >= map.starts[body] &&
-            map.pcs[segment] < map.ends[body] && map.sources[segment] >= 0 &&
-            self.titan(map.bases[map.sources[segment]])) {
+            map.pcs[segment] < map.ends[body] && map.sources[segment] >= 0) {
           base = map.bases[map.sources[segment]]; line = map.lines[segment];
         }
       }
@@ -273,30 +227,29 @@ addToLibrary({
         /^.*?@.*?wasm-function\[(\d+)\]\s*$/,
       ];
       addOnPreRun(function() {
-        addRunDependency('titan-trace-map');
+        addRunDependency('titan-trace-table');
         var start = performance.now(), bytes = 0;
         Promise.resolve().then(async function() {
-          var path = locateFile('{{{ WASM_BINARY_FILE }}}.map');
+          var path = locateFile('{{{ WASM_BINARY_FILE }}}.trace');
           var data;
           if (ENVIRONMENT_IS_NODE) data = readBinary(path);
           else {
             var response = await fetch(path, {credentials: 'same-origin'});
-            if (!response.ok) throw new Error('trace map request failed (' + response.status + ')');
+            if (!response.ok) throw new Error('trace table request failed (' + response.status + ')');
             data = new Uint8Array(await response.arrayBuffer());
           }
           bytes = data.byteLength;
-          var map = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(data));
           var identity = UTF8ToString(wasmExports['titan_browser_trace_identity']());
-          TitanBrowserTrace.index = TitanBrowserTrace.buildIndex(map, identity);
-          Module['titanBrowserTrace'] = {state: 'ready', reason: null, mapBytes: bytes,
+          TitanBrowserTrace.index = TitanBrowserTrace.readTable(data, identity);
+          Module['titanBrowserTrace'] = {state: 'ready', reason: null, traceBytes: bytes,
             loadMilliseconds: performance.now() - start, indexBytes: TitanBrowserTrace.index.bytes};
         }).catch(function(cause) {
           TitanBrowserTrace.index = null;
           var reason = cause instanceof Error ? cause.message : String(cause);
-          Module['titanBrowserTrace'] = {state: 'degraded', reason, mapBytes: bytes,
+          Module['titanBrowserTrace'] = {state: 'degraded', reason, traceBytes: bytes,
             loadMilliseconds: performance.now() - start, indexBytes: 0};
           console.warn('Titan browser trace: ' + reason);
-        }).finally(function() { removeRunDependency('titan-trace-map'); });
+        }).finally(function() { removeRunDependency('titan-trace-table'); });
       });
     },
   },

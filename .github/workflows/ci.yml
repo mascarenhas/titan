@@ -478,9 +478,11 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs \
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs absent-modules sdk-digests; do
+              titan-browser-node-worker.mjs titan-browser-page.mjs titan-browser-module-check.mjs \
+              titan-protobuf.mjs build-profile absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
+          test "$(cat "$PREFIX/lib/titan-browser/0.6/build-profile")" = "$TITAN_BUILD_PROFILE"
 
       - name: Run the browser real-toolchain gate
         env:
@@ -544,7 +546,10 @@ jobs:
             test -f "$output/$image.mjs"
             test -f "$output/$image.wasm"
             test -f "$output/$image.wasm.map"
+            test -f "$output/$image.wasm.trace"
           done
+          "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry \
+            "$output/runner_image.wasm" "$output/runner_status.wasm"
 
       # The loader suite takes image paths relative to --root, so every fixture
       # is built into one isolated root: loader_app and fidelity as programs,
@@ -575,6 +580,7 @@ jobs:
               test -f "$output/$image.mjs"
               test -f "$output/$image.wasm"
               test -f "$output/$image.wasm.map"
+              test -f "$output/$image.wasm.trace"
             done
           done
           # Exercise the guard in an optimized, assertions-off measurement
@@ -594,6 +600,12 @@ jobs:
           test -f "$optimized/fidelity.mjs"
           test -f "$optimized/fidelity.wasm"
           test -f "$optimized/fidelity.wasm.map"
+          test -f "$optimized/fidelity.wasm.trace"
+          "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry \
+            "$root"/assertions-*/loader_names.wasm
+          "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry,fixture:loader,fixture:controls \
+            "$root"/assertions-*/loader_app.wasm "$root"/assertions-*/fidelity.wasm \
+            "$optimized/fidelity.wasm"
 
       - name: Run the portable loader suite under Node and Chromium
         run: |
@@ -971,9 +983,11 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs \
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs absent-modules sdk-digests; do
+              titan-browser-node-worker.mjs titan-browser-page.mjs titan-browser-module-check.mjs \
+              titan-protobuf.mjs build-profile absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
+          test "$(cat "$PREFIX/lib/titan-browser/0.6/build-profile")" = "$TITAN_BUILD_PROFILE"
 
       - name: Run complete browser core stdlib suite under Node and Chromium
         if: matrix.stdlib-suite
@@ -1031,6 +1045,7 @@ jobs:
             out/browser-stdlib/images/*.mjs
             out/browser-stdlib/images/*.wasm
             out/browser-stdlib/images/*.wasm.map
+            out/browser-stdlib/images/*.wasm.trace
             out/browser-stdlib/*roots.txt
             out/browser-stdlib/members.md
             out/browser-net/**
@@ -1075,6 +1090,7 @@ jobs:
       TITAN_TRACE_OUTPUT: ${{ github.workspace }}/out/browser/trace-${{ matrix.profile }}-${{ matrix.engine }}
       TITAN_BRIDGE_OUTPUT: ${{ github.workspace }}/out/browser/bridge-${{ matrix.profile }}-${{ matrix.engine }}
       TITAN_NET_OUTPUT: ${{ github.workspace }}/out/browser-net
+      TITAN_DELIVERY_OUTPUT: ${{ github.workspace }}/out/browser-delivery
 
     steps:
       - uses: actions/checkout@v6
@@ -1168,6 +1184,7 @@ jobs:
           make browser-sdk PREFIX="$PREFIX"
           test -f "$PREFIX/lib/titan-browser/0.6/titan-browser-trace.js"
           test -f "$PREFIX/lib/titan-browser/0.6/titan-browser-bridge.js"
+          test "$(cat "$PREFIX/lib/titan-browser/0.6/build-profile")" = "$TITAN_BUILD_PROFILE"
 
       - name: Restore Playwright-managed browsers
         uses: ubicloud/cache@v4
@@ -1319,6 +1336,35 @@ jobs:
           }
           JS
 
+      # The browser chapter's complete application, built by the commands its
+      # section documents in this cell's profile, then served by the documented
+      # http-dev-server to a page in this engine with nothing else involved.
+      - name: Build the browser chapter's complete application and its server
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          lua -E spec/browser/build-delivery.lua "$TITAN_DELIVERY_OUTPUT" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery-build.log"
+
+      - name: Run the complete application's hosted deployment test
+        run: |
+          set -euo pipefail
+          records=()
+          if [ "$TITAN_BUILD_PROFILE" = production ]; then
+            records=(--records "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json")
+          fi
+          "$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE" \
+            --root "$TITAN_DELIVERY_OUTPUT" "${records[@]}" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery.log"
+
+      - name: Run the complete application under Node
+        if: matrix.engine == 'chromium'
+        run: |
+          set -euo pipefail
+          "$PREFIX/lib/titan-browser/0.6/titan-browser-run" --engine node --timeout 120000 \
+            --root "$TITAN_DELIVERY_OUTPUT" --js-test "$TITAN_DELIVERY_OUTPUT/dod.test.mjs" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery-node.log"
+
       - name: Install the pinned Vite deployment dependency
         if: matrix.engine == 'chromium'
         run: |
@@ -1326,7 +1372,7 @@ jobs:
           PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT" --no-save \
             --package-lock=false --no-audit --no-fund "vite@$TITAN_VITE_VERSION"
 
-      - name: Run self-contained HTTP and Vite deployment gate
+      - name: Run the browser chapter's documented page, server and Vite examples
         if: matrix.engine == 'chromium'
         env:
           TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
@@ -1335,13 +1381,15 @@ jobs:
         run: |
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_deployment_spec.lua \
-            2>&1 | tee "$RUNNER_TEMP/browser-playwright-deployment.log"
+          "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_docs_spec.lua \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-docs.log"
 
       # A validation install cannot stand in for a production one: the
       # descriptor and SDK identity would disagree. This cell already owns a
       # production prefix, so the profile-dependent pins run here and nowhere
-      # else, and are `pending` in every validation run by design.
+      # else, and are `pending` in every validation run by design. The module
+      # check case runs in both installations, so each profile links a real
+      # image through it.
       - name: Run the production-only browser pins
         if: matrix.profile == 'production' && matrix.engine == 'chromium'
         env:
@@ -1351,7 +1399,7 @@ jobs:
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
           "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua \
-            --filter="keeps frame flags on test owners" \
+            --filter="keeps frame flags on test owners" --filter="checks the linked module" \
             2>&1 | tee "$RUNNER_TEMP/browser-production-pins.log"
 
       # Node is the binding engine for the C-call limit, and the other Node
@@ -1389,6 +1437,33 @@ jobs:
             --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-degraded.log"
 
+      # Measurements only: recursion depth is engine-specific, so the
+      # production Firefox and WebKit cells add their engine to the Node and
+      # Chromium records of browser-packaging. Never fails on the numbers.
+      - name: Record memory, Task scaling and recursion depth on the managed engine
+        if: matrix.profile == 'production' && matrix.engine != 'chromium'
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          lua -E spec/browser/build-records.lua "$RUNNER_TEMP/browser-records" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-records-build.log"
+          "$TITAN_NODE" spec/fixtures/browser_records/collect.mjs --sdk "$PREFIX/lib/titan-browser/0.6" \
+            --images "$RUNNER_TEMP/browser-records" --engines "$TITAN_TRACE_ENGINE" --measure memory,recursion \
+            --out "$PWD/out/browser-records/records-$TITAN_TRACE_ENGINE.json" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-records.log"
+
+      # The complete browser core stdlib image on this cell's engine. The step
+      # runs last, so that failing cases leave every earlier gate's receipts;
+      # the image runs every case and the audit reports each failure.
+      - name: Run the complete browser core stdlib suite on the managed engine
+        if: matrix.profile == 'validation'
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE" \
+            TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs --image --sdk \"$PREFIX/lib/titan-browser/0.6\"" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-stdlib.log"
+
       - name: Upload Playwright trace receipts
         if: always()
         uses: actions/upload-artifact@v7
@@ -1400,7 +1475,168 @@ jobs:
             ${{ env.TITAN_TRACE_OUTPUT }}
             ${{ env.TITAN_BRIDGE_OUTPUT }}
             ${{ env.TITAN_NET_OUTPUT }}
+            ${{ env.TITAN_DELIVERY_OUTPUT }}/delivery.json
+            ${{ env.TITAN_DELIVERY_OUTPUT }}/browser-app/site
+            out/browser-stdlib/*.log
           if-no-files-found: error
+          retention-days: 7
+
+      # Measurements only: the hosted test fails on harness errors, never on
+      # these numbers.
+      - name: Upload browser records
+        if: always() && matrix.profile == 'production'
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-records-playwright-${{ matrix.engine }}
+          path: out/browser-records/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # A new user's installation from a fresh clone of this commit, with no
+  # prepared tree, cache of Titan outputs or Titan variable: the installation
+  # and browser chapters' marked commands, run in order by doc_check, with the
+  # clone moved away before the browser chapter. Then the complete application
+  # under Node and in Chromium, and the release-profile records.
+  browser-packaging:
+    name: browser packaging, clean checkout and records (ubuntu-24.04, emsdk 6.0.13, Node 26, Playwright 1.64.1 Chromium)
+    if: github.event_name == 'push'
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      MAKEFLAGS: "-j4"
+      TITAN_JOBS: "4"
+      TITAN_EMSDK_VERSION: "6.0.13"
+      TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
+      TITAN_NODE_VERSION: "26.13.0"
+      TITAN_PLAYWRIGHT_VERSION: "1.64.1"
+      TITAN_PLAYWRIGHT_ROOT: ${{ github.workspace }}/out/playwright-tools
+      TITAN_VITE_VERSION: "8.3.6"
+      TITAN_VITE_ROOT: ${{ github.workspace }}/out/vite-tools
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # The installation chapter's Ubuntu packages, and a Lua for doc_check,
+      # which runs before the clone has built its own.
+      - name: Install the documented Ubuntu packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake curl git libreadline-dev libssl-dev pkg-config lua5.4
+
+      - name: Restore the pinned Emscripten SDK
+        uses: ubicloud/cache@v4
+        with:
+          path: ${{ github.workspace }}/.emsdk
+          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
+
+      - name: Install Emscripten
+        run: |
+          set -euo pipefail
+          if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
+            git -C "$GITHUB_WORKSPACE" clone --depth 1 \
+              https://github.com/emscripten-core/emsdk.git "$TITAN_EMSDK_ROOT"
+          fi
+          "$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"
+          "$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          emcc --version | grep -q " $TITAN_EMSDK_VERSION "
+
+      - name: Install the pinned Node 26 runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.TITAN_NODE_VERSION }}
+
+      - name: Select and qualify Node 26
+        run: |
+          node_bin=$(command -v node)
+          version=$("$node_bin" --version)
+          test "$version" = "v$TITAN_NODE_VERSION"
+          "$node_bin" -e 'if (typeof WebAssembly.promising !== "function" || typeof WebAssembly.Suspending !== "function") throw new Error("Node requires unflagged JSPI")'
+          echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"
+          "$node_bin" --version
+
+      - name: Restore Playwright-managed browsers
+        uses: ubicloud/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ubuntu-24.04-${{ runner.arch }}-playwright-${{ env.TITAN_PLAYWRIGHT_VERSION }}-chromium-v1
+
+      - name: Install the pinned Playwright Chromium and Vite
+        run: |
+          set -euo pipefail
+          npm install --prefix "$TITAN_PLAYWRIGHT_ROOT" --no-save \
+            --package-lock=false --no-audit --no-fund \
+            "playwright@$TITAN_PLAYWRIGHT_VERSION"
+          "$TITAN_NODE" "$TITAN_PLAYWRIGHT_ROOT/node_modules/playwright/cli.js" \
+            install --with-deps chromium
+          PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT" --no-save \
+            --package-lock=false --no-audit --no-fund "vite@$TITAN_VITE_VERSION"
+
+      # The browser chapter assumes Emscripten active and Node 26 on PATH,
+      # ahead of emsdk's bundled Node.
+      - name: Install from a fresh clone and build exactly as the manuals document
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export PATH="${TITAN_NODE%/*}:$PATH"
+          lua5.4 scripts/doc_check.lua --clean-checkout --workspace "$RUNNER_TEMP/clean-checkout" \
+            --checkout "$GITHUB_WORKSPACE" --vite-root "$TITAN_VITE_ROOT" \
+            doc/language/installation.md doc/language/browser-target.md \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-doc-check.log"
+
+      # The reader's shell has the installation's bin on PATH, where the
+      # documented http-dev-server finds titan.so through titanc.
+      - name: Check the documented images and run the complete application
+        run: |
+          set -euo pipefail
+          workspace="$RUNNER_TEMP/clean-checkout"
+          export PATH="$workspace/prefix/bin:$PATH"
+          PREFIX="$workspace/prefix" lua -E spec/browser/build-delivery.lua --built "$workspace" \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-stage.log"
+          "$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine chromium --root "$workspace" \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-hosted.log"
+          "$workspace/prefix/lib/titan-browser/0.6/titan-browser-run" --engine node --timeout 120000 \
+            --root "$workspace" --js-test "$workspace/dod.test.mjs" \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-node.log"
+
+      # Measurements only: the collector fails on harness errors and on a
+      # memory run that completes without Titan's allocation error, never on
+      # the numbers.
+      - name: Record sizes, startup, memory, Task scaling and recursion depth
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          workspace="$RUNNER_TEMP/clean-checkout"
+          export PATH="$workspace/prefix/bin:$PATH"
+          PREFIX="$workspace/prefix" lua -E spec/browser/build-records.lua "$RUNNER_TEMP/browser-records" \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-records-build.log"
+          "$TITAN_NODE" spec/fixtures/browser_records/collect.mjs \
+            --sdk "$workspace/prefix/lib/titan-browser/0.6" --images "$RUNNER_TEMP/browser-records" \
+            --app "$workspace/browser-app/out" --engines node,chromium --out out/browser-records/packaging.json \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-records.log"
+
+      - name: Upload browser packaging logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-packaging
+          path: ${{ runner.temp }}/browser-packaging-*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload browser records
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-records-packaging
+          path: out/browser-records/
+          if-no-files-found: warn
           retention-days: 7
 
   native-coverage:

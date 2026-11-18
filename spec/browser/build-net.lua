@@ -43,4 +43,9 @@ compile({"--target", "browser", "--no-uv-bootstrap", "--test", "--tree", path.jo
 copy("net.test.mjs")
 copy("same-origin.mjs")
 copy("websocket.test.mjs")
+-- Each image uses only reviewed imports (scripts/browser_imports.lua).
+local checks = dofile(path.join(repository, "scripts/browser_stdlib.lua"))
+local strategy = require("titan-compiler.io").new_sync()
+assert(checks.check_file_imports(strategy, path.join(images, "http.mjs"), {"entry"}))
+assert(checks.check_file_imports(strategy, path.join(images, "websocket.mjs"), {"entry", "fixture:net"}))
 io.stdout:write("BROWSER-NET " .. output .. " profile=" .. (os.getenv("TITAN_BUILD_PROFILE") or "production") .. "\n")

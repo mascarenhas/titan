@@ -1,0 +1,283 @@
+-- Loopback behavior of the manual's development server,
+-- doc/language/http-dev-server.titan. spec/coder/browser_docs_spec.lua copies
+-- this owner and the server into one source tree and builds them with --test,
+-- so the standard-library test tree never resolves modules from the manual.
+local async = import "async"
+local fs = import "fs"
+local http = import "http"
+local os = import "os"
+local path = import "path"
+local string = import "string"
+local test = import "test"
+local dev = import "http-dev-server.titan"
+
+local record Reply
+  status: integer
+  headers: http.Headers
+  body: string
+end
+
+-- A served folder with a secret beside it, and the server serving it.
+local record Fixture
+  base: string
+  site: string
+  origin: string
+end
+
+local function remove_tree(target: string)
+  local info? = fs.lstat(target)
+  if not info then return end
+  if info.kind == "directory" then
+    local names = fs.list(target)
+    for index = 1, #names do remove_tree(path.join(target, names[index])) end
+    fs.rmdir(target)
+  else
+    fs.unlink(target)
+  end
+end
+
+local function symlink(target: string, link: string)
+  local process = os.spawn("ln", {"-s", target, link}, os.with_parent_stdin,
+                           os.with_parent_stdout, os.with_parent_stderr)
+  test.assert(process:wait().code == 0, "ln -s " .. target .. " " .. link .. " failed")
+end
+
+local function scratch_folder(context: test.Context): string
+  local base = fs.tmpname()
+  fs.unlink(base)
+  fs.mkdir(base)
+  context:cleanup(function () remove_tree(base) end)
+  return base
+end
+
+-- The first free loopback port of a fixed range, found with the server's own
+-- listen, which returns nil only for EADDRINUSE.
+local function listen_available(handler: http.Handler): (http.Server, integer)
+  for port = 28400, 28499 do
+    local server? = dev.listen(handler, port)
+    if server then return server, port end
+  end
+  raise "no free loopback port in 28400-28499"
+end
+
+local function serve(context: test.Context, site: string): string
+  local server, port = listen_available(dev.Site(site):serve)
+  local serving = async.run<|nil, value|>(function (): nil
+    server:serve()
+    return nil
+  end)
+  context:cleanup(function ()
+    -- Idle keep-alive connections would keep their server Tasks waiting.
+    http.close_idle_connections()
+    server:close()
+    async.join(serving)
+  end)
+  return "http://127.0.0.1:" .. port
+end
+
+local function open_fixture(context: test.Context): Fixture
+  local base = scratch_folder(context)
+  local site = path.join(base, "site")
+  fs.mkdir(site)
+  fs.write_file(path.join(base, "secret.txt"), "secret\n")
+  fs.write_file(path.join(site, "index.html"), "<p>home</p>\n")
+  fs.write_file(path.join(site, "app.mjs"), "export default 1;\n")
+  fs.write_file(path.join(site, "app.wasm"), "\0asm\1\0\0\0")
+  fs.write_file(path.join(site, "app.wasm.trace"), "trace\0bytes")
+  fs.write_file(path.join(site, "app.wasm.map"), "{}\n")
+  fs.write_file(path.join(site, "notes.txt"), "notes\n")
+  fs.write_file(path.join(site, "LICENSE"), "license\n")
+  fs.mkdir(path.join(site, "docs"))
+  fs.write_file(path.join(site, "docs", "index.html"), "<p>docs</p>\n")
+  fs.mkdir(path.join(site, "empty"))
+  symlink("app.mjs", path.join(site, "alias.mjs"))
+  symlink(path.join("..", "secret.txt"), path.join(site, "escape.txt"))
+  symlink("..", path.join(site, "up"))
+  symlink("loop", path.join(site, "loop"))
+  return Fixture(base, site, serve(context, site))
+end
+
+local function fetch(fixture: Fixture, method: string, target: string): Reply
+  local response = http.request(method, fixture.origin .. target)
+  defer response:close()
+  local body = string.writer()
+  for chunk in response:read do body:write(chunk) end
+  return Reply(response.status, response.headers, body:drain())
+end
+
+local function expect_file(context: test.Context, fixture: Fixture, name: string,
+                           target: string, file: string, content_type: string)
+  context:run(name, function (_: test.Context)
+    local reply = fetch(fixture, "GET", target)
+    local contents = fs.read_file(path.join(fixture.site, file))
+    test.assert(reply.status == 200, target .. " answered " .. reply.status)
+    test.assert(reply.body == contents, target .. " served the wrong bytes")
+    test.assert(reply.headers:get("Content-Type") == content_type,
+                target .. " has Content-Type " .. (reply.headers:get("Content-Type") or "nil"))
+    test.assert(reply.headers:get("Content-Length") == "" .. #contents,
+                target .. " has the wrong Content-Length")
+    test.assert(reply.headers:get("Cache-Control") == "no-store",
+                target .. " lacks Cache-Control: no-store")
+  end)
+end
+
+local function expect_status(context: test.Context, fixture: Fixture, name: string,
+                             method: string, target: string, status: integer)
+  context:run(name, function (_: test.Context)
+    local reply = fetch(fixture, method, target)
+    test.assert(reply.status == status,
+                method .. " " .. target .. " answered " .. reply.status .. ", not " .. status)
+    test.assert(reply.headers:get("Content-Type") == "text/plain; charset=utf-8",
+                method .. " " .. target .. " refusal is not plain text")
+    test.assert(reply.headers:get("Cache-Control") == "no-store",
+                method .. " " .. target .. " lacks Cache-Control: no-store")
+  end)
+end
+
+function test_content_types(context: test.Context)
+  local fixture = open_fixture(context)
+  expect_file(context, fixture, "index", "/", "index.html", "text/html; charset=utf-8")
+  expect_file(context, fixture, "html", "/index.html", "index.html", "text/html; charset=utf-8")
+  expect_file(context, fixture, "module", "/app.mjs", "app.mjs", "text/javascript")
+  expect_file(context, fixture, "wasm", "/app.wasm", "app.wasm", "application/wasm")
+  expect_file(context, fixture, "trace", "/app.wasm.trace", "app.wasm.trace",
+              "application/octet-stream")
+  expect_file(context, fixture, "map", "/app.wasm.map", "app.wasm.map", "application/json")
+  expect_file(context, fixture, "text", "/notes.txt", "notes.txt", "text/plain; charset=utf-8")
+  expect_file(context, fixture, "unknown", "/LICENSE", "LICENSE", "application/octet-stream")
+  expect_file(context, fixture, "escaped", "/app%2Emjs", "app.mjs", "text/javascript")
+  expect_file(context, fixture, "inner_symlink", "/alias.mjs", "app.mjs", "text/javascript")
+end
+
+function test_head_sends_length_without_body(context: test.Context)
+  local fixture = open_fixture(context)
+  context:run("file", function (_: test.Context)
+    local reply = fetch(fixture, "HEAD", "/app.wasm")
+    test.assert(reply.status == 200, "HEAD /app.wasm answered " .. reply.status)
+    test.assert(reply.body == "", "HEAD /app.wasm carried a body")
+    test.assert(reply.headers:get("Content-Length") == "8",
+                "HEAD /app.wasm does not announce the file's length")
+    test.assert(reply.headers:get("Content-Type") == "application/wasm",
+                "HEAD /app.wasm has the wrong Content-Type")
+  end)
+  context:run("missing", function (_: test.Context)
+    local reply = fetch(fixture, "HEAD", "/missing.html")
+    test.assert(reply.status == 404, "HEAD /missing.html answered " .. reply.status)
+    test.assert(reply.body == "", "HEAD /missing.html carried a body")
+    test.assert(reply.headers:get("Content-Length") == "" .. #"404 Not Found\n",
+                "HEAD /missing.html does not announce the refusal's length")
+  end)
+end
+
+function test_other_methods_are_refused(context: test.Context)
+  local fixture = open_fixture(context)
+  local methods = {"POST", "PUT", "DELETE", "OPTIONS"}
+  for index = 1, #methods do
+    local method = methods[index]
+    context:run(method, function (_: test.Context)
+      local reply = fetch(fixture, method, "/index.html")
+      test.assert(reply.status == 405, method .. " answered " .. reply.status)
+      test.assert(reply.headers:get("Allow") == "GET, HEAD", method .. " lacks Allow: GET, HEAD")
+    end)
+  end
+end
+
+function test_directories(context: test.Context)
+  local fixture = open_fixture(context)
+  context:run("redirect", function (_: test.Context)
+    local reply = fetch(fixture, "GET", "/docs")
+    test.assert(reply.status == 301, "/docs answered " .. reply.status)
+    test.assert(reply.headers:get("Location") == "/docs/", "/docs redirects elsewhere")
+  end)
+  -- `//docs/` would be a protocol-relative location naming the host "docs".
+  context:run("redirect_double_slash", function (_: test.Context)
+    local reply = fetch(fixture, "GET", "//docs")
+    test.assert(reply.status == 301, "//docs answered " .. reply.status)
+    test.assert(reply.headers:get("Location") == "/docs/",
+                "//docs redirects to " .. (reply.headers:get("Location") or "nil"))
+  end)
+  expect_file(context, fixture, "index", "/docs/", path.join("docs", "index.html"),
+              "text/html; charset=utf-8")
+  expect_status(context, fixture, "without_index", "GET", "/empty/", 404)
+  expect_status(context, fixture, "missing", "GET", "/missing/", 404)
+end
+
+function test_paths_stay_inside_the_folder(context: test.Context)
+  local fixture = open_fixture(context)
+  expect_status(context, fixture, "parent", "GET", "/%2e%2e/secret.txt", 403)
+  expect_status(context, fixture, "nested_parent", "GET", "/docs/%2E%2E/%2e%2e/secret.txt", 403)
+  expect_status(context, fixture, "current", "GET", "/%2e/index.html", 403)
+  expect_status(context, fixture, "encoded_slash", "GET", "/docs%2F..%2F..%2Fsecret.txt", 403)
+  expect_status(context, fixture, "backslash", "GET", "/..%5Csecret.txt", 403)
+  expect_status(context, fixture, "nul", "GET", "/index.html%00.txt", 403)
+  expect_status(context, fixture, "file_symlink", "GET", "/escape.txt", 403)
+  expect_status(context, fixture, "directory_symlink", "GET", "/up/secret.txt", 403)
+  expect_status(context, fixture, "directory_symlink_itself", "GET", "/up", 403)
+  expect_status(context, fixture, "directory_symlink_index", "GET", "/up/", 403)
+  expect_status(context, fixture, "missing", "GET", "/secret.txt", 404)
+end
+
+-- Paths that the file system refuses to look up answer like missing files.
+function test_unusable_paths(context: test.Context)
+  local fixture = open_fixture(context)
+  expect_status(context, fixture, "file_as_folder", "GET", "/index.html/inside.txt", 404)
+  expect_status(context, fixture, "symlink_loop", "GET", "/loop", 404)
+  expect_status(context, fixture, "name_too_long", "GET", "/" .. string.rep("n", 300), 404)
+end
+
+local function change_mode(file: string, mode: string)
+  local process = os.spawn("chmod", {mode, file}, os.with_parent_stdin,
+                           os.with_parent_stdout, os.with_parent_stderr)
+  test.assert(process:wait().code == 0, "chmod " .. mode .. " " .. file .. " failed")
+end
+
+-- Whether looking `file` up is permitted, as it always is for the superuser.
+local function searchable(file: string): boolean
+  fs.stat(file)
+  return true
+catch
+  if error is async.OperationError and (error as async.OperationError).name == "EACCES" then
+    return false
+  end
+  raise
+end
+
+-- A folder that the server may not search is refused.
+function test_unreadable_folder(context: test.Context)
+  local fixture = open_fixture(context)
+  local locked = path.join(fixture.site, "locked")
+  fs.mkdir(locked)
+  fs.write_file(path.join(locked, "inside.txt"), "inside\n")
+  change_mode(locked, "000")
+  context:cleanup(function () change_mode(locked, "755") end)
+  if searchable(path.join(locked, "inside.txt")) then
+    context:log("the superuser can search the locked folder: nothing to check")
+    return
+  end
+  expect_status(context, fixture, "locked", "GET", "/locked/inside.txt", 403)
+end
+
+function test_busy_port(context: test.Context)
+  local base = scratch_folder(context)
+  local server, port = listen_available(dev.Site(base):serve)
+  defer server:close()
+  test.assert(not dev.listen(dev.Site(base):serve, port), "a busy port was listened on twice")
+  context:log("BEGIN expected http-dev-server diagnostics")
+  local status = dev.main({base, "" .. port})
+  context:log("END expected http-dev-server diagnostics")
+  test.assert(status == 1, "a busy port exits with status " .. status .. ", not 1")
+end
+
+function test_usage(context: test.Context)
+  local base = scratch_folder(context)
+  local cases: {{string}} = {{}, {base, "http"}, {base, "0"}, {base, "70000"},
+                             {path.join(base, "missing")}, {base, "8000", "extra"}}
+  context:log("BEGIN expected http-dev-server diagnostics")
+  local statuses: {integer} = {}
+  for index = 1, #cases do statuses[index] = dev.main(cases[index]) end
+  context:log("END expected http-dev-server diagnostics")
+  for index = 1, #cases do
+    test.assert(statuses[index] == 2, "usage case " .. index .. " exits with status " ..
+                statuses[index] .. ", not 2")
+  end
+end

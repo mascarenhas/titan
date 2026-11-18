@@ -34,6 +34,8 @@
 # Counted-string conversion rows use an unmeasured 1.000 planning weight.
 # Issue 334's browser drive row uses the same unmeasured 1.000 planning weight;
 # its real-toolchain cases pend outside the browser CI gates.
+# Issue 337's documentation rows use the same unmeasured 1.000 planning weight;
+# the browser chapter page case pends outside the browser CI gates.
 compiler spec/abi_spec.lua 0.201 2.926
 retained spec/asan_generated_c_context_spec.lua 0.587 -
 compiler spec/binary_compatibility_spec.lua 0.017 0.107
@@ -101,7 +103,7 @@ compiler spec/coder/bound_methods_spec.lua 2.440 6.427
 stdlib spec/coder/build_coordination_spec.lua 1.000 34.874
 compiler spec/coder/browser_bridge_spec.lua 1.000 -
 compiler spec/coder/browser_budgets_spec.lua 1.000 -
-compiler spec/coder/browser_deployment_spec.lua 1.000 -
+stdlib spec/coder/browser_docs_spec.lua 1.000 -
 compiler spec/coder/browser_entry_gate_spec.lua 1.000 -
 compiler spec/coder/browser_fixtures_spec.lua 1.000 -
 compiler spec/coder/browser_images_spec.lua 1.000 -
@@ -208,6 +210,7 @@ compiler spec/csemantics_spec.lua 0.145 0.627
 compiler spec/ctypes_spec.lua 0.211 2.820
 retained spec/dense_array_runtime_spec.lua 2.367 -
 compiler spec/depfile_spec.lua 1.000 -
+compiler spec/doc_check_spec.lua 1.000 -
 compiler spec/documentation_spec.lua 0.232 0.787
 compiler spec/driver_spec.lua 9.998 89.022
 compiler spec/foreign_alias_headers_spec.lua 2.974 46.664

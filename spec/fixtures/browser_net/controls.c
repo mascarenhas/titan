@@ -43,8 +43,11 @@ EM_JS(void, titan_net_test_publish, (), {
     if (this.buffer === HEAPU8.buffer && bytes.byteLength === large) marks.largeCopies++;
     return copy.call(this, bytes, offset);
   };
+  /* holders counts the message holder objects that Titan still owns. */
+  const holder = value => value !== null && typeof value === 'object' && Object.hasOwn(value, 'bytes');
   owner.options.bindings.__titanTest(Object.freeze({
-    snapshot: () => ({...marks}),
+    snapshot: () => ({...marks,
+      holders: [...owner.slots.values()].filter(entry => holder(entry.value)).length}),
     restore() {
       owner.binding = binding;
       owner.releaseSlot = release;

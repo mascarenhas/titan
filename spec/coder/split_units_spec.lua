@@ -1636,7 +1636,8 @@ os.exit(result.ok and 0 or 1)
             for name in lfs.dir(output_root) do
                 assert.is_nil(name:find(".tmp.", 1, true), name)
             end
-            assert.is_nil(read_file(output_root .. "/mod.c"):find("titan_object_source_mod", 1, true))
+            assert.is_nil(read_file(output_root .. "/mod.c"):find(
+                coder_names._private_symbol("mod", "titan_source"), 1, true))
             assert.is_nil(mod.compiled)
         end)
     end

@@ -792,6 +792,7 @@ describe("minicoro Emscripten JSPI backend", function()
                     local ok, log = browser_support.c_image(info, workspace, name,
                         minicoro_suite(defines), { purpose = "minicoro", assertions = 2 })
                     assert.truthy(ok, log)
+                    browser_toolchain.check_imports(workspace .. "/" .. name .. ".mjs", { "entry" })
                     for _, engine in ipairs({ "node", "chromium" }) do
                         ok, log = browser_support.image(info, workspace, engine, name)
                         assert.truthy(ok, log)
@@ -809,6 +810,7 @@ describe("minicoro Emscripten JSPI backend", function()
             browser_support.files.read(browser_support.fixture .. "/minicoro_floor.c"),
             { purpose = "minicoro", assertions = 2 })
         assert.truthy(ok, log)
+        browser_toolchain.check_imports(workspace .. "/unwind-floor.mjs", { "entry" })
         for _, engine in ipairs({ "node", "chromium" }) do
             ok, log = browser_support.image(info, workspace, engine, "unwind-floor")
             assert.truthy(ok, log)
@@ -872,6 +874,7 @@ int main(void) {
         local ok, log = browser_support.c_image(info, workspace, "retirement",
             control, { purpose = "minicoro", assertions = 2 })
         assert.truthy(ok, log)
+        browser_toolchain.check_imports(workspace .. "/retirement.mjs", { "entry" })
         for _, engine in ipairs({ "node", "chromium" }) do
             ok, log = browser_support.image(info, workspace, engine, "retirement")
             assert.truthy(ok, log)

@@ -724,7 +724,8 @@ if not args.compile_only and not args.print_ast then
             local wasm
             program_path, wasm = driver.browser_program_path(stem, args.exe)
             if not program_path then exit(wasm) end
-            outputs = { { path = program_path }, { path = wasm }, { path = wasm .. ".map" } }
+            outputs = { { path = program_path }, { path = wasm }, { path = wasm .. ".map" },
+                { path = wasm .. ".trace" } }
         elseif platform.windows then
             local paths, path_error = driver.windows_program_paths(
                 args.test and test_runner.MODULE_NAME or main_module, args.exe,
@@ -802,7 +803,7 @@ if not args.compile_only and not args.print_ast then
         end
         if not browser_profile then exit(err) end
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page" }) do
+                "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
             runtime[#runtime + 1] = browser_assets[key]
         end
         runtime[#runtime + 1] = resolver_context.target_descriptor.paths.liblua
@@ -1177,7 +1178,7 @@ if main_module then
     if target == "browser" then
         local browser_output, wasm = driver.browser_program_path(program_output, program_output)
         if not browser_output then exit(wasm) end
-        extra_outputs = { wasm, wasm .. ".map" }
+        extra_outputs = { wasm, wasm .. ".map", wasm .. ".trace" }
     elseif platform.windows then
         local paths, path_error = windows_paths, nil
         if not paths then

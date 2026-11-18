@@ -3,8 +3,9 @@
 `titanc --target browser` compiles Titan modules and authored C to
 relocatable WebAssembly objects with Emscripten, publishes library-mode
 providers as self-describing Wasm archives, and links programs and tests into
-a self-contained ES module (`.mjs`), its WebAssembly binary (`.wasm`), and its
-extended source map (`.wasm.map`). The module embeds Titan's loader and
+a self-contained ES module (`.mjs`), its WebAssembly binary (`.wasm`), its
+trace table (`.wasm.trace`), and its extended source map (`.wasm.map`). The
+module embeds Titan's loader and
 exports one default `create(options)` function, which web pages and
 applications import directly. Tests and command-line workflows run the same
 images under Node 26+, headless Chromium (`titan-browser-run`), and
@@ -27,8 +28,9 @@ The implementation is spread over:
 * `titan-compiler/browsertrace.lua`, which computes the content-derived image
   identity before entrypoint compilation, reads the final `.wasm` function
   imports, code-section body ranges, and `name` section with the bounded Wasm
-  reader, validates the standard v3 `.wasm.map`, and rewrites it with Titan's
-  `x_titan_*` trace extensions;
+  reader, validates the standard v3 `.wasm.map`, rewrites it with Titan's
+  `x_titan_*` trace extensions, and writes the [trace table](#the-trace-table)
+  from the same segment walk;
 * `titan-compiler/browserentry.lua`, the generated browser launcher (`initialize`,
   `entry`, `close`, shared `titan_entry_error_message` conversion) and weak C
   forwards to `titan.browser`'s foreign functions;
@@ -45,8 +47,9 @@ The implementation is spread over:
   which fold the descriptor identity, the link profile, and the SDK assets
   into object and link certificates;
 * `titanc`, which validates the target, requires `--output`, locks and marks
-  the output root early, selects the archive-only or three-file image output
-  set (`.mjs`, `.wasm`, `.wasm.map`), and checks the SDK before linking;
+  the output root early, selects the archive-only or four-file image output
+  set (`.mjs`, `.wasm`, `.wasm.trace`, `.wasm.map`), and checks the SDK before
+  linking;
 * the runtime sources `titan.c`, `titan_path.c`, and `ltitanlib.c`, whose
   host-only paths compile out under `TITAN_TARGET_BROWSER`, and the runtime
   headers `titan.h`, `titan/ffi.h`, and `transfer.h`, which carry a `__wasm__`
@@ -58,9 +61,10 @@ The implementation is spread over:
   `titan-browser-library.js`, `titan-browser-bridge.js`, and
   `titan-browser-trace.js`, the loader source `titan-browser.mjs` that
   `browserlink.embed` places in every image, the standalone portable peer
-  `titan-protobuf.mjs`, and the runner
+  `titan-protobuf.mjs`, the runner
   `titan-browser-run` with `titan-browser-run.mjs`,
-  `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`; and
+  `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`, and the
+  [module check](#the-module-check) `titan-browser-module-check.mjs`; and
 * the Make targets `lua-browser` (`scripts/lua_browser.sh`), `browser-sdk`
   (`scripts/browser_sdk.lua`), and `titan-stdlib-browser-test`, with the
   build-owned [standard-library checks](#the-browser-standard-library) in
@@ -83,10 +87,12 @@ The browser target supports four kinds of work, all with an explicit
   [structural validation](#library-mode-and-structural-validation) and the
   [executing protocol check](#the-executing-protocol-runner);
 * [program and test images](#program-and-test-images): a build with `main`,
-  or `--test` without `-c`, links `<stem>.mjs`, `<stem>.wasm`, and
-  `<stem>.wasm.map` with the [link profile](#the-link-profile), the [browser
-  entrypoint](#the-browser-entrypoint), and the post-link
-  [source-map extension rewrite](#source-map-extensions-and-image-identity); and
+  or `--test` without `-c`, links `<stem>.mjs`, `<stem>.wasm`,
+  `<stem>.wasm.trace`, and `<stem>.wasm.map` with the [link
+  profile](#the-link-profile), the [browser entrypoint](#the-browser-entrypoint),
+  and the post-link [source-map extension
+  rewrite](#source-map-extensions-and-image-identity) and [trace
+  table](#the-trace-table); and
 * the C-only work these require: preamble, profile, enum-carrier, and
   acceptance C probes, and C-header preprocessing for `foreign import`.
 
@@ -258,12 +264,14 @@ prefix`.
 | `runtime` | `libtitan.a` (`paths.libtitan`) | `titan.o`, `minicoro.o`, `titan_path.o`, `ltitanlib.o`, compiled for the browser |
 | `js_library` | `titan-browser-library.js` | the Emscripten `--js-library` with the completion and admission imports ([channels](#completion-and-output-channels)) |
 | `bridge_library` | `titan-browser-bridge.js` | the Emscripten `--js-library` implementing the protected typed bridge imports and host ownership operations |
-| `trace_library` | `titan-browser-trace.js` | the Emscripten `--js-library` with the eager `.wasm.map` run-dependency loader, lookup index, and `Error.stack` capture/symbolization imports ([Browser trace backend](error-handling.md#browser-trace-backend)) |
+| `trace_library` | `titan-browser-trace.js` | the Emscripten `--js-library` with the eager `.wasm.trace` run-dependency loader, the table reader and lookup, and `Error.stack` capture/symbolization imports ([Browser trace backend](error-handling.md#browser-trace-backend)) |
 | `loader` | `titan-browser.mjs` | the [loader](#the-loader) source embedded into generated images, not a deployment import |
 | `runner` | `titan-browser-run` | the [runner](#the-runner)'s POSIX shell launcher (mode 0755) |
 | `runner_module` | `titan-browser-run.mjs` | the runner's supervisor |
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
+| `module_check` | `titan-browser-module-check.mjs` | the [module check](#the-module-check) that the compiler runs on each staged image module |
+| `build_profile` | `build-profile` | the descriptor's `build_profile` and a newline, written by `make browser-sdk` and [checked at every link](#readiness-and-the-missing-sdk-diagnostic); `sdk-digests` records it |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
 | `provider` | `titan.a` | the browser standard provider: fourteen shared roots including `io`, browser compositions of `async`, `timer`, synchronous `lua`, the `os` subset, and the `http` and `websocket` clients, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
@@ -277,6 +285,10 @@ target lacks, one `<module>\t<reason>` line each, which `browser_sdk.lua
 finalize` writes from the [status inventory](#subset-parity-gate). The
 compiler reads it only to word a [missing-module
 diagnostic](#the-absent-module-diagnostic), so `sdk-digests` does not record it.
+The language manual's [browser SDK
+file list](../language/browser-target.md#installing-the-browser-sdk) names every
+installed file once; `installer.browser_sdk_owned` is the same list in code,
+and `spec/browser_sdk_spec.lua` compares it with a fresh SDK build.
 
 None of the five runtime sources is compiled with `-fPIC`, LTO, or
 libbacktrace; their host-only paths compile out under the browser target
@@ -289,9 +301,9 @@ nor the native Lua headers are ever written; the common Titan headers
 
 `browserlink.require_sdk(context, descriptor, install)` checks, in the order
 `runtime`, `js_library`, `bridge_library`, `trace_library`, `loader`, `runner`,
-`runner_module`, `node_worker`, `page`, that each asset is a regular file that
-`context.io` can open and read
-(a bounded read of at most one byte). It executes nothing, reads no manifest, and does
+`runner_module`, `node_worker`, `page`, `module_check`, `build_profile`, that
+each asset is a regular file that `context.io` can open and read (a bounded
+read of at most one byte). It executes nothing, reads no manifest, and does
 not require `lpeglabel`, `provider`, or `sdk_digests`: the initial provider
 publication runs before either exists. The first missing asset returns:
 
@@ -299,6 +311,19 @@ publication runs before either exists. The first missing asset returns:
 browser SDK is incomplete: missing "<path>"; run 'make browser-sdk PREFIX=<prefix>'
 browser SDK is incomplete: missing "<path>"; run 'make browser-sdk PREFIX=<prefix> ROCKS_TREE=<tree>'
 ```
+
+It then reads `build-profile` (at most 33 bytes), which must be exactly a
+valid profile name and a newline (`browser SDK build profile "<path>" is
+invalid; run '<command>'`) and must equal the descriptor's `build_profile`:
+
+```text
+browser SDK "<titan_bin>" was built with the <sdk> profile, but this build uses <build>; set TITAN_BUILD_PROFILE=<sdk>, or build a <build> browser SDK in another prefix with 'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=<build>'
+```
+
+When `install.rocks_tree` is set, the suggested command also names
+`ROCKS_TREE=<tree>` after the prefix. The archives in `titan_bin` were compiled
+under the SDK's profile, so a link under the other one would mix two object
+profiles in one image.
 
 `driver.require_browser_sdk(context)` supplies `install`: `prefix` is
 `driver.INSTALL_PATHS.root` (the descriptor root when unset) and `rocks_tree`
@@ -343,8 +368,9 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    `driver.build_static_archive` (the descriptor's `emar`/`emranlib` and the
    member-verification path), rejects any member that imports a `GOT.*`
    symbol or refers to `dlopen`, `dlsym`, `dlerror`, or a `backtrace_` name,
-   copies the JavaScript and runner assets (the launcher executable), and
-   checks readiness with `browserlink.require_sdk` and
+   copies the JavaScript and runner assets (the launcher executable), writes
+   the descriptor's profile and a newline to `build-profile`, and checks
+   readiness with `browserlink.require_sdk` and
    `driver.browser_node_ready` against the staged runner.
 4. `titanc --target browser --output <build> --source-first --incremental
    -X <titan_bin>/libtitan-lpeglabel.a <BROWSER_STDLIB_ROOTS>` publishes
@@ -954,9 +980,9 @@ string.core_test string.format_pack_test string.regex_test url.tests path.tests
 test.tests reflect.tests json.tests protobuf.tests protobuf.portable_tests transfer.tests async.tests timer.tests os.tests io.tests http.tests websocket.tests
 ```
 
-All twenty-three owners are compiled into `images/stdlib.mjs`, with its `.wasm`
-and `.wasm.map` siblings. `TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK` rejects an
-empty or duplicate root inventory before build setup. The compiler's
+All twenty-three owners are compiled into `images/stdlib.mjs`, with its `.wasm`,
+`.wasm.trace`, and `.wasm.map` siblings. `TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK`
+rejects an empty or duplicate root inventory before build setup. The compiler's
 [general image bounds](#build-time-image-bounds) apply; the suite has no
 separate image-size budget or partition policy. The fifteen-owner image
 measured below, including the unsplit transfer regression, ran under Node and
@@ -983,12 +1009,16 @@ emsdk, Node 26+, and a JSPI-capable headless Chromium. It:
 2. runs `check_browser_stdlib.lua inventory` once against the installed native
    and browser providers, which applies the [subset parity
    gate](#subset-parity-gate), and writes `members.md`;
-3. for `node` and then `chromium`, runs the image with the SDK's
-   `titan-browser-run --engine <engine> --timeout 300000 --grace 2000` through
-   `scripts/run_browser_stdlib.sh`, forwarding a nonempty `TITAN_FILTER` as
-   one `--filter=` argument. The wrapper saves stdout in `stdlib.<engine>.log`
-   and stderr in `stdlib.<engine>.stderr.log`, replays both, and preserves the
-   runner's status. Failure under one engine does not hide the other; and
+3. for each engine of `TITAN_BROWSER_TEST_ENGINES` (default `node chromium`),
+   runs the image with `TITAN_BROWSER_TEST_RUNNER --engine <engine> --timeout
+   300000 --grace 2000` through `scripts/run_browser_stdlib.sh`, forwarding a
+   nonempty `TITAN_FILTER` as one `--filter=` argument. The runner is a shell
+   command that takes `titan-browser-run`'s options and defaults to the SDK's
+   `titan-browser-run`; the validation Playwright cells pass their engine and
+   `"$TITAN_NODE" spec/browser/playwright-run.mjs --image --sdk <sdk>`. The
+   wrapper saves stdout in `stdlib.<engine>.log` and stderr in
+   `stdlib.<engine>.stderr.log`, replays both, and preserves the runner's
+   status. Failure under one engine does not hide the other; and
 4. after each engine, audits only stdout with
    `check_browser_stdlib.lua output roots.txt <filter> <stdout-log>`.
    The shared native validator requires nonzero selection, no duplicate or
@@ -1012,8 +1042,8 @@ expected Lua warnings (`Lua warning: error in coroutine cleanup ...`) are such
 writes, and the validator rejects a split report. Warnings
 stay visible in the `.stderr.log` files and on the console; nothing is
 filtered out. `out/browser-stdlib/` therefore holds `objects/` (titanc's output
-tree), `images/` (`stdlib.mjs`, `stdlib.wasm`, and `stdlib.wasm.map`),
-`roots.txt`, `members.md`, and the per-engine `stdlib.node.log`,
+tree), `images/` (`stdlib.mjs`, `stdlib.wasm`, `stdlib.wasm.trace`, and
+`stdlib.wasm.map`), `roots.txt`, `members.md`, and the per-engine `stdlib.node.log`,
 `stdlib.node.stderr.log`, `stdlib.chromium.log`, and
 `stdlib.chromium.stderr.log`. The target never writes into `objects/`: titanc
 creates it and its `.titan-target` marker on a cold run, because a browser
@@ -1107,8 +1137,8 @@ home, because WebKit's default ephemeral context has no HTTP cache.
   headers (with routes that omit or restrict CORS headers), serve cacheable
   resources with an ETag and hit and revalidation counters, implement every
   redirect status with and without `Location`, a redirect chain past the hop
-  limit, and a cross-origin hop, and serve the runner page and image assets
-  for same-origin requests. Its WebSocket routes echo with subprotocol
+  limit, and a cross-origin hop, and serve the runner page and the image's
+  `.mjs`, `.wasm` and `.wasm.trace` for same-origin requests. Its WebSocket routes echo with subprotocol
   selection and accept the request's own `Origin`, and one route denies every
   origin.
 * `wire_peer.mjs` is a Node `node:net` peer for wire behavior that a
@@ -1132,7 +1162,8 @@ home, because WebKit's default ephemeral context has no HTTP cache.
   active cases, plus two that skip outside their capability context) and four
   Task-form cancellation phases: pending headers, an already-settled headers
   request before adoption, failing metadata, and a pending body. In real
-  browsers an iframe from the native server's origin (`same-origin.mjs`) runs
+  browsers an iframe from the native server's origin (`same-origin.mjs`,
+  created with `requireTrace: true`, so a missing table fails it) runs
   the one filtered case for same-origin cache modes and `no_cors()`. It then
   hands over to `websocket.test.mjs`, which runs the WebSocket image and three
   cancellation phases (opening, read, write). That driver wraps the host
@@ -1147,7 +1178,7 @@ phase, waits for the peer to see every connection it observed close and
 requires balanced host listeners on each, before disposal. Both drivers
 require that no `onNotificationError` arrives before or during each
 `dispose()` they await. The driver ends with one `BROWSER-NET` JSON report
-(verdict, 65 cases, the cancellation phases, the same-origin page, engine,
+(verdict, 68 cases, the cancellation phases, the same-origin page, engine,
 and verified TLS) that `run.mjs` and the spec check.
 
 The tests assert each engine's measured behavior where hosts deviate. Node
@@ -1641,7 +1672,7 @@ as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
 every `ASYNCIFY_*` setting, `JSPI`, every `JSPI_*` setting,
 `BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`, `INITIAL_HEAP`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
-`INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
+`INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `MIN_NODE_VERSION`, `FORCE_FILESYSTEM`,
 `FILESYSTEM`, `MINIMAL_RUNTIME`, `PRINTF_LONG_DOUBLE`, `EXPORTED_FUNCTIONS`,
 `EXPORTED_RUNTIME_METHODS`, `INCOMING_MODULE_JS_API`, `ASSERTIONS`,
 `STACK_OVERFLOW_CHECK`, and the target defines, plus `--no-entry` and
@@ -1658,6 +1689,18 @@ protocol probe check link extras under the descriptor's `build_profile`. So
 compile option "-O2"`, and `--ldflag=-O3` reports `browser production link
 profile owns option -O3`. Other Emscripten settings pass through, so a later
 user flag can never weaken the profile.
+
+It also refuses the options that put a file's contents into the generated
+module or its data, split or joined with `=`: `--pre-js`, `--post-js`,
+`--extern-pre-js`, `--extern-post-js`, `--js-transform`, `--embed-file`,
+`--preload-file`, and `--exclude-file`. The image identity and the warm-link
+certificate record the owned inputs and the flags, not such files, so a changed
+file would leave a stale module up to date and give two different modules one
+identity. The diagnostic names the supported route instead, for example
+`browser production link profile does not accept --pre-js; add JavaScript with
+EM_JS or EM_ASM in a --c-source helper`; the file options end with `browser
+images have no filesystem` and `--js-transform` with `the generated module is
+Titan's`.
 
 ## Semantic-cache ownership
 
@@ -1822,7 +1865,8 @@ output root and each held lock domain again and reserves every
   `options` component differs as well. A foreign-format object found at an
   expected path parses and misses.
 * **Links.** The final-link key is a digest of the output paths only, so
-  a program's key covers `<stem>.mjs`, `<stem>.wasm`, and `<stem>.wasm.map`.
+  a program's key covers `<stem>.mjs`, `<stem>.wasm`, `<stem>.wasm.trace`, and
+  `<stem>.wasm.map`.
   `titanc` always supplies its ordinary native profile identity as
   `policy.target`; `linkcertificate.prepare` is the sole writer of the browser
   value: for a browser context it copies the recipe policy and sets `target`
@@ -2003,7 +2047,8 @@ flag list.
 | `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
 | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | initial memory is the image's static data and main stack plus a 15 MiB heap, so static data never outgrows a fixed initial size (15 MiB is the heap a data-free image had under the former fixed 16 MiB; [measured sizes](#budgets)); coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
-| `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
+| `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines ([the module check](#the-module-check)) |
+| `-sMIN_NODE_VERSION=260000` | Node 26, the only supported Node, so Emscripten emits no `require('node:crypto')` fallback |
 | `-sFILESYSTEM=0` | no Emscripten filesystem in launcher images; `lua-main` keeps `-sFORCE_FILESYSTEM=1` because it has no launcher |
 | `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
 | `-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke","_titan_browser_release_callable","_titan_browser_close","_malloc","_free","_titan_browser_trace_identity"]` | the four promised bridge entries, synchronous wrapper release, the C buffer allocation and release used for argument marshalling, and the 64-hex image identity export; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
@@ -2385,11 +2430,12 @@ Firefox, and WebKit.
 
 `titanc` plans a browser program or test like a native one; the build
 coordinator's [output preflight](build-coordinator.md#pre-dispatch-output-preflight)
-reserves the executable (`.mjs`), its WebAssembly binary (`.wasm`), and its
-source map (`.wasm.map`). `driver.browser_program_path(stem, explicit)` maps
-the output: the explicit `--exe` (which must end in `.mjs`: `browser executable
-output "<path>" must end in .mjs`) or `<stem>.mjs`, where the stem is the
-native program output path, plus its `.wasm` and `.wasm.map` siblings. A test
+reserves the executable (`.mjs`), its WebAssembly binary (`.wasm`), its trace
+table (`.wasm.trace`), and its source map (`.wasm.map`).
+`driver.browser_program_path(stem, explicit)` maps the output: the explicit
+`--exe` (which must end in `.mjs`: `browser executable output "<path>" must end
+in .mjs`) or `<stem>.mjs`, where the stem is the native program output path,
+plus its `.wasm`, `.wasm.trace`, and `.wasm.map` siblings. A test
 image's stem is the first root's. Before certification `titanc` requires the
 SDK and the program profile; the [executing
 check](#the-executing-protocol-runner) then runs for selected archives as on
@@ -2434,40 +2480,57 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    `browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)` so
    that `x_titan_image`, `x_titan_function_imports`,
    `x_titan_function_ranges`, and `x_titan_function_names` are bound to the
-   final linked `.wasm`;
-6. read the installed loader and call `browserlink.embed` on the staged
+   final linked `.wasm`, and write the [trace table](#the-trace-table) that
+   the same call derives to the staged `.wasm.trace`;
+6. read the installed loader and call
+   `browserlink.embed(module, loader, wasm_name, identity)` on the staged
    `.mjs`, removing the pinned Emscripten trailing default factory export and
    enclosing the loader implementation before installing default
    `create(options)`. Both the loader and bridge-library digests participate
    in image/certificate identity without a version change. Recognizable
-   `new URL(..., import.meta.url)` expressions name both sibling assets, and
-   caller `locateFile` still overrides their resolution. A malformed transform
-   fails while all predecessors are untouched. Then run `before_commit`
-   (which invalidates the link record);
-7. validate that any existing destination in `{ <stem>.wasm.map, <stem>.wasm,
-   <stem>.mjs }` is a regular file (`browser output '<path>' is not a regular
-   file`) and reserve a sibling `.old` backup path for each before touching any
-   predecessor; then in order `.wasm.map`, `.wasm`, `.mjs`, move any existing
-   predecessor to its backup and rename the staged artifact into place, and run
-   `after_publish` (`titanc` commits the link certificate there). The `.mjs`
-   rename (followed by `after_publish` when present) is the commit point: if
-   any backup rename, publication rename, or `after_publish` fails, rollback
-   walks the outputs in reverse order (`.mjs`, `.wasm`, `.wasm.map`), removes
+   `new URL(..., import.meta.url)` expressions name both runtime assets, the
+   `.wasm` and the `.wasm.trace`, and
+   caller `locateFile` still overrides their resolution. The generated
+   `create` passes `{identity, wasm}` (the step-3 identity and the `.wasm`
+   basename) to the loader, which refuses a `.wasm` from another link
+   ([module and Wasm binding](#module-and-wasm-binding)); `embed` refuses an
+   identity that is not 64 lowercase hexadecimal digits. `embed` also rewrites
+   the module's Node shell ([the module check](#the-module-check)). A
+   malformed transform fails while all predecessors are untouched. Then run
+   the module check over the staged module, then `before_commit` (which
+   invalidates the link record);
+7. validate that any existing destination in `{ <stem>.wasm.trace,
+   <stem>.wasm.map, <stem>.wasm, <stem>.mjs }` is a regular file (`browser
+   output '<path>' is not a regular file`) and reserve a sibling `.old` backup
+   path for each before touching any predecessor; then in order `.wasm.trace`,
+   `.wasm.map`, `.wasm`, `.mjs`, move any existing predecessor to its backup
+   and rename the staged artifact into place, and run `after_publish` (`titanc`
+   commits the link certificate there). The `.mjs` rename (followed by
+   `after_publish` when present) is the commit point: if any backup rename,
+   publication rename, or `after_publish` fails, rollback walks the outputs in
+   reverse order (`.mjs`, `.wasm`, `.wasm.map`, `.wasm.trace`), removes
    published new files, and restores every backed-up predecessor (`cannot
    restore browser artifact: <reason>; predecessor retained at <backup>` when
    even restoration fails). An unextended `.wasm.map` is never visible at the
    published path. The backups are removed after the commit.
 
 An image owns no DSO, debug bundle, or dSYM companion
-(`validate_program_output_paths` reserves the `.wasm` and `.wasm.map` siblings
-in `extra_outputs` and omits `.dSYM` on Darwin hosts for a browser context). A
-warm link hit verifies all three files, and a missing or modified `.mjs`,
-`.wasm`, or `.wasm.map` forces a relink while objects still hit. Final images
-never read `.titan.meta`,
-`.titan.source`, or `.titan.cprobe`; `wasm-ld` keeps the `.titan.source` and
-`.titan.meta` payloads as named data segments and drops `.titan.cprobe`
-([Baseline](#baseline)). Every image imports Lua's `env.exit`, which neither
-the entrypoint nor completion uses.
+(`validate_program_output_paths` reserves the `.wasm`, `.wasm.trace`, and
+`.wasm.map` siblings in `extra_outputs` and omits `.dSYM` on Darwin hosts for
+a browser context). A warm link hit verifies all four files, and a missing or
+modified `.mjs`, `.wasm`, `.wasm.trace`, or `.wasm.map` forces a relink while
+objects still hit. Final images never read `.titan.meta`, `.titan.source`, or
+`.titan.cprobe`, and carry none of them. On Wasm the two metadata payloads are
+unreferenced external definitions rather than `used` statics, so objects and
+archives keep them for the metadata readers and `wasm-ld --gc-sections` drops
+them from every image. Their `<mangled>_\u2119_titan_metadata` and
+`<mangled>_\u2119_titan_source` names keep these external symbols apart from
+module protocol functions and authored C names; probe payloads never reach an
+image ([Baseline](#baseline)). The payloads were more than a third of an image: the
+validation trace-gate runtime image shrank from 19,689,714 to 12,317,007
+bytes, and the standard-library aggregate from 55,845,693 to 35,884,282 bytes,
+with as much less initial linear memory. Every image imports Lua's
+`env.exit`, which neither the entrypoint nor completion uses.
 
 ### Build-time image bounds
 
@@ -2501,7 +2564,7 @@ Absent, empty, invalid or wholly unmapped source metadata produces an explicit
 `source unavailable` reason while preserving the size diagnostic.
 
 All program, generated-test and provider-protocol images share this check
-before map rewriting, `before_commit`, protocol execution or three-file
+before map rewriting, `before_commit`, protocol execution or four-file
 publication. Guard rejection leaves predecessor bytes untouched; the failed
 link certificate remains invalidated and the staged candidate is retired.
 The existing compiler inventory hashes both guard and source-map Lua owners,
@@ -2531,6 +2594,166 @@ under the former fixed 16 MiB initial memory.
 Default tiering and sandboxing were unchanged, with no memory feature or
 forced optimizing-only compiler. These are individual measurements, not
 maximum startup-memory guarantees.
+
+### The module check
+
+One generated module serves pages, bundlers and Node, and it loads no other
+module: page JavaScript, including another ES module of the page, reaches
+Titan only as `create({bindings})` values through `titan.browser`, just as
+`--js-library` is refused. Emscripten 6.0.13's `ENVIRONMENT=web,node` shell
+reaches Node inside `if (ENVIRONMENT_IS_NODE)` through four statements:
+`const { createRequire } = await import('node:module')`,
+`var require = createRequire(import.meta.url)`, `var fs = require('node:fs')`,
+and `require('node:path').dirname(require('node:url').fileURLToPath(_scriptName))`.
+An optimizing link prints them again with double quotes, extra parentheses
+around the `import`, and less whitespace (none at all without `-g2`).
+`embed` removes the first two and rewrites the others to
+`process.getBuiltinModule('fs')`, `'path'` and `'url'`, which Node 26 provides
+synchronously without an import. Only the first occurrence of each pinned
+form changes, and all four change or none: a shell printed in another form
+would keep part of its `require`, so `embed` refuses it with `browser image
+has an unrecognized Emscripten Node shell`. The link profile owns
+`-sMIN_NODE_VERSION=260000`; below Node 19, Emscripten's WASI `random_get`
+would `require('node:crypto')`.
+
+After `embed` writes the staged module, `driver.compile_browser_image` calls
+`browserlink.check_module`, which runs the SDK's
+`titan-browser-module-check.mjs` under emcc's configured Node, read with
+`em-config NODE_JS` (a Python list of the executable and its arguments), with
+the acorn parser of emcc's own installation,
+`<em-config EMSCRIPTEN_ROOT>/node_modules/acorn/dist/acorn.mjs` (acorn 8.18.0
+in Emscripten 6.0.13). Every Emscripten installation has both, so the check
+needs nothing beyond the pinned toolchain. Nothing is cached: each link parses
+its own module, which took 17–41 ms on the images measured, about 0.15 s per
+link with the process starts. The checker parses the module as an ES module
+(`ecmaVersion: 'latest'`) and walks its tree. It refuses:
+
+* an `import` declaration (`imports "<specifier>"`), an `export ... from`
+  (`re-exports from "<specifier>"`), and every `import()` (`uses dynamic
+  import()`), whatever the specifier;
+* the identifier `require` wherever it refers to a binding (`uses require`),
+  which covers calls through parentheses, a comma expression, optional
+  chaining, a tagged template and an alias, and a property named `require`
+  read through a member access or a destructuring pattern, such as
+  `module.require` (`reads require`);
+* any use of `getBuiltinModule` other than a call with exactly one of the
+  string literals `'fs'`, `'path'` and `'url'` that the rewritten shell makes;
+* a module that does not parse (`does not parse as an ES module: <acorn
+  message>`).
+
+A refusal reads `browser image module <construct> at line <n> (<the first 60
+characters of the code>); <route>`, where the route is `the image module is
+self-contained; pass page JavaScript to Titan as create({bindings}) values
+through titan.browser` for imports and `browser images load no Node module;
+pass page JavaScript to Titan as create({bindings}) values through
+titan.browser` for the rest. Property names, object keys, labels, comments,
+strings and regular expressions name nothing, so prose may mention any of
+these. Apart from the rewritten shell's three calls, the modules that
+Emscripten generates for the link profiles use none of them. The check keeps
+generated and `EM_JS` code to the deployment profile; computed names such as
+`process[name]` and `eval` are beyond it, and it is not a sandbox.
+
+The checker exits 2 with its one refusal on stdout; any other failure, such as
+a missing acorn, is `browser image module check did not run: <output>`. It
+covers user `EM_JS` and `EM_ASM` code, which Emscripten places in the module,
+and runs for every program, test and protocol image; the `lua-main` baseline
+images that `scripts/browser_baseline.lua` links directly keep Emscripten's
+shell. The checker is an SDK file, so `sdk-digests` and the final-link
+certificate record it, and changing it relinks.
+
+### Import manifest
+
+`scripts/browser_imports.lua` is the reviewed allowlist of the imports a final
+browser image may contain. The maintainer reviews every change to it, as for the
+[status inventory](#subset-parity-gate). Each row is
+`{ class, module, name, signature, provider = ..., reason = ... }`:
+
+* the class says which images may use the import;
+* the signature is the Wasm function type as `(params)->(results)`, for
+  example `(i32,i64,i32)->(i32)`; a non-function import names its kind
+  (`memory`, `table`, `global`, or `tag` and its signature) instead;
+* the provider names the JavaScript that implements the import in the
+  generated `.mjs`: one of Titan's three Emscripten libraries, a file of
+  Emscripten 6.0.13's own library, or a test fixture; and
+* the reason says why images need it.
+
+Every image has the `entry` class: programs, test images and provider protocol
+probes, which all link Titan's launcher. A repository test image adds one class
+for each test fixture it links, so one fixture's imports never pass in an
+image that does not link that fixture:
+
+| Class | Fixture |
+| --- | --- |
+| `fixture:controls` | `spec/fixtures/browser_runtime/fixture_controls.h`, the `EM_JS` controls that several C helpers include |
+| `fixture:trace` | `spec/fixtures/browser_trace/trace_support.c` |
+| `fixture:html5` | the html5 click counter `spec/fixtures/browser_bridge/counter.titan` |
+| `fixture:net` | `spec/fixtures/browser_net/controls.c` |
+| `fixture:loader` | `spec/fixtures/browser_loader/loader.c` |
+| `fixture:gate` | `spec/fixtures/browser_runtime/gate.c` |
+| `fixture:budget` | `spec/fixtures/browser_runtime/budget.c` |
+| `fixture:scheduler` | `spec/fixtures/browser_scheduler/mini_driver.c` and `scheduler_child.c` |
+
+No non-function import (memory, table, global or tag) is listed, so any such
+import fails the check.
+
+The `entry` rows are the bridge, completion, admission, coroutine, relinquish
+and trace imports of Titan's libraries, and the parts of Emscripten's runtime
+and C library that Emscripten implements in JavaScript:
+
+* `abort`, `assert`, `exit`, the checked stack overflow, and memory growth;
+* wall-clock and calendar time;
+* anonymous `mmap`/`munmap`;
+* three `wasi_snapshot_preview1` functions: `clock_time_get`,
+  `environ_sizes_get` and `environ_get`.
+
+The launcher defines the WASI stdio functions and file syscalls itself
+([Filesystem](#the-link-profile)), so they are not imports. The supplied
+loader therefore implements every `entry` import, and a browser image needs
+no WASI host and no Node.
+
+`staticmetadata.browser_trace_image` reads each function or tag import's
+signature from the type section. It refuses:
+
+* a type form other than a function type;
+* a value type other than `i32`, `i64`, `f32`, `f64`, `v128`, `funcref` or
+  `externref`;
+* an import type index outside the type section.
+
+`scripts/browser_stdlib.lua` provides the checks:
+
+* `allowed_imports(allowlist, classes)` first checks its inputs: a nonempty
+  list of known classes, complete rows with a provider and a reason, and one
+  row per class, module and name.
+* `check_imports(bytes, origin, classes)` then fails with one line per image
+  import that no row of the given classes lists with the same signature:
+  `<image>: unlisted browser import <module>.<name> <signature> (classes <classes>)`,
+  followed by `add a reviewed row for each to scripts/browser_imports.lua`.
+* `check_file_imports(strategy, image, classes)` reads the `.wasm` of one
+  image, named by its `.mjs` or `.wasm`, and checks it.
+
+The command-line form is
+`lua -E scripts/check_browser_stdlib.lua imports CLASS[,CLASS...] WASM...`.
+
+The check runs wherever the repository builds an image, with that image's own
+classes:
+
+| Where | Images and classes |
+| --- | --- |
+| `make titan-stdlib-browser-test`, after the closure check | `images/stdlib.wasm`: `entry` |
+| `spec/browser/build-trace.lua` | the runtime, uncaught and async images: `entry,fixture:trace` (the degraded variants copy the runtime image's `.wasm`) |
+| `spec/browser/build-bridge.lua` | the bridge and public-state images: `entry,fixture:controls`; `counter`: `entry,fixture:html5`; `initializer-failure` and `responsive`: `entry` |
+| `spec/browser/build-net.lua` | `http`: `entry`; `websocket`: `entry,fixture:net` |
+| `spec/browser/build-delivery.lua` | the chapter's complete application `app`: `entry` |
+| The [`browser-toolchain`](continuous-integration.md#browser-toolchain-job) runner and loader image steps | the runner images and `loader_names`: `entry`; `loader_app`, `fidelity`, and the optimized `fidelity`: `entry,fixture:loader,fixture:controls` |
+| `spec/support/browser_toolchain.lua` `check_imports`, called by each spec's build | bridge spec: as `build-bridge.lua`; entry gate: the `gate.c` images `entry,fixture:gate,fixture:controls`, the `entry_lifetimes.c` image `entry,fixture:controls`; scheduler: the scheduler owner `entry,fixture:scheduler`, the others `entry`; budget probes: `entry,fixture:budget`; the documented `hello` image of the documentation gate, the archive-only consumer of `browser_protocol_spec.lua`, and the stdlib gate, fixture and minicoro images: `entry` |
+
+The trace-adapter units of the `browser-toolchain` job link
+`spec/fixtures/browser_trace_adapter/lifecycle.c` and `filter.c` with plain
+`emcc` and the Titan C runtime. They have no Titan launcher, are not final
+browser images, and are not checked.
+
+The allowlist is a repository check, not a compiler rule: an application
+image may import its own `EM_JS` functions and any Emscripten API it calls.
 
 ## The browser entrypoint
 
@@ -2715,78 +2938,139 @@ extensions:
   subsection 1, or `null` when absent. Source-map `names` are never used as a
   substitute for Wasm function names. The final `.wasm` retains its custom
   `name` section in this milestone for DevTools inspection; runtime
-  symbolization reads `x_titan_function_names` so it works identically when the
-  `name` section is stripped.
+  symbolization reads the same names from the [trace table](#the-trace-table),
+  so it works identically when the `name` section is stripped.
 
-### Eager map loader and trace metadata
+### Module and Wasm binding
+
+`create(factory, options, image)` first requires `image` to be the generated
+module's binding, `{identity, wasm}` with a 64-digit lowercase hexadecimal
+identity and a `.wasm` name, and throws a `TypeError` otherwise.
+`BrowserOwner.instantiate` reads the instantiated Wasm's
+`_titan_browser_trace_identity()` string right after the factory resolves
+and checks for Titan channels; a module without that export fails the channel
+check (`browser image does not provide Titan channels`). It compares the
+string with the identity that the generated module passed to `create`. A
+difference throws
+`failure('PROTOCOL', 'browser image mismatch: <stem>.mjs belongs to image
+<12 hex>, <stem>.wasm is image <12 hex>')`, which poisons the owner before any
+entry, whatever `requireTrace` says: Emscripten glue generated for another
+link is never safe to run. A trace table from another link stays a
+degraded-trace condition ([eager trace loader](#eager-trace-loader-and-trace-metadata)).
+
+Only the host sees both identities, so the comparison is loader JavaScript;
+Titan code never runs before it.
+
+Publication renames the trace table, the map, the `.wasm`, then the `.mjs`.
+The runtime never reads the map, so an interruption can leave only two kinds
+of mixed sets:
+
+| Interrupted after | Files | Outcome |
+| --- | --- | --- |
+| the table or map rename | new table (and map), old `.wasm` and `.mjs` | degraded trace, or the `requireTrace` initialization failure |
+| the `.wasm` rename | new table, map and `.wasm`, old `.mjs` | the protocol failure above |
+
+The warm-link check relinks either set.
+
+### The trace table
+
+`browsertrace.rewrite` derives `<stem>.wasm.trace` from the same validated walk
+of the final map's segments that binds the map's extensions, so the runtime
+reads a few compact arrays instead of parsing the map. A row starts where the
+location of the code inside a defined function body changes: to a `.titan`
+source line, or to a gap, which is an unmapped segment or a non-`.titan`
+source such as C the optimizer inlined into the body. Each body starts in a
+gap, the last of several segments at one offset wins, consecutive equal
+locations share one row, rows never cross a body boundary, and segments outside
+every body are dropped. A lookup that takes the last row at or before an
+offset inside its body therefore sees exactly what the map's segments say
+there. A body's declaring basename is that of its first `.titan` row, and the
+table lists only the basenames of `.titan` rows, deduplicated (at most 32,767:
+`too many Titan source names for the trace table`), so a segment that a later
+one at the same offset replaces names nothing. The table also lists every
+function name, imports first, empty when the name section has none. The
+reader refuses rows that do not ascend and `.titan` rows without a line.
+
+The layout is little-endian, every 4-byte array starts 4-byte aligned, and the
+size is exact:
+
+| Offset | Field |
+| --- | --- |
+| 0 | magic `TTRC` |
+| 4 | u32 format version, 1 |
+| 8 | the 64-character image identity |
+| 72 | u32 function imports `I` |
+| 76 | u32 defined bodies `B` |
+| 80 | u32 rows `R` |
+| 84 | u32 basenames `S` |
+| 88 | u32 string bytes `T` |
+| 92 | u32 `[B]` body start gaps, each from the previous body's end (the first from 0) |
+| | u32 `[B]` body lengths |
+| | u32 `[R]` row offset deltas |
+| | u32 `[R]` row line deltas modulo 2<sup>32</sup>; a gap row repeats the previous line, so its delta is 0 |
+| | u32 `[S + I + B + 1]` string offsets: basenames, then function names |
+| | i16 `[R]` row basename index, -1 for a gap |
+| | i16 `[B]` body declaring basename index, -1 when the body has no `.titan` location |
+| | `T` bytes of UTF-8 strings |
+
+`browsertrace.trace_table(map_bytes)` derives the same table from a final map,
+which keeps the `x_titan_*` extensions as the readable form of the same
+binding: developer tools ignore them, and tests and tools read function names
+and ranges from them. The trace-gate builder makes its `missing_symbols`
+variant this way.
+
+Measured with Node 26.13.1. The map loader that the table replaces took
+141–157 ms on hello and 681 ms on the standard-library aggregate:
+
+| Image | Rows | `.wasm.map` brotli bytes | `.wasm.trace` bytes / brotli | Read |
+| --- | ---: | ---: | ---: | ---: |
+| validation trace-gate runtime image | 363,566 | 321,184 | 4,245,930 / 221,340 | 1.6 ms |
+| production hello | 401,750 | 397,757 | 4,504,015 / 219,249 | 1.9 ms |
+| validation standard-library aggregate | 1,229,731 | 865,996 | 14,300,264 / 640,993 | 6.2 ms |
+
+`browsertrace.rewrite` takes 0.63 s on the trace-gate runtime image and
+2.29 s on the standard-library aggregate, of which the same parse and walk
+without the table writer take 0.49 s and 1.70 s: the table costs those links
+about 0.14 s and 0.6 s.
+
+### Eager trace loader and trace metadata
 
 `titan-browser-trace.js` registers an `addOnPreRun` callback that adds the run
-dependency `titan-trace-map` before user code can start. It resolves
-`locateFile('{{{ WASM_BINARY_FILE }}}.map')` (`fetch(path, {credentials:
-'same-origin'})` in browsers and `readBinary(path)` in Node), decodes the UTF-8
-bytes with `TextDecoder('utf-8', {fatal: true})`, validates the standard v3
-source map and `x_titan_*` extensions, verifies that `x_titan_image` equals
-`UTF8ToString(wasmExports['titan_browser_trace_identity']())`, builds the
-typed-array lookup index
-([Browser trace backend](error-handling.md#browser-trace-backend)), publishes a
-private result on `Module['titanBrowserTrace']`, and removes
-`titan-trace-map`:
+dependency `titan-trace-table` before user code can start. It resolves
+`locateFile('{{{ WASM_BINARY_FILE }}}.trace')` (`fetch(path, {credentials:
+'same-origin'})` in browsers, failing with `trace table request failed
+(<status>)`, and `readBinary(path)` in Node) and reads it with
+`readTable(data, identity)` against
+`UTF8ToString(wasmExports['titan_browser_trace_identity']())`. The reader
+checks only what the bytes could get wrong: the magic and version and the
+exact size (`invalid trace table`), the identity (`trace table image does not
+match`), and every body bound, row offset and order, basename index, `.titan`
+row line, and string offset.
+It copies a table whose bytes are not 4-byte aligned, decodes the deltas into
+absolute `pcs`, `lines`, `starts`, and `ends` arrays, decodes the basenames,
+and decodes a function name only when a frame needs it
+([Browser trace backend](error-handling.md#browser-trace-backend)). It then
+publishes a private result on `Module['titanBrowserTrace']` and removes
+`titan-trace-table`:
 
 ```text
 { state: 'ready' | 'degraded', reason: string | null,
-  mapBytes: number, loadMilliseconds: number, indexBytes: number }
+  traceBytes: number, loadMilliseconds: number, indexBytes: number }
 ```
 
-`mapBytes` is the UTF-8 byte length of the fetched `.wasm.map`,
-`loadMilliseconds` measures the elapsed time (`performance.now()`) from
-request/read start through validated index readiness, and `indexBytes` is the
-sum of the six retained typed arrays' `byteLength`s (`pcs`, `sources`, `lines`,
-`starts`, `ends`, and `first` — not total JavaScript heap usage; `0` when
-degraded). When the map is missing, malformed, missing `x_titan_*` extensions,
-or mismatched with the instantiated `.wasm`, `state` is `'degraded'`, `reason`
+`traceBytes` is the byte length of the fetched table, `loadMilliseconds`
+measures the elapsed time (`performance.now()`) from request/read start through
+index readiness, and `indexBytes` is the retained table plus the four decoded
+arrays (not total JavaScript heap usage; `0` when degraded). When the table is
+missing, malformed, or from another link, `state` is `'degraded'`, `reason`
 records the failure, and one `console.warn('Titan browser trace: ' + reason)`
 is emitted at load time. Embeddings default to permitting degraded mode.
 With `requireTrace: true`, `BrowserOwner.initializeEntry` checks the public
-map snapshot after factory readiness, before its first Lua initialization
+trace snapshot after factory readiness, before its first Lua initialization
 entry. It saves an ordinary initialization failure with status 1 and message
 bytes, but no Titan trace because Lua was never entered. The runner and
 Playwright shared page pass `requireTrace: !allowDegradedTrace`; no wrapper
 owns another lifecycle or admits a gap between initialization and main.
-
-Observed trace cost for #330, when both installations still linked what is now
-the validation profile, on the representative compiled trace-gate image
-`out/browser/trace/assertions-2/runtime.mjs` (which then linked all 34 native
-trace fixture cases under the D14 object profile `-O1 -fno-inline
--fno-optimize-sibling-calls -gline-tables-only` and the D18 Titan-entry link
-profile `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2
--sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals`):
-
-| Installation | Engine | `.wasm` bytes | `.wasm.map` bytes (`mapBytes`) | Map / Wasm | Eager map/index load (`loadMilliseconds`) | Retained typed-array index (`indexBytes`) |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Validation | Node 24.19.0 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 96.3 ms | 2,902,884 |
-| Production | Node 24.19.0 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 95.2 ms | 2,902,884 |
-| Validation | Host Chromium 156.0.8078.79 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 61.1 ms | 2,902,884 |
-| Production | Host Chromium 156.0.8078.79 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 73.2 ms | 2,902,884 |
-| Validation | Playwright Chromium 141.0.7390.37 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 72.5 ms | 2,902,884 |
-| Production | Playwright Chromium 141.0.7390.37 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 102.4 ms | 2,902,884 |
-| Validation | Playwright Firefox 142.0.1 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 62.0 ms | 2,902,884 |
-| Production | Playwright Firefox 142.0.1 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 113.0 ms | 2,902,884 |
-| Validation | Playwright WebKit 26.0 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 69.0 ms | 2,902,884 |
-| Production | Playwright WebKit 26.0 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 63.0 ms | 2,902,884 |
-
-Each `loadMilliseconds` entry is one observed eager-load sample from the
-passing 72-row / 70-native-case gate run (spanning map read or loopback HTTP
-`fetch`, UTF-8 decoding, JSON parsing, `x_titan_image` verification, and
-typed-array index construction — not total image startup, a multi-run average,
-or a cold-network benchmark). `indexBytes` sums the six retained typed arrays
-only (`pcs`, `sources`, `lines`, `starts`, `ends`, and `first`); it excludes
-the retained `names` and `bases` JavaScript string arrays and temporary parsing
-allocations, so it is not total retained or peak JavaScript heap usage.
-
-Since #343 the production installation links a different image: its current
-trace-gate test image is 3,231,911 bytes with a 904,919-byte map, against
-5,261,947 and 1,279,867 for validation ([Measurements](#measurements)). Its
-eager-load cost has not been measured again.
 
 ### WebAssembly stack survey
 
@@ -2833,7 +3117,7 @@ runtime and its current-engine tests.
    `0xPC` in any tested configuration. Cold named runs in Playwright WebKit
    also mix numeric-only and named forms within a single stack. Both forms
    always carry the bracketed decimal function index `[<N>]`, which resolves
-   through `x_titan_function_names` and `TITAN_NAMES_KEY` to the Titan display
+   through the trace table's function names and `TITAN_NAMES_KEY` to the Titan display
    name and declaring `.titan` basename for no-line rendering.
 4. **Active-chain order and fibers.** Across all six engines, the active Wasm
    call chain is ordered youngest-first without reordering or duplication
@@ -3867,8 +4151,8 @@ module, it:
    (`selected static provider failed executable-context protocol validation
    (browser runner exit <code>)`, with 75 when the runner could not start);
    and
-5. removes the probe source, object, `.mjs`, `.wasm`, and `.wasm.map` on every
-   path.
+5. removes the probe source, object, `.mjs`, `.wasm`, `.wasm.map`, and
+   `.wasm.trace` on every path.
 
 `titanc` calls it before a program or test link, with the program's objects
 and the selected archives, exactly where the native probe runs.
@@ -3927,7 +4211,8 @@ backend-off control. A cell's one option record feeds planning, child build,
 identity and receipt. The format identifier stays unchanged.
 
 The historical tables below belong to #329's pre-JSPI images and are not
-current JSPI size, memory, startup or latency guarantees.
+current JSPI size, memory, startup or latency guarantees; the release
+profile's current measurements are the [records](#records).
 
 
 | Titan cell | `.wasm` bytes | `.mjs` bytes | Node instantiate / run (ms) | Chromium instantiate / run (ms) | Suspension, Node / Chromium (ms) |
@@ -3986,6 +4271,66 @@ cannot remove them. Every Titan image imports 50 symbols (every Lua
 interpreter image 27), none of them `dlopen`, `dlsym`, `dlerror`, or a
 backtrace function.
 
+## Records
+
+The release profile's records are measurements, not gates; nothing fails on
+their values. Two harnesses take them:
+
+* `spec/fixtures/browser_delivery/hosted.mjs --records FILE`, in the
+  `production` Playwright cells, one per engine, loads the complete
+  application's page five times. It records startup (the first output, the
+  WebAssembly instantiation, and the Wasm and trace fetches) and scheduler
+  responsiveness: the frames the page draws during the Task phase, their
+  largest gap, and the delay of clicks made meanwhile
+  ([documentation checks](#documentation-checks)).
+* `spec/fixtures/browser_records/collect.mjs`, in the `browser-packaging`
+  job, measures the clean checkout's installation (the default `production`
+  profile) under Node and in Playwright Chromium:
+  * the sizes of the complete application's `app.wasm`, `app.mjs`,
+    `app.wasm.trace` and `app.wasm.map`: raw, gzip level 9 and brotli quality
+    11, with Node's `zlib`;
+  * startup under Node, in five fresh instances: from `create()` until
+    `initialize()` resolves, for the application and for `records.mjs`, and
+    until `records.mjs` first writes output;
+  * memory: `records.mjs memory` prints the WebAssembly memory size
+    (`emscripten_get_heap_size()`, which never shrinks, so its last value is
+    the peak) and the bytes malloc has handed out (`mallinfo().uordblks`). It
+    prints them at start; after a warm-up batch of 256 Tasks has finished and
+    two collections; after each batch of 256 Tasks parked on channels of their
+    own, until creating a Task fails; and after the parked Tasks finish and
+    two collections. The bytes per Task come from the parked batches. A run
+    that completes must have stopped at Titan's own `could not create
+    coroutine: Out of memory`. An engine that fails first (status 70, 71 or
+    75), as a [fatal engine allocation
+    failure](../language/browser-target.md#limits) does, is recorded as that
+    engine's limit with the last parked count;
+  * recursion: the deepest depth that passes for plain recursion in `main`
+    and in a new coroutine (`stack.mjs`, which imports neither `async` nor
+    `io`, so `main` is not a Task and runs on the main stack), in `main`'s
+    Task, and in `main`'s Task with a `timer.sleep(0)` at the deepest call
+    (`records.mjs`). Every probe runs in a fresh engine. The depth doubles
+    from 1000 until a run fails, then a bisection narrows it to within 1%.
+    The failure is recorded by kind from the runner's status: the engine's
+    call stack (75 with a call-stack message), an abort (70), a trap (71),
+    or a Titan error (1). Any other status fails the step.
+
+Recursion depth is engine-specific, so the `production` Firefox and WebKit
+Playwright cells run the collector too, with `--engines` set to their engine
+and `--measure memory,recursion`; together the jobs record memory and recursion
+on all four engines.
+
+`spec/browser/build-records.lua` builds `records.titan` and `stack.titan` from
+`spec/fixtures/browser_records/` with the installation's `titanc`, under the
+profile that its browser SDK recorded whatever `TITAN_BUILD_PROFILE` the
+environment holds, and checks both images' imports against the `entry` class.
+The collector runs Node images
+through the SDK's `titan-browser-run` and the other engines through
+`spec/browser/playwright-run.mjs`, and writes its JSON file with a Markdown
+table beside it: `out/browser-records/packaging.json` in `browser-packaging`
+and `records-<engine>.json` in the Playwright cells, where the hosted test
+writes `playwright-<engine>.json`. Both jobs upload `out/browser-records/` as
+`browser-records-*` artifacts.
+
 ## Host processes
 
 The compiler process never loads a Wasm image or a browser archive. The
@@ -4007,11 +4352,153 @@ initialization boundary both reject the target with `browser builds are
 supported from Linux and macOS hosts (host is <host>)`:
 `browser builds are supported from Linux and macOS hosts (host is windows)` on
 Windows, and `browser builds are supported from Linux and macOS hosts (host is
-native)` on an unlabeled native host. The fork's `make install-browser`
-likewise refuses a native Windows shell, `Makefile.win` has neither
+native)` on an unlabeled native host. `Makefile.win` has neither
 `lua-browser` nor `browser-sdk`, and the runner refuses to execute an image on
 Windows (`harness failure: browser execution is supported from Linux and macOS
-hosts`).
+hosts`). The fork's `make install-browser` refuses a native Windows shell, but
+from an MSYS2 CLANG64 shell with emsdk 6.0.13 it builds and installs the
+browser Lua.
+
+Lifting the compiler's refusal alone does not make a Windows-host build work.
+In the order a build meets them:
+
+* emsdk installs `emcc.exe`, `emar.exe` and `emranlib.exe`, while the
+  descriptor looks for extensionless `emcc` on the `EMSDK` and `PATH` routes
+  and for extensionless siblings beside it;
+* the native Windows `io` support has no executable-access check, so
+  `io.Sync:executable` refuses a real `emcc.exe`;
+* with both worked around, preprocessing `lua.h` for the target does not find
+  `stdarg.h` among the include roots given to the C preprocessor;
+* `titan-browser-run` is a POSIX `sh` launcher, and the browser specs pend on
+  Windows, including the browser source-resolution checks.
+
+## Documentation checks
+
+The browser chapter's opening and its complete application are executable.
+`scripts/doc_check.lua` runs the fenced blocks that an HTML comment marker
+(invisible in rendered Markdown) selects: `file=PATH` writes the block to a
+workspace path, `run` and `setup=checkout` run an `sh` block, and
+`expect=LABEL` records text for the caller to compare. Unmarked blocks,
+including the long-running serve commands, never run, and a marker spelled
+inside an unmarked block is text. An unknown or malformed marker, a marker
+without a following fence, a `run` block that is not `sh`, and a file path
+that is absolute or leaves the workspace are errors.
+
+All marked blocks of the given documents become one `set -eu` script, so a
+`cd` or `export` carries over to later blocks, and each document starts in
+the workspace. File blocks become quoted heredocs that write the bytes as
+shown. Command blocks get a fixed list of exact substitutions, each logged
+when it applies: the documented clone command becomes `git -c
+protocol.file.allow=always clone --recurse-submodules <checkout> titan` in the
+`setup=checkout` block (Git 2.38 and newer refuse local submodule clones
+otherwise), the documented `PREFIX` value becomes the job's prefix,
+`/path/to/titan` becomes the source checkout, and `npm install --save-dev vite`
+becomes a link to the pinned Vite installation. A command that needs a
+substitution whose value was not given, a value that no block needs, and a
+checkout block without the documented clone command are errors, so the check
+fails when the chapter drifts from it. `section(text, heading)` keeps one
+`##` section of a document, ending at the next `##` heading outside a fence,
+and blanks the other lines, so a caller can check one section and its
+diagnostics keep the document's line numbers. `spec/doc_check_spec.lua` tests
+the grammar, section selection, the substitutions and the shell's
+persistence, runs a clean checkout of a scratch Git repository, and plans the
+installation and browser chapters as the clean-checkout job runs them.
+
+`--clean-checkout` is the mode of the [`browser-packaging`
+job](continuous-integration.md#browser-packaging-job). It takes a workspace
+that must not exist yet and the checkout to clone, both absolute paths. The
+checkout block clones that commit into `WORKSPACE/titan`, and the documented
+`PREFIX` becomes `WORKSPACE/prefix`. After the document that holds the
+checkout block, the script moves the clone to `WORKSPACE/titan-moved`, which
+`/path/to/titan` names from then on, so the later documents run against an
+installation whose source tree has moved: nothing installed may still point
+into it. The shell starts without the variables that select a Titan
+installation, profile or build mode, or Lua's module paths
+(`doc_check.clean_variables`: `PREFIX`, `ROCKS_TREE`, `TITAN_ROOT`,
+`TITAN_BUILD_PROFILE`, `OPENSSL_MODE`, `LUA_PATH`, and the like), so a job's
+own settings, including those a workflow sets for all its jobs,
+cannot stand in for a documented command. The script needs only Lua 5.4 or
+newer, so a job can run it with its distribution's Lua before the clone has
+built its own.
+
+`spec/coder/browser_docs_spec.lua` runs the opening section ("A first web
+page") in a workspace with the installation's `bin` on `PATH` and no Titan
+overrides (`TITAN_ROOT`, `TITAN_PATH_0_6`, `TITAN_TARGET`, and the extra-flag
+variables are unset), as a reader's shell would be. It checks the `hello`
+image's imports against the `entry` class, then
+`spec/fixtures/browser_docs/docs.mjs` imports the image
+in plain Node (ready and frozen trace, the documented output), and loads
+`site/`, `site-assets/` (`locateFile`) and `vite-app/dist/` in Chromium, each
+served by the documented `http-dev-server` on the first free port from 28500.
+Every page must show the `expect=page` text; every response must be 200; the
+Wasm must arrive once as `application/wasm`, the module as `text/javascript`
+and the trace table once; nothing from the SDK is served; and Vite must emit
+hashed `.wasm` and `.trace` files and no unhashed one. A copy of `site/`
+without `hello.wasm.trace` must end in `(failed, status 1)`, which shows that
+the page's `requireTrace: true` would catch a deployment that drops the
+table.
+
+`doc/language/http-dev-server.titan` is a single-file native program on
+`titan.http`. Its `Site` record holds the folder's canonical path. A request
+path is split on `/` and each segment percent-decoded before it is checked,
+so `%2e%2e`, an encoded `/` (`%2F`), a backslash and NUL are refused with 403
+whatever their spelling. `Site:lookup` then checks that the path's canonical
+form (`fs.realpath`) is the folder or lies below it before anything else,
+including the redirect of a folder path without a trailing `/`, so a symbolic
+link that leads outside is refused with 403 whether it names a file or a
+folder. The redirect's location starts at the path's first name, so `//docs`
+cannot become a protocol-relative `//docs/`. `fs.stat` returns nil only for a
+missing file; lookup errors that mean no file is there (`ENOTDIR`, `ELOOP`,
+`ENAMETOOLONG`) answer 404 and permission errors (`EACCES`, `EPERM`) 403, so
+these requests get a response rather than ending their connection Task with
+an error. A response to `HEAD` sets `Content-Length` and writes no body, as
+`titan.http` requires. The native owner
+`spec/fixtures/browser_docs/http_dev_server_test.titan` imports the server's
+source (`import "http-dev-server.titan"`), serves a scratch folder on a
+loopback port in its own Task, and checks content types, `HEAD`, methods,
+directories, traversal, symbolic links and lookup errors through the public
+HTTP client, plus `main`'s usage and busy-port statuses. Its unreadable-folder
+case has nothing to check when the superuser runs it. The docs spec copies the
+two files into one source tree and builds them with `--test`, so the
+standard-library test tree never resolves modules from the manual.
+
+The "A complete application" section documents `doc/language/browser-app/`:
+`app.titan`, its page `index.html`, and `greeting.txt`.
+`spec/browser/build-delivery.lua OUTPUT` runs that section's commands with
+`doc_check` in the reader's shell: the installation's `bin` on `PATH`,
+`PREFIX` naming it, `TITAN_BUILD_PROFILE` set to the profile that its browser
+SDK recorded, and no Titan overrides. It builds the documented
+`http-dev-server` natively under the same profile, checks the image's imports
+against the `entry` class, and writes `delivery.json` with the profile and the
+section's `expect=app` and `expect=app-errors` texts. With
+`--built WORKSPACE`, it builds and runs nothing: the clean-checkout job has
+already run the whole chapter there, so it checks the imports of the first
+page's `out/hello.mjs` and of the application, then writes the same
+`delivery.json` and copies the Node run's modules.
+`spec/fixtures/browser_delivery/hosted.mjs` serves `browser-app/site` with
+that server and loads the page in one Playwright engine, in a fresh context
+with service workers blocked. The page's output element must hold the
+`expect=app` text; its error element must start with the `expect=app-errors`
+lines (the Titan frames without lines on WebKit) and continue only with
+frames from `async.titan`, `coroutine.titan` and `runtime.browser.titan`
+(`expectations.mjs`). The program's own frames are exact in both profiles:
+no function on that call chain is inlined. The page must request exactly `/`,
+`app.mjs`, `app.wasm`, `app.wasm.trace`, `titan-protobuf.mjs` and
+`greeting.txt`, each once and answered with 200, open no WebSocket, and
+complete each fetched file in its own Resource Timing; Chromium reports a
+fetch whose body is read through a stream reader, as `http.get` reads, as
+`net::ERR_ABORTED` to Playwright even after the body completed, so only a
+failure before the response counts. The trace table's `responseEnd` must
+precede the first output, no resource may start once the caught error is
+shown, and the page must draw at least one frame while the Tasks wait. An
+init script, not the page, measures: the first output, the WebAssembly
+instantiation, the Wasm and trace fetches, animation frames during the Task
+phase, and the delay of clicks made then. With `--records FILE` the
+test loads the page four more times and writes their medians and maxima;
+the numbers never fail the test. `dod.test.mjs`, copied into the output with
+`expectations.mjs`, runs the image under `titan-browser-run --engine node
+--js-test` with the page's two bindings and the same server, and checks the
+same texts.
 
 ## Validation
 
@@ -4042,12 +4529,21 @@ hosts`).
   images with frame flags and both Binaryen skips, test owners' frame flags,
   validation and harness purposes unchanged), the image-derived link purpose
   and its refusals of a contrary or missing purpose, the owned options named
-  by profile, missing-SDK and `.mjs` diagnostics, program and test images with
+  by profile, the refused options that add a file to the module or its data
+  (`--pre-js` and the rest, directly and through `--ldflag`), missing-SDK and
+  `.mjs` diagnostics, the Node shell rewrite in every printed form and the
+  refusal of a partly recognized shell, the module check's refusals of the
+  adversarial module texts (division and regular-expression contexts, `\r\n`
+  continuations, escaped specifiers, every `require` call spelling and alias,
+  `getBuiltinModule` beyond the shell's three) and its accepted prose, a real
+  image of the installation's profile accepted and an `EM_JS` `import()`
+  refused before publication, program and test images with
   statuses, binary arguments, uncaught reports, protected initialization and
   allocation failures, the libc drain, the stdio-only filesystem regression,
-  dynamic-loading guards, three-file preflight reservation and repeated-link
+  dynamic-loading guards, four-file preflight reservation and repeated-link
   image identity, contributor-prologue `.wasm.map` attribution, image
-  inventories, measurement optimization, the native libbacktrace and
+  inventories, program images without `.titan.*` payload segments while their
+  objects keep both payload symbols, measurement optimization, the native libbacktrace and
   fallback trace invariants, and [long-double
   formatting](#the-link-profile) (`-sPRINTF_LONG_DOUBLE=1` for every profile,
   purpose, and entry, every rejected override spelling, and the
@@ -4057,23 +4553,32 @@ hosts`).
   pending in a validation installation and runs in the production Chromium
   [`browser-playwright`](continuous-integration.md#browser-playwright-job)
   cell.
-* `spec/coder/browser_incremental_spec.lua` — browser object and three-file
-  link certificates, shared-asset and `.wasm.map`-change invalidation,
-  three-predecessor rollback across backup/publication/certificate boundaries,
+* `spec/coder/browser_incremental_spec.lua` — browser object and four-file
+  link certificates, shared-asset and `.wasm.map`- or `.wasm.trace`-change invalidation,
+  four-predecessor rollback across backup/publication/certificate boundaries,
   certified `-L`/`-l` archive reuse versus uncertified `emcc`-only system
   libraries, and, for a program and a test image, an oversize body rejected
   before `before_commit` and publication with predecessors intact and no
   certificate, recovery, a warm final-link hit that does not inventory the
-  published image again, and a miss after the copied guard owner changes.
+  published image again, and a miss after the copied guard owner changes, and
+  the mixed sets an interrupted publication can leave, run under Node
+  ([module and Wasm binding](#module-and-wasm-binding)).
 * `spec/browser_trace_map_spec.lua` — final-image Wasm section/range/name
   extraction, standard v3 `.wasm.map` validation, `x_titan_*` extension
-  rewriting, `browsertrace.identity` recipe, `browser_trace_libraries`
+  rewriting, the [trace table](#the-trace-table) writer (gaps for inlined C
+  and unmapped code, the last segment at an offset, including one that
+  replaces a body's first segment, coalescing, body
+  boundaries, used basenames only and their limit, imports-first names, the
+  identity, and the same table from the final map), checked by an independent
+  decoder against the segments at every offset of constructed and seeded
+  generated maps, `browsertrace.identity` recipe, `browser_trace_libraries`
   resolution, malformed/truncated Wasm and map rejection, the
   [byte bounds](#build-time-image-bounds) (image equality, bodies at and below
   the bound with a padded length, imports-first indexing, quoted and unnamed
-  labels), and rejected-body source attribution (first mapping inside the body,
-  same-offset unmapped replacement, the half-open end, unavailable metadata,
-  whole-map validation).
+  labels), import signatures from the type section and their refusals (type
+  form, value type, type length, import type index), and rejected-body source
+  attribution (first mapping inside the body, same-offset unmapped
+  replacement, the half-open end, unavailable metadata, whole-map validation).
 * `spec/coder/browser_trace_entries_spec.lua` — browser-only
   `registry[TITAN_ENTRIES_KEY]` registration across all `titanentry` wrapper
   families, split-unit deduplication, early `_init` ordering before
@@ -4085,14 +4590,21 @@ hosts`).
   browser generation changes.
 * `spec/coder/browser_protocol_spec.lua` — the executing check, corrupted
   providers (exits 21 to 26) without publication, re-execution before
-  identical-archive reuse, probe cleanup, archive-only consumers on both
-  engines, and an oversize protocol body rejected with its mapped source
-  before execution or provider publication.
+  identical-archive reuse, probe cleanup, an oversize protocol body rejected
+  with its mapped source before execution or provider publication, and an
+  archive-only consumer: a library archive installed into a separate
+  `libprefix/lib/titan-browser/0.6/` and named by `TITAN_PATH_0_6`, with its
+  source and output deleted, links into a program whose `-v` link names the
+  installed archive and compiles no `pkg` source; the program prints the
+  expected line and exits 0 under Node and Chromium.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
   `TITAN_EXTRA_CPPFLAGS`, the twenty-one-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
-  order and contents, and the standalone `-shared-mem` archive regression.
+  order and contents, the standalone `-shared-mem` archive regression, the
+  readiness order with the `build-profile` record's mismatch and invalid
+  forms, and `make uninstall-browser-sdk` against a synthesized SDK holding a
+  user archive (kept files, empty-directory pruning, refusal before removal).
 * `spec/browser_stdlib_spec.lua` (emsdk-free) and
   `spec/coder/browser_stdlib_closure_spec.lua` — the [dependency-closure
   check](#the-dependency-closure-check) and its negative fixtures, the
@@ -4107,7 +4619,12 @@ hosts`).
   single-image audit of timing, owner, failure, skip, and filter accounting,
   the rejected `ExternalWait` record literal on both targets, the
   [absent-module diagnostic](#the-absent-module-diagnostic) on the real SDK,
-  and both type fixtures against the installed providers.
+  both type fixtures against the installed providers, and the [import
+  manifest](#import-manifest) checker over constructed images (listed imports
+  per class, an injected unlisted import, a changed signature, unlisted
+  memory and global imports, a fixture's imports refused for an `entry` image
+  and for another fixture's image, and malformed, duplicate or unknown-class
+  allowlists).
 * `spec/coder/browser_stdlib_gate_spec.lua` — the [initialization and
   fidelity gate](#initialization-and-fidelity-gate).
 * `spec/coder/browser_net_spec.lua` and `spec/browser/build-net.lua` — the
@@ -4143,21 +4660,49 @@ hosts`).
   `browser_bridge_spec.lua` also runs `environment.mjs` with the libc
   environment fixture in both assertion modes under Node and Chromium,
   checking validation, empty defaults, UTF-8, mutation, and instance isolation.
-* `spec/coder/browser_deployment_spec.lua` with
-  `spec/fixtures/browser_bridge/deployment.mjs` — a real program loaded over
-  plain HTTP, with relocated assets through `locateFile`, and from a Vite
-  build, with no external Titan loader available.
+* `spec/coder/browser_docs_spec.lua` with `scripts/doc_check.lua`,
+  `spec/fixtures/browser_docs/docs.mjs`, and
+  `spec/fixtures/browser_docs/http_dev_server_test.titan` — the browser
+  chapter's opening run as documented ([documentation
+  checks](#documentation-checks)): plain Node, plain HTTP, relocated assets
+  through `locateFile`, and a Vite build, with no external Titan loader
+  available, plus the loopback behavior of `http-dev-server.titan`. The
+  server is a native program on `titan.http`, so the file belongs to the
+  installed-stdlib domain: CI runs it in `native-coverage` after the standard
+  provider is installed, where the browser case pends, and in the `chromium`
+  Playwright cells, which require both cases.
+  `spec/doc_check_spec.lua` tests the runner's marker grammar, section
+  selection and substitutions without Emscripten, and its clean-checkout
+  clone and move on a scratch Git repository.
+* `spec/browser/build-delivery.lua` with
+  `spec/fixtures/browser_delivery/hosted.mjs`, `dod.test.mjs` and
+  `expectations.mjs` — the chapter's complete application built by its
+  documented commands and served by the documented server to Chromium,
+  Firefox and WebKit in the Playwright cells, and run under Node, against
+  the documented output and trace, with exact requests and their order
+  ([documentation checks](#documentation-checks)). The `browser-packaging`
+  job runs both chapters from a fresh clone through `doc_check.lua
+  --clean-checkout` and the same tests on the result.
+* `spec/browser/build-records.lua` with `spec/fixtures/browser_records/` —
+  the release profile's [records](#records) in the `browser-packaging` job
+  and the `production` Firefox and WebKit cells; they fail on harness errors
+  and on a memory run that completes without Titan's allocation error, never
+  on the measured values.
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and
-  dispose cycles, concurrent instances, lifecycle races, and the optimized
-  guard image (`optimized-guard.mjs`).
+  dispose cycles, concurrent instances, lifecycle races, the optimized
+  guard image (`optimized-guard.mjs`), and the refusal of one `loader_app`
+  module paired with the other assertion mode's `.wasm`.
 * `spec/browser/runner.test.mjs` and `spec/browser/runner-fixtures.mjs` — the
   runner's resolver, probe, CLI, `--allow-degraded-trace` and the default
   required-trace initialization failure for direct and `--js-test` images,
   exported `within`/`Monitor` helpers and symlink invocation, status
   categories, grace, abort and cleanup boundaries, process-group retirement,
-  and path containment, over Node and both Chromium transports.
+  path containment, over Node and both Chromium transports, and, with fake
+  images, the loader's protocol failure for a `.wasm` from another link or
+  without its identity export, and its `TypeError` for a malformed image
+  binding.
 * `spec/browser/trace-adapter.test.mjs` and
   `spec/fixtures/browser_trace_adapter/{stacks.json,stacks-jspi-current.json,degraded.mjs,lifecycle.c,filter.c}`
   — Node unit tests for the V8, SpiderMonkey, and JavaScriptCore stack parsers
@@ -4166,18 +4711,25 @@ hosts`).
   `Error.stackTraceLimit` and
   `Error.prepareStackTrace` descriptor preservation (absent, data, accessor,
   non-writable, and non-configurable descriptors without invoking getters or
-  setters or constructing an `Error` on unsafe descriptors), lookup boundary,
-  gap, and empty-`sourcesContent` validation, and the compiled `lifecycle.c`
-  (preRun/export readiness) and `filter.c` (entry sentinels and registered
-  names are kept, a symbol with no `.titan` basename is dropped) fixtures.
+  setters or constructing an `Error` on unsafe descriptors), lookup boundaries,
+  gaps, indexes and names over tables that the compiler's writer derives from
+  synthetic maps, refusal of damaged tables (short, magic, version, image,
+  truncated, trailing, counts, bounds, a repeated row offset, a `.titan` row
+  without a line, indexes, string offsets) and a table at
+  an unaligned offset, the eager loader's ready and degraded results, and the
+  compiled `lifecycle.c` (preRun/export readiness) and `filter.c` (entry
+  sentinels and registered names are kept, a symbol with no `.titan` basename
+  is dropped) fixtures.
 * `spec/browser/build-trace.lua`, `spec/browser/trace.test.mjs`,
   `spec/browser/playwright-run.mjs`, `spec/browser/playwright-runner.test.mjs`,
   and `spec/fixtures/browser_trace/` — the
   staged multi-engine browser trace gate (46 discovered native cases in
   `trace_cases` plus the `trace_uncaught` and `trace_async` programs, staged
-  into `assertions-2` and `assertions-0` with 98 positive `cases` rows and 8
+  into `assertions-2` and `assertions-0` with 98 positive `cases` rows and 10
   intentional `degradedCases` rows in `manifest.json`, which also records the
-  installation `profile`) covering direct and `.browser.titan`
+  installation `profile`; the degraded rows pair the runtime image with a
+  missing, malformed (the image's own map under the table's name), truncated,
+  or flipped-identity trace table, or another link's complete table) covering direct and `.browser.titan`
   contributor locations, deep recursion and engine truncation, mixed
   `Lua -> Titan -> Lua -> Titan` merge order, mixed and `pcall` recursion past
   the [browser C-call limit](#the-regression), all wrapper families, fresh
@@ -4200,10 +4752,11 @@ The Busted files need emcc 6.0.13 and the installed browser Lua; the image,
 protocol, SDK, stdlib closure, entry and stdlib gate, bridge, fixture, budget,
 and minicoro files also need Node 26+ and an installed browser SDK, and all of
 them except the stdlib closure file also need a headless Chromium. The
-deployment file instead needs Node 26+, the browser SDK, and the pinned Vite
-and Playwright installations named by `TITAN_VITE_ROOT` and
+documentation file's page case instead needs Node 26+, the browser SDK, and
+the pinned Vite and Playwright installations named by `TITAN_VITE_ROOT` and
 `TITAN_PLAYWRIGHT_ROOT`; `TITAN_REQUIRE_BROWSER_DEPLOYMENT=1` turns their
-absence into a failure.
+absence into a failure. Its `http-dev-server` case needs only the native
+installation.
 `spec/support/browser_toolchain.lua` discovers these through
 `require({node=true, chrome=true, sdk=true})` (or the subset a file needs)
 and the runner's `--probe`. Its
@@ -4223,5 +4776,5 @@ trace-adapter, and Node trace suites. The two
 the provider, incremental, image, protocol, SDK, stdlib closure, entry, bridge,
 scheduler, network, stdlib gate, fixture, and minicoro files, with the browser
 core stdlib suite running only in the `sdk` shard.
-The Playwright trace, bridge, and deployment gates run in
+The Playwright trace, bridge, and documentation gates run in
 [`browser-playwright`](continuous-integration.md#browser-playwright-job).

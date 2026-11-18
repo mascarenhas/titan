@@ -1110,7 +1110,7 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf
 #ifdef TITAN_TARGET_BROWSER
     if (st.status != 0)
         titan_bt_addframe(buf, &wrote_any, st.status == 1
-            ? "(native Titan frames unavailable: trace map not loaded)"
+            ? "(native Titan frames unavailable: trace table not loaded)"
             : "(native Titan frames unavailable: capture failed)");
     if (st.truncated)
         titan_bt_addframe(buf, &wrote_any, "(...native frames truncated...)");

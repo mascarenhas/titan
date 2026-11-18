@@ -1,0 +1,32 @@
+-- Recursion depth on the browser's main C stack and in a coroutine, for
+-- spec/fixtures/browser_records/collect.mjs. Without `async`, and `io`, which
+-- imports it, `main` runs on the main stack instead of in a Task:
+--
+--   main N        recurses to depth N in main
+--   coroutine N   recurses to depth N in a new coroutine
+--
+-- It returns 0 when it reaches depth N; a deeper recursion than the stacks
+-- hold fails the run.
+local coroutine = import "coroutine"
+local math = import "math"
+
+local function recurse(depth: integer): integer
+  if depth == 0 then return 0 end
+  return recurse(depth - 1) + 1
+end
+
+function main(args: {string}): integer
+  local depth? = math.tointeger(args[2] or "")
+  if not depth then return 2 end
+  local reached = -1
+  if args[1] == "main" then
+    reached = recurse(depth)
+  elseif args[1] == "coroutine" then
+    local owner = coroutine.create(function (_: value): value return recurse(depth) end, "depth")
+    reached = owner:resume(nil)
+  else
+    return 2
+  end
+  if reached ~= depth then return 1 end
+  return 0
+end

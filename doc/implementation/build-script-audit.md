@@ -254,17 +254,20 @@ invocation compiles every root with
 `--c-source spec/fixtures/browser_runtime/close.c`; like the native
 aggregate, the owners drive their own `async` Runtimes.
 
-The image is `images/stdlib.mjs` with its `.wasm` and `.wasm.map`, below
+The image is `images/stdlib.mjs` with its `.wasm`, `.wasm.trace`, and `.wasm.map`, below
 `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`); compiler
 output stays in `objects/`, which titanc creates and marks. The target writes
-`roots.txt`, prints the build duration, checks the dependency closure and the
-[subset parity gate](browser-target.md#subset-parity-gate), and writes
-`members.md`. There is no separate
+`roots.txt`, prints the build duration, checks the dependency closure, checks
+the image's imports against the `entry` class of the [import
+manifest](browser-target.md#import-manifest), applies the [subset parity
+gate](browser-target.md#subset-parity-gate), and writes `members.md`. There is no separate
 suite byte budget: the compiler's [general image
 bounds](browser-target.md#build-time-image-bounds) apply.
 
 The SDK's `titan-browser-run` executes the complete image under Node and
-Chromium through `scripts/run_browser_stdlib.sh`. The `stdlib.<engine>.log`
+Chromium through `scripts/run_browser_stdlib.sh`; `TITAN_BROWSER_TEST_ENGINES`
+and `TITAN_BROWSER_TEST_RUNNER` select other engines and a runner that takes
+the same options, as the Playwright CI cells do. The `stdlib.<engine>.log`
 and `stdlib.<engine>.stderr.log` streams remain separate, and only stdout is
 audited. `TITAN_FILTER` is forwarded as one `--filter=` argument. Each engine
 must select at least one case, and an unfiltered run must execute every
@@ -384,7 +387,7 @@ with `+` and `RECURSIVE_WRAPPER_GUARD`, and delegates native parallelism to
 | `install` (no `INST_PREFIX`) | `install-compiler`, `publish-titan-sdk`, `publish-stdlib`. |
 | `install` (LuaRocks pass) | `install-compiler`, `install-rock-tools`, `stage-rock-payload`. |
 | `binary-rock` | `luarocks pack titan`, renaming the `.all.rock` result to the suffix from `luarocks config arch`. |
-| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, publish the browser standard provider `titan.a` (the [browser stdlib](browser-target.md#the-browser-standard-library) roots in `BROWSER_STDLIB_ROOTS`, with LPegLabel as the only `-X` payload and include path) through ordinary library mode, certify its dependency closure, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; with `make lua-browser` and `make titan-stdlib-browser-test`, one of the three Titan targets that need emsdk. |
+| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, record the build profile in `build-profile` (browser links under the other profile are refused), publish the browser standard provider `titan.a` (the [browser stdlib](browser-target.md#the-browser-standard-library) roots in `BROWSER_STDLIB_ROOTS`, with LPegLabel as the only `-X` payload and include path) through ordinary library mode, certify its dependency closure, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; with `make lua-browser` and `make titan-stdlib-browser-test`, one of the three Titan targets that need emsdk. |
 
 Standard-library installation copies the built provider pair, licenses, and
 optional symbols. SDK installation also publishes Titan's own `LICENSE` at
@@ -445,14 +448,26 @@ declares no `modules`.
 
 `titan-uninstall` (`scripts/titan_install.lua`) removes all installed Titan
 rock versions through LuaRocks first. Only when that succeeds does it remove
-the exact external Titan files, including the fourteen `make browser-sdk`-owned
-files under `lib/titan-browser/<ver>/` (`installer.browser_sdk_owned`, which
-`spec/browser_sdk_spec.lua` checks against the files a fresh SDK build writes)
-for each matching release; Lua,
+the exact external Titan files, including the `make browser-sdk`-owned files
+under `lib/titan-browser/<ver>/` for each matching release
+(`installer.browser_sdk_owned`, the [browser SDK file
+list](../language/browser-target.md#installing-the-browser-sdk) in code, which
+`spec/browser_sdk_spec.lua` checks against the files a fresh SDK build writes); Lua,
 LuaRocks, dependency modules, the fork's `lib/browser/`, user archives under
 `lib/titan-browser/<ver>/`, and shared native dependencies remain. Windows
 callers must close processes that use a
 destination DLL before replacing or removing it.
+
+`make uninstall-browser-sdk PREFIX=<prefix> [ROCKS_TREE=<tree>]` runs
+`scripts/titan_install.lua uninstall-browser-sdk <TITAN_INSTALL_TREE>
+<TITAN_LIBRARY_VERSION>` (with the tree's Lua modules on its paths, as
+`publish` does). `installer.uninstall_browser_sdk` checks every
+`installer.browser_sdk_owned` path first and refuses, removing nothing, when
+one is neither a file nor a link (`browser SDK file is not a file: <path>`);
+it then removes those files and prunes `lib/titan-browser/<ver>/` and
+`lib/titan-browser/` only when they are empty. It is the only target that
+edits an installation tree without installing; clean targets still never
+touch one.
 
 ## Checks
 
@@ -462,3 +477,28 @@ build and install recipes inspect no artifacts. The operational Windows scripts
 in `scripts/` cover LuaRocks acquisition, native source preparation and
 building, libbacktrace and runtime compilation, stdlib compilation, and profile
 selection.
+
+`spec/rockspec_spec.lua` checks what the rocks carry:
+
+* **Source rock.** It packs and unpacks a copy of the checkout and requires
+  every file the build reads: the standard-library sources from
+  `audited_stdlib_sources()` (`spec/support/source_inventory.lua`), which adds
+  the browser-only sources from the compiler's browser selection to the Make
+  lists; every `*_TITAN_HEADERS` list; `TITAN_RUNTIME_SOURCES`,
+  `BROWSER_RUNTIME_SOURCES`, and the SDK headers; the LPegLabel sources and
+  headers; every `scripts/` file that `Makefile`, `Makefile.win`, or
+  `scripts/install_compiler.mk` names, and the scripts those name in turn;
+  every checkout header that a runtime source includes or a standard-library
+  source foreign-imports, followed through quoted `#include`s (such as
+  `titan-runtime/titan_winloader.h` and `titan/transfer_native.h`); and the
+  browser SDK assets that `browserlink.sdk_assets` names. A short hand list
+  holds only what none of these name, such as a Windows Perl module, vendor
+  patches, licenses, `scripts/browser_stdlib_inventory.lua`, and
+  `titan-protobuf.mjs`. There is one standard-library tree: outside `titan/`,
+  `spec/`, and `doc/`, no file may be Titan source or share a basename with a
+  file under `titan/`.
+* **Binary rock.** `luarocks pack` copies the retained rock directory and the
+  manifest's deployed files, so the installed-prefix test walks both. Neither
+  may hold a `*.titan` file outside `doc/`, a `*.browser.titan` file, or any
+  browser SDK file (`titan-browser*` or `titan-protobuf.mjs`). `make
+  browser-sdk` installs the browser SDK outside LuaRocks.

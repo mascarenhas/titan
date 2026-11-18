@@ -26,6 +26,13 @@ local function run(argv)
     return result.started and result.ok, result.output or result.diagnostic or ""
 end
 
+-- Both C helpers include the fixture controls; only gate.c waits and reads
+-- the clock.
+local C_SOURCE_CLASSES = {
+    ["gate.c"] = { "entry", "fixture:gate", "fixture:controls" },
+    ["entry_lifetimes.c"] = { "entry", "fixture:controls" },
+}
+
 local function build(info, assertions, module, name, is_test, c_source)
     local output = workspace .. "/assertions-" .. assertions
     files.mkdir(output)
@@ -44,6 +51,7 @@ local function build(info, assertions, module, name, is_test, c_source)
     local ok, log = run(argv)
     assert.is_true(ok, log)
     assert.equal("file", lfs.attributes(output .. "/" .. name .. ".wasm", "mode"))
+    toolchain.check_imports(output .. "/" .. name .. ".wasm", C_SOURCE_CLASSES[c_source or "gate.c"])
 end
 
 describe("browser real runtime entry gate", function()
@@ -63,8 +71,8 @@ describe("browser real runtime entry gate", function()
             build(info, assertions, "entry_gate", "gate", true)
             build(info, assertions, "final_fiber", "final-fiber", false)
             receipt(info.sdk_root .. "/sdk-digests", "sdk-digests")
-            for _, name in ipairs({ "gate.mjs", "gate.wasm", "gate.wasm.map",
-                    "final-fiber.mjs", "final-fiber.wasm", "final-fiber.wasm.map" }) do
+            for _, name in ipairs({ "gate.mjs", "gate.wasm", "gate.wasm.map", "gate.wasm.trace",
+                    "final-fiber.mjs", "final-fiber.wasm", "final-fiber.wasm.map", "final-fiber.wasm.trace" }) do
                 receipt(workspace .. "/assertions-" .. assertions .. "/" .. name, name)
             end
             for _, name in ipairs({ "entry_gate.titan", "final_fiber.titan", "gate.c", "gate.h", "entry-gate.mjs" }) do

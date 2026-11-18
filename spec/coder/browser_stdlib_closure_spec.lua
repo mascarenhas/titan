@@ -104,7 +104,8 @@ describe("browser stdlib real-toolchain closure", function()
             assert.equal("test.tests\n", assert(strategy:read_file(output .. "/roots.txt")))
             assert.is_nil(strategy:lstat(output .. "/stdlib.roots.txt"))
             for _, artifact in ipairs({
-                "images/stdlib.mjs", "images/stdlib.wasm", "images/stdlib.wasm.map", "members.md",
+                "images/stdlib.mjs", "images/stdlib.wasm", "images/stdlib.wasm.map", "images/stdlib.wasm.trace",
+                "members.md",
                 "stdlib.node.log", "stdlib.node.stderr.log", "stdlib.chromium.log", "stdlib.chromium.stderr.log",
             }) do
                 assert.equal("file", assert(strategy:stat(output .. "/" .. artifact)).kind, artifact)

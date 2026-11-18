@@ -432,7 +432,7 @@ local function extended_sdk()
     -- production failure, so the readiness answer carries that distinction.
     local present = strategy:stat(installed.titan_bin) ~= nil
     local assets, diagnostic = browserlink.require_sdk({ io = strategy },
-        { paths = installed }, { prefix = prefix, rocks_tree = rocks_tree })
+        { paths = installed, build_profile = driver.BUILD_PROFILE }, { prefix = prefix, rocks_tree = rocks_tree })
     if not assets then return diagnostic, present end
     cache.sdk = installed.titan_bin
 end
@@ -470,6 +470,16 @@ function M.require(requirements)
         error(reason, 2)
     end
     return nil, reason
+end
+
+-- A test image uses only reviewed imports (scripts/browser_imports.lua): the
+-- entry imports plus the classes of the test fixtures it links. `image` names
+-- the `.mjs` or its `.wasm`.
+local stdlib_checks
+function M.check_imports(image, classes)
+    stdlib_checks = stdlib_checks or dofile(repository_root() .. "/scripts/browser_stdlib.lua")
+    local ok, err = stdlib_checks.check_file_imports(compiler_io.new_sync(), image, classes)
+    if not ok then error(err, 2) end
 end
 
 return M

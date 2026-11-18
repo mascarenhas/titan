@@ -127,13 +127,23 @@ ${DEFLINE}int $TYPESNAME(lua_State* L) {
 }
 ]]
 
+-- A final browser image never reads the payload, so on Wasm it is an
+-- unreferenced external definition: objects and archives keep it for the
+-- metadata readers, and wasm-ld drops it from images.
+-- Implementation notes: doc/implementation/browser-target.md#program-and-test-images
 coder.modmetadata = [[
 #if defined(__APPLE__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
-#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)
+#define TITAN_META_LINKAGE static
+#elif defined(__wasm__)
+#define TITAN_META_SECTION \
+    __attribute__((aligned(1), section(".titan.meta")))
+#define TITAN_META_LINKAGE
+#elif defined(__ELF__) || defined(_WIN32)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.meta")))
+#define TITAN_META_LINKAGE static
 #else
 #error unsupported object format for Titan archive metadata
 #endif
@@ -146,7 +156,7 @@ coder.modmetadata = [[
 #endif
 
 TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE
-static const unsigned char $METADATANAME[] = $METADATA;
+TITAN_META_LINKAGE const unsigned char $METADATANAME[] = $METADATA;
 ]]
 
 -- Enumerate the ABI-visible prefix of a module userdata. Producers and

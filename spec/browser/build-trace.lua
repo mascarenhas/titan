@@ -8,6 +8,9 @@ assert(not arg[2], "build-trace.lua accepts exactly one output directory")
 if not path.is_absolute(output) then output = path.join(repository, output) end
 local prefix = assert(os.getenv("TITAN_ROOT") or os.getenv("PREFIX"), "TITAN_ROOT or PREFIX is required")
 local fixture = path.join(repository, "spec/fixtures/browser_trace")
+-- Each image uses only reviewed imports (scripts/browser_imports.lua).
+local checks = dofile(path.join(repository, "scripts/browser_stdlib.lua"))
+local strategy = require("titan-compiler.io").new_sync()
 
 local cases = {
   "test_direct_locations", "test_selected_contributor_locations",
@@ -115,6 +118,7 @@ end
     io.stdout:write(result.output or result.diagnostic or ""); io.stdout:flush()
     assert(result.ok, "trace fixture build failed: " .. image .. " (" .. tostring(result.status) .. ")")
     assert(lfs.attributes(image, "mode") == "file", "missing built image " .. image)
+    assert(checks.check_file_imports(strategy, image, {"entry", "fixture:trace"}))
     io.stdout:write("TRACE-IMAGE " .. image .. " nativeCases=" .. (target.testing and #all or 0) .. "\n")
   end
 end
@@ -159,27 +163,31 @@ for _, assertions in ipairs({2, 0}) do
   row(manifest.cases, mode .. ".async_uncaught", mode .. "/async.mjs", nil, 0, "failed", 1, async_report, true)
   row(manifest.cases, mode .. ".task_entries", mode .. "/runtime.mjs", "test_task_entry_targets", 1)
   local map = read(path.join(base, "runtime.wasm.map"))
-  assert(map:find('"x_titan_image"%s*:%s*"%x%x'), "runtime map lacks Titan image identity")
-  for _, variant in ipairs({"missing", "malformed", "wrong_image", "extension_free", "missing_symbols"}) do
+  local trace = read(path.join(base, "runtime.wasm.trace"))
+  assert(trace:sub(1, 4) == "TTRC", "runtime image lacks its trace table")
+  -- Variant directories hold no map: the runtime reads only the table.
+  for _, variant in ipairs({"missing", "malformed", "truncated", "wrong_image", "foreign_image",
+      "missing_symbols"}) do
     local directory = path.join(base, variant)
     mkdir(directory)
     for _, ext in ipairs({"mjs", "wasm"}) do write(path.join(directory, "runtime." .. ext), read(path.join(base, "runtime." .. ext))) end
     local changed
-    if variant == "malformed" then changed = '{"version":3,"mappings":'
+    if variant == "malformed" then
+      -- The image's own map under the table's name.
+      changed = map
+    elseif variant == "truncated" then changed = trace:sub(1, -2)
     elseif variant == "wrong_image" then
-      changed = map:gsub('("x_titan_image"%s*:%s*")(%x)', function(before, first)
-        return before .. (first == "0" and "1" or "0")
-      end, 1)
-    elseif variant == "extension_free" then
-      -- Remove all extensions by replacing their names with optional unknown
-      -- keys. Standard fields and mapped locations remain byte-for-byte intact.
-      changed = map:gsub('"x_titan_', '"x_fixture_')
+      changed = trace:sub(1, 8) .. (trace:sub(9, 9) == "0" and "1" or "0") .. trace:sub(10)
+    elseif variant == "foreign_image" then
+      -- A complete, valid table from another link.
+      changed = read(path.join(base, "async.wasm.trace"))
     elseif variant == "missing_symbols" then
-      changed = map:gsub('("x_titan_function_names"%s*:%s*%[)(.-)(%])', function(before, names, after)
+      local unnamed = map:gsub('("x_titan_function_names"%s*:%s*%[)(.-)(%])', function(before, names, after)
         return before .. names:gsub('"[^"]*"', "null") .. after
       end, 1)
+      changed = assert(require("titan-compiler.browsertrace").trace_table(unnamed))
     end
-    local destination = path.join(directory, "runtime.wasm.map")
+    local destination = path.join(directory, "runtime.wasm.trace")
     if changed then write(destination, changed)
     elseif lfs.attributes(destination) then assert(os.remove(destination)) end
     if variant == "missing_symbols" then

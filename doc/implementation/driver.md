@@ -2225,11 +2225,11 @@ path with `.mjs` appended. The details are in the browser-target chapter:
   protected wrappers for C-only images.
 * **Linking** uses `browserlink.profile`, compiles the entrypoint with the
   descriptor's prefix, links with `emcc` into a staging directory, checks the
-  final image's imports and byte bounds, rewrites the staged source map,
-  embeds the loader into the staged `.mjs` with `browserlink.embed`, and
-  publishes `<stem>.wasm.map`, `<stem>.wasm`, and then `<stem>.mjs` as one set
-  (running `after_publish` inside the rollback window and restoring every
-  predecessor on failure)
+  final image's imports and byte bounds, rewrites the staged source map and
+  writes its trace table, embeds the loader into the staged `.mjs` with
+  `browserlink.embed`, and publishes `<stem>.wasm.trace`, `<stem>.wasm.map`,
+  `<stem>.wasm`, and then `<stem>.mjs` as one set (running `after_publish`
+  inside the rollback window and restoring every predecessor on failure)
   ([Program and test images](browser-target.md#program-and-test-images),
   [The link profile](browser-target.md#the-link-profile)).
 * **The protocol runner.** Before a browser program or test links, `titanc`

@@ -102,7 +102,16 @@ elseif action == "fixture" then
     assert(first, "fixture requires the browser provider")
     local text = checks.type_fixture(need(staticmetadata.scan_archive(first)))
     if second then need(strategy:write_file(second, text)) else io.write(text) end
+elseif action == "imports" then
+    assert(first and second, "imports requires a comma-separated class list and at least one Wasm image")
+    local classes = {}
+    for class in first:gmatch("[^,]+") do classes[#classes + 1] = class end
+    for index = 3, #arguments do
+        need(checks.check_imports(need(strategy:read_file(arguments[index])), arguments[index], classes))
+    end
+    print(string.format("Browser image imports: %d image(s) use only imports listed for %s.",
+        #arguments - 2, first))
 else
     error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | " ..
-        "output ROOTS FILTER LOG | fixture BROWSER [FILE]")
+        "output ROOTS FILTER LOG | fixture BROWSER [FILE] | imports CLASS[,CLASS...] WASM...")
 end

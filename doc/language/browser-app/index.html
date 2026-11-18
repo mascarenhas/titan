@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>A complete Titan application</title>
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <p>Frames drawn: <span id="frames">0</span></p>
+  <pre id="output"></pre>
+  <pre id="errors"></pre>
+  <script type="module">
+    import create from "./app.mjs";
+    import { portable } from "./titan-protobuf.mjs";
+
+    // Each output stream appends its UTF-8 text to its own element.
+    function show(id) {
+      const element = document.getElementById(id);
+      const text = new TextDecoder();
+      return chunk => { element.textContent += text.decode(chunk, { stream: true }); };
+    }
+
+    // The frame counter advances while Titan's Tasks wait.
+    const frames = document.getElementById("frames");
+    let drawn = 0;
+    function draw() {
+      frames.textContent = String(++drawn);
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+
+    let codec;
+    const instance = create({
+      stdout: show("output"),
+      stderr: show("errors"),
+      requireTrace: true,
+      bindings: {
+        // Receives a copied card and returns a changed copy.
+        publish(description, bytes) {
+          codec ??= portable(description);
+          const [card] = codec.decode(bytes);
+          const Card = codec.types["app.Card"];
+          return codec.encode(new Card(card.title.toUpperCase(), card.visits + 1n));
+        },
+        // Calls Titan back twice. A call made while a binding runs is
+        // refused, so the calls start after this binding has returned.
+        visit(bump) {
+          const visits = (async () => {
+            await null;
+            try {
+              await bump.call(1n);
+              await bump.call(2n);
+            } finally {
+              bump.release();
+            }
+          })();
+          return { kind: "detachable", promise: visits };
+        },
+      },
+    });
+    try {
+      const greeting = new URL("greeting.txt", location.href).href;
+      const result = await instance.run([greeting]);
+      document.getElementById("output").textContent +=
+        `(${result.kind}, status ${result.status})\n`;
+    } finally {
+      await instance.dispose();
+    }
+  </script>
+</body>
+</html>

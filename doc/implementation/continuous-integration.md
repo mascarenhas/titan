@@ -12,16 +12,18 @@ coverage reports upload from `out/coverage/report`.
 
 ## Linux job graph and concurrency
 
-Linux runs on pushes. Seven job definitions produce fourteen runner
-executions: `build-compiler` and `sanitizer` start independently; after
+Linux runs on pushes. Eight job definitions produce fifteen runner
+executions: `build-compiler`, `sanitizer`, and
+[`browser-packaging`](#browser-packaging-job) start independently; after
 `build-compiler`, two `test-linux-compiler` shard pairs, `native-coverage`,
 [`browser-toolchain`](#browser-toolchain-job), two
 [`browser-stdlib`](#browser-stdlib-job) shards, and the six-cell
 [`browser-playwright`](#browser-playwright-job) matrix (`validation` and
 `production` profiles across `chromium`, `firefox`, and `webkit`) start in
-parallel. Preparation has a 30-minute timeout, compiler pairs 45 minutes,
-native coverage, the browser jobs, and the `browser-playwright` cells 60
-minutes, and the independent cold sanitizer build 75 minutes.
+parallel. Preparation has a 30-minute timeout, compiler pairs and
+`browser-packaging` 45 minutes, native coverage, the other browser jobs, and
+the `browser-playwright` cells 60 minutes, and the independent cold sanitizer
+build 75 minutes.
 
 Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
 The native coverage, sanitizer, and browser jobs each use a four-vCPU runner
@@ -249,9 +251,10 @@ jobs begin with the same seven steps:
    `PATH`, proving that the native build never needs the browser toolchain.
 7. **Browser SDK.** With emsdk sourced, the step asserts that
    `lib/titan-browser` is absent or empty, runs `make browser-sdk
-   PREFIX="$PREFIX"`, and asserts the ten installed SDK files listed in the
-   [browser SDK layout](browser-target.md#the-browser-sdk) apart from the
-   LPegLabel archive (`titan-browser-trace.js` included).
+   PREFIX="$PREFIX"`, asserts that every file in the [browser SDK file
+   list](../language/browser-target.md#installing-the-browser-sdk) except the
+   LPegLabel archive is installed, and that `build-profile` holds the job's
+   `TITAN_BUILD_PROFILE`.
 
 `browser-toolchain` then runs:
 
@@ -274,23 +277,30 @@ jobs begin with the same seven steps:
    measured.
 10. **Runner images.** The installed `titanc` builds `runner_image` (a
     `--test` image) and `runner_status` (a program) from `spec/browser` into
-    `out/browser/runner` and asserts `.mjs`, `.wasm`, and `.wasm.map` for each.
+    `out/browser/runner` and asserts `.mjs`, `.wasm`, `.wasm.map`, and `.wasm.trace` for each.
+    `scripts/check_browser_stdlib.lua imports entry` then checks both images
+    against the [import manifest](browser-target.md#import-manifest).
 11. **Loader images.** For assertions 2 and 0, the job sets
     `driver.browser_link_options` and builds `loader_app` and `fidelity`
     (programs with `--c-source spec/fixtures/browser_loader/loader.c`) with the
     `program` purpose and `loader_names` (a `--test` image) with the `test`
     purpose, because a contrary purpose is refused
     ([internal selection](browser-target.md#the-link-profile)), into
-    `out/browser/loader`, asserting `.mjs`, `.wasm`, and `.wasm.map` for each.
+    `out/browser/loader`, asserting `.mjs`, `.wasm`, `.wasm.map`, and `.wasm.trace` for each.
     It also
     builds one `fidelity` image with the `baseline` profile at `O2` and
     assertions off, plus the harness-only `--ldflag=-Os` (the profile itself
     supplies the debug flags), because Emscripten 6.0.13 minifies export names
-    only at `-O3` or a shrink level.
+    only at `-O3` or a shrink level. The import check accepts the `entry` class
+    for `loader_names` and `entry,fixture:loader,fixture:controls` for the
+    `loader_app` and both `fidelity` images, which link the loader fixture.
 12. **Loader suite.** The installed `titan-browser-run --timeout 300000
     --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
     workspace with relative image paths, runs under Node and then Chromium,
-    with output copied to `$RUNNER_TEMP/browser-loader.log`.
+    with output copied to `$RUNNER_TEMP/browser-loader.log`. The first two
+    image arguments are the two assertion modes' `loader_app`, which the
+    suite also pairs crosswise to check that a module refuses another link's
+    `.wasm`.
 13. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
     runs against the minified image under both engines with the same timeout
     and grace and output copied to `$RUNNER_TEMP/browser-guard.log`.
@@ -353,7 +363,8 @@ After step 7, `browser-stdlib` runs:
    once, unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
    builds all twenty-three browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
-   checks dependency closure and applies the [subset parity
+   checks dependency closure and the image's `entry` imports against the
+   [import manifest](browser-target.md#import-manifest), applies the [subset parity
    gate](browser-target.md#subset-parity-gate) to the fourteen shared
    modules, `async`, `timer`, `os`, `lua`, `http`, and `websocket`, then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
@@ -401,7 +412,7 @@ After step 7, `browser-stdlib` runs:
     days: the `browser-*.log` files and, when present, the browser core stdlib
     suite's evidence: `out/browser-stdlib/*.log` (the
     per-engine `stdlib.<engine>.log` stdout and `stdlib.<engine>.stderr.log`
-    files), `out/browser-stdlib/images/*.{mjs,wasm,wasm.map}`, `roots.txt`
+    files), `out/browser-stdlib/images/*.{mjs,wasm,wasm.map,wasm.trace}`, `roots.txt`
     (through the `*roots.txt` pattern), `members.md`, and the live network
     harness's `out/browser-net/` tree.
 
@@ -409,9 +420,11 @@ After step 7, `browser-stdlib` runs:
 
 `browser-playwright` (`browser traces and bridge (${{ matrix.profile }}, ${{
 matrix.engine }}, Playwright 1.64.1)`) runs the multi-engine trace, bridge,
-and live network gates on Linux across a six-cell `fail-fast: false` matrix
-(`profile: [validation, production]` × `engine: [chromium, firefox, webkit]`),
-each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
+live network and hosted deployment gates, and in `validation` cells the
+browser stdlib suite, on Linux across a six-cell `fail-fast: false` matrix
+(`profile: [validation, production]` × `engine: [chromium, firefox,
+webkit]`), each on a four-vCPU runner with a 60-minute timeout after
+`build-compiler`:
 
 1. **Prefix preparation (`validation` versus `production`).** `validation`
    cells restore `titan-linux-prepared.tar.gz` into `$GITHUB_WORKSPACE/.lua`.
@@ -426,7 +439,8 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    `.emsdk` (`ubuntu-24.04-<arch>-emsdk-6.0.13-v1`), activates Emscripten 6.0.13,
    and separately installs and qualifies Node 26.13.0 as `TITAN_NODE`. It runs
    `make lua-browser PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`,
-   asserting the installed `titan-browser-trace.js` and `titan-browser-bridge.js`.
+   asserting the installed `titan-browser-trace.js` and `titan-browser-bridge.js`
+   and that `build-profile` holds the cell's profile.
 3. **Playwright engine provisioning and supervisor check.** `ubicloud/cache@v4`
    restores `PLAYWRIGHT_BROWSERS_PATH` (`.playwright-browsers`) under
    `ubuntu-24.04-<arch>-playwright-1.64.1-<engine>-v1`; `npm install --prefix
@@ -443,7 +457,10 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    `$RUNNER_TEMP/browser-playwright-build.log`) builds the test image and the
    uncaught and async-bootstrap program images for both assertion modes with
    the cell's installed `titanc` and stages the degraded-map variants,
-   `trace.test.mjs`, and `manifest.json`.
+   `trace.test.mjs`, and `manifest.json`. Like `build-bridge.lua`,
+   `build-net.lua` and `build-delivery.lua` (steps 7 to 9), it checks each
+   image it builds against the [import manifest](browser-target.md#import-manifest)
+   classes of the fixtures that image links.
 5. **Positive trace gate.** `"$TITAN_NODE" spec/browser/playwright-run.mjs --engine
    "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 --sdk
    "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT"
@@ -466,7 +483,7 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    (`$RUNNER_TEMP/browser-playwright-policy.log`); then
    `playwright-run.mjs ... --allow-degraded-trace ... "$TITAN_TRACE_OUTPUT/trace.test.mjs"
    -- --degraded` (`$RUNNER_TEMP/browser-playwright-degraded.log`) verifies the
-   single load warning, the `(native Titan frames unavailable: trace map not
+   single load warning, the `(native Titan frames unavailable: trace table not
    loaded)` marker, and original-error preservation.
 7. **Persistent bridge gate (all six cells).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
@@ -512,27 +529,54 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    database trusts the test CA; Firefox and WebKit run the
    untrusted-certificate rejections, and WebKit runs in a persistent context
    so that its HTTP cache exists.
-9. **Self-contained deployment (`chromium`, both profiles).** These two cells
-   install `vite@8.3.6` into `TITAN_VITE_ROOT` (`out/vite-tools`) with the
-   pinned Node runtime. With `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`,
+9. **The complete application (all six cells).** `lua -E
+   spec/browser/build-delivery.lua "$TITAN_DELIVERY_OUTPUT"`
+   (`out/browser-delivery`, logged to
+   `$RUNNER_TEMP/browser-playwright-delivery-build.log`) builds the browser
+   chapter's complete application by its section's commands, in the cell's
+   profile, and the documented `http-dev-server` natively. `"$TITAN_NODE"
+   spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE"
+   --root "$TITAN_DELIVERY_OUTPUT"`
+   (`$RUNNER_TEMP/browser-playwright-delivery.log`) serves it to a page in the
+   cell's engine and checks the documented output and trace, the page's exact
+   requests, and their order against the first output and the caught error
+   ([documentation checks](browser-target.md#documentation-checks)).
+   `production` cells add `--records
+   "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json"`: startup
+   and responsiveness over five loads, which never fail the step. Chromium
+   cells also run the image under Node with `titan-browser-run --engine node
+   --timeout 120000 --root "$TITAN_DELIVERY_OUTPUT" --js-test
+   "$TITAN_DELIVERY_OUTPUT/dod.test.mjs"`
+   (`$RUNNER_TEMP/browser-playwright-delivery-node.log`).
+10. **The browser chapter's examples (`chromium`, both profiles).** These two
+   cells install `vite@8.3.6` into `TITAN_VITE_ROOT` (`out/vite-tools`) with
+   the pinned Node runtime. With `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`,
    `TITAN_REQUIRE_BROWSER_DEPLOYMENT=1`, and `TITAN_PROBE_CACHE_DISABLE=1`,
-   `busted -o gtest -v spec/coder/browser_deployment_spec.lua` builds a real
-   program and exercises plain HTTP loading, relocated assets through
-   `locateFile`, and a Vite build using the cell's managed Chromium. The gate
-   serves only generated program assets and page files, requires successful
-   Wasm/map fetches and a ready trace map, and runs `main`; no external Titan
-   loader is supplied. Its output is
-   `$RUNNER_TEMP/browser-playwright-deployment.log`. Firefox and WebKit cells
-   keep their own managed engine without installing another one for this gate.
-10. **Production-only pins (`production` × `chromium` only).** With
+   `busted -o gtest -v spec/coder/browser_docs_spec.lua` runs the marked
+   blocks of the browser chapter's opening section through `scripts/doc_check.lua`
+   ([documentation checks](browser-target.md#documentation-checks)): it
+   builds the documented `hello` program and `http-dev-server`, runs the
+   image under plain Node, and loads the documented page with the cell's
+   managed Chromium from the folder, from its `locateFile` variant, and from
+   the documented Vite build, each served by `http-dev-server`. Each page
+   must show the chapter's expected text and fetch the Wasm (as
+   `application/wasm`) and the trace table once each; no external Titan
+   loader is served, and a copy without the trace table must fail through the
+   page's `requireTrace: true`. Its output is
+   `$RUNNER_TEMP/browser-playwright-docs.log`. Firefox and WebKit cells keep
+   their own managed engine without installing another one for this gate.
+11. **Production-only pins (`production` × `chromium` only).** With
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` and `TITAN_PROBE_CACHE_DISABLE=1`,
    `"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua
-   --filter="keeps frame flags on test owners"` runs the pin that observes the
-   production object and link profile from a real production installation
+   --filter="keeps frame flags on test owners" --filter="checks the linked
+   module"` runs the pin that observes the production object and link profile
+   from a real production installation, and the [module
+   check](browser-target.md#the-module-check) case on a real production image
    (`$RUNNER_TEMP/browser-production-pins.log`). A validation installation
-   cannot stand in for it, so it is pending in every validation run, including
-   the `browser-stdlib` job.
-11. **Production trace gate on Node (same cell).** Node is the binding engine
+   cannot stand in for the pin, so it is pending in every validation run,
+   including the `browser-stdlib` job; the module check case runs there too,
+   on a validation image.
+12. **Production trace gate on Node (same cell).** Node is the binding engine
    for the [browser C-call limit](browser-target.md#the-browser-c-call-limit),
    and the `browser-toolchain` job's Node gate runs a validation installation
    only. The cell's installed `titan-browser-run --engine node --timeout 300000
@@ -545,13 +589,87 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    (`$RUNNER_TEMP/browser-playwright-node-policy.log`),
    and the `--allow-degraded-trace ... -- --degraded` run covers the degraded
    rows (`$RUNNER_TEMP/browser-playwright-node-degraded.log`).
-12. **Receipts.** On `always()`, `actions/upload-artifact` uploads
+13. **Engine records (`production` × `firefox` and `webkit`).** Recursion
+    depth is engine-specific, so these cells add their engine to the Node and
+    Chromium records of [`browser-packaging`](#browser-packaging-job). With
+    emsdk sourced, `lua -E spec/browser/build-records.lua` builds the records
+    programs with the cell's installation
+    (`$RUNNER_TEMP/browser-playwright-records-build.log`), and `collect.mjs
+    --engines "$TITAN_TRACE_ENGINE" --measure memory,recursion` writes
+    `out/browser-records/records-<engine>.json`
+    (`$RUNNER_TEMP/browser-playwright-records.log`; [records](browser-target.md#records)).
+14. **Complete browser core stdlib suite (`validation` only, last).** With
+    emsdk sourced, `make titan-stdlib-browser-test PREFIX="$PREFIX"
+    TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE"
+    TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs
+    --image --sdk \"$PREFIX/lib/titan-browser/0.6\""` builds the same single
+    stdlib image as `browser-stdlib`'s `sdk` shard and runs it on the cell's
+    managed engine (`$RUNNER_TEMP/browser-playwright-stdlib.log`). It is the
+    last test step, so a failing case leaves every earlier gate's receipts.
+15. **Receipts.** On `always()`, `actions/upload-artifact` uploads
     `${{ runner.temp }}/browser-playwright-*.log`,
     `${{ runner.temp }}/browser-production-pins.log`,
-    `${{ env.TITAN_TRACE_OUTPUT }}`, `${{ env.TITAN_BRIDGE_OUTPUT }}`, and
-    `${{ env.TITAN_NET_OUTPUT }}` as
+    `${{ env.TITAN_TRACE_OUTPUT }}`, `${{ env.TITAN_BRIDGE_OUTPUT }}`,
+    `${{ env.TITAN_NET_OUTPUT }}`, the complete application's
+    `delivery.json` and staged `browser-app/site`, and the stdlib suite's
+    per-engine `out/browser-stdlib/*.log` as
     `browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}` for seven
-    days.
+    days. `production` cells also upload `out/browser-records/` as
+    `browser-records-playwright-${{ matrix.engine }}`.
+
+## `browser-packaging` job
+
+`browser-packaging` (`browser packaging, clean checkout and records
+(ubuntu-24.04, emsdk 6.0.13, Node 26, Playwright 1.64.1 Chromium)`) installs
+Titan as a new user does, from the manuals alone, and records the release
+profile. It has no `needs` and takes nothing from another job: no prepared
+tree and no C-probe or native-dependency cache. The workflow's own
+`TITAN_BUILD_PROFILE` and `OPENSSL_MODE` still reach it, so `doc_check`
+unsets them for the documented commands, and the later build scripts use the
+profile that the installed browser SDK recorded. It runs on a four-vCPU
+runner with `MAKEFLAGS=-j4` and `TITAN_JOBS=4`.
+
+1. **Host packages.** `apt-get` installs the installation chapter's Ubuntu
+   list (`build-essential cmake curl git libreadline-dev libssl-dev
+   pkg-config`) and `lua5.4`, which runs `doc_check` before the clone has
+   built its own Lua.
+2. **Tools.** The emsdk 6.0.13 cache and activation, Node 26.13.0
+   (`TITAN_NODE`), Playwright 1.64.1 Chromium under the Playwright cells'
+   `chromium` cache key, and `vite@8.3.6` in `TITAN_VITE_ROOT`, provisioned
+   as in `browser-playwright`.
+3. **Clean checkout.** With emsdk sourced and Node 26 ahead of emsdk's own
+   Node on `PATH`, `lua5.4 scripts/doc_check.lua --clean-checkout --workspace
+   "$RUNNER_TEMP/clean-checkout" --checkout "$GITHUB_WORKSPACE" --vite-root
+   "$TITAN_VITE_ROOT" doc/language/installation.md
+   doc/language/browser-target.md` runs both chapters' marked blocks in one
+   shell (`$RUNNER_TEMP/browser-packaging-doc-check.log`; [documentation
+   checks](browser-target.md#documentation-checks)). The checkout block
+   clones this commit afresh, the installation goes to the workspace's
+   `prefix` in the default `production` profile, and the clone moves away
+   before the browser chapter builds the first page, `http-dev-server`, the
+   Vite example and the complete application from the installation.
+4. **The complete application.** The rest of the job puts the installation's
+   `bin` on `PATH`, as the installation chapter does for the reader; the
+   documented `http-dev-server` is an ordinary native executable that finds
+   `titan.so` through the `titanc` there. `lua -E
+   spec/browser/build-delivery.lua --built "$workspace"` checks the imports
+   of the first page's and the application's images and stages the
+   workspace (`browser-packaging-stage.log`); `hosted.mjs --engine chromium`
+   serves the documented site with the documented server
+   (`browser-packaging-hosted.log`), and the installation's
+   `titan-browser-run --engine node --js-test` runs `dod.test.mjs`
+   (`browser-packaging-node.log`).
+5. **Records.** With emsdk sourced, `spec/browser/build-records.lua` builds
+   the records programs with the installed compiler and checks their imports
+   (`browser-packaging-records-build.log`), and `collect.mjs --engines
+   node,chromium` writes `out/browser-records/packaging.json` and
+   `packaging.md` ([records](browser-target.md#records);
+   `browser-packaging-records.log`). The step fails on harness errors and on
+   a memory run that completes without Titan's allocation error, never on the
+   values.
+6. **Receipts.** On `always()`, the job uploads
+   `${{ runner.temp }}/browser-packaging-*.log` as `browser-packaging` and
+   `out/browser-records/` as `browser-records-packaging`, for seven days.
 
 ## Cache ownership
 
