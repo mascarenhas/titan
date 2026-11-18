@@ -18,6 +18,7 @@ local platform = require "titan-compiler.platform"
 local installed_prefix = require "spec.support.installed_prefix"
 local browser = require "titan-compiler.browsertarget"
 local browserlink = require "titan-compiler.browserlink"
+local version = require "titan-compiler.version"
 local M = {}
 M.repository = paths.to_slash(assert(require("lfs").currentdir()))
 M.make = platform.windows and (os.getenv("MAKE") or "make") or "make"
@@ -457,7 +458,7 @@ function M.stage_runner(info, destination)
     if not platform.windows then return end
     local files = require "spec.fixtures.target_selection.support"
     local root = paths.dirname(paths.dirname(paths.dirname(info.sdk_root)))
-    for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
+    for _, relative in ipairs(browserlink.windows_runner_files(version.TITAN_LIBRARY_VERSION)) do
         files.copy(paths.join(root, relative), paths.join(destination, relative))
     end
 end

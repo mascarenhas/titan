@@ -98,7 +98,11 @@ function M.install(options)
                 if matches then
                     tool = entry[2]
                     local args = { table.unpack(argv, #prefix + 1) }
-                    if entry[1] == "cc" and #args == 1 and args[1]:match("^@.+[.]mjs[.]rsp$") then
+                    if entry[1] == "cc" and #args == 1 and
+                            (args[1]:match("^@.+[.]mjs[.]rsp$") or
+                             args[1]:match("^@.+[.]mjs[.]link[.]rsp[.]tmp[.][^/\\]+$")) then
+                        -- The compiler's GNU quoting only escapes backslashes
+                        -- and double quotes, both supported by split_shell_words.
                         local file = assert(io.open(args[1]:sub(2), "rb"))
                         local bytes = assert(file:read("a"))
                         assert(file:close())

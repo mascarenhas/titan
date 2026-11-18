@@ -608,7 +608,7 @@ function require(name)
         local function after_tool(argv, tool)
             if tool ~= "emranlib" or os.getenv("BROWSER_CORRUPTION") ~= "corrupt-member" then return end
             local filename = argv[#argv]
-            if not filename:match("/output[.]a$") or corrupted[filename] then return end
+            if not filename:match("[/\\]output[.]a$") or corrupted[filename] then return end
             corrupted[filename] = true
             local parsed = assert(original_require("titan-compiler.staticmetadata").scan_archive(filename))
             local file = assert(io.open(filename, "r+b"))
@@ -626,7 +626,7 @@ function require(name)
                 ar = { assert(os.getenv("BROWSER_AR")) },
                 ranlib = { assert(os.getenv("BROWSER_RANLIB")) } },
             record = function(tool, operation)
-                local file = assert(io.open(assert(os.getenv("BROWSER_COMMAND_LOG")), "a"))
+                local file = assert(io.open(assert(os.getenv("BROWSER_COMMAND_LOG")), "ab"))
                 file:write(tool, " ", operation, "\n"); file:close()
             end,
             after = after_tool,
@@ -667,11 +667,8 @@ function require(name)
                 for _, argument in ipairs({ "-c", cfile, "-o", filename }) do
                     argv[#argv + 1] = argument
                 end
-                local quoted = {}
-                for index, argument in ipairs(argv) do
-                    quoted[index] = assert(original_require("c-parser.cdriver").shell_quote(argument))
-                end
-                assert(os.execute(table.concat(quoted, " ")))
+                local result = request.context.io:run(argv, { stderr_to_stdout = true })
+                assert(result.ok, result.output or result.diagnostic)
             end
             return stage(request)
         end
@@ -811,7 +808,9 @@ assert(driver.close_resolver_context(context))
         write(companion, "preserve me")
         result = run_cli(nil, "--incremental", "pkg.left")
         assert.is_false(result.ok)
-        assert.matches(companion, result.output, 1, true)
+        assert.matches("has native companion", result.output, 1, true)
+        local diagnostic = platform.windows and path.to_slash(result.output:gsub("\\\\", "\\")) or result.output
+        assert.matches(companion, diagnostic, 1, true)
         assert.equal(original, read(archive_path)); assert.equal("preserve me", read(companion))
     end)
 
