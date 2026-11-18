@@ -197,9 +197,16 @@ function spawnEngine(executable, args, stdio) {
     // Node still owns its IPC/CDP pipe construction. The native helper
     // forwards those handles and keeps these two private slots out of Chrome
     // and the worker: drain acknowledgement, then supervisor lifetime.
+    // Scope the helper's provider lookup to its own installation without
+    // replacing the engine's Titan path (the Node worker can launch Titan).
+    const env = { ...process.env };
+    const pathVariable = "TITAN_PATH_0_6";
+    const inheritedKey = Object.keys(env).find(key => key.toUpperCase() === pathVariable);
+    env.TITAN_BROWSER_JOB_SAVED_PATH = inheritedKey === undefined ? "0" : `1${env[inheritedKey]}`;
+    if (inheritedKey !== undefined) delete env[inheritedKey];
+    env[pathVariable] = resolve(assets, "../../titan/0.6");
     const child = spawn(jobHelper, [executable, ...args], {
-        detached: true, windowsHide: true, stdio: [...stdio, "pipe", "pipe"],
-        env: { ...process.env, TITAN_PATH_0_6: resolve(assets, "../../titan/0.6") },
+        detached: true, windowsHide: true, stdio: [...stdio, "pipe", "pipe"], env,
     });
     let acknowledgements = 0;
     child.stdio[stdio.length]?.on("data", bytes => {

@@ -109,16 +109,22 @@ async function cleanChromium(result) {
 test("Windows engine jobs retain native IPC and retire engine on either owner loss",
     { skip: !windows && "platform: requires Windows Job Objects" }, async t => {
     const helper = resolve(dirname(runner), "../../../bin/titan-browser-job.exe");
-    for (const mode of ["ipc", "supervisor-pipe", "helper-death"]) await t.test(mode, async () => {
+    for (const mode of ["ipc", "ipc-empty", "ipc-absent", "supervisor-pipe", "helper-death"]) await t.test(mode, async () => {
+        const ipc = mode.startsWith("ipc");
         const argv = ["", "λ with spaces", 'quote"then slash\\', "C:\\tools\\with space\\"];
-        const worker = mode === "ipc"
-            ? "process.on('message', value => process.send({value, argv: process.argv.slice(1)}, () => process.exit(37)))"
+        const path = mode === "ipc" ? "C:\\caller λ;;C:\\with space\\" : mode === "ipc-empty" ? "" : undefined;
+        const worker = ipc
+            ? `process.on('message', value => process.send({value, argv: process.argv.slice(1),
+                path: process.env.TITAN_PATH_0_6 ?? null, saved: process.env.TITAN_BROWSER_JOB_SAVED_PATH ?? null},
+                () => process.exit(37)))`
             : `const child = require('node:child_process').spawn(process.execPath,
                 ['-e', 'setInterval(() => {}, 1000)'], {detached: true, stdio: 'ignore'});
                console.log(process.pid + ' ' + child.pid); setInterval(() => {}, 1000)`;
         const child = spawn(helper, [process.execPath, "-e", worker, "--", ...argv], {
             windowsHide: true,
-            stdio: ["ignore", "pipe", "pipe", ...(mode === "ipc" ? ["ipc"] : []), "pipe", "pipe"],
+            stdio: ["ignore", "pipe", "pipe", ...(ipc ? ["ipc"] : []), "pipe", "pipe"],
+            env: { ...process.env, TITAN_PATH_0_6: resolve(dirname(runner), "../../titan/0.6"),
+                TITAN_BROWSER_JOB_SAVED_PATH: path === undefined ? "0" : `1${path}` },
         });
         const closed = new Promise((resolve, reject) => {
             child.once("error", reject); child.once("close", resolve);
@@ -136,10 +142,10 @@ test("Windows engine jobs retain native IPC and retire engine on either owner lo
         child.stdio.at(-1).on("error", () => {});
         child.stderr.on("data", bytes => { if (strict) process.stderr.write(bytes); });
         try {
-            if (mode === "ipc") {
+            if (ipc) {
                 const replied = new Promise(resolve => child.once("message", resolve));
                 child.send({ text: "spaces and λ" });
-                assert.deepEqual(await started(replied), { value: { text: "spaces and λ" }, argv });
+                assert.deepEqual(await started(replied), { value: { text: "spaces and λ" }, argv, path: path ?? null, saved: null });
                 assert.equal(await settle(closed), 37);
                 assert.equal(proof, "1");
             } else {

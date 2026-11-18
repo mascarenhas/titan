@@ -37,6 +37,26 @@ local function first_engine_argument(raw: foreign *WCHAR): integer
   return first
 end
 
+local function wide_name(name: string): owned WCHAR[]
+  local buffer: owned WCHAR[] = foreign WCHAR.new_array(#name + 1)
+  ffi.MultiByteToWideChar(ffi.CP_UTF8 as foreign UINT, 0, name, -1, buffer, #name + 1)
+  return buffer
+end
+
+-- The supervisor pins the helper's own provider in its launch environment.
+-- Restore the caller's setting, including absent vs empty, for the engine.
+local function restore_engine_path(): boolean
+  local saved = wide_name("TITAN_BROWSER_JOB_SAVED_PATH")
+  local size = ffi.GetEnvironmentVariableW(saved, nil, 0)
+  if size == 0 then return true end
+  local value: owned WCHAR[] = foreign WCHAR.new_array(size)
+  if ffi.GetEnvironmentVariableW(saved, value, size) ~= size - 1 then return false end
+  local path = wide_name("TITAN_PATH_0_6")
+  local inherited: foreign *WCHAR = nil
+  if value[0] == 49 then inherited = (value as foreign *WCHAR) + 1 end
+  return ffi.SetEnvironmentVariableW(path, inherited) ~= 0 and ffi.SetEnvironmentVariableW(saved, nil) ~= 0
+end
+
 local function retire(job: foreign HANDLE): boolean
   if ffi.TerminateJobObject(job, failed) == 0 then
     problem("TerminateJobObject", ffi.GetLastError())
@@ -142,6 +162,9 @@ function main(_args: {string}): integer
     return problem("UpdateProcThreadAttribute (handle list)", ffi.GetLastError())
   end
 
+  if not restore_engine_path() then
+    return problem("restore engine environment", ffi.GetLastError())
+  end
   local child = foreign PROCESS_INFORMATION.new()
   if ffi.CreateProcessW(nil, command, nil, nil, 1, ffi.EXTENDED_STARTUPINFO_PRESENT as foreign DWORD,
       nil, nil, info, child) == 0 then

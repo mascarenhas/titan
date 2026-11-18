@@ -38,7 +38,7 @@ TITAN_JOBS_CHECK = case $(call make_shell_quote,$(TITAN_JOBS)) in ''|0*|*[!0-9]*
 
 BROWSER_SDK_ENV = PREFIX=$(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(PREFIX))) \
 	TITAN_INSTALL_TREE=$(call make_shell_quote,$(BROWSER_INSTALL_TREE)) \
-	ROCKS_TREE=$(call make_shell_quote,$(strip $(ROCKS_TREE))) \
+	ROCKS_TREE=$(call make_shell_quote,$(if $(strip $(ROCKS_TREE)),$(call BROWSER_NATIVE_PATH,$(ROCKS_TREE)))) \
 	TITAN_ROOT=$(call make_shell_quote,$(BROWSER_INSTALL_TREE)) \
 	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(call BROWSER_NATIVE_PATH,.)) \
 	TITAN_PATH= \
@@ -61,8 +61,8 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 	  exit 1; \
 	fi; \
 	build_dir=$(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(TITAN_BROWSER_BUILD_DIR))); \
-	$(BROWSER_BUILD_HOST_TOOLS) \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua prepare "$$build_dir" $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,.)); \
+	$(BROWSER_BUILD_HOST_TOOLS) \
 	c_objects=$$($(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
 	  --output "$$build_dir" -c --incremental -j$(TITAN_JOBS) \
 	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) --print-c-objects \
