@@ -110,12 +110,13 @@ test("Windows engine jobs retain native IPC and retire engine on either owner lo
     { skip: !windows && "platform: requires Windows Job Objects" }, async t => {
     const helper = resolve(dirname(runner), "../../../bin/titan-browser-job.exe");
     for (const mode of ["ipc", "supervisor-pipe", "helper-death"]) await t.test(mode, async () => {
+        const argv = ["", "λ with spaces", 'quote"then slash\\', "C:\\tools\\with space\\"];
         const worker = mode === "ipc"
-            ? "process.on('message', value => process.send(value, () => process.exit(37)))"
+            ? "process.on('message', value => process.send({value, argv: process.argv.slice(1)}, () => process.exit(37)))"
             : `const child = require('node:child_process').spawn(process.execPath,
                 ['-e', 'setInterval(() => {}, 1000)'], {detached: true, stdio: 'ignore'});
                console.log(process.pid + ' ' + child.pid); setInterval(() => {}, 1000)`;
-        const child = spawn(helper, [process.execPath, "-e", worker], {
+        const child = spawn(helper, [process.execPath, "-e", worker, "--", ...argv], {
             windowsHide: true,
             stdio: ["ignore", "pipe", "pipe", ...(mode === "ipc" ? ["ipc"] : []), "pipe", "pipe"],
         });
@@ -138,7 +139,7 @@ test("Windows engine jobs retain native IPC and retire engine on either owner lo
             if (mode === "ipc") {
                 const replied = new Promise(resolve => child.once("message", resolve));
                 child.send({ text: "spaces and λ" });
-                assert.deepEqual(await started(replied), { text: "spaces and λ" });
+                assert.deepEqual(await started(replied), { value: { text: "spaces and λ" }, argv });
                 assert.equal(await settle(closed), 37);
                 assert.equal(proof, "1");
             } else {

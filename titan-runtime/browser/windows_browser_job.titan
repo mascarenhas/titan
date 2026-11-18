@@ -2,8 +2,6 @@ foreign import "windows.h"
 foreign import "string.h"
 foreign import "stdio.h"
 
-local strings = import "string"
-
 local const failed = 125
 local const stop_wait_ms = 2000
 
@@ -18,35 +16,25 @@ local function problem(operation: string, code: integer): integer
   return failed
 end
 
--- CreateProcessW takes one mutable command line. Double runs of backslashes
--- only before a quote or the closing delimiter, as the Windows CRT expects.
-local function command_line(args: {string}): string
-  local line = strings.writer()
-  defer line:close()
-  for index = 1, #args do
-    if index > 1 then line:write(" ") end
-    line:write('"')
-    local word = args[index]
-    local first, slashes = 1, 0
-    for cursor = 1, #word do
-      local byte: integer = strings.byte(word, cursor, cursor)
-      if byte == 92 then
-        slashes = slashes + 1
-      else
-        if byte == 34 then
-          line:write(strings.sub(word, first, cursor - 1))
-          line:write(strings.rep("\\", slashes + 1))
-          line:write('"')
-          first = cursor + 1
-        end
-        slashes = 0
-      end
+-- Node has already encoded the engine argv for the Windows CRT. Skip the
+-- helper's own argv[0] in the original wide command line and pass an exact
+-- copy of the remaining arguments; CreateProcessW may modify that buffer.
+local function first_engine_argument(raw: foreign *WCHAR): integer
+  local first = 0
+  local quoted = false
+  while raw[first] ~= 0 do
+    local ch = raw[first]
+    if ch == 34 then
+      quoted = not quoted
+    elseif not quoted and (ch == 32 or ch == 9) then
+      break
     end
-    line:write(strings.sub(word, first, #word))
-    if slashes > 0 then line:write(strings.rep("\\", slashes)) end
-    line:write('"')
+    first = first + 1
   end
-  return line:drain()
+  while raw[first] == 32 or raw[first] == 9 do
+    first = first + 1
+  end
+  return first
 end
 
 local function retire(job: foreign HANDLE): boolean
@@ -69,15 +57,18 @@ local function retire(job: foreign HANDLE): boolean
   return false
 end
 
-function main(args: {string}): integer
-  if #args == 0 then return failed end
-  local text = command_line(args)
-  local wide_count = ffi.MultiByteToWideChar(65001, 8, text, -1, nil, 0)
-  if wide_count <= 0 then return problem("MultiByteToWideChar", ffi.GetLastError()) end
-  local command: owned WCHAR[] = foreign WCHAR.new_array(wide_count)
-  if ffi.MultiByteToWideChar(65001, 8, text, -1, command, wide_count) ~= wide_count then
-    return problem("MultiByteToWideChar", ffi.GetLastError())
+function main(_args: {string}): integer
+  local raw = ffi.GetCommandLineW()
+  if not raw then return failed end
+  local first = first_engine_argument(raw)
+  if raw[first] == 0 then return failed end
+  local last = first
+  while raw[last] ~= 0 do
+    last = last + 1
   end
+  local count_chars = last - first + 1
+  local command: owned WCHAR[] = foreign WCHAR.new_array(count_chars)
+  ffi.memcpy(command as foreign *void, (raw + first) as foreign *void, count_chars * foreign WCHAR.sizeof)
 
   local startup = foreign STARTUPINFOEXW.new()
   -- STARTUPINFOEXW's first member has the same address as the enclosing struct.

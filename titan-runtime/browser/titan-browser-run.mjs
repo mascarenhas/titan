@@ -429,7 +429,10 @@ class ChromiumEngine {
                     if (performance.now() - malformedSince > 1000) {
                         throw new Error(`invalid DevToolsActivePort: ${JSON.stringify(text)}`);
                     }
-                } catch (error) { if (error.code !== "ENOENT") throw error; }
+                } catch (error) {
+                    // Windows can expose the file before Chromium's exclusive write closes it.
+                    if (error.code !== "ENOENT" && !(windows && error.code === "EBUSY")) throw error;
+                }
                 await delay(20);
             }
             if (!endpoint || this.closing) return;

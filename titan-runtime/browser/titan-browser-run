@@ -3,6 +3,9 @@
 if [ "${TITAN_NODE+x}" = x ]; then
     node_path=$TITAN_NODE
     case "$node_path" in
+        *\\*) if [ "${OS:-}" = Windows_NT ]; then node_path=$(cygpath -am -- "$node_path" 2>/dev/null); fi ;;
+    esac
+    case "$node_path" in
         */*) ;;
         *) node_path=$(command -v "$node_path" 2>/dev/null) ;;
     esac
