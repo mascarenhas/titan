@@ -1037,7 +1037,7 @@ local function probe_include_paths(config)
                     -- Windows joins and parent lookup canonicalize separators.
                     -- #include_next compares the opened header's parent with
                     -- the supplying search root before moving to the next one.
-                    local normalized, path_error = platform.path.normalize(path)
+                    local normalized, path_error = platform.path.separators(path)
                     if not normalized then
                         return nil, "invalid C include search directory " .. string.format("%q", path) ..
                             ": " .. path_error

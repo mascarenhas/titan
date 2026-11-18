@@ -383,12 +383,18 @@ local function include_root(strategy, directory)
     return compiler_paths.to_slash(compiler_paths.normalize(directory))
 end
 
-local function tool_candidate(strategy, filename)
+local function tool_candidate(context, filename)
+    local strategy = context.io
+    if platform.windows then
+        -- The pinned SDK names .exe tools explicitly. Use native spawn's
+        -- physical lookup but never accept its appended-extension fallback:
+        -- the recorded name must also be the one MSYS env runs for emcc.
+        local ok, identity, selected = pcall(incremental.physical_executable, context, filename)
+        return ok and identity ~= nil and compiler_paths.to_slash(selected) == filename
+    end
     local info = strategy:stat(filename)
-    -- On Windows a regular .exe is only a candidate; tools() must also launch
-    -- it successfully. POSIX retains its effective X_OK check before launch.
-    return info and info.kind == "file" and (platform.windows or
-        type(strategy.executable) == "function" and strategy:executable(filename) == true)
+    return info and info.kind == "file" and type(strategy.executable) == "function" and
+        strategy:executable(filename) == true
 end
 
 local INSTALL = "; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
@@ -397,7 +403,7 @@ local function tools(context)
     local emsdk, cc = platform.getenv("EMSDK")
     if emsdk and emsdk ~= "" then
         cc = assert(absolute(strategy, tool_path(compiler_paths.join(emsdk, "upstream/emscripten"), "emcc")))
-        if not tool_candidate(strategy, cc) then
+        if not tool_candidate(context, cc) then
             return nil, "browser target requires Emscripten 6.0.13: emcc not found at " ..
                 string.format("%q", cc) .. " (EMSDK=" .. string.format("%q", emsdk) .. ")" .. INSTALL
         end
@@ -407,7 +413,7 @@ local function tools(context)
             local candidate, err = absolute(strategy,
                 tool_path(directory == "" and "." or directory, "emcc"))
             if not candidate then return nil, err end
-            if tool_candidate(strategy, candidate) then cc = candidate; break end
+            if tool_candidate(context, candidate) then cc = candidate; break end
         end
         if not cc then
             return nil, "browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on PATH)" .. INSTALL
@@ -416,6 +422,10 @@ local function tools(context)
     local command = M.compiler_argv({ cc })
     command[#command + 1] = "--version"
     local result = strategy:run(command, { stderr_to_stdout = true })
+    if platform.windows and type(result) == "table" and not result.started then
+        return nil, "browser target requires Emscripten 6.0.13: cannot execute emcc at " ..
+            string.format("%q", cc) .. ": " .. tostring(result.diagnostic or "process did not start") .. INSTALL
+    end
     local found = type(result) == "table" and type(result.output) == "string" and
         result.output:match("emcc[^\n]- (%d+%.%d+%.%d+)") or "unknown"
     if type(result) ~= "table" or not result.ok or found ~= M.EMSCRIPTEN_VERSION then
@@ -428,18 +438,9 @@ local function tools(context)
     for _, item in ipairs({ { "ar", "emar" }, { "ranlib", "emranlib" } }) do
         local key, name = item[1], item[2]
         local filename = tool_path(location, name)
-        if not tool_candidate(strategy, filename) then
+        if not tool_candidate(context, filename) then
             return nil, "browser target requires Emscripten 6.0.13: " .. name .. " not found at " ..
                 string.format("%q", filename) .. " (emcc=" .. string.format("%q", cc) .. ")" .. INSTALL
-        end
-        if platform.windows then
-            local probe = strategy:run({ filename, "--version" }, { stderr_to_stdout = true })
-            if type(probe) ~= "table" or not probe.ok then
-                local diagnostic = type(probe) == "table" and (probe.diagnostic or probe.output)
-                return nil, "browser target requires Emscripten 6.0.13: cannot execute " .. name ..
-                    " at " .. string.format("%q", filename) ..
-                    (diagnostic and diagnostic ~= "" and ": " .. diagnostic:gsub("%s+$", "") or "") .. INSTALL
-            end
         end
         out[key] = { filename }
     end

@@ -1352,15 +1352,16 @@ precedence.
 `browsertarget.EMSCRIPTEN_VERSION` is the single constant `6.0.13`. When
 `EMSDK` is set and nonempty it is authoritative: the tools are
 `$EMSDK/upstream/emscripten/{emcc,emar,emranlib}`. Otherwise Titan searches
-`PATH` for the compiler (an empty entry means `.`) and selects `emar` and
-`emranlib` only beside it. On Windows the basenames end in `.exe` and `PATH`
-is semicolon-delimited. Windows selects regular files and requires the
-selected tools' `--version` invocations to succeed. POSIX selects regular
-files with effective execute permission. The host `CC`, `AR`, and `RANLIB`
-are never consulted. All three tools are recorded as absolute one-word argv
-arrays. `emcc --version` runs
-once, with stderr merged, and its first `emcc ... <major>.<minor>.<patch>`
-version is compared with the pin.
+`PATH` for the first matching compiler (an empty entry means `.`) and selects
+`emar` and `emranlib` only beside it. The selected compiler must report the
+pinned version; a bad first match does not fall through to another SDK.
+On Windows the basenames end in `.exe` and `PATH` is semicolon-delimited.
+Native executable resolution must select that exact filename; it may not
+append another extension. POSIX requires effective execute permission.
+The host `CC`, `AR`, and `RANLIB` are never consulted. All three tools are
+recorded as absolute one-word argv arrays. `emcc --version` runs once, with
+stderr merged, and its first `emcc ... <major>.<minor>.<patch>` version is
+compared with the pin.
 
 ```text
 browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on PATH); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
@@ -1371,9 +1372,10 @@ browser target requires Emscripten 6.0.13: <tool> not found at "<path>" (emcc="<
 
 `<found>` is `unknown` when the output carries no parsable version or the
 command fails. `emar` and `emranlib` delegate to LLVM archive tools whose
-banners are not Emscripten versions, so only `emcc` is version-checked; the
-siblings must come from the same installation directory. The full
-`--version` output is kept in the descriptor. `incremental.toolchain_identity`
+banners are not Emscripten versions. Archive construction proves their
+deterministic `qDc` and `-D` modes, even on Windows where tool discovery does
+not run the siblings. The full `emcc --version` output is kept in the
+descriptor. `incremental.toolchain_identity`
 still folds `emcc`'s `-E -v` banner, which carries the Emscripten and Clang
 versions, and adds the descriptor identity
 ([Object and link identity](#object-and-link-identity)).
@@ -1497,10 +1499,11 @@ prefix is classified by the Wasm reader, and its fingerprint must equal the
 expected baseline. No probe links or executes anything.
 
 Clang on Windows may report both slash styles in its include-search banner.
-The preprocessor normalizes those directories to the same Windows spelling
-as an opened header's parent before `#include_next` compares them. Search
-order is unchanged; a header's forwarding directive resumes after the
-directory that supplied it.
+The preprocessor normalizes those separators without rewriting directory
+components or search order. `#include_next` can then find the directory that
+supplied the current header. Include-root spelling participates in the
+semantic C-header digest: old Windows receipts miss once if their recorded
+search spelling changes.
 
 ### Freezing and identity
 

@@ -11470,11 +11470,15 @@ local function run_archive_tool(base, arguments, verbose, discard_output)
     return run_argv(argv, verbose, discard_output)
 end
 
-local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
+local function archive_tool_capabilities(ar, ranlib, probe, object, verbose, browser)
     os.remove(probe)
     local ar_args = { "qDc", probe }
     if object then ar_args[#ar_args + 1] = object end
     local ar_d = run_archive_tool(ar, ar_args, verbose, true)
+    if browser and not ar_d then
+        os.remove(probe)
+        return nil, "browser archive tool " .. string.format("%q", ar[1]) .. " failed deterministic qDc"
+    end
     if not ar_d then
         os.remove(probe)
         ar_args[1] = "qc"
@@ -11488,6 +11492,10 @@ local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
     end
 
     local ranlib_d = run_archive_tool(ranlib, { "-D", probe }, verbose, true)
+    if browser and not ranlib_d then
+        os.remove(probe)
+        return nil, "browser archive tool " .. string.format("%q", ranlib[1]) .. " failed deterministic -D"
+    end
     if not ranlib_d then
         local ranlib_ok, ranlib_term, ranlib_code =
             run_archive_tool(ranlib, { probe }, verbose, true)
@@ -11678,7 +11686,7 @@ function driver.build_static_archive(
     if not ranlib then ranlib, ranlib_err = perf.tool_command(driver.RANLIB, "RANLIB") end
     if not ranlib then return abort(ranlib_err) end
     local capability, capability_err = archive_tool_capabilities(
-        ar, ranlib, probe, staged_paths[1], verbose)
+        ar, ranlib, probe, staged_paths[1], verbose, descriptor and platform.windows)
     if not capability then return abort(capability_err) end
     if descriptor and not capability.deterministic then
         return abort("browser archive tools require deterministic qDc and -D modes")

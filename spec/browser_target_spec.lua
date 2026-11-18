@@ -21,10 +21,6 @@ local function tool_suffix()
     return platform.windows and ".exe" or ""
 end
 
-local function tool_call_count()
-    return platform.windows and 4 or 2
-end
-
 local function fresh_driver()
     local saved = package.loaded["titan-compiler.driver"]
     package.loaded["titan-compiler.driver"] = nil
@@ -179,7 +175,7 @@ describe("browser target descriptor", function()
         assert.has_error(function() descriptor.lua.record.sjlj = "emscripten" end, "browser target descriptor is immutable")
         assert.has_error(function() table.insert(descriptor.compile_flags, "-flto") end,
             "browser target descriptor is immutable")
-        assert.equal(tool_call_count(), #calls)
+        assert.equal(2, #calls)
         assert.same({ "env", "EMCC_CFLAGS=", descriptor.tools.cc[1], "--version" }, calls[1])
         local flags = table.concat(calls[#calls], " ")
         contains(flags, "-c")
@@ -200,7 +196,7 @@ describe("browser target descriptor", function()
         local rebuilt = assert(browser.import(data))
         assert.same(data, browser.export(rebuilt))
         assert.equal(descriptor.identity, rebuilt.identity)
-        assert.equal(tool_call_count(), #calls)
+        assert.equal(2, #calls)
         data.compile_flags[1] = "changed after import"
         assert.equal("--std=c99", rebuilt.compile_flags[1])
         assert.is_nil(browser.import(data))
@@ -637,20 +633,18 @@ describe("browser target descriptor", function()
         end
     end)
 
-    it("rejects Windows archive programs that exist but cannot be launched", function()
+    it("reports a Windows emcc launch failure without mistaking it for a missing file", function()
         platform.windows = true
         local root = "C:/fixture"
         platform.getenv = function(name)
             if name == "EMSDK" then return root .. "/emsdk" end
         end
-        for _, name in ipairs({ "emar", "emranlib" }) do
-            local context, inputs = fake_context({ root = root, tool_root = root, unstartable = name })
-            local descriptor, err = browser.build(context, inputs)
-            assert.is_nil(descriptor)
-            contains(err, "cannot execute " .. name)
-            contains(err, name .. ".exe")
-            contains(err, "not a Windows executable")
-        end
+        local context, inputs = fake_context({ root = root, tool_root = root, unstartable = "emcc" })
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        contains(err, "cannot execute emcc")
+        contains(err, "/emcc.exe")
+        contains(err, "not a Windows executable")
     end)
 
     it("diagnoses a missing record with the fork install command", function()
@@ -991,7 +985,7 @@ describe("browser target descriptor", function()
         local context = subject.new_resolver_context({ io = template.io, target = "browser" })
         local descriptor = assert(subject.context_target_descriptor(context))
         assert.equal(descriptor, subject.context_target_descriptor(context))
-        assert.equal(tool_call_count(), #calls)
+        assert.equal(2, #calls)
         assert.equal(FAKE_ROOT .. "/cache-prefix/var/cache/titan-probes/browser-6.0.13/" ..
             cprobe_cache.VERSION, descriptor.probe_cache_directory)
         assert.equal(native_cache, subject.PROBE_CACHE_DIRECTORY)
