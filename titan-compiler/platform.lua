@@ -64,8 +64,8 @@ function platform.absolute(path, cwd, strategy)
     return nil, err
 end
 
--- Match libuv's Win32 PATH quote handling, including semicolons inside
--- quoted entries. The browser's explicit search also admits empty entries.
+-- See doc/implementation/windows-build.md#windows-executable-path-entries.
+-- Keep the runner's JavaScript mirror in sync with regular executable mode.
 function platform.windows_path_entries(search, include_empty)
     local start = 1
     local limit = #search + (include_empty and 1 or 0)
@@ -78,15 +78,13 @@ function platform.windows_path_entries(search, include_empty)
             local finish = search:find(";", after_quote, true) or #search + 1
             local directory = search:sub(start, finish - 1)
             start = finish + 1
-            if directory ~= "" or include_empty then
-                if quoted then
-                    if #directory == 1 then return nil, "malformed Windows executable PATH" end
-                    directory = directory:sub(2)
-                end
-                local last = directory:sub(-1)
-                if last == '"' or last == "'" then directory = directory:sub(1, -2) end
-                return directory
+            if quoted then
+                if #directory == 1 then return nil, "malformed Windows executable PATH" end
+                directory = directory:sub(2)
             end
+            local last = directory:sub(-1)
+            if last == '"' or last == "'" then directory = directory:sub(1, -2) end
+            if directory ~= "" or include_empty then return directory end
         end
     end
 end

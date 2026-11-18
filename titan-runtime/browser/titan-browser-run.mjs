@@ -74,13 +74,31 @@ function parse(argv) {
     return options;
 }
 
+// Mirrors platform.windows_path_entries in regular executable mode; see
+// doc/implementation/windows-build.md#windows-executable-path-entries.
+function* windowsPathEntries(search) {
+    let start = 0;
+    while (start < search.length) {
+        const first = search[start];
+        const quoted = first === '"' || first === "'";
+        const close = quoted ? search.indexOf(first, start + 1) : start;
+        const separator = close < 0 ? -1 : search.indexOf(";", close);
+        const finish = separator < 0 ? search.length : separator;
+        if (quoted && finish === start + 1) throw new Error("malformed Windows executable PATH");
+        const directory = search.slice(start + Number(quoted), finish).replace(/["']$/, "");
+        if (directory) yield directory;
+        start = finish + 1;
+    }
+}
+
 async function executable(value) {
     if (!value) return null;
     const explicit = value.includes("/") || value.includes("\\");
     const tool = windows && !explicit && !value.toLowerCase().endsWith(".exe") ? `${value}.exe` : value;
-    const candidates = explicit ? [resolve(tool)] :
-        (process.env.PATH ?? "").split(delimiter).map(dir => resolve(dir || ".", tool));
-    for (const path of candidates) {
+    const search = process.env.PATH ?? "";
+    const entries = explicit ? [""] : windows ? windowsPathEntries(search) : search.split(delimiter);
+    for (const directory of entries) {
+        const path = resolve(directory, tool);
         try {
             await access(path, constants.X_OK);
             if ((await stat(path)).isFile()) return path;

@@ -742,14 +742,21 @@ describe("browser target descriptor", function()
             { true, "C:/fake", [[C:\sdk]], [[mingw32-make -f Makefile.win lua-browser PREFIX=C:\sdk]] },
         }) do
             local windows, root, prefix, command = table.unpack(row)
-            platform.windows = windows
-            platform.getenv = function(name) if name == "EMSDK" then return root .. "/emsdk" end end
-            local context, inputs = fake_context({ root = root, tool_root = root, missing_record = true })
-            inputs.install_prefix = prefix
-            local descriptor, err = browser.build(context, inputs)
-            assert.is_nil(descriptor)
-            assert.equal(string.format("browser Lua record %q is unavailable: not found; install it with '%s'",
-                inputs.paths.lua_record, command), err)
+            local function check()
+                platform.getenv = function(name) if name == "EMSDK" then return root .. "/emsdk" end end
+                local context, inputs = fake_context({ root = root, tool_root = root, missing_record = true })
+                inputs.install_prefix = prefix
+                local descriptor, err = browser.build(context, inputs)
+                assert.is_nil(descriptor)
+                assert.equal(string.format("browser Lua record %q is unavailable: not found; install it with '%s'",
+                    inputs.paths.lua_record, command), err)
+            end
+            if windows then
+                platform.windows = true
+                check()
+            else
+                fixtures.with_posix_host(check)
+            end
         end
     end)
 

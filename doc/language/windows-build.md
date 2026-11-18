@@ -191,9 +191,10 @@ sh "$PREFIX/lib/titan-browser/0.6/titan-browser-run" out-browser/app.mjs
 The browser SDK installs separately from native Lua and the native provider.
 Set the same `TITAN_BUILD_PROFILE` for `browser-sdk` and its consumers; the
 `titan-stdlib-browser-test` target defaults to `validation`. For Chromium
-tests also set `TITAN_CHROME` to the headless executable. See
-[the browser runner](browser-target.md#testing-from-the-command-line) for
-the `chromium` engine and its transport options.
+tests also set `TITAN_CHROME` to the headless executable.
+The shell launcher accepts either slash direction in its own path or an
+explicit `TITAN_NODE`. See [the browser runner](browser-target.md#testing-from-the-command-line)
+for the `chromium` engine and its transport options.
 
 ## Long double on worker threads
 

@@ -216,7 +216,6 @@ local function posix_model_it(name, callback)
         local previous = platform.windows
         local previous_driver = {}
         for key, value in pairs(driver) do previous_driver[key] = value end
-        platform.windows = false
         if previous then
             -- Host module-load paths on Windows carry drive letters (`C:/...`).
             -- Delegate to the real production `driver.initialize_layout` so its
@@ -229,8 +228,7 @@ local function posix_model_it(name, callback)
                 return previous_driver.initialize_layout(context)
             end
         end
-        local completed, failure = xpcall(callback, debug.traceback)
-        platform.windows = previous
+        local completed, failure = xpcall(function() browser_fixtures.with_posix_host(callback) end, debug.traceback)
         for key in pairs(driver) do driver[key] = nil end
         for key, value in pairs(previous_driver) do driver[key] = value end
         assert.truthy(completed, failure)
@@ -332,8 +330,8 @@ describe("target source selection API", function()
             assert.is_true(driver.close_resolver_context(context))
 
             local implementation = driver._browser_target
-            driver._browser_target = setmetatable({ build = function(_, inputs)
-                return assert(implementation.import(browser_fixtures.descriptor(inputs.paths.root)))
+            driver._browser_target = setmetatable({ build = function()
+                return assert(implementation.import(browser_fixtures.descriptor()))
             end }, { __index = implementation })
             if expected == "native" then
                 assert.has_error(function()

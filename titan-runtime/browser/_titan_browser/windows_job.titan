@@ -1,5 +1,6 @@
 foreign import "windows.h"
 foreign import "string.h"
+foreign import "io.h"
 
 local const failed = 125
 local const stop_wait_ms = 2000
@@ -139,7 +140,7 @@ function main(_args: {string}): integer
   local acknowledgement = handles[count - 2]
   local inherited = count - 2
   for index = inherited, count - 1 do
-    handles[index] = nil
+    handles[index] = ffi.INVALID_HANDLE_VALUE
     reserved[header + index] = 0
   end
   ffi.memcpy(handle_table, handles as foreign *void, handle_bytes)
@@ -185,12 +186,17 @@ function main(_args: {string}): integer
     return problem("restore engine environment", ffi.GetLastError())
   end
   local child = foreign PROCESS_INFORMATION.new()
-  if ffi.CreateProcessW(nil, command, nil, nil, 1, ffi.EXTENDED_STARTUPINFO_PRESENT as foreign DWORD,
-      nil, nil, info, child) == 0 then
+  const flags = (ffi.EXTENDED_STARTUPINFO_PRESENT | ffi.CREATE_NO_WINDOW) as foreign DWORD
+  if ffi.CreateProcessW(nil, command, nil, nil, 1, flags, nil, nil, info, child) == 0 then
     return problem("CreateProcessW", ffi.GetLastError())
   end
   ffi.CloseHandle(child.hThread)
   defer ffi.CloseHandle(child.hProcess)
+  -- Only the engine should keep its stdio and protocol handles. Otherwise
+  -- the supervisor cannot observe an engine closing a pipe before it exits.
+  for slot = 0, inherited - 1 do
+    if slot ~= 2 then ffi._close(slot) end -- Keep stderr for helper diagnostics.
+  end
   local status = 0
   while true do
     local waited = ffi.WaitForSingleObject(child.hProcess, 25)

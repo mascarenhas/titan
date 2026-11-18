@@ -268,6 +268,17 @@ filesystem, module, and process behavior must be tested with CLANG64/UCRT.
 See [Microsoft's UTF-8 process guidance](https://learn.microsoft.com/en-us/windows/apps/design/globalizing/use-utf8-code-page)
 and [Windows DLL search order](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order).
 
+### Windows executable PATH entries
+
+The compiler and the browser runner split the Windows executable `PATH` on
+semicolons. A leading single or double quote protects semicolons up to
+the matched closing quote. Strip a leading and trailing quote from the
+entry before interpreting it; a relative entry is used as given.
+Regular executable lookup skips both empty and quoted-empty entries;
+Emscripten tool discovery treats both as the current directory, as its
+POSIX search does for empty entries. This rule is about how `PATH` entries
+are interpreted, not the separate process policy for search outside `PATH`.
+
 ## Windows loader boundary
 
 `titan-runtime/titan_winloader.h` (`titan_win_load_library`) converts a UTF-8

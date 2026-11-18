@@ -18,6 +18,27 @@ M.target_defines = {
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
 }
 
+-- POSIX host models must also use the real POSIX lexical path implementation,
+-- even if the running interpreter loaded the Windows version of path.lua.
+function M.with_posix_host(callback)
+    local saved_windows = platform.windows
+    local native, saved = require "titan-compiler.path", {}
+    if saved_windows then
+        local filename = assert(package.searchpath("titan-compiler.path", package.path))
+        local environment = setmetatable({ package = { config = "/\n;\n?\n!\n-\n" } }, { __index = _G })
+        local posix = assert(loadfile(filename, "t", environment))()
+        for key, value in pairs(posix) do
+            saved[key], native[key] = native[key], value
+        end
+    end
+    platform.windows = false
+    local ok, result = xpcall(callback, debug.traceback)
+    platform.windows = saved_windows
+    for key, value in pairs(saved) do native[key] = value end
+    if not ok then error(result, 0) end
+    return result
+end
+
 function M.fingerprint()
     return { format = "wasm", word_size = 32, linking_version = 2, features = M.features }
 end

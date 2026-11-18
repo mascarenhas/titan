@@ -1498,6 +1498,21 @@ describe("incremental configuration", function()
         assert.equal(0, #ctx.io.commands)
     end)
 
+    it("uses the quoted Windows PATH entry, not the current directory from empty entries", function()
+        local platform = require "titan-compiler.platform"
+        local original = platform.windows
+        local ctx = context({ ["C:/cwd/tool.exe"] = "current", ["C:/tools;with space/tool.exe"] = "selected" })
+        ctx.executable_path = [[;"";'';"C:/tools;with space";]]
+        function ctx.io:cwd() return "C:/cwd" end
+        function ctx.io:executable_search_cwd() return false end
+        platform.windows = true
+        local ok, identity, selected = pcall(incremental.physical_executable, ctx, "tool.exe")
+        platform.windows = original
+        assert.is_true(ok, identity)
+        assert.equal("C:/tools;with space/tool.exe", selected)
+        assert.equal(selected, identity.path)
+    end)
+
     it("probes one flagless toolchain description independently of effective options", function()
         local ctx = native_context({ [native_tool("cc")] = "driver" })
         local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"

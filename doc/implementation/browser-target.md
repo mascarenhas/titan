@@ -1366,8 +1366,8 @@ precedence.
 `PATH` for the first matching compiler (an empty entry means `.`) and selects
 `emar` and `emranlib` only beside it. The selected compiler must report the
 pinned version; a bad first match does not fall through to another SDK.
-On Windows the basenames end in `.exe` and `PATH` is semicolon-delimited,
-with semicolons inside a quoted entry treated as part of that path.
+On Windows the basenames end in `.exe` and Titan uses the
+[Emscripten `PATH` search mode](windows-build.md#windows-executable-path-entries).
 Native executable resolution must select that exact filename; it may not
 append another extension. POSIX requires effective execute permission.
 During a Windows `PATH` search, an absent exact candidate permits a later
@@ -3943,6 +3943,8 @@ where `<found>` is `unknown` without a parsable version. It then locates
 (`titan-browser-run: harness failure: runner assets are missing`), and execs
 it. Native `titanc.exe` runs the same script with `sh.exe` and an argv
 vector; it does not interpret the launcher path as a command.
+The Windows shell launcher converts backslashes in its own path and in an
+explicit `TITAN_NODE` before resolving their directories.
 
 `titan-browser-run.mjs` parses `[--engine node|chromium] [--timeout MS]
 [--grace MS] [--chrome PATH] [--cdp pipe|port] [--root DIR]
@@ -3967,6 +3969,10 @@ engine handles in the allowlist, preserving the worker IPC descriptor and
 Chromium pipe descriptors 3/4. Two private slots carry the supervisor's
 lifetime and the helper's post-drain acknowledgement; neither is inherited
 by the engine.
+The helper uses `CREATE_NO_WINDOW` for the engine. After launch it closes
+its copies of the engine's stdin, stdout and protocol descriptors so their
+owner can observe EOF without waiting for the engine to exit. It retains
+stderr for its own diagnostics.
 The launcher is installed as `bin/titan-browser-job.exe`; its provider is
 `lib/titan/0.6/_titan_browser/windows_job.dll`, under a private module
 namespace in the normal Windows native provider layout. The helper loads it
@@ -3990,7 +3996,9 @@ browser launch. It prints exactly one LF-terminated JSON object:
 
 Chrome selection is `--chrome`, then `TITAN_CHROME`, then `google-chrome`,
 `google-chrome-stable`, `chromium`, `chromium-browser`, and
-`chrome-headless-shell` on `PATH`. Chrome is usable when `--version` runs and
+`chrome-headless-shell` on `PATH`. Windows first looks for `chrome.exe`
+and uses the [regular Windows `PATH` search mode](windows-build.md#windows-executable-path-entries).
+Chrome is usable when `--version` runs and
 prints a recognized Google Chrome (for Testing), Chromium, or Chrome Headless
 Shell banner with a four-part version; no fixed major is required. A failure
 keeps the path and version found, with a reason such as `headless Chromium not
