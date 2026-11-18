@@ -1,7 +1,11 @@
 local assert = require "luassert"
 local lfs = require "lfs"
 local process = require "titan-compiler.process"
-local linux = require("luv").os_uname().sysname == "Linux"
+-- luv's loop lives as long as the first luv module table. Busted drops this
+-- file's package.loaded entries afterwards, so a plain require here would
+-- leave a later file's luv calls on a freed loop; process.library() anchors
+-- that table for the whole Busted process.
+local linux = process.library().os_uname().sysname == "Linux"
 local toolchain = require "spec.support.browser_toolchain"
 local checks = dofile("scripts/browser_stdlib.lua")
 local repository = assert(lfs.currentdir())
