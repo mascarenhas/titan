@@ -366,7 +366,10 @@ test("public image observation forwards aborts and traps but leaves handled prot
 });
 
 test("launcher rejects absent and wrong-major Node without stdout", async t => {
-    const missing = join(tmpdir(), "titan-missing-node-329");
+    const absent = await mkdtemp(join(tmpdir(), "titan-missing-tools-"));
+    t.after(() => rm(absent, { recursive: true, force: true }));
+    const missing = join(absent, windows ? "node.exe" : "node");
+    const chrome = join(absent, windows ? "chrome.exe" : "chrome");
     const result = await run(["--probe"], { TITAN_NODE: missing });
     assert.equal(result.status, 75);
     assert.equal(result.stdout.length, 0);
@@ -374,7 +377,7 @@ test("launcher rejects absent and wrong-major Node without stdout", async t => {
     const node = windows ? process.execPath.replaceAll("\\", "/") : process.execPath;
     for (const [name, path] of [["missing on PATH", undefined], ["absolute interpreter", node]]) {
         await t.test(name, async () => {
-            const env = { ...process.env, TITAN_CHROME: "/missing/chrome-329", TITAN_NODE: path };
+            const env = { ...process.env, TITAN_CHROME: chrome, TITAN_NODE: path };
             const { stdout, stderr, code = 0 } = await exec(windows ? "sh.exe" : "/bin/sh", [
                 "-c", 'PATH=; export PATH; exec "$0" "$@"', windows ? runner.replaceAll("\\", "/") : runner, "--probe",
             ], { cwd: tmpdir(), env }).catch(error => error);
@@ -405,8 +408,11 @@ test("launcher rejects absent and wrong-major Node without stdout", async t => {
     });
 });
 
-test("probe is closed JSON and needs no SDK or browser launch", async () => {
-    const result = await run(["--probe"], { TITAN_CHROME: "/missing/chrome-329" });
+test("probe is closed JSON and needs no SDK or browser launch", async t => {
+    const directory = await mkdtemp(join(tmpdir(), "titan-missing-chrome-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const chrome = join(directory, windows ? "chrome.exe" : "chrome");
+    const result = await run(["--probe"], { TITAN_CHROME: chrome });
     assert.equal(result.status, 0, result.stderr.toString());
     assert.equal(result.stderr.length, 0);
     assert.equal(result.stdout.toString().split("\n").length, 2);
@@ -417,14 +423,16 @@ test("probe is closed JSON and needs no SDK or browser launch", async () => {
     assert.equal(info.node.ok, true);
     assert.equal(info.node.reason, null);
     assert.equal(info.chrome.ok, false);
-    assert.equal(info.chrome.path, resolve(tmpdir(), "/missing/chrome-329"));
+    assert.equal(info.chrome.path, chrome);
     assert.equal(info.chrome.version, null);
     assert.ok(info.chrome.reason);
 });
 
 test("Windows launcher accepts native backslashes in both absolute paths",
-    { skip: !windows && "platform: requires MSYS2 Windows paths" }, async () => {
-    const result = await run(["--probe"], { TITAN_NODE: process.execPath, TITAN_CHROME: "/missing/chrome-329" },
+    { skip: !windows && "platform: requires MSYS2 Windows paths" }, async t => {
+    const directory = await mkdtemp(join(tmpdir(), "titan-missing-chrome-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const result = await run(["--probe"], { TITAN_NODE: process.execPath, TITAN_CHROME: join(directory, "chrome.exe") },
         { launcher: runner });
     assert.equal(result.status, 0, result.stderr.toString());
     assert.equal(JSON.parse(result.stdout).node.version, process.version);
@@ -459,14 +467,16 @@ test("Windows Chromium PATH respects quoted entries and never searches empty ent
     }
 });
 
-test("CLI misuse is 2 and absent image is harness 75", async () => {
+test("CLI misuse is 2 and absent image is harness 75", async t => {
     for (const args of [[], ["--engine", "bad", fixture], ["--timeout", "0", fixture], ["--grace", "-1", fixture], ["--cdp", "bad", fixture]]) {
         const result = await run(args);
         assert.equal(result.status, 2, result.stderr.toString());
         assert.equal(result.stdout.length, 0);
         assert.match(result.stderr.toString(), /usage: titan-browser-run/);
     }
-    const result = await run(["/missing/image-329.mjs"]);
+    const directory = await mkdtemp(join(tmpdir(), "titan-missing-image-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const result = await run([join(directory, "image.mjs")]);
     assert.equal(result.status, 75);
     assert.equal(result.stdout.length, 0);
     assert.match(result.stderr.toString(), /titan-browser-run: harness failure:/);
