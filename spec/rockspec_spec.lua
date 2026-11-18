@@ -2561,7 +2561,7 @@ describe("relocatable Lua build configuration", function()
             assert(lfs.touch(path, old, old))
             return path
         end
-        for _, path in ipairs({ "Makefile.win", "scripts/install_compiler.mk",
+        for _, path in ipairs({ "Makefile.win", "scripts/install_compiler.mk", "scripts/browser.mk",
                 "scripts/titan_install.lua", "scripts/titan-uninstall",
                 "spec/support/stdlib_test_modules.mk" }) do
             fixture(source, path, read_file(path))
@@ -2770,6 +2770,7 @@ printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
             fixture(source, name, read_file(repository .. "/" .. name))
         end
         fixture(source, "scripts/install_compiler.mk", "")
+        fixture(source, "scripts/browser.mk", read_file(repository .. "/scripts/browser.mk"))
         fixture(source, "scripts/build_windows_runtime.sh", [=[#!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "$1/runtime"

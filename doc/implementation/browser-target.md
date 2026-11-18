@@ -1363,6 +1363,9 @@ pinned version; a bad first match does not fall through to another SDK.
 On Windows the basenames end in `.exe` and `PATH` is semicolon-delimited.
 Native executable resolution must select that exact filename; it may not
 append another extension. POSIX requires effective execute permission.
+During a Windows `PATH` search, an absent exact candidate permits a later
+entry, a present candidate's resolution error stops with its path and cause,
+and a resolved executable must still pass its execution check.
 The host `CC`, `AR`, and `RANLIB` are never consulted. All three tools are
 recorded as absolute one-word argv arrays. `emcc --version` runs once, with
 stderr merged, and its first `emcc ... <major>.<minor>.<patch>` version is

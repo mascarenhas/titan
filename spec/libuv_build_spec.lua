@@ -1334,7 +1334,7 @@ end
             local ok, output = run_argv({ "mkdir", "-p", root .. "/scripts",
                 root .. "/spec/support", root .. "/out/titan" })
             assert.truthy(ok, output)
-            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk",
+            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk", "scripts/browser.mk",
                     "spec/support/stdlib_test_modules.mk" }) do
                 write_file(root .. "/" .. path, read_file(path))
             end
@@ -1401,7 +1401,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
             local prefix = root .. "/prefix"
             local inputs = {
                 "Makefile", "prepared", "LICENSE", "THIRD_PARTY_NOTICES.md",
-                "scripts/install_compiler.mk",
+                "scripts/install_compiler.mk", "scripts/browser.mk",
                 "scripts/titan_install.lua", "scripts/titan-uninstall",
                 "spec/support/stdlib_test_modules.mk",
                 "titanc", "titan-compiler/driver.lua",
@@ -1433,6 +1433,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
             write_file(root .. "/Makefile", read_file("Makefile"))
             write_file(root .. "/scripts/install_compiler.mk",
                 read_file("scripts/install_compiler.mk"))
+            write_file(root .. "/scripts/browser.mk", read_file("scripts/browser.mk"))
             write_file(root .. "/spec/support/stdlib_test_modules.mk",
                 read_file("spec/support/stdlib_test_modules.mk"))
             -- The built `titan` support module is a Make-owned input here.
@@ -1869,7 +1870,7 @@ done
             local ok, output = run_argv({ "mkdir", "-p", root .. "/scripts",
                 root .. "/spec/support", root .. "/out/tests/test", root .. "/lib/titan/0.6" })
             assert.truthy(ok, output)
-            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk",
+            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk", "scripts/browser.mk",
                     "spec/support/stdlib_test_modules.mk" }) do
                 write_file(root .. "/" .. path, read_file(path))
             end
@@ -1946,7 +1947,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> ../../environment
                     root .. "/spec/fixtures/stdlib/native",
                     root .. "/lib/titan/0.6", root .. "/build" })
                 assert.truthy(ok, output)
-                for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk",
+                for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk", "scripts/browser.mk",
                         "spec/support/stdlib_test_modules.mk" }) do
                     write_file(root .. "/" .. path, read_file(path))
                 end
@@ -2004,7 +2005,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> ../../environment
             local ok, output = run_argv({ "mkdir", "-p", root .. "/scripts",
                 root .. "/spec/support", root .. "/spec/stdlib/titan/test", native })
             assert.truthy(ok, output)
-            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk",
+            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk", "scripts/browser.mk",
                     "spec/support/stdlib_test_modules.mk" }) do
                 write_file(root .. "/" .. path, read_file(path))
             end
@@ -2060,7 +2061,7 @@ end
             local ok, output = run_argv({ "mkdir", "-p", root .. "/scripts",
                 root .. "/spec/support", root .. "/spec/stdlib/titan/test", native })
             assert.truthy(ok, output)
-            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk",
+            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk", "scripts/browser.mk",
                     "spec/support/stdlib_test_modules.mk",
                     "spec/support/run_with_timeout.sh",
                     "spec/support/check_stdlib_test_output.lua" }) do

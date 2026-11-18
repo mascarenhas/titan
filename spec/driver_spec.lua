@@ -315,13 +315,13 @@ describe("target source selection API", function()
                     else
                         assert.is_nil(target)
                         if value == "browser" then
-                            assert.equal("browser builds are supported from Linux and macOS hosts (host is native)", err)
+                            assert.equal("browser builds are supported from Linux, macOS and Windows hosts (host is native)", err)
                         else
                             assert.matches(origin == "TITAN_TARGET" and
                                 "TITAN_TARGET=" .. value or "--target " .. value, err, 1, true)
                         end
                         local reason = value == "native" and "not a compilation target" or
-                            value == "browser" and "supported from Linux and macOS hosts" or
+                            value == "browser" and "supported from Linux, macOS and Windows hosts" or
                             value == "wasm32" and "unknown target" or
                             "native cross-compilation is not supported"
                         assert.matches(reason, err, 1, true)
@@ -338,7 +338,7 @@ describe("target source selection API", function()
             if expected == "native" then
                 assert.has_error(function()
                     driver.new_resolver_context({ io = strategy, target = "browser" })
-                end, "browser builds are supported from Linux and macOS hosts (host is native)")
+                end, "browser builds are supported from Linux, macOS and Windows hosts (host is native)")
             else
                 local explicit = driver.new_resolver_context({ io = strategy, target = "browser" })
                 assert.equal("browser", driver.context_target(explicit))

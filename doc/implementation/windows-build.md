@@ -1075,14 +1075,11 @@ Pure generated-header fixtures use drive-qualified virtual output paths on
 Windows, so direct code generation and the driver's absolute header plans
 refer to the same location.
 
-Browser builds remain unsupported on Windows. The CLI rejects that host when
-validating `--target browser`, before applying browser-specific option policy.
-The option-policy tests retain the exact disabled-line-directive diagnostic
-as a separate assertion; the Windows child asserts the earlier host rejection.
-[Windows and other hosts](browser-target.md#windows-and-other-hosts) lists
-what else a Windows-host browser build meets: no `Makefile.win` targets,
-extensionless Emscripten tool discovery, no Windows executable-access check,
-a target preprocessing failure, and a POSIX-only runner.
+The CLI admits `--target browser` on Windows; browser option-policy tests
+assert the same disabled-line-directive diagnostic on all three hosts.
+Browser object compilation uses the fork's browser Lua, not the controlled
+native DLL. See [Windows browser builds](browser-target.md#windows-and-other-hosts)
+for the browser SDK and runner requirements.
 
 The pre-marker generated-C upgrade fixture reads bytes in binary mode and
 exercises both LF and CRLF output. Removing generated preamble lines must

@@ -216,7 +216,7 @@ describe("c preprocessor (cpp)", function()
         local strategy = require("titan-compiler.io").new_sync()
         local contents = {
             ["C:/sdk/before/carrier.h"] = "int wrong_header;\n",
-            ["C:/sdk/sysroot/compat/carrier.h"] = "#include_next <carrier.h>\n",
+            ["C:/sdk/link/../compat/carrier.h"] = "#include_next <carrier.h>\n",
             ["C:/sdk/clang/include/carrier.h"] = "int compiler_carrier;\n",
         }
         function strategy:stat(filename)
@@ -233,7 +233,7 @@ describe("c preprocessor (cpp)", function()
                     output = '#include "..." search starts here:\r\n' ..
                         " C:/sdk/before\r\n" ..
                         "#include <...> search starts here:\r\n" ..
-                        " C:\\sdk\\sysroot/compat\r\n" ..
+                        " C:\\sdk\\link/../compat\r\n" ..
                         " C:\\sdk/clang\\include\r\nEnd of search list.\r\n"
                 end
             end
@@ -243,6 +243,7 @@ describe("c preprocessor (cpp)", function()
         local ok, failure = xpcall(function()
             platform.windows = true
             local context = assert(cpp.new_context({ compiler = { "clang.exe" }, io = strategy }))
+            assert.equal("C:/sdk/link/../compat", context.incdirs.system[1])
             -- Angle lookup excludes the quote-only decoy. The nested directive
             -- must continue after the actual directory that supplied carrier.h.
             local parsed = assert(cpp.parse_contents("C:/fixture.c", "#include <carrier.h>\n", context))

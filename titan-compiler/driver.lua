@@ -11686,11 +11686,8 @@ function driver.build_static_archive(
     if not ranlib then ranlib, ranlib_err = perf.tool_command(driver.RANLIB, "RANLIB") end
     if not ranlib then return abort(ranlib_err) end
     local capability, capability_err = archive_tool_capabilities(
-        ar, ranlib, probe, staged_paths[1], verbose, descriptor and platform.windows)
+        ar, ranlib, probe, staged_paths[1], verbose, descriptor ~= nil)
     if not capability then return abort(capability_err) end
-    if descriptor and not capability.deterministic then
-        return abort("browser archive tools require deterministic qDc and -D modes")
-    end
 
     os.remove(temporary)
     local archive_prefix = copy_argv(ar)

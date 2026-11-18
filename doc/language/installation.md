@@ -442,8 +442,9 @@ The [browser target](browser-target.md) needs Emscripten 6.0.13, Node 26+, a
 browser build of the Lua fork, and the browser SDK, all in the same prefix as
 Titan; running programs and tests in headless Chrome with `titan-browser-run`
 also needs Chrome or Chromium. The rock's installation needs none of them:
-`luarocks install titan` and `luarocks make` never run Emscripten. Only Linux
-and macOS hosts are supported.
+`luarocks install titan` and `luarocks make` never run Emscripten. The full
+browser SDK and runner workflow below needs Linux or macOS. MSYS2 CLANG64
+on Windows supports compile-only work after `make -f Makefile.win lua-browser`.
 
 With Emscripten active (`source <emsdk>/emsdk_env.sh`), after `luarocks make`
 and from the checkout, install the browser Lua and then the browser SDK:

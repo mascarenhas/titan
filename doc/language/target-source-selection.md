@@ -274,8 +274,8 @@ variants are siblings of their default, so that directory does not change.
 `titanc -T <label>` or `titanc --target <label>` selects the target, as a
 separate argument; `--target=<label>` is accepted too. The short `-t` remains
 `--tree`. Without the option, `titanc` reads the `TITAN_TARGET` environment
-variable. Native compilation is available only for the host, and the browser
-target only from Linux and macOS hosts:
+variable. Native compilation is available only for the host. Linux, macOS
+and Windows admit the browser target:
 
 | `-T`/`--target` or `TITAN_TARGET` | Result |
 | --- | --- |
@@ -283,7 +283,7 @@ target only from Linux and macOS hosts:
 | the host's own OS label, such as `linux` on Linux | accepted; the same as absent |
 | another OS label | error, for example `--target windows: native cross-compilation is not supported (host is linux)` |
 | `native` | error: `--target native: 'native' selects source files for native hosts; it is not a compilation target` |
-| `browser` | the [browser target](browser-target.md) on Linux and macOS hosts; on any other host, error: `browser builds are supported from Linux and macOS hosts (host is windows)` |
+| `browser` | the [browser target](browser-target.md) on Linux, macOS and Windows hosts; on an unlabeled host, error: `browser builds are supported from Linux, macOS and Windows hosts (host is native)` |
 | anything else | error, for example `--target wasm32: unknown target 'wasm32': expected linux, darwin, windows or browser` |
 
 On a native host without an OS label, there is no own label to accept, so every

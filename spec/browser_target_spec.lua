@@ -617,12 +617,15 @@ describe("browser target descriptor", function()
                 if name == "EMSDK" and route == "EMSDK" then return root .. "/emsdk" end
                 if name == "PATH" then return "D:/not-empty;" .. directory end
             end
-            local context, inputs = fake_context({ root = root, tool_root = root })
+            local context, inputs, calls, files = fake_context({ root = root, tool_root = root })
+            files["D:/not-empty/emcc.com"] = "not the pinned SDK executable"
+            files["D:/not-empty/emcc.bat"] = "not the pinned SDK executable"
             local descriptor = assert(browser.build(context, inputs))
             assert.equal(route, descriptor.tools.source)
             assert.equal(directory .. "/emcc.exe", descriptor.tools.cc[1])
             assert.equal(directory .. "/emar.exe", descriptor.tools.ar[1])
             assert.equal(directory .. "/emranlib.exe", descriptor.tools.ranlib[1])
+            assert.equal(2, #calls, "descriptor creation never launches archive tools")
             local data = browser.export(descriptor)
             assert(browser.import(data))
             data.tools.ranlib[1] = directory .. "/emranlib"
@@ -631,6 +634,28 @@ describe("browser target descriptor", function()
             assert.is_nil(imported)
             assert.equal("invalid browser tool argv", err)
         end
+    end)
+
+    it("does not continue past an existing Windows candidate with a resolution error", function()
+        platform.windows = true
+        local root = "C:/fixture"
+        local candidate = "D:/unresolved/emcc.exe"
+        platform.getenv = function(name)
+            if name == "PATH" then return "D:/unresolved;" .. root .. "/emsdk/upstream/emscripten" end
+        end
+        local context, inputs, calls, files = fake_context({ root = root, tool_root = root })
+        files[candidate] = "candidate with inaccessible metadata"
+        local lstat = context.io.lstat
+        function context.io:lstat(filename)
+            if filename == candidate then return nil, "fixture access denied" end
+            return lstat(self, filename)
+        end
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        contains(err, "cannot resolve")
+        contains(err, candidate)
+        contains(err, "fixture access denied")
+        assert.equal(0, #calls)
     end)
 
     it("reports a Windows emcc launch failure without mistaking it for a missing file", function()

@@ -483,6 +483,30 @@ describe("browser providers", function()
         assert.equal(4, #commands)
     end)
 
+    it("names the browser archiver that fails its deterministic capability check", function()
+        local platform = require "titan-compiler.platform"
+        local process = require "titan-compiler.process"
+        local primary = root .. "/primary.o"
+        write(primary, wasm("pkg.mod"))
+        local context = browser_context(root)
+        local tools = context.target_descriptor.tools
+        local destination = root .. "/out/pkg.a"
+        for _, command in ipairs({ tools.ar[1], tools.ranlib[1] }) do
+            process.capture = function(argv)
+                if not platform.windows then argv = assert(cdriver.split_shell_words(argv[3])) end
+                return { started = true, ok = argv[1] ~= command, why = "exit", status = 3, output = "" }
+            end
+            local staged, err = driver.stage_browser_provider({
+                context = context, public_dso = destination, target = fixtures.fingerprint(),
+                archive_inputs = { { kind = "object", input = primary } },
+            })
+            assert.is_nil(staged)
+            assert.matches("browser archive tool " .. string.format("%q", command), err, 1, true)
+            assert.matches("failed deterministic", err, 1, true)
+        end
+        assert(driver.close_resolver_context(context))
+    end)
+
     it("does not add target probes to native provider lookup", function()
         local context = driver.new_resolver_context()
         context.io.run = function() error("unexpected native target probe") end

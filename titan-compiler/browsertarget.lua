@@ -385,25 +385,43 @@ end
 
 local function tool_candidate(context, filename)
     local strategy = context.io
+    local info, stat_error = strategy:stat(filename)
     if platform.windows then
-        -- The pinned SDK names .exe tools explicitly. Use native spawn's
-        -- physical lookup but never accept its appended-extension fallback:
-        -- the recorded name must also be the one MSYS env runs for emcc.
+        -- An absent exact .exe may continue a PATH walk; an exact candidate
+        -- with a resolution error stops it. A resolved name still has to
+        -- launch at its execution boundary. Never accept libuv's appended
+        -- extension fallback: emcc is also run by MSYS env.
+        if stat_error then return nil, stat_error end
+        if not info then return false end
         local ok, identity, selected = pcall(incremental.physical_executable, context, filename)
-        return ok and identity ~= nil and compiler_paths.to_slash(selected) == filename
+        if not ok then
+            if type(identity) ~= "string" then error(identity, 0) end
+            return nil, identity
+        end
+        if not identity then return nil, selected end
+        if compiler_paths.to_slash(selected) ~= filename then
+            return nil, "physical resolver selected " .. string.format("%q", selected)
+        end
+        return true
     end
-    local info = strategy:stat(filename)
     return info and info.kind == "file" and type(strategy.executable) == "function" and
         strategy:executable(filename) == true
 end
 
 local INSTALL = "; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
+local function resolution_error(filename, reason)
+    return "browser target requires Emscripten 6.0.13: cannot resolve " ..
+        string.format("%q", filename) .. ": " .. reason .. INSTALL
+end
+
 local function tools(context)
     local strategy = context.io
     local emsdk, cc = platform.getenv("EMSDK")
     if emsdk and emsdk ~= "" then
         cc = assert(absolute(strategy, tool_path(compiler_paths.join(emsdk, "upstream/emscripten"), "emcc")))
-        if not tool_candidate(context, cc) then
+        local present, reason = tool_candidate(context, cc)
+        if reason then return nil, resolution_error(cc, reason) end
+        if not present then
             return nil, "browser target requires Emscripten 6.0.13: emcc not found at " ..
                 string.format("%q", cc) .. " (EMSDK=" .. string.format("%q", emsdk) .. ")" .. INSTALL
         end
@@ -413,7 +431,9 @@ local function tools(context)
             local candidate, err = absolute(strategy,
                 tool_path(directory == "" and "." or directory, "emcc"))
             if not candidate then return nil, err end
-            if tool_candidate(context, candidate) then cc = candidate; break end
+            local present, reason = tool_candidate(context, candidate)
+            if reason then return nil, resolution_error(candidate, reason) end
+            if present then cc = candidate; break end
         end
         if not cc then
             return nil, "browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on PATH)" .. INSTALL
@@ -438,7 +458,9 @@ local function tools(context)
     for _, item in ipairs({ { "ar", "emar" }, { "ranlib", "emranlib" } }) do
         local key, name = item[1], item[2]
         local filename = tool_path(location, name)
-        if not tool_candidate(context, filename) then
+        local present, reason = tool_candidate(context, filename)
+        if reason then return nil, resolution_error(filename, reason) end
+        if not present then
             return nil, "browser target requires Emscripten 6.0.13: " .. name .. " not found at " ..
                 string.format("%q", filename) .. " (emcc=" .. string.format("%q", cc) .. ")" .. INSTALL
         end
