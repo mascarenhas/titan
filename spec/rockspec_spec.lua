@@ -1096,7 +1096,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
                 derived[#derived + 1] = lpeglabel .. "/" .. word
             end
         end
-        local scripts, named = { "Makefile", "Makefile.win", "scripts/install_compiler.mk" }, {}
+        local scripts, named = { "Makefile", "Makefile.win", "scripts/install_compiler.mk", "scripts/browser.mk" }, {}
         local index = 1
         while scripts[index] do
             for script in read_file(scripts[index]):gmatch("scripts/[%w_.-]+") do
@@ -1150,6 +1150,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         for _, expected in ipairs(derived) do
             assert.truthy(contains_suffix(expected), expected)
         end
+        assert.truthy(contains_suffix("titan-runtime/browser/windows_browser_job.titan"))
         for _, retired in ipairs({
             "titan/lua.titan",
             "titan/uv/file.titan",
@@ -1182,9 +1183,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.falsy(path:find("/openssl-build/", 1, true), path)
             assert.falsy(path:match("/openssl%-%d"), path)
         end
-        -- One standard-library tree: outside titan/, only tests and
-        -- documentation may hold Titan source or reuse a standard-library
-        -- file's basename.
+        -- Keep one standard-library tree. The Windows browser job helper is
+        -- a separate build tool, not another standard-library source.
         local root
         for path in pairs(unpacked_files) do
             if path == "Makefile.win" or path:sub(-#"/Makefile.win") == "/Makefile.win" then
@@ -1205,7 +1205,9 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             local file = relative(path)
             local top = file and file:match("^([^/]+)/")
             if top and top ~= "titan" and top ~= "spec" and top ~= "doc" then
-                assert.falsy(file:match("%.titan$"), file)
+                if file ~= "titan-runtime/browser/windows_browser_job.titan" then
+                    assert.falsy(file:match("%.titan$"), file)
+                end
                 local duplicated = stdlib_files[file:match("[^/]+$")]
                 assert.is_nil(duplicated, file .. " duplicates " .. tostring(duplicated))
             end

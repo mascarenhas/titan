@@ -460,12 +460,19 @@ function installer.uninstall_browser_sdk(sdk_tree, release)
     local destination = physical(sdk_tree)
     local relative = "lib/titan-browser/" .. release
     local paths = {}
-    for index, name in ipairs(installer.browser_sdk_owned) do
-        contained(destination, relative .. "/" .. name)
-        paths[index] = destination .. "/" .. relative .. "/" .. name
-        local mode = lfs.symlinkattributes(paths[index], "mode")
+    local function append(asset)
+        contained(destination, asset)
+        paths[#paths + 1] = destination .. "/" .. asset
+    end
+    for _, name in ipairs(installer.browser_sdk_owned) do append(relative .. "/" .. name) end
+    if windows then
+        append("bin/titan-browser-job.exe")
+        append("lib/titan/" .. release .. "/windows_browser_job.dll")
+    end
+    for _, path in ipairs(paths) do
+        local mode = lfs.symlinkattributes(path, "mode")
         if mode ~= nil and mode ~= "file" and mode ~= "link" then
-            return nil, "browser SDK file is not a file: " .. paths[index]
+            return nil, "browser SDK file is not a file: " .. path
         end
     end
     for _, path in ipairs(paths) do

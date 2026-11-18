@@ -13,7 +13,7 @@ import {create} from "../../titan-runtime/browser/titan-browser.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runner = resolve(process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run"));
 const fixture = join(root, "spec/browser/runner-fixtures.mjs");
-const supported = process.platform !== "win32";
+const windows = process.platform === "win32";
 const strict = process.env.TITAN_REQUIRE_BROWSER_TOOLCHAIN === "1";
 const exec = promisify(execFile);
 
@@ -47,7 +47,9 @@ function fixtureRoot(image) {
 }
 
 function launch(args, env = {}) {
-    const child = spawn(runner, args, { cwd: tmpdir(), env: { ...process.env, TITAN_NODE: process.execPath, ...env } });
+    const program = windows ? process.execPath : runner;
+    const argv = windows ? [runner + ".mjs", ...args] : args;
+    const child = spawn(program, argv, { cwd: tmpdir(), env: { ...process.env, TITAN_NODE: process.execPath, ...env } });
     const stdout = [], stderr = [];
     let hard;
     const deadline = setTimeout(() => {
@@ -98,9 +100,75 @@ async function cleanChromium(result) {
     await absent(path);
     const pid = /\bpid (\d+); profile/.exec(result.stderr.toString());
     if (pid) assert.throws(() => process.kill(Number(pid[1]), 0), { code: "ESRCH" });
-    const { stdout } = await exec("ps", ["-axo", "pid=,args="]);
-    assert.equal(stdout.includes(`--user-data-dir=${path}`), false, `Chromium process still owns ${path}`);
+    if (!windows) {
+        const { stdout } = await exec("ps", ["-axo", "pid=,args="]);
+        assert.equal(stdout.includes(`--user-data-dir=${path}`), false, `Chromium process still owns ${path}`);
+    }
 }
+
+test("Windows engine jobs retain native IPC and retire engine on either owner loss",
+    { skip: !windows && "platform: requires Windows Job Objects" }, async t => {
+    const helper = resolve(dirname(runner), "../../../bin/titan-browser-job.exe");
+    for (const mode of ["ipc", "supervisor-pipe", "helper-death"]) await t.test(mode, async () => {
+        const worker = mode === "ipc"
+            ? "process.on('message', value => process.send(value, () => process.exit(37)))"
+            : `const child = require('node:child_process').spawn(process.execPath,
+                ['-e', 'setInterval(() => {}, 1000)'], {detached: true, stdio: 'ignore'});
+               console.log(process.pid + ' ' + child.pid); setInterval(() => {}, 1000)`;
+        const child = spawn(helper, [process.execPath, "-e", worker], {
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "pipe", ...(mode === "ipc" ? ["ipc"] : []), "pipe", "pipe"],
+        });
+        const closed = new Promise((resolve, reject) => {
+            child.once("error", reject); child.once("close", resolve);
+        });
+        let deadline;
+        const expired = new Promise((_, reject) => {
+            deadline = setTimeout(() => reject(new Error(`Windows ${mode} job did not settle`)), 10000);
+        });
+        const settle = pending => Promise.race([pending, expired]);
+        const started = pending => settle(Promise.race([pending, closed.then(status => {
+            throw new Error(`Windows ${mode} helper exited before readiness (${status})`);
+        })]));
+        let proof = "";
+        child.stdio.at(-2).on("data", bytes => { proof += bytes; });
+        child.stdio.at(-1).on("error", () => {});
+        child.stderr.on("data", bytes => { if (strict) process.stderr.write(bytes); });
+        try {
+            if (mode === "ipc") {
+                const replied = new Promise(resolve => child.once("message", resolve));
+                child.send({ text: "spaces and λ" });
+                assert.deepEqual(await started(replied), { text: "spaces and λ" });
+                assert.equal(await settle(closed), 37);
+                assert.equal(proof, "1");
+            } else {
+                const text = await started(new Promise(resolve => {
+                    let line = "";
+                    child.stdout.setEncoding("utf8").on("data", chunk => {
+                        line += chunk;
+                        if (line.includes("\n")) resolve(line.trim());
+                    });
+                }));
+                const pids = text.split(" ").map(Number);
+                assert.equal(new Set([child.pid, ...pids]).size, 3, text);
+                assert.ok(pids.every(pid => pid > 0), text);
+                if (mode === "supervisor-pipe") child.stdio.at(-1).destroy();
+                else child.kill();
+                await settle(closed);
+                assert.equal(proof, mode === "supervisor-pipe" ? "1" : "");
+                for (const pid of pids) {
+                    await until(() => {
+                        try { process.kill(pid, 0); return false; }
+                        catch (error) { if (error.code === "ESRCH") return true; throw error; }
+                    });
+                }
+            }
+        } finally {
+            clearTimeout(deadline);
+            if (child.exitCode === null && child.signalCode === null) child.kill();
+        }
+    });
+});
 
 async function until(check, milliseconds = 5000) {
     const deadline = performance.now() + milliseconds;
@@ -238,7 +306,8 @@ test("public image observation forwards aborts and traps but leaves handled prot
     ]);
 });
 
-test("launcher rejects absent and wrong-major Node without stdout", { skip: !supported }, async () => {
+test("launcher rejects absent and wrong-major Node without stdout",
+    { skip: windows && "platform: uses a POSIX shebang fixture in an isolated PATH" }, async () => {
     const missing = join(tmpdir(), "titan-missing-node-329");
     const result = await run(["--probe"], { TITAN_NODE: missing });
     assert.equal(result.status, 75);
@@ -261,7 +330,7 @@ test("launcher rejects absent and wrong-major Node without stdout", { skip: !sup
     } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("probe is closed JSON and needs no SDK or browser launch", { skip: !supported }, async () => {
+test("probe is closed JSON and needs no SDK or browser launch", async () => {
     const result = await run(["--probe"], { TITAN_CHROME: "/missing/chrome-329" });
     assert.equal(result.status, 0, result.stderr.toString());
     assert.equal(result.stderr.length, 0);
@@ -273,12 +342,12 @@ test("probe is closed JSON and needs no SDK or browser launch", { skip: !support
     assert.equal(info.node.ok, true);
     assert.equal(info.node.reason, null);
     assert.equal(info.chrome.ok, false);
-    assert.equal(info.chrome.path, "/missing/chrome-329");
+    assert.equal(info.chrome.path, resolve(tmpdir(), "/missing/chrome-329"));
     assert.equal(info.chrome.version, null);
     assert.ok(info.chrome.reason);
 });
 
-test("CLI misuse is 2 and absent image is harness 75", { skip: !supported }, async () => {
+test("CLI misuse is 2 and absent image is harness 75", async () => {
     for (const args of [[], ["--engine", "bad", fixture], ["--timeout", "0", fixture], ["--grace", "-1", fixture], ["--cdp", "bad", fixture]]) {
         const result = await run(args);
         assert.equal(result.status, 2, result.stderr.toString());
@@ -293,7 +362,7 @@ test("CLI misuse is 2 and absent image is harness 75", { skip: !supported }, asy
 
 for (const engine of ["node", "chromium"]) {
     for (const cdp of engine === "node" ? ["pipe"] : ["pipe", "port"]) {
-        test(`portable frozen context, GC, exact bytes, and cleanup (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`portable frozen context, GC, exact bytes, and cleanup (${engine}/${cdp})`, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const result = await run(["--engine", engine, "--cdp", cdp, "--grace", "20", "--root", root, "--js-test", fixture]);
             assert.equal(result.status, 0, result.stderr.toString());
@@ -310,7 +379,7 @@ for (const engine of ["node", "chromium"]) {
             assert.deepEqual(forwarded.stdout, Buffer.from(JSON.stringify(args)));
             if (engine === "chromium") await cleanChromium(forwarded);
         });
-        test(`real CLI test image preserves bytes and 0/1/2 status (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`real CLI test image preserves bytes and 0/1/2 status (${engine}/${cdp})`, async t => {
             const image = testImage(t);
             if (!image) return;
             if (engine === "chromium" && !await chromium(t)) return;
@@ -359,7 +428,7 @@ for (const engine of ["node", "chromium"]) {
                 "Usage: <test-executable> [-h|--help] [-v|--verbose] [-f PATTERN|--filter=PATTERN]...\n");
             if (engine === "chromium") for (const result of [passed, failed, skipped, empty, invalid]) await cleanChromium(result);
         });
-        test(`uncaught real-image completion corruption remains a harness failure (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`uncaught real-image completion corruption remains a harness failure (${engine}/${cdp})`, async t => {
             const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
             if (!named) {
                 if (strict) assert.fail("TITAN_BROWSER_LOADER_IMAGE must name the compiled fidelity fixture");
@@ -376,7 +445,7 @@ for (const engine of ["node", "chromium"]) {
                 if (engine === "chromium") await cleanChromium(result);
             });
         });
-        test(`failure categories and bounded cleanup (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`failure categories and bounded cleanup (${engine}/${cdp})`, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const image = process.env.TITAN_BROWSER_RUNNER_IMAGE && resolve(process.env.TITAN_BROWSER_RUNNER_IMAGE);
             const directory = fixtureRoot(image);
@@ -432,7 +501,7 @@ for (const engine of ["node", "chromium"]) {
             ["binding bytes", "abort-binding", "bytes"], ["binding format", "abort-binding", "format"],
             ["binding allocation", "abort-binding", "allocation"],
         ]) {
-            test(`fatal ${phase} abort completes disposal before shutdown (${engine}/${cdp})`, { skip: !supported }, async t => {
+            test(`fatal ${phase} abort completes disposal before shutdown (${engine}/${cdp})`, async t => {
                 const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
                 if (!named) {
                     if (strict) assert.fail("TITAN_BROWSER_LOADER_IMAGE must name the compiled fidelity fixture");
@@ -452,7 +521,8 @@ for (const engine of ["node", "chromium"]) {
                 if (engine === "chromium") await cleanChromium(result);
             });
         }
-        test(`JS module/path isolation and long deadlines (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`JS module/path isolation and long deadlines (${engine}/${cdp})`,
+            { skip: windows && "platform: NTFS cannot represent the literal question-mark asset name in this fixture" }, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const directory = await mkdtemp(join(tmpdir(), "titan runner-"));
             try {
@@ -502,7 +572,7 @@ for (const engine of ["node", "chromium"]) {
             assert.doesNotMatch(large.stderr.toString(), /TimeoutOverflowWarning/);
             if (engine === "chromium") await cleanChromium(large);
         });
-        test(`application signed status is masked only at CLI exit (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`application signed status is masked only at CLI exit (${engine}/${cdp})`, async t => {
             const image = testImage(t);
             if (!image) return;
             if (engine === "chromium" && !await chromium(t)) return;
@@ -519,7 +589,8 @@ for (const engine of ["node", "chromium"]) {
 }
 
 for (const cdp of ["pipe", "port"]) {
-    test(`launch/connect failure retires only its own process and profile (${cdp})`, { skip: !supported }, async t => {
+    test(`launch/connect failure retires only its own process and profile (${cdp})`,
+        { skip: windows && "platform: launches executable POSIX shell scripts as Chromium substitutes" }, async t => {
         const directory = await mkdtemp(join(tmpdir(), "titan-chrome-launch-"));
         const chrome = join(directory, "chrome");
         const banner = "if [ \"$1\" = --version ]; then printf 'Chromium 156.0.8078.80\\n'; exit 0; fi\n" +
@@ -570,7 +641,8 @@ for (const cdp of ["pipe", "port"]) {
     });
 }
 
-test("port discovery retries partial files and bounds malformed content", { skip: !supported }, async t => {
+test("port discovery retries partial files and bounds malformed content",
+    { skip: windows && "platform: fake Chromium uses a POSIX shebang and SIGTERM handler" }, async t => {
     for (const initial of ["empty", "port", "garbage", "missing"]) await t.test(initial, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-chrome-port-"));
         try {
@@ -633,7 +705,8 @@ test("port discovery retries partial files and bounds malformed content", { skip
     });
 });
 
-test("Node retires TERM-resistant descendants independently of its worker leader", { skip: !supported }, async t => {
+test("Node retires TERM-resistant descendants independently of its worker leader",
+    { skip: windows && "platform: exercises POSIX process groups and delivery of SIGINT/SIGTERM" }, async t => {
     for (const mode of ["leader-exit", "deadline", "SIGINT", "SIGTERM"]) await t.test(mode, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-node-group-"));
         const files = await descendantFixture(directory);
@@ -671,7 +744,8 @@ test("Node retires TERM-resistant descendants independently of its worker leader
 });
 
 for (const cdp of ["pipe", "port"]) {
-    test(`Chromium retires TERM-resistant profile-less descendants (${cdp})`, { skip: !supported }, async t => {
+    test(`Chromium retires TERM-resistant profile-less descendants (${cdp})`,
+        { skip: windows && "platform: exercises POSIX shebang and process-group termination" }, async t => {
         for (const mode of ["leader-exit", "deadline", "SIGINT", "SIGTERM"]) await t.test(mode, async () => {
             const directory = await mkdtemp(join(tmpdir(), "titan-chrome-group-"));
             const files = await descendantFixture(directory);
@@ -719,7 +793,8 @@ for (const cdp of ["pipe", "port"]) {
         });
     });
 
-    test(`SIGINT and SIGTERM retire Chromium while real Wasm is busy (${cdp})`, { skip: !supported }, async t => {
+    test(`SIGINT and SIGTERM retire Chromium while real Wasm is busy (${cdp})`,
+        { skip: windows && "platform: Windows child.kill does not deliver catchable POSIX signals" }, async t => {
         if (!await chromium(t)) return;
         for (const signal of ["SIGINT", "SIGTERM"]) await t.test(signal, async () => {
             const execution = launch(["--engine", "chromium", "--cdp", cdp, "--timeout", "10000",
@@ -742,7 +817,8 @@ for (const cdp of ["pipe", "port"]) {
     });
 }
 
-test("owned group EPERM distinguishes retired members from live permission failures", { skip: !supported }, async t => {
+test("owned group EPERM distinguishes retired members from live permission failures",
+    { skip: windows && "platform: exercises POSIX process-group permission handling" }, async t => {
     for (const mode of ["empty", "zombie", "stale", "other-group", "live", "pid-denied"]) await t.test(mode, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-group-eperm-"));
         const files = await descendantFixture(directory);
@@ -791,7 +867,8 @@ test("owned group EPERM distinguishes retired members from live permission failu
     });
 });
 
-test("exact-profile PID EPERM ignores only retired processes", { skip: !supported }, async t => {
+test("exact-profile PID EPERM ignores only retired processes",
+    { skip: windows && "platform: exercises POSIX ps and PID permission handling" }, async t => {
     for (const mode of ["profile-zombie", "profile-stale", "profile-denied"]) await t.test(mode, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-profile-eperm-"));
         const files = await descendantFixture(directory);
@@ -822,8 +899,7 @@ test("exact-profile PID EPERM ignores only retired processes", { skip: !supporte
 });
 
 for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium", "port"]]) {
-    test(`required trace fails before main for direct and host-test images (${engine}/${cdp})`,
-        {skip: !supported}, async t => {
+    test(`required trace fails before main for direct and host-test images (${engine}/${cdp})`, async t => {
         const image = await missingTableImage(t);
         if (!image || (engine === "chromium" && !await chromium(t))) return;
         const directory = fixtureRoot(image.file);
@@ -849,7 +925,7 @@ for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium"
     });
 }
 
-test("required trace uses the existing lazy initialization and disposal lifecycle", {skip: !supported}, async t => {
+test("required trace uses the existing lazy initialization and disposal lifecycle", async t => {
     const image = await missingTableImage(t);
     if (!image) return;
     const {default: createImage} = await import(pathToFileURL(image.file).href);
@@ -994,7 +1070,8 @@ test("imported runner helpers leave CLI dormant and preserve supervisor behavior
     assert.equal(within(root, dirname(root)), false);
 });
 
-test("direct invocation through a symlink still runs the runner CLI", {skip: !supported}, async () => {
+test("direct invocation through a symlink still runs the runner CLI",
+    { skip: windows && "capability: unprivileged Windows links may not be traversable" }, async () => {
     const directory = await mkdtemp(join(tmpdir(), "titan-runner-import-"));
     try {
         const link = join(directory, "runner.mjs");

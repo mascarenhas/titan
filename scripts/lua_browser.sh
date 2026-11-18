@@ -45,7 +45,7 @@ browser_ar=${LUA_BROWSER_AR-}
 browser_ranlib=${LUA_BROWSER_RANLIB-}
 
 tool_suffix=
-if [ "${MSYSTEM:-}" = CLANG64 ]; then tool_suffix=.exe; fi
+if [ "${OS:-}" = Windows_NT ]; then tool_suffix=.exe; fi
 emcc=emcc$tool_suffix
 emar=emar$tool_suffix
 emranlib=emranlib$tool_suffix

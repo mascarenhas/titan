@@ -9,6 +9,7 @@ BROWSER_LUA_MODULE_SUFFIX ?= .so
 BROWSER_NATIVE_PATH ?= $(abspath $(1))
 BROWSER_RUNNER_SHELL ?=
 BROWSER_LPEGLABEL_CPPFLAGS ?= $(LPEGLABEL_CPPFLAGS)
+BROWSER_COMPILER_REMEDY ?= run 'luarocks make' or 'make install-compiler-sdk' first
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -56,10 +57,11 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 	titanc_bin=$(call make_shell_quote,$(BROWSER_INSTALL_TREE)/bin/titanc$(BROWSER_EXE_SUFFIX)); \
 	if test ! -x "$$titanc_bin"; then titanc_bin=$(call make_shell_quote,$(PREFIX)/bin/titanc$(BROWSER_EXE_SUFFIX)); fi; \
 	if test ! -x "$$titanc_bin"; then \
-	  echo "browser-sdk: installed titanc not found; install the native Titan compiler first" >&2; \
+	  echo "browser-sdk: installed titanc not found; $(BROWSER_COMPILER_REMEDY)" >&2; \
 	  exit 1; \
 	fi; \
 	build_dir=$(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(TITAN_BROWSER_BUILD_DIR))); \
+	$(BROWSER_BUILD_HOST_TOOLS) \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua prepare "$$build_dir" $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,.)); \
 	c_objects=$$($(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
 	  --output "$$build_dir" -c --incremental -j$(TITAN_JOBS) \
@@ -105,7 +107,8 @@ titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all
 	echo "Browser stdlib building image: stdlib"; \
 	started=$$(date +%s); \
 	$(BROWSER_SDK_ENV) TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)) \
-	  $(call make_shell_quote,$(BROWSER_INSTALL_TREE)/bin/titanc$(BROWSER_EXE_SUFFIX)) -q --target browser --test --incremental --no-uv-bootstrap \
+	  $(call make_shell_quote,$(BROWSER_INSTALL_TREE)/bin/titanc$(BROWSER_EXE_SUFFIX)) \
+	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) --target browser --test --incremental --no-uv-bootstrap \
 	  --tree $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,spec/stdlib/titan)) \
 	  --output "$$compiler_dir" --exe "$$build_dir/images/stdlib.mjs" -j$(TITAN_JOBS) \
 	  --c-source $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,spec/fixtures/browser_runtime/close.c)) "$$@"; \

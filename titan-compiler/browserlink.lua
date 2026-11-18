@@ -29,9 +29,15 @@ function M.runner_argv(launcher, ...)
     return { launcher, ... }
 end
 
+-- The native pair stays in the ordinary Windows executable/provider layout.
+function M.windows_runner_files(release)
+    return { "bin/titan-browser-job.exe", "lib/titan/" .. release .. "/windows_browser_job.dll" }
+end
+
 function M.require_sdk(context, descriptor, install)
     local assets = M.sdk_assets(descriptor.paths)
-    local command = "make browser-sdk PREFIX=" .. install.prefix
+    local make = platform.windows and "make -f Makefile.win browser-sdk" or "make browser-sdk"
+    local command = make .. " PREFIX=" .. install.prefix
     if install.rocks_tree and install.rocks_tree ~= "" then
         command = command .. " ROCKS_TREE=" .. install.rocks_tree
     end
@@ -57,8 +63,18 @@ function M.require_sdk(context, descriptor, install)
         local rocks = install.rocks_tree and install.rocks_tree ~= "" and " ROCKS_TREE=<tree>" or ""
         return nil, string.format("browser SDK %q was built with the %s profile, but this build uses %s; " ..
             "set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
-            "'make browser-sdk PREFIX=<prefix>%s TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin,
-            profile, descriptor.build_profile, profile, descriptor.build_profile, rocks, descriptor.build_profile)
+            "'%s PREFIX=<prefix>%s TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin,
+            profile, descriptor.build_profile, profile, descriptor.build_profile, make, rocks, descriptor.build_profile)
+    end
+    if platform.windows then
+        for _, relative in ipairs(M.windows_runner_files(require("titan-compiler.version").TITAN_LIBRARY_VERSION)) do
+            local filename = path.join(descriptor.paths.root, relative)
+            local stat = context.io:stat(filename)
+            if not stat or stat.kind ~= "file" then
+                return nil, "browser SDK is incomplete: missing " .. string.format("%q", filename) ..
+                    "; run '" .. command .. "'"
+            end
+        end
     end
     return assets
 end

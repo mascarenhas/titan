@@ -181,6 +181,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local descriptor = assert(browser.import(fixtures.descriptor(root)))
         local descriptor_assets = browserlink.sdk_assets(descriptor.paths)
         local present = {}
+        local make = platform.windows and "make -f Makefile.win browser-sdk" or "make browser-sdk"
         local function norm_key(filename)
             return paths.to_slash(paths.normalize(filename))
         end
@@ -203,8 +204,8 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
             assert.is_nil(ok)
             assert.equal(
-                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
-                    descriptor_assets[key], root),
+                string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s'",
+                    descriptor_assets[key], make, root),
                 err)
             local ok_empty_tree, err_empty_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
                 prefix = root,
@@ -212,8 +213,8 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             })
             assert.is_nil(ok_empty_tree)
             assert.equal(
-                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
-                    descriptor_assets[key], root),
+                string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s'",
+                    descriptor_assets[key], make, root),
                 err_empty_tree)
             local ok_tree, err_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
                 prefix = root,
@@ -221,10 +222,20 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             })
             assert.is_nil(ok_tree)
             assert.equal(
-                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s ROCKS_TREE=%s\'',
-                    descriptor_assets[key], root, root .. "-rocks"),
+                string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s ROCKS_TREE=%s'",
+                    descriptor_assets[key], make, root, root .. "-rocks"),
                 err_tree)
             present[norm_key(descriptor_assets[key])] = key == "build_profile" and descriptor.build_profile .. "\n" or "ok"
+        end
+        if platform.windows then
+            for _, relative in ipairs(browserlink.windows_runner_files(version.TITAN_LIBRARY_VERSION)) do
+                local filename = paths.join(root, relative)
+                local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
+                assert.is_nil(ok)
+                assert.equal(string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s'",
+                    filename, make, root), err)
+                present[norm_key(filename)] = "ok"
+            end
         end
 
         -- lpeglabel, provider, and sdk_digests are not bootstrap readiness prerequisites.
@@ -239,18 +250,18 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.is_nil(mismatch)
         assert.equal(string.format("browser SDK %q was built with the %s profile, but this build uses %s; " ..
             "set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
-            "'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin, other,
-            descriptor.build_profile, other, descriptor.build_profile, descriptor.build_profile), mismatch_err)
+            "'%s PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin, other,
+            descriptor.build_profile, other, descriptor.build_profile, make, descriptor.build_profile), mismatch_err)
         local _, tree_err = browserlink.require_sdk({ io = fake_io }, descriptor,
             { prefix = root, rocks_tree = root .. "-rocks" })
-        assert.truthy(tree_err:find("'make browser-sdk PREFIX=<prefix> ROCKS_TREE=<tree> TITAN_BUILD_PROFILE=" ..
+        assert.truthy(tree_err:find("'" .. make .. " PREFIX=<prefix> ROCKS_TREE=<tree> TITAN_BUILD_PROFILE=" ..
             descriptor.build_profile .. "'", 1, true), tree_err)
         for _, content in ipairs({ "", "debug\n", descriptor.build_profile, descriptor.build_profile .. "\n\n" }) do
             present[record] = content
             local invalid, invalid_err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
             assert.is_nil(invalid)
-            assert.equal(string.format("browser SDK build profile %q is invalid; run 'make browser-sdk PREFIX=%s'",
-                descriptor_assets.build_profile, root), invalid_err)
+            assert.equal(string.format("browser SDK build profile %q is invalid; run '%s PREFIX=%s'",
+                descriptor_assets.build_profile, make, root), invalid_err)
         end
     end)
 

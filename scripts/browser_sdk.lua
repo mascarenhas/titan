@@ -292,6 +292,11 @@ elseif action == "stage-runtime" then
     copy_file_atomic(browser_src .. "/titan-browser-node-worker.mjs", assets.node_worker, false)
     copy_file_atomic(browser_src .. "/titan-browser-page.mjs", assets.page, false)
     copy_file_atomic(browser_src .. "/titan-browser-module-check.mjs", assets.module_check, false)
+    if platform.windows then
+        for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
+            copy_file_atomic(build_dir .. ".windows-host/" .. relative, install_tree .. "/" .. relative, true)
+        end
+    end
     -- The archives above follow this profile; links refuse another one.
     local recorded, record_err = strategy:write_file(assets.build_profile, descriptor.build_profile .. "\n")
     if not recorded then fail("cannot write '" .. assets.build_profile .. "': " .. tostring(record_err)) end
@@ -387,6 +392,11 @@ elseif action == "finalize" then
             fail("missing staged browser SDK asset '" .. asset_path .. "'")
         end
         digest_inputs[#digest_inputs + 1] = asset_path
+    end
+    if platform.windows then
+        for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
+            digest_inputs[#digest_inputs + 1] = paths.join(install_tree, relative)
+        end
     end
 
     local digest_ctx = {

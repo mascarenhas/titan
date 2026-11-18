@@ -11519,9 +11519,16 @@ end
 -- limits one argument to 128 KiB independently of its larger ARG_MAX. Keep a
 -- deliberately conservative portable ceiling and measure the exact quoted
 -- rendering, including a configured multi-word AR command.
-local ARCHIVE_SHELL_COMMAND_LIMIT = 64 * 1024
+-- Windows CreateProcess has a 32,767 UTF-16-unit limit. A conservative UTF-8
+-- byte bound leaves room for the CRT argv spelling and terminating NUL.
+local ARCHIVE_SHELL_COMMAND_LIMIT = platform.windows and 24 * 1024 or 64 * 1024
 
 local function shell_argv_size(argv)
+    if platform.windows then
+        local rendered, err = platform.windows_process_command(argv)
+        if not rendered then return nil, err end
+        return #rendered
+    end
     local size = 0
     for index, argument in ipairs(argv) do
         local quoted, quote_err = cdriver.shell_quote(argument)
@@ -11543,9 +11550,9 @@ local function archive_batches(paths, prefix)
     end
     local size = fixed_size
     for _, path in ipairs(paths) do
-        local quoted, quote_err = cdriver.shell_quote(path)
-        if not quoted then return nil, quote_err end
-        local contribution = #quoted + 1
+        local argument_size, quote_err = shell_argv_size({ path })
+        if not argument_size then return nil, quote_err end
+        local contribution = argument_size + 1
         if #batch ~= 0 and
            size + contribution > ARCHIVE_SHELL_COMMAND_LIMIT then
             batches[#batches + 1] = batch
@@ -13987,16 +13994,27 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     append_argv(command, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
     append_argv(command, extra_flags)
     append_argv(command, options.final_link_flags)
+    if verbose then io.stderr:write(assert(command_argv(command)), "\n") end
+    if platform.windows then
+        -- Keep emcc's host wrapper outside the response file. The same argv
+        -- is expanded by emcc before linking or reporting linker inputs.
+        local response, response_error = platform.windows_response_contents(
+            { table.unpack(command, 4) })
+        if not response then return nil, response_error end
+        local response_path = staged .. ".rsp"
+        valid, err = context.io:write_file(response_path, response)
+        if not valid then return nil, err end
+        command = { command[1], command[2], command[3], "@" .. response_path }
+    end
     local linked, term, code
     if options.dependency_output then
-        if verbose then io.stderr:write(assert(command_argv(command)), "\n") end
         local result = context.io:run(command, { stderr_to_stdout = false })
         if not result.started then return nil, result.diagnostic end
         if not result.ok then return nil, result.why, result.status end
         linked, err = context.io:write_file(options.dependency_output, result.output or "")
         if not linked then return nil, err end
     else
-        linked, term, code = run_argv(command, verbose)
+        linked, term, code = run_argv(command, false)
         if not linked then return nil, term, code end
     end
     for _, filename in ipairs({ staged, staged_wasm, staged_map }) do

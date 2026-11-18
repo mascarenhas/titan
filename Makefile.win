@@ -98,7 +98,7 @@ help:
 	@echo '  lua-browser  build/install the fork WebAssembly Lua archive'
 	@echo '  browser-sdk  build/install the browser runtime and SDK (prepared compiler and browser Lua required)'
 	@echo '  uninstall-browser-sdk  remove the owned browser SDK files'
-	@echo '  titan-stdlib-browser-test  build, audit and run the browser suite under Node and Chromium'
+	@echo '  titan-stdlib-browser-test  build, audit and run the browser suite (use the SDK build profile)'
 	@echo '  lua-check   check native exports/imports and exercise SDK consumers'
 	@echo '  native-source-check  check configured native headers with Clang COFF objects'
 	@echo '  native      build/install native SDK (system OpenSSL by default)'
@@ -363,6 +363,13 @@ BROWSER_EXE_SUFFIX := .exe
 BROWSER_LUA_MODULE_SUFFIX := .dll
 BROWSER_NATIVE_PATH = $(shell cygpath -am "$(1)")
 BROWSER_RUNNER_SHELL := sh
+BROWSER_COMPILER_REMEDY := run 'make -f Makefile.win compiler' first
+BROWSER_BUILD_HOST_TOOLS = TITAN_ROOT=$(call quote,$(call BROWSER_NATIVE_PATH,$(PREFIX))) TITAN_PATH= \
+	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call quote,$(call BROWSER_NATIVE_PATH,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION))) \
+	TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS= \
+	"$$titanc_bin" --target windows --no-uv-bootstrap --incremental -j$(TITAN_JOBS) \
+	  --tree $(call quote,$(call BROWSER_NATIVE_PATH,titan-runtime/browser)) \
+	  --output "$$build_dir.windows-host" --exe "$$build_dir.windows-host/bin/titan-browser-job.exe" windows_browser_job;
 BROWSER_NATIVE_PARITY = $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua inventory-fixture \
 	$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/members.md"
 include $(call make_path,$(TITAN_MAKEFILE_DIR)scripts/browser.mk)

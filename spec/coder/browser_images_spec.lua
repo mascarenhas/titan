@@ -374,6 +374,7 @@ describe("browser image profile and SDK readiness", function()
         local descriptor = fixtures.descriptor()
         local assets = browserlink.sdk_assets(descriptor.paths)
         local present = {}
+        local make = platform.windows and "make -f Makefile.win browser-sdk" or "make browser-sdk"
         local context = { io = {
             stat = function(_, filename) return present[filename] and { kind = "file" } end,
             read_file = function(_, filename)
@@ -385,13 +386,19 @@ describe("browser image profile and SDK readiness", function()
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
-                "; run 'make browser-sdk PREFIX=/prefix ROCKS_TREE=/rocks'", err)
+                "; run '" .. make .. " PREFIX=/prefix ROCKS_TREE=/rocks'", err)
             present[assets[key]] = true
+        end
+        if platform.windows then
+            local paths = require "titan-compiler.path"
+            for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
+                present[paths.join(descriptor.paths.root, relative)] = true
+            end
         end
         assert.same(assets, assert(browserlink.require_sdk(context, descriptor, { prefix = "/prefix" })))
         present[assets.runtime] = nil
         local _, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix" })
-        assert.truthy(err:find("run 'make browser-sdk PREFIX=/prefix'", 1, true))
+        assert.truthy(err:find("run '" .. make .. " PREFIX=/prefix'", 1, true))
     end)
 
     it("renders native stdio and unavailable file syscalls in every launcher", function()
