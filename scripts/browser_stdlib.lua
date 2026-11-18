@@ -32,7 +32,7 @@ end
 -- The Make inventory is literal, with the same continuation convention as the
 -- native source audits. Gates consume it instead of keeping another root list.
 function M.browser_roots(strategy, filename)
-    local contents, err = strategy:read_file(filename or "Makefile")
+    local contents, err = strategy:read_file(filename or directory .. "browser.mk")
     if not contents then return nil, err end
     local roots, collecting, found = {}, false, false
     for line in (contents .. "\n"):gmatch("(.-)\n") do
@@ -608,6 +608,20 @@ function M.inventory(native, browser, recorded_differences)
     end
     if #differences > 0 then return nil, "unrecorded public interface differences:\n" .. table.concat(differences, "\n") end
     return rows, modules, recorded_rows
+end
+
+-- Windows installs a native DLL, not a native stdlib archive. This is the same
+-- serialized native interface inventory the Unix live archive is checked against.
+function M.native_fixture()
+    local native = { entries = {}, key_order = {} }
+    local fixture = dofile(directory .. "../spec/fixtures/stdlib/titan_stdlib_types.lua")
+    for name, interface in pairs(fixture) do
+        local module = "titan." .. name
+        native.entries[module] = { types = interface }
+        native.key_order[#native.key_order + 1] = module
+    end
+    table.sort(native.key_order, util.bytewise_less)
+    return native
 end
 
 local member_statuses = { implemented = true, raise = true, ["type-only"] = true,

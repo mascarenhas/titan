@@ -462,6 +462,12 @@ function incremental.preprocessed_identities(context, inputs)
         for index, input in ipairs(inputs) do
             local source = required(context.io:tmpname())
             temporaries[#temporaries + 1] = source
+            if platform.windows and context.target == "browser" then
+                -- The CRT's temporary suffix can be .s, which emcc classifies
+                -- as assembly before forwarding the explicit -x c to Clang.
+                source = source .. ".c"
+                temporaries[#temporaries + 1] = source
+            end
             -- Keep the two prefix-map keys distinct even for a relative
             -- strategy tmpname; neither map may replace a full FILE/BASE_FILE
             -- expansion with a basename (or vice versa).

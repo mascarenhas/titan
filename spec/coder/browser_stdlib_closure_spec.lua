@@ -433,24 +433,33 @@ end
         end
     end)
 
-    -- The browser lane checks both fixtures against the installed providers:
-    -- the browser one is rendered whole, the native one compared module by
-    -- module with the native provider's metadata.
-    it("pins the native and browser type fixtures to the installed providers", function()
+    it("pins the browser type fixture to the installed provider", function()
         local info = fixture({ sdk = true })
         if not info then return end
         local browser = assert(staticmetadata.scan_archive(info.sdk_root .. "/titan.a"))
         assert.equal(assert(strategy:read_file("spec/fixtures/stdlib/titan_stdlib_browser_types.lua")),
             checks.type_fixture(browser),
             "browser type fixture is stale; regenerate it with check_browser_stdlib.lua fixture")
+        if platform.windows then
+            local native = checks.native_fixture()
+            assert(checks.inventory(native, browser))
+            assert(checks.check_status(native, browser))
+        end
+    end)
+
+    it("pins the native type fixture to the installed archive", function()
+        if platform.windows then
+            pending("platform: Windows installs the native stdlib as a DLL, not a Titan archive")
+            return
+        end
+        local info = fixture({ sdk = true })
+        if not info then return end
         local native_provider = assert(driver.installed_paths(info.prefix)).titan_bin .. "/titan.a"
         local scanned = assert(staticmetadata.scan_archive(native_provider))
-        local expected = assert(loadfile("spec/fixtures/stdlib/titan_stdlib_types.lua"))()
+        local expected = checks.native_fixture()
+        assert.equal(#expected.key_order, #scanned.key_order)
         for _, modname in ipairs(scanned.key_order) do
-            assert.equal(expected[modname:sub(7)], scanned.entries[modname].types, modname)
+            assert.equal(expected.entries[modname].types, scanned.entries[modname].types, modname)
         end
-        local count = 0
-        for _ in pairs(expected) do count = count + 1 end
-        assert.equal(#scanned.key_order, count)
     end)
 end)

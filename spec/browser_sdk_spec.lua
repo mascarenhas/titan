@@ -124,15 +124,17 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         return workspace
     end
 
-    it("declares lua-browser and browser-sdk only in POSIX Makefile and keeps Makefile.win free of browser targets", function()
+    it("includes the same opt-in browser targets from both host Makefiles", function()
         local makefile = assert(strategy:read_file(paths.join(repository, "Makefile")))
         local makefile_win = assert(strategy:read_file(paths.join(repository, "Makefile.win")))
 
-        contains(makefile, "lua-browser:")
-        contains(makefile, "browser-sdk:")
-        contains(makefile, "scripts/lua_browser.sh")
-        contains(makefile, "scripts/browser_sdk.lua")
-        contains(makefile, "--print-c-objects")
+        local fragment = assert(strategy:read_file(paths.join(repository, "scripts/browser.mk")))
+        for _, host in ipairs({ makefile, makefile_win }) do contains(host, "scripts/browser.mk") end
+        contains(fragment, "lua-browser:")
+        contains(fragment, "browser-sdk:")
+        contains(fragment, "scripts/lua_browser.sh")
+        contains(fragment, "scripts/browser_sdk.lua")
+        contains(fragment, "--print-c-objects")
 
         -- Ordinary Make targets must not invoke lua-browser or browser-sdk or inherit TITAN_TARGET.
         local all_rule = assert(makefile:match("\nall:[^\n]*\n\t([^\n]+)"))
@@ -140,8 +142,9 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.is_nil(all_rule:find("browser-sdk", 1, true))
         contains(makefile, "unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET;")
 
-        assert.is_nil(makefile_win:find("lua%-browser"))
-        assert.is_nil(makefile_win:find("browser%-sdk"))
+        local windows_all = assert(makefile_win:match("\nall:([^\n]*)"))
+        assert.is_nil(windows_all:find("lua-browser", 1, true))
+        assert.is_nil(windows_all:find("browser-sdk", 1, true))
     end)
 
     it("maps browser SDK assets into the sibling lib/titan-browser/<ver>/ tree and diagnoses missing required assets in order", function()
@@ -252,7 +255,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
     end)
 
     it("removes only the files browser-sdk installed with make uninstall-browser-sdk", function()
-        local makefile = assert(strategy:read_file(paths.join(repository, "Makefile")))
+        local makefile = assert(strategy:read_file(paths.join(repository, "scripts/browser.mk")))
         contains(makefile, "uninstall-browser-sdk:")
         contains(makefile, "scripts/titan_install.lua uninstall-browser-sdk")
         local installer = assert(loadfile(paths.join(repository, "scripts/titan_install.lua")))()

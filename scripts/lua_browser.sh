@@ -44,6 +44,12 @@ browser_cc=${LUA_BROWSER_CC-}
 browser_ar=${LUA_BROWSER_AR-}
 browser_ranlib=${LUA_BROWSER_RANLIB-}
 
+tool_suffix=
+if [ "${MSYSTEM:-}" = CLANG64 ]; then tool_suffix=.exe; fi
+emcc=emcc$tool_suffix
+emar=emar$tool_suffix
+emranlib=emranlib$tool_suffix
+
 resolved_cc=
 if [ -n "$browser_cc" ]; then
 	case $browser_cc in
@@ -51,31 +57,31 @@ if [ -n "$browser_cc" ]; then
 	*) resolved_cc=$(command -v "$browser_cc" 2>/dev/null || true) ;;
 	esac
 elif [ -n "${EMSDK:-}" ]; then
-	candidate="$EMSDK/upstream/emscripten/emcc"
+	candidate="$EMSDK/upstream/emscripten/$emcc"
 	if [ -x "$candidate" ]; then
 		resolved_cc=$candidate
 	else
 		fail "browser target requires Emscripten 6.0.13: emcc not found at \"$candidate\" (EMSDK=\"$EMSDK\"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
 	fi
 else
-	resolved_cc=$(command -v emcc 2>/dev/null || true)
+	resolved_cc=$(command -v "$emcc" 2>/dev/null || true)
 fi
 
 if [ -n "$resolved_cc" ]; then
 	em_dir=$(CDPATH= cd "$(dirname "$resolved_cc")" && pwd)
-	if [ -z "$browser_ar" ] && [ ! -x "$em_dir/emar" ]; then
-		fail "browser target requires Emscripten 6.0.13: emar not found at \"$em_dir/emar\" (emcc=\"$resolved_cc\"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
+	if [ -z "$browser_ar" ] && [ ! -x "$em_dir/$emar" ]; then
+		fail "browser target requires Emscripten 6.0.13: emar not found at \"$em_dir/$emar\" (emcc=\"$resolved_cc\"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
 	fi
-	if [ -z "$browser_ranlib" ] && [ ! -x "$em_dir/emranlib" ]; then
-		fail "browser target requires Emscripten 6.0.13: emranlib not found at \"$em_dir/emranlib\" (emcc=\"$resolved_cc\"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
+	if [ -z "$browser_ranlib" ] && [ ! -x "$em_dir/$emranlib" ]; then
+		fail "browser target requires Emscripten 6.0.13: emranlib not found at \"$em_dir/$emranlib\" (emcc=\"$resolved_cc\"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
 	fi
 	PATH="$em_dir:$PATH"
 	export PATH
 fi
 
-effective_cc=${browser_cc:-emcc}
-effective_ar=${browser_ar:-emar rcu}
-effective_ranlib=${browser_ranlib:-emranlib}
+effective_cc=${browser_cc:-$emcc}
+effective_ar=${browser_ar:-$emar rcu}
+effective_ranlib=${browser_ranlib:-$emranlib}
 
 if command -v sha256sum >/dev/null 2>&1; then
 	sha256_file() { sha256sum < "$1" | cut -c1-64; }

@@ -1078,8 +1078,8 @@ esac
     end)
 
     it("keeps every compiler-selected browser stdlib source free of absent-module imports", function()
-        if platform.windows then pending("browser source resolution requires a supported host"); return end
-        assert.same(makefile_words("BROWSER_STDLIB_ROOTS"), assert(browser_checks.browser_roots(compiler_io.new_sync())))
+        assert.same(makefile_words("BROWSER_STDLIB_ROOTS", "scripts/browser.mk"),
+            assert(browser_checks.browser_roots(compiler_io.new_sync())))
         local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
         local context = driver._new_resolver_context({ target = "browser" }, descriptor)
         local called, ok, err = pcall(browser_checks.check_sources, context, ".")
@@ -1095,7 +1095,7 @@ esac
             if row[2] ~= "absent" then delivered[#delivered + 1] = row[1] end
             if row[2] ~= "browser-only" then native[#native + 1] = row[1] end
         end
-        local roots, all = makefile_words("BROWSER_STDLIB_ROOTS"), makefile_words("STDLIB_ROOTS")
+        local roots, all = makefile_words("BROWSER_STDLIB_ROOTS", "scripts/browser.mk"), makefile_words("STDLIB_ROOTS")
         for _, list in ipairs({ delivered, native, roots, all }) do table.sort(list) end
         assert.same(roots, delivered)
         assert.same(all, native)

@@ -126,6 +126,11 @@ staged member-verification path. `luarocks make` stays independent of emsdk,
 and `make browser-sdk` works into an empty destination. A missing standard
 provider is an ordinary provider miss with source fallback.
 
+`Makefile` and `Makefile.win` include `scripts/browser.mk`. On Windows the
+recipes pass drive-letter paths to native `lua.exe` and `titanc.exe`; shell
+scripts still run under MSYS2. Archive publication and the executing protocol
+check belong to the browser target, not the Windows DLL publication path.
+
 ## The fork's `browser` target
 
 The Lua fork pinned by the `lua-5.5.1` submodule owns the facts that do not
@@ -4365,8 +4370,10 @@ CLANG64 and the fork's browser Lua; `make install-browser` in the Lua
 submodule works there with the pinned emsdk. The compiler does not enable
 native cross-compilation.
 
-`Makefile.win` does not yet install the browser SDK, and the runner does not
-execute images on Windows. Compile-only work does not require either.
+`Makefile.win lua-browser` installs the verified browser Lua. The Windows
+`browser-sdk` build goes through the same archive staging and module checks,
+but its executing protocol check cannot finish while the runner refuses to
+execute images on Windows. Compile-only work does not need the runner.
 
 ## Documentation checks
 

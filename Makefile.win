@@ -9,7 +9,7 @@ SHELL := $(if $(filter Windows_NT,$(OS)),bash.exe,/bin/bash)
 
 # Choose the policy before configuring any source or native object graph.
 TITAN_WINDOWS_COVERAGE_GOALS := titan-native-coverage-build titan-native-coverage-run titan-native-coverage
-TITAN_WINDOWS_TEST_GOALS := toolchain-check lua-source-check lua-check native-source-check native-check compiler-check runtime-check stdlib-check compiler-publication-check titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test rock-test test $(TITAN_WINDOWS_COVERAGE_GOALS)
+TITAN_WINDOWS_TEST_GOALS := toolchain-check lua-source-check lua-check native-source-check native-check compiler-check runtime-check stdlib-check compiler-publication-check titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test titan-stdlib-browser-test rock-test test $(TITAN_WINDOWS_COVERAGE_GOALS)
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_WINDOWS_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)
 ifneq ($(TITAN_BUILD_PROFILE),validation)
@@ -24,6 +24,8 @@ TITAN_WINDOWS_NATIVE_LDFLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),
 TITAN_PROFILE_HOST_FLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),-O2 -fno-lto)
 
 quote = '$(subst ','"'"',$(1))'
+make_shell_quote = $(call quote,$(1))
+make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 empty :=
 space := $(empty) $(empty)
 make_path = $(subst $(space),\$(space),$(1))
@@ -93,6 +95,10 @@ help:
 	@echo '  lua-source-check  test configured headers with Clang COFF objects (also on Linux)'
 	@echo '  lua-build   build lua55.dll, its import library, and lua.exe'
 	@echo '  lua         install those files and the complete matching Lua SDK'
+	@echo '  lua-browser  build/install the fork WebAssembly Lua archive'
+	@echo '  browser-sdk  build/install the browser runtime and SDK (prepared compiler and browser Lua required)'
+	@echo '  uninstall-browser-sdk  remove the owned browser SDK files'
+	@echo '  titan-stdlib-browser-test  build, audit and run the browser suite under Node and Chromium'
 	@echo '  lua-check   check native exports/imports and exercise SDK consumers'
 	@echo '  native-source-check  check configured native headers with Clang COFF objects'
 	@echo '  native      build/install native SDK (system OpenSSL by default)'
@@ -341,6 +347,25 @@ compiler-publication-check: runtime
 # The source inventory is identical to the Unix aggregate. Windows keeps its
 # native outputs and copied SDK in an explicitly owned local NTFS workspace.
 include spec/support/stdlib_test_modules.mk
+
+# The browser recipes use host-native paths when passing data to lua.exe or
+# titanc.exe, even when the invoking GNU Make accepts MSYS absolute paths.
+TITAN_OUTPUT_DIR ?= $(WINDOWS_BUILD_ROOT)
+TITAN_LUA ?= $(shell cygpath -m "$(LUA_BIN)")
+TITAN_LIBRARY_VERSION_SUFFIX := _$(subst .,_,$(TITAN_LIBRARY_VERSION))
+LPEGLABEL_VENDOR_DIR ?= vendor/lpeglabel
+TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
+	titan-runtime/titan_path.c titan-runtime/ltitanlib.c
+BROWSER_LPEGLABEL_SOURCES = $(addprefix $(LPEGLABEL_VENDOR_DIR)/,lplcap.c lplcode.c lplprint.c lpltree.c lplvm.c)
+BROWSER_LPEGLABEL_CPPFLAGS = -I"$(call BROWSER_NATIVE_PATH,$(LPEGLABEL_VENDOR_DIR))"
+BROWSER_INSTALL_TREE = $(call BROWSER_NATIVE_PATH,$(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX)))
+BROWSER_EXE_SUFFIX := .exe
+BROWSER_LUA_MODULE_SUFFIX := .dll
+BROWSER_NATIVE_PATH = $(shell cygpath -am "$(1)")
+BROWSER_RUNNER_SHELL := sh
+BROWSER_NATIVE_PARITY = $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua inventory-fixture \
+	$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/members.md"
+include $(call make_path,$(TITAN_MAKEFILE_DIR)scripts/browser.mk)
 TITAN_TEST_BUILD_DIR ?= $(WINDOWS_BUILD_ROOT)/stdlib-tests
 TITAN_TEST_MAKE := $(MAKE)
 TITAN_TEST_TIMEOUT ?= $(if $(filter $(TITAN_WINDOWS_COVERAGE_GOALS),$(MAKECMDGOALS)),600,1800)

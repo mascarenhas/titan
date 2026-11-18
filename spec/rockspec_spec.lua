@@ -1086,7 +1086,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             header_lists = header_lists + 1
         end
         assert.truthy(header_lists > 0)
-        for _, name in ipairs({ "TITAN_RUNTIME_SOURCES", "BROWSER_RUNTIME_SOURCES",
+        for _, name in ipairs({ "TITAN_RUNTIME_SOURCES",
                 "TITAN_SDK_ROOT_HEADERS", "TITAN_SDK_NAMESPACED_HEADERS" }) do
             add_make_list(name)
         end

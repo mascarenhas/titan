@@ -14,12 +14,13 @@ local install_tree = assert(getenv("TITAN_INSTALL_TREE") or prefix, "TITAN_INSTA
 -- Configure search paths before requiring non-core modules (including lfs),
 -- keeping TITAN_INSTALL_TREE ahead of PREFIX to match Makefile's titanc selection.
 do
+    local suffix = package.config:sub(1, 1) == "\\" and ".dll" or ".so"
     local roots = install_tree ~= prefix and { install_tree, prefix } or { install_tree }
     local lua_paths, c_paths = {}, {}
     for _, root in ipairs(roots) do
         lua_paths[#lua_paths + 1] = root .. "/share/lua/5.5/?.lua"
         lua_paths[#lua_paths + 1] = root .. "/share/lua/5.5/?/init.lua"
-        c_paths[#c_paths + 1] = root .. "/lib/lua/5.5/?.so"
+        c_paths[#c_paths + 1] = root .. "/lib/lua/5.5/?" .. suffix
     end
     lua_paths[#lua_paths + 1] = package.path
     c_paths[#c_paths + 1] = package.cpath
@@ -46,6 +47,7 @@ local compiler_io = require "titan-compiler.io"
 local paths = require "titan-compiler.path"
 local util = require "titan-compiler.util"
 local stdlib_checks = dofile("scripts/browser_stdlib.lua")
+local platform = require "titan-compiler.platform"
 
 local strategy = compiler_io.new_sync()
 
@@ -77,6 +79,9 @@ local function copy_file_atomic(source, destination, executable)
     if not written then
         fail("cannot write '" .. destination .. "': " .. tostring(write_err))
     end
+    -- MSYS sh reads the launcher as a script on Windows; NTFS has no POSIX
+    -- execute mode to preserve for a native Titan invocation.
+    if platform.windows then return end
     local mode = executable and "0755" or "0644"
     local chmod_res = strategy:run({ "chmod", mode, destination }, { stderr_to_stdout = true })
     if not chmod_res or not chmod_res.ok then

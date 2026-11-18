@@ -443,6 +443,9 @@ source /path/to/emsdk/emsdk_env.sh
 make lua-browser PREFIX="$PREFIX"
 ```
 
+From MSYS2 CLANG64 on Windows, use `make -f Makefile.win lua-browser`
+(or `mingw32-make -f Makefile.win lua-browser`) with the same `PREFIX`.
+
 `make lua-browser` builds the fork's `browser` target and installs it. It
 keeps an existing installation only when the complete browser configuration
 matches it: the fork commit, the Emscripten version, the compile flags and

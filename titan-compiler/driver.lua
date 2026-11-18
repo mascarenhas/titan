@@ -13666,11 +13666,13 @@ function driver.run_standalone_archive_probe(
             return nil, "selected static provider failed executable-context protocol linking (" ..
                 tostring(term) .. (code and (", exit " .. tostring(code)) or "") .. ")"
         end
-        local result = context.io:run({ assets.runner, "--engine", "node", image },
+        local result = context.io:run(driver.browserlink.runner_argv(assets.runner, "--engine", "node", image),
             { stderr_to_stdout = true })
         if type(result) ~= "table" or not result.ok then
+            local detail = type(result) == "table" and (result.output or result.diagnostic)
             return nil, "selected static provider failed executable-context protocol validation " ..
-                "(browser runner exit " .. tostring(type(result) == "table" and result.status or 75) .. ")"
+                "(browser runner exit " .. tostring(type(result) == "table" and result.status or 75) .. ")" ..
+                (detail and detail ~= "" and ": " .. detail:gsub("%s+$", "") or "")
         end
         return true
     end
@@ -13997,7 +13999,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         linked, err = context.io:write_file(options.dependency_output, result.output or "")
         if not linked then return nil, err end
     else
-        linked, term, code = driver.run_link_command(command, verbose, staged)
+        linked, term, code = run_argv(command, verbose)
         if not linked then return nil, term, code end
     end
     for _, filename in ipairs({ staged, staged_wasm, staged_map }) do
@@ -14107,7 +14109,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
 end
 
 function driver.browser_node_ready(context, assets)
-    local result = context.io:run({ assets.runner, "--probe" }, { stderr_to_stdout = true })
+    local result = context.io:run(driver.browserlink.runner_argv(assets.runner, "--probe"), { stderr_to_stdout = true })
     if type(result) == "table" and result.ok then return true, nil, result.output end
     local detail = type(result) == "table" and (result.output or result.diagnostic) or "runner probe failed"
     local reason = detail and detail:match("Node 26 or newer is required %((.-)%)%s*$")

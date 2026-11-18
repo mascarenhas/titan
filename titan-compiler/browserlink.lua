@@ -1,4 +1,5 @@
 local path = require "titan-compiler.path"
+local platform = require "titan-compiler.platform"
 local M = {}
 -- WebAssembly JavaScript Interface implementation-defined byte limits.
 local MAX_IMAGE_BYTES, MAX_BODY_BYTES = 1073741824, 7654321
@@ -21,6 +22,11 @@ function M.sdk_assets(paths)
         provider = path.join(root, "titan.a"),
         sdk_digests = paths.sdk_digests,
     }
+end
+
+function M.runner_argv(launcher, ...)
+    if platform.windows then return { "sh.exe", path.to_slash(launcher), ... } end
+    return { launcher, ... }
 end
 
 function M.require_sdk(context, descriptor, install)
@@ -375,11 +381,12 @@ end
 -- Implementation notes: doc/implementation/browser-target.md#the-module-check
 function M.check_module(context, tools, checker, module)
     local function setting(name)
-        local result = context.io:run({ path.join(tools.location, "em-config"), name },
+        local em_config = platform.windows and "em-config.exe" or "em-config"
+        local result = context.io:run({ path.join(tools.location, em_config), name },
             { stderr_to_stdout = true })
         local output = type(result) == "table" and (result.output or result.diagnostic) or tostring(result)
         -- Python prints the value last, after any configuration warning.
-        local value = type(result) == "table" and result.ok and output:match("([^\n]*)\n?$")
+        local value = type(result) == "table" and result.ok and output:match("([^\r\n]*)\r?\n?$")
         if value and value ~= "" then return value end
         return nil, "cannot read emcc's " .. name .. " setting: " .. output
     end
