@@ -3,6 +3,8 @@ local argparse = require "argparse"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local native_target = platform.windows and "windows" or
+    (require("luv").os_uname().sysname == "Darwin" and "darwin" or "linux")
 
 local EXIT = {}
 
@@ -63,7 +65,7 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
         observed.native_inputs = normalized
     end
     function driver.configure_foreign_c() return true end
-    function driver.validate_target() return "native" end
+    function driver.validate_target() return native_target end
     function driver.context_target(context) return context.target end
     function driver.default_c_parts() return 4 end
     function driver.prepare_output_root(dir) return dir end

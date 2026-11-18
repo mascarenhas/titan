@@ -58,10 +58,8 @@ end
 
 local function ensure_dir(dir)
     if lfs.attributes(dir, "mode") == "directory" then return true end
-    local parent = dir:match("^(.*)/[^/]+$")
-    if parent and parent ~= "" and parent ~= dir then
-        ensure_dir(parent)
-    end
+    local parent = paths.dirname(dir)
+    if parent ~= dir then ensure_dir(parent) end
     local ok, err = lfs.mkdir(dir)
     if not ok and lfs.attributes(dir, "mode") ~= "directory" then
         fail("cannot create directory '" .. dir .. "': " .. tostring(err))
