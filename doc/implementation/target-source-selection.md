@@ -102,10 +102,10 @@ platform first, so it knows the host. `nil` or `""` returns the host target.
 `origin` is `"--target"` or `"TITAN_TARGET"`; diagnostics start with
 `--target <value>` or `TITAN_TARGET=<value>`. Explicit `native` is always
 rejected (`'native' selects source files for native hosts; it is not a
-compilation target`), `browser` is returned on a Linux or macOS host and
-otherwise rejected as `browser builds are supported from Linux and macOS
-hosts (host is <host>)` (without the origin prefix), an OS
-label equal to `context.host_target` is returned, another OS label is rejected
+compilation target`), `browser` is returned on Linux, macOS and Windows hosts
+and otherwise rejected as `browser builds are supported from Linux, macOS
+and Windows hosts (host is <host>)` (without the origin prefix). An OS label
+equal to `context.host_target` is returned, another OS label is rejected
 as `native cross-compilation is not supported (host is <host>)`, and anything
 else is `unknown target '<value>': expected linux, darwin, windows or browser`.
 On a label-less host, `host_target` is `native`, so every nonempty value is

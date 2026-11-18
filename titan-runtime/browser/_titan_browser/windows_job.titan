@@ -1,0 +1,228 @@
+foreign import "windows.h"
+foreign import "string.h"
+foreign import "io.h"
+
+local const failed = 125
+local const stop_wait_ms = 2000
+
+-- The Windows SDK defines these through the function-like
+-- ProcThreadAttributeValue macro, which is not available through the FFI.
+local const PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x2000d
+local const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002
+-- FOPEN in the CRT's inherited descriptor table.
+local const crt_fopen = 0x01
+
+local function diagnostic(text: string)
+  -- Use the inherited Win32 stderr directly: the helper has no Titan
+  -- standard-library dependency and does not need a CRT stream or buffer.
+  local message = "Windows browser job: " .. text .. "\n"
+  local written = foreign DWORD.new_array(1)
+  ffi.WriteFile(ffi.GetStdHandle(ffi.STD_ERROR_HANDLE), message, #message, written, nil)
+end
+
+local function problem(operation: string, code: integer): integer
+  diagnostic(operation .. " failed (Win32 " .. code .. ")")
+  return failed
+end
+
+-- Node has already encoded the engine argv for the Windows CRT. Skip the
+-- helper's own argv[0] in the original wide command line and pass an exact
+-- copy of the remaining arguments; CreateProcessW may modify that buffer.
+local function first_engine_argument(raw: foreign *WCHAR): integer
+  local first = 0
+  local quoted = false
+  while raw[first] ~= 0 do
+    local ch = raw[first]
+    if ch == 34 then
+      quoted = not quoted
+    elseif not quoted and (ch == 32 or ch == 9) then
+      break
+    end
+    first = first + 1
+  end
+  while raw[first] == 32 or raw[first] == 9 do
+    first = first + 1
+  end
+  return first
+end
+
+local function wide_name(name: string): owned WCHAR[]
+  local buffer: owned WCHAR[] = foreign WCHAR.new_array(#name + 1)
+  ffi.MultiByteToWideChar(ffi.CP_UTF8 as foreign UINT, 0, name, -1, buffer, #name + 1)
+  return buffer
+end
+
+-- The supervisor pins the helper's own provider in its launch environment.
+-- Restore the caller's setting, including absent vs empty, for the engine.
+local function restore_engine_path(): boolean
+  local saved = wide_name("TITAN_BROWSER_JOB_SAVED_PATH")
+  local size = ffi.GetEnvironmentVariableW(saved, nil, 0)
+  if size == 0 then return true end
+  local value: owned WCHAR[] = foreign WCHAR.new_array(size)
+  if ffi.GetEnvironmentVariableW(saved, value, size) ~= size - 1 then return false end
+  local path = wide_name("TITAN_PATH_0_6")
+  local inherited: foreign *WCHAR = nil
+  if value[0] == 49 then inherited = (value as foreign *WCHAR) + 1 end
+  return ffi.SetEnvironmentVariableW(path, inherited) ~= 0 and ffi.SetEnvironmentVariableW(saved, nil) ~= 0
+end
+
+local function retire(job: foreign HANDLE): boolean
+  if ffi.TerminateJobObject(job, failed) == 0 then
+    problem("TerminateJobObject", ffi.GetLastError())
+    return false
+  end
+  local accounting = foreign JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.new()
+  local deadline = ffi.GetTickCount64() + stop_wait_ms
+  repeat
+    if ffi.QueryInformationJobObject(job, ffi.JobObjectBasicAccountingInformation,
+        accounting as foreign *void, foreign JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.sizeof, nil) == 0 then
+      problem("QueryInformationJobObject", ffi.GetLastError())
+      return false
+    end
+    if accounting.ActiveProcesses == 0 then return true end
+    ffi.Sleep(10)
+  until ffi.GetTickCount64() >= deadline
+  diagnostic("owned engine processes did not exit")
+  return false
+end
+
+function main(_args: {string}): integer
+  local raw = ffi.GetCommandLineW()
+  if not raw then return failed end
+  local first = first_engine_argument(raw)
+  if raw[first] == 0 then return failed end
+  local last = first
+  while raw[last] ~= 0 do
+    last = last + 1
+  end
+  local count_chars = last - first + 1
+  local command: owned WCHAR[] = foreign WCHAR.new_array(count_chars)
+  ffi.memcpy(command as foreign *void, (raw + first) as foreign *void, count_chars * foreign WCHAR.sizeof)
+
+  local startup = foreign STARTUPINFOEXW.new()
+  -- STARTUPINFOEXW's first member has the same address as the enclosing struct.
+  local raw_startup = startup as foreign *void
+  local info = raw_startup as foreign LPSTARTUPINFOW
+  ffi.GetStartupInfoW(info)
+  local reserved: foreign BYTE[] = startup.StartupInfo.lpReserved2
+  const header = foreign int.sizeof
+  if not reserved or startup.StartupInfo.cbReserved2 < header then
+    diagnostic("missing inherited engine descriptors")
+    return failed
+  end
+  local count_field = foreign int.new_array(1)
+  ffi.memcpy(count_field as foreign *void, reserved as foreign *void, header)
+  local count: integer = count_field[0]
+  if count < 5 or count > 7 or startup.StartupInfo.cbReserved2 ~= header + count + count * foreign HANDLE.sizeof then
+    diagnostic("unexpected inherited engine descriptors")
+    return failed
+  end
+  -- The final two CRT slots are private to the helper: drain acknowledgement,
+  -- then parent lifetime. Never let the engine inherit them.
+  local handles = foreign HANDLE.new_array(7)
+  local handle_bytes = count * foreign HANDLE.sizeof
+  local handle_table = (reserved + header + count) as foreign *void
+  ffi.memcpy(handles as foreign *void, handle_table, handle_bytes)
+  for slot = 0, count - 1 do
+    local handle = handles[slot]
+    if reserved[header + slot] & crt_fopen == 0 or not handle or handle == ffi.INVALID_HANDLE_VALUE then
+      diagnostic("invalid inherited descriptor slot " .. slot)
+      return failed
+    end
+    for prior = 0, slot - 1 do
+      if handles[prior] == handle then
+        diagnostic("inherited descriptor slot " .. slot .. " duplicates slot " .. prior)
+        return failed
+      end
+    end
+  end
+  local owner = handles[count - 1]
+  local acknowledgement = handles[count - 2]
+  local inherited = count - 2
+  for index = inherited, count - 1 do
+    handles[index] = ffi.INVALID_HANDLE_VALUE
+    reserved[header + index] = 0
+  end
+  ffi.memcpy(handle_table, handles as foreign *void, handle_bytes)
+  if ffi.PeekNamedPipe(owner, nil, 0, nil, nil, nil) == 0 then
+    return problem("engine owner pipe", ffi.GetLastError())
+  end
+
+  local job = ffi.CreateJobObjectW(nil, nil)
+  if not job then return problem("CreateJobObjectW", ffi.GetLastError()) end
+  defer ffi.CloseHandle(job)
+  local limits = foreign JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new()
+  limits.BasicLimitInformation.LimitFlags = ffi.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE as foreign DWORD
+  if ffi.SetInformationJobObject(job, ffi.JobObjectExtendedLimitInformation,
+      limits as foreign *void, foreign JOBOBJECT_EXTENDED_LIMIT_INFORMATION.sizeof) == 0 then
+    return problem("SetInformationJobObject", ffi.GetLastError())
+  end
+
+  local length = foreign SIZE_T.new_array(1)
+  ffi.InitializeProcThreadAttributeList(nil, 2, 0, length)
+  local bytes: integer = length[0]
+  if bytes == 0 then return problem("InitializeProcThreadAttributeList (size)", ffi.GetLastError()) end
+  local storage: owned unsigned long long[] = foreign unsigned long long.new_array((bytes + 7) // 8)
+  local raw_storage = storage as foreign *void
+  local attributes = raw_storage as foreign LPPROC_THREAD_ATTRIBUTE_LIST
+  if ffi.InitializeProcThreadAttributeList(attributes, 2, 0, length) == 0 then
+    return problem("InitializeProcThreadAttributeList", ffi.GetLastError())
+  end
+  defer ffi.DeleteProcThreadAttributeList(attributes)
+  startup.lpAttributeList = attributes
+  startup.StartupInfo.cb = foreign STARTUPINFOEXW.sizeof
+  local job_list = foreign HANDLE.new_array(1)
+  job_list[0] = job
+  if ffi.UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, job_list as foreign *void,
+      foreign HANDLE.sizeof, nil, nil) == 0 then
+    return problem("UpdateProcThreadAttribute (job list)", ffi.GetLastError())
+  end
+  if ffi.UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles as foreign *void,
+      inherited * foreign HANDLE.sizeof, nil, nil) == 0 then
+    return problem("UpdateProcThreadAttribute (handle list)", ffi.GetLastError())
+  end
+
+  if not restore_engine_path() then
+    return problem("restore engine environment", ffi.GetLastError())
+  end
+  local child = foreign PROCESS_INFORMATION.new()
+  const flags = (ffi.EXTENDED_STARTUPINFO_PRESENT | ffi.CREATE_NO_WINDOW) as foreign DWORD
+  if ffi.CreateProcessW(nil, command, nil, nil, 1, flags, nil, nil, info, child) == 0 then
+    return problem("CreateProcessW", ffi.GetLastError())
+  end
+  ffi.CloseHandle(child.hThread)
+  defer ffi.CloseHandle(child.hProcess)
+  -- Only the engine should keep its stdio and protocol handles. Otherwise
+  -- the supervisor cannot observe an engine closing a pipe before it exits.
+  for slot = 0, inherited - 1 do
+    if slot ~= 2 then ffi._close(slot) end -- Keep stderr for helper diagnostics.
+  end
+  local status = 0
+  while true do
+    local waited = ffi.WaitForSingleObject(child.hProcess, 25)
+    -- WAIT_OBJECT_0 aliases STATUS_WAIT_0 in the Windows headers.
+    if waited == ffi.STATUS_WAIT_0 then
+      local code = foreign DWORD.new_array(1)
+      if ffi.GetExitCodeProcess(child.hProcess, code) == 0 then
+        status = problem("GetExitCodeProcess", ffi.GetLastError())
+      else
+        status = code[0]
+      end
+      break
+    elseif waited ~= ffi.WAIT_TIMEOUT then
+      status = problem("WaitForSingleObject", ffi.GetLastError())
+      break
+    end
+    if ffi.PeekNamedPipe(owner, nil, 0, nil, nil, nil) == 0 then
+      local code = ffi.GetLastError()
+      if code ~= ffi.ERROR_BROKEN_PIPE and code ~= ffi.ERROR_NO_DATA then status = problem("engine owner pipe", code) end
+      break
+    end
+  end
+  if not retire(job) then return failed end
+  local written = foreign DWORD.new_array(1)
+  if ffi.WriteFile(acknowledgement, "1", 1, written, nil) == 0 then
+    return problem("acknowledge engine shutdown", ffi.GetLastError())
+  end
+  return status
+end

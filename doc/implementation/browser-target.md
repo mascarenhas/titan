@@ -126,6 +126,11 @@ staged member-verification path. `luarocks make` stays independent of emsdk,
 and `make browser-sdk` works into an empty destination. A missing standard
 provider is an ordinary provider miss with source fallback.
 
+`Makefile` and `Makefile.win` include `scripts/browser.mk`. On Windows the
+recipes pass drive-letter paths to native `lua.exe` and `titanc.exe`; shell
+scripts still run under MSYS2. Archive publication and the executing protocol
+check belong to the browser target, not the Windows DLL publication path.
+
 ## The fork's `browser` target
 
 The Lua fork pinned by the `lua-5.5.1` submodule owns the facts that do not
@@ -325,12 +330,14 @@ When `install.rocks_tree` is set, the suggested command also names
 under the SDK's profile, so a link under the other one would mix two object
 profiles in one image.
 
-`driver.require_browser_sdk(context)` supplies `install`: `prefix` is
-`driver.INSTALL_PATHS.root` (the descriptor root when unset) and `rocks_tree`
-is the nonempty `ROCKS_TREE` environment variable, which selects the second
-form. The
-check runs only at a program or test link, before the executing protocol
-check, and in `make browser-sdk` itself; object compilation never runs it.
+`driver.require_browser_sdk(context)` supplies the repair command's roots.
+It keeps the user's original `PREFIX` and `ROCKS_TREE` spelling when called
+by the Make recipe, and otherwise uses the installation root and the
+nonempty `ROCKS_TREE` environment variable. Identity checks still use
+canonical paths. On Windows `browserlink` renders the same command as
+`mingw32-make -f Makefile.win browser-sdk`. The check runs only when linking
+an image, before the executing protocol check, and during `browser-sdk`;
+object compilation never runs it.
 
 ### `make browser-sdk`
 
@@ -343,12 +350,14 @@ library, or the native SDK build, and it clears ambient `LUA_PATH`,
 `LUA_CPATH`, and `TITAN_TARGET`. It runs the installed `titanc` from
 `TITAN_INSTALL_TREE` (then `PREFIX`); a missing compiler stops with
 `browser-sdk: installed titanc not found; run 'luarocks make' or 'make
-install-compiler-sdk' first`. Every child gets `TITAN_ROOT` set to the
-installation tree, `TITAN_PATH_0_6` set to the checkout, an empty
-`TITAN_PATH`, an empty `CPPFLAGS`, and `TITAN_EXTRA_CPPFLAGS` replaced by
-exactly `LPEGLABEL_CPPFLAGS` (`-I<checkout>/vendor/lpeglabel`); the ambient
-values of both are discarded, never appended to (`BROWSER_SDK_ENV`). When
-`TITAN_NODE` is unset or empty, the recipe unsets it and leaves ordinary
+install-compiler-sdk' first` on Unix, or `browser-sdk: installed titanc not
+found; run 'mingw32-make -f Makefile.win compiler' first` on Windows.
+`scripts/build_browser_sdk.sh` runs the install sequence once the guarded
+Make recipe has set `TITAN_ROOT` to the installation tree, `TITAN_PATH_0_6` to
+the checkout, `TITAN_PATH` and `CPPFLAGS` to empty, and
+`TITAN_EXTRA_CPPFLAGS` to exactly the vendored lpeglabel include flag.
+The native Windows runner helper builds separately against `PREFIX`.
+When `TITAN_NODE` is unset or empty, the script unsets it and leaves ordinary
 `PATH` selection intact; emsdk's bundled Node does not override it. The
 build directory is `TITAN_BROWSER_BUILD_DIR` (default
 `$(TITAN_OUTPUT_DIR)/browser-sdk`), a browser `--output` root.
@@ -1310,7 +1319,9 @@ Native exception switches remain unsupported: Wasm SJLJ is selected by
 ### Record diagnostics
 
 Every record diagnostic names the record path, the offending field, and the
-fork's install command with the actual root:
+host install command. Unix uses the fork's `make install-browser`; Windows
+uses `mingw32-make -f Makefile.win lua-browser` from the Titan checkout.
+Both include the prefix the user supplied. For example, on Unix:
 
 ```text
 browser Lua record "<path>" is unavailable: <reason>; install it with 'make install-browser PREFIX=<root>'
@@ -1351,26 +1362,37 @@ precedence.
 
 `browsertarget.EMSCRIPTEN_VERSION` is the single constant `6.0.13`. When
 `EMSDK` is set and nonempty it is authoritative: the tools are
-`$EMSDK/upstream/emscripten/{emcc,emar,emranlib}`. Otherwise `emcc` is the
-first executable regular file named `emcc` along `PATH` (an empty entry means
-`.`), and `emar`/`emranlib` must be executable siblings in the same
-directory. The host `CC`, `AR`, and `RANLIB` are never consulted. All three
-tools are recorded as absolute one-word argv arrays. `emcc --version` runs
-once, with stderr merged, and its first `emcc ... <major>.<minor>.<patch>`
-version is compared with the pin.
+`$EMSDK/upstream/emscripten/{emcc,emar,emranlib}`. Otherwise Titan searches
+`PATH` for the first matching compiler (an empty entry means `.`) and selects
+`emar` and `emranlib` only beside it. The selected compiler must report the
+pinned version; a bad first match does not fall through to another SDK.
+On Windows the basenames end in `.exe` and Titan uses the
+[Emscripten `PATH` search mode](windows-build.md#windows-executable-path-entries).
+Native executable resolution must select that exact filename; it may not
+append another extension. POSIX requires effective execute permission.
+During a Windows `PATH` search, an absent exact candidate permits a later
+entry, a present candidate's resolution error stops with its path and cause,
+and a resolved executable must still pass its execution check.
+The host `CC`, `AR`, and `RANLIB` are never consulted. All three tools are
+recorded as absolute one-word argv arrays. `emcc --version` runs once, with
+stderr merged, and its first `emcc ... <major>.<minor>.<patch>` version is
+compared with the pin.
 
 ```text
 browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on PATH); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
 browser target requires Emscripten 6.0.13: emcc not found at "<path>" (EMSDK="<root>"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
 browser target requires Emscripten 6.0.13: "<path>" reports <found>; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
 browser target requires Emscripten 6.0.13: <tool> not found at "<path>" (emcc="<cc>"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
+browser target requires Emscripten 6.0.13: cannot resolve "<path>": <reason>; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
+browser target requires Emscripten 6.0.13: cannot execute emcc at "<path>": <reason>; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh
 ```
 
 `<found>` is `unknown` when the output carries no parsable version or the
 command fails. `emar` and `emranlib` delegate to LLVM archive tools whose
-banners are not Emscripten versions, so only `emcc` is version-checked; the
-siblings must come from the same installation directory. The full
-`--version` output is kept in the descriptor. `incremental.toolchain_identity`
+banners are not Emscripten versions. Archive construction proves their
+deterministic `qDc` and `-D` modes, even on Windows where tool discovery does
+not run the siblings. The full `emcc --version` output is kept in the
+descriptor. `incremental.toolchain_identity`
 still folds `emcc`'s `-E -v` banner, which carries the Emscripten and Clang
 versions, and adds the descriptor identity
 ([Object and link identity](#object-and-link-identity)).
@@ -1493,6 +1515,13 @@ are cross-checked with the record. A trivial C object compiled with the same
 prefix is classified by the Wasm reader, and its fingerprint must equal the
 expected baseline. No probe links or executes anything.
 
+Clang on Windows may report both slash styles in its include-search banner.
+The preprocessor normalizes those separators without rewriting directory
+components or search order. `#include_next` can then find the directory that
+supplied the current header. Include-root spelling participates in the
+semantic C-header digest: old Windows receipts miss once if their recorded
+search spelling changes.
+
 ### Freezing and identity
 
 The descriptor is recursively immutable. Every table is replaced by a proxy
@@ -1588,8 +1617,8 @@ original, later lock boundary.
 
 1. discards the embedded interface provider, its rejection and overlap state,
    and the used embedded target-profile identity;
-2. rejects hosts other than Linux and macOS:
-   `browser builds are supported from Linux and macOS hosts (host is <host>)`,
+2. rejects hosts other than Linux, macOS, and Windows:
+   `browser builds are supported from Linux, macOS and Windows hosts (host is <host>)`,
    and rejects `driver.EMIT_LINE_DIRECTIVES == false` (`--no-line-directives`
    or `TITAN_NO_LINE_DIRECTIVES=1`) with `browser target owns option
    --no-line-directives (TITAN_NO_LINE_DIRECTIVES)`;
@@ -3912,7 +3941,10 @@ titan-browser-run: Node 26 or newer is required ("<path>" reports <found>; expec
 where `<found>` is `unknown` without a parsable version. It then locates
 `titan-browser-run.mjs` beside itself, never relative to the working directory
 (`titan-browser-run: harness failure: runner assets are missing`), and execs
-it.
+it. Native `titanc.exe` runs the same script with `sh.exe` and an argv
+vector; it does not interpret the launcher path as a command.
+The Windows shell launcher converts backslashes in its own path and in an
+explicit `TITAN_NODE` before resolving their directories.
 
 `titan-browser-run.mjs` parses `[--engine node|chromium] [--timeout MS]
 [--grace MS] [--chrome PATH] [--cdp pipe|port] [--root DIR]
@@ -3929,6 +3961,30 @@ with a `realpath(process.argv[1])` check so that importing it from tests or
 `spec/browser/playwright-run.mjs` does not run the CLI while direct invocation
 (including through a symlink) works normally.
 
+On Windows, Node spawns a native Titan helper for each engine, compiled by
+`Makefile.win browser-sdk`. The helper attaches an unnamed, non-breakaway
+Job Object atomically at `CreateProcessW` and owns its only handle. It
+validates each inherited CRT slot and forwards the stdio table with only the
+engine handles in the allowlist, preserving the worker IPC descriptor and
+Chromium pipe descriptors 3/4. Two private slots carry the supervisor's
+lifetime and the helper's post-drain acknowledgement; neither is inherited
+by the engine.
+The helper uses `CREATE_NO_WINDOW` for the engine. After launch it closes
+its copies of the engine's stdin, stdout and protocol descriptors so their
+owner can observe EOF without waiting for the engine to exit. It retains
+stderr for its own diagnostics.
+The launcher is installed as `bin/titan-browser-job.exe`; its provider is
+`lib/titan/0.6/_titan_browser/windows_job.dll`, under a private module
+namespace in the normal Windows native provider layout. The helper loads it
+from the installed tree, then restores the supervisor's original
+`TITAN_PATH_0_6` for the engine.
+If Node disappears, the lifetime pipe closes; if the helper disappears,
+Windows closes the job handle and kills its members. The runner removes a
+Chromium profile only after the helper confirms no processes remain.
+This preserves the existing `pipe` default and explicit loopback `port`
+without silently switching transports. POSIX uses its existing group and
+profile retirement rules.
+
 **Probe.** `--probe` (with an optional `--chrome`) needs no file, SDK, or
 browser launch. It prints exactly one LF-terminated JSON object:
 
@@ -3940,7 +3996,9 @@ browser launch. It prints exactly one LF-terminated JSON object:
 
 Chrome selection is `--chrome`, then `TITAN_CHROME`, then `google-chrome`,
 `google-chrome-stable`, `chromium`, `chromium-browser`, and
-`chrome-headless-shell` on `PATH`. Chrome is usable when `--version` runs and
+`chrome-headless-shell` on `PATH`. Windows first looks for `chrome.exe`
+and uses the [regular Windows `PATH` search mode](windows-build.md#windows-executable-path-entries).
+Chrome is usable when `--version` runs and
 prints a recognized Google Chrome (for Testing), Chromium, or Chrome Headless
 Shell banner with a four-part version; no fixed major is required. A failure
 keeps the path and version found, with a reason such as `headless Chromium not
@@ -4346,31 +4404,19 @@ native runtime build are never entered.
 
 ## Windows and other hosts
 
-Browser builds are supported from Linux and macOS hosts. On Windows, and on a
-native host without an OS label, `driver.validate_target` and the library
-initialization boundary both reject the target with `browser builds are
-supported from Linux and macOS hosts (host is <host>)`:
-`browser builds are supported from Linux and macOS hosts (host is windows)` on
-Windows, and `browser builds are supported from Linux and macOS hosts (host is
-native)` on an unlabeled native host. `Makefile.win` has neither
-`lua-browser` nor `browser-sdk`, and the runner refuses to execute an image on
-Windows (`harness failure: browser execution is supported from Linux and macOS
-hosts`). The fork's `make install-browser` refuses a native Windows shell, but
-from an MSYS2 CLANG64 shell with emsdk 6.0.13 it builds and installs the
-browser Lua.
+The driver admits `browser` on Linux, macOS, and Windows. A native host with
+no OS label still receives `browser builds are supported from Linux, macOS
+and Windows hosts (host is native)`. Browser compilation on Windows uses MSYS2
+CLANG64 and the fork's browser Lua; `make install-browser` in the Lua
+submodule works there with the pinned emsdk. The compiler does not enable
+native cross-compilation.
 
-Lifting the compiler's refusal alone does not make a Windows-host build work.
-In the order a build meets them:
-
-* emsdk installs `emcc.exe`, `emar.exe` and `emranlib.exe`, while the
-  descriptor looks for extensionless `emcc` on the `EMSDK` and `PATH` routes
-  and for extensionless siblings beside it;
-* the native Windows `io` support has no executable-access check, so
-  `io.Sync:executable` refuses a real `emcc.exe`;
-* with both worked around, preprocessing `lua.h` for the target does not find
-  `stdarg.h` among the include roots given to the C preprocessor;
-* `titan-browser-run` is a POSIX `sh` launcher, and the browser specs pend on
-  Windows, including the browser source-resolution checks.
+`Makefile.win` shares browser Lua/SDK staging, validation, and manifest
+publication with `Makefile`. Its native runner helper and provider use the
+ordinary Windows executable/DLL layout outside the browser asset directory.
+The Wasm profile and verified SDK rules are the same on all three hosts;
+Windows browser build and runner commands are supported from MSYS2 CLANG64.
+Node timers on Windows follow the host timer granularity.
 
 ## Documentation checks
 

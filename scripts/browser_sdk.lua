@@ -14,12 +14,13 @@ local install_tree = assert(getenv("TITAN_INSTALL_TREE") or prefix, "TITAN_INSTA
 -- Configure search paths before requiring non-core modules (including lfs),
 -- keeping TITAN_INSTALL_TREE ahead of PREFIX to match Makefile's titanc selection.
 do
+    local suffix = package.config:sub(1, 1) == "\\" and ".dll" or ".so"
     local roots = install_tree ~= prefix and { install_tree, prefix } or { install_tree }
     local lua_paths, c_paths = {}, {}
     for _, root in ipairs(roots) do
         lua_paths[#lua_paths + 1] = root .. "/share/lua/5.5/?.lua"
         lua_paths[#lua_paths + 1] = root .. "/share/lua/5.5/?/init.lua"
-        c_paths[#c_paths + 1] = root .. "/lib/lua/5.5/?.so"
+        c_paths[#c_paths + 1] = root .. "/lib/lua/5.5/?" .. suffix
     end
     lua_paths[#lua_paths + 1] = package.path
     c_paths[#c_paths + 1] = package.cpath
@@ -27,25 +28,29 @@ do
     package.cpath = table.concat(c_paths, ";")
 end
 
+local browserlink = require "titan-compiler.browserlink"
+local remedy_prefix = getenv("TITAN_BROWSER_REMEDY_PREFIX") or prefix
+
 local ok_lfs, lfs = pcall(require, "lfs")
 if not ok_lfs or type(lfs) ~= "table" then
-    io.stderr:write("browser-sdk: LuaFileSystem (lfs) is unavailable; run 'luarocks make' first\n")
+    io.stderr:write("browser-sdk: LuaFileSystem (lfs) is unavailable; ", browserlink.compiler_remedy(), "\n")
     os.exit(1)
 end
 local ok_support, support = pcall(require, "titan")
 if not ok_support or type(support) ~= "table" then
-    io.stderr:write("browser-sdk: installed Titan support module is unavailable; run 'luarocks make' or 'make install-compiler-sdk' first\n")
+    io.stderr:write("browser-sdk: installed Titan support module is unavailable; ",
+        browserlink.compiler_remedy(), "\n")
     os.exit(1)
 end
 
 local driver = require "titan-compiler.driver"
-local browserlink = require "titan-compiler.browserlink"
 local incremental = require "titan-compiler.incremental"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local compiler_io = require "titan-compiler.io"
 local paths = require "titan-compiler.path"
 local util = require "titan-compiler.util"
 local stdlib_checks = dofile("scripts/browser_stdlib.lua")
+local platform = require "titan-compiler.platform"
 
 local strategy = compiler_io.new_sync()
 
@@ -56,10 +61,8 @@ end
 
 local function ensure_dir(dir)
     if lfs.attributes(dir, "mode") == "directory" then return true end
-    local parent = dir:match("^(.*)/[^/]+$")
-    if parent and parent ~= "" and parent ~= dir then
-        ensure_dir(parent)
-    end
+    local parent = paths.dirname(dir)
+    if parent ~= dir then ensure_dir(parent) end
     local ok, err = lfs.mkdir(dir)
     if not ok and lfs.attributes(dir, "mode") ~= "directory" then
         fail("cannot create directory '" .. dir .. "': " .. tostring(err))
@@ -77,6 +80,9 @@ local function copy_file_atomic(source, destination, executable)
     if not written then
         fail("cannot write '" .. destination .. "': " .. tostring(write_err))
     end
+    -- MSYS sh reads the launcher as a script on Windows; NTFS has no POSIX
+    -- execute mode to preserve for a native Titan invocation.
+    if platform.windows then return end
     local mode = executable and "0755" or "0644"
     local chmod_res = strategy:run({ "chmod", mode, destination }, { stderr_to_stdout = true })
     if not chmod_res or not chmod_res.ok then
@@ -134,6 +140,7 @@ local function stage_differing_roots()
         local prefix_ctx = { io = strategy, extra_ffi_include_dirs = {} }
         local prefix_desc, prefix_err = driver._browser_target.build(prefix_ctx, {
             paths = prefix_paths,
+            install_prefix = remedy_prefix,
             runtime_include = runtime_inc,
             compile_flags = {},
             build_profile = getenv("TITAN_BUILD_PROFILE") or "production",
@@ -180,7 +187,7 @@ local function stage_differing_roots()
     for _, rel in ipairs(common_headers) do
         local hdr = install_tree .. "/" .. rel
         if lfs.attributes(hdr, "mode") ~= "file" then
-            fail("missing installed header '" .. hdr .. "'; run 'luarocks make' or 'make install-compiler-sdk' first")
+            fail("missing installed header '" .. hdr .. "'; " .. browserlink.compiler_remedy())
         end
     end
 end
@@ -287,13 +294,19 @@ elseif action == "stage-runtime" then
     copy_file_atomic(browser_src .. "/titan-browser-node-worker.mjs", assets.node_worker, false)
     copy_file_atomic(browser_src .. "/titan-browser-page.mjs", assets.page, false)
     copy_file_atomic(browser_src .. "/titan-browser-module-check.mjs", assets.module_check, false)
+    if platform.windows then
+        for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
+            copy_file_atomic(build_dir .. ".windows-host/" .. relative, install_tree .. "/" .. relative, true)
+        end
+    end
     -- The archives above follow this profile; links refuse another one.
     local recorded, record_err = strategy:write_file(assets.build_profile, descriptor.build_profile .. "\n")
     if not recorded then fail("cannot write '" .. assets.build_profile .. "': " .. tostring(record_err)) end
 
-    local rocks_tree = getenv("ROCKS_TREE")
+    local rocks_tree = os.getenv("TITAN_BROWSER_REMEDY_ROCKS_TREE")
+    if rocks_tree == nil then rocks_tree = getenv("ROCKS_TREE") end
     local ready, ready_err = browserlink.require_sdk(context, descriptor, {
-        prefix = prefix,
+        prefix = remedy_prefix,
         rocks_tree = rocks_tree,
     })
     if not ready then
@@ -382,6 +395,11 @@ elseif action == "finalize" then
             fail("missing staged browser SDK asset '" .. asset_path .. "'")
         end
         digest_inputs[#digest_inputs + 1] = asset_path
+    end
+    if platform.windows then
+        for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
+            digest_inputs[#digest_inputs + 1] = paths.join(install_tree, relative)
+        end
     end
 
     local digest_ctx = {

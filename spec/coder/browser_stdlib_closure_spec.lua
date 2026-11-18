@@ -10,6 +10,7 @@ local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local driver = require "titan-compiler.driver"
+local paths = require "titan-compiler.path"
 
 describe("browser stdlib real-toolchain closure", function()
     local workspace
@@ -73,7 +74,6 @@ describe("browser stdlib real-toolchain closure", function()
     end)
 
     it("builds and audits the real suite target from cold and warm output trees", function()
-        if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local info = fixture({ node = true, chrome = true, sdk = true })
         if not info then return end
         local output = workspace .. "/suite"
@@ -83,7 +83,8 @@ describe("browser stdlib real-toolchain closure", function()
         local argv = {
             "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
             "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
-            "make", "--no-print-directory", "titan-stdlib-browser-test",
+            toolchain.make, "--no-print-directory", "-f", toolchain.makefile,
+            "titan-stdlib-browser-test",
             "PREFIX=" .. info.prefix, "TITAN_BROWSER_TEST_BUILD_DIR=" .. output,
             "TITAN_STDLIB_BROWSER_TEST_ROOTS=test.tests",
             "TITAN_FILTER=",
@@ -101,7 +102,7 @@ describe("browser stdlib real-toolchain closure", function()
             assert.equal(2, summaries, state .. "\n" .. log)
             assert.equal("browser\n", assert(strategy:read_file(output .. "/objects/.titan-target")))
             assert.is_nil(strategy:lstat(output .. "/.titan-target"))
-            assert.equal("test.tests\n", assert(strategy:read_file(output .. "/roots.txt")))
+            assert.equal("test.tests\n", assert(strategy:read_file(output .. "/roots.txt")):gsub("\r\n", "\n"))
             assert.is_nil(strategy:lstat(output .. "/stdlib.roots.txt"))
             for _, artifact in ipairs({
                 "images/stdlib.mjs", "images/stdlib.wasm", "images/stdlib.wasm.map", "images/stdlib.wasm.trace",
@@ -388,12 +389,15 @@ end
                 -- just repeated path strings. Each physical payload is decoded
                 -- once across both certificates and the output-tree traversal.
                 local aliases, foreign = { "-X" }, {}
+                local function path_key(path)
+                    return platform.windows and paths.to_slash(path):lower() or path
+                end
                 for _, side in ipairs({ "left", "right" }) do
                     local original = workspace .. "/" .. side .. "/payload." .. extension
                     local alias = workspace .. "/mirror-" .. side .. "." .. extension
                     assert(lfs.link(original, alias))
                     aliases[#aliases + 1] = alias
-                    foreign[original], foreign[alias] = true, true
+                    foreign[path_key(original)], foreign[path_key(alias)] = true, true
                 end
                 run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser", "--incremental",
                     "--tree", workspace, "--output", output, "--exe", output .. "/mirror.mjs", "intruder",
@@ -401,7 +405,7 @@ end
                 local reads = 0
                 local observed = setmetatable({
                     read_file = function(_, filename, ...)
-                        if foreign[filename] then reads = reads + 1 end
+                        if foreign[path_key(filename)] then reads = reads + 1 end
                         return strategy:read_file(filename, ...)
                     end,
                 }, { __index = function(_, method)
@@ -433,24 +437,33 @@ end
         end
     end)
 
-    -- The browser lane checks both fixtures against the installed providers:
-    -- the browser one is rendered whole, the native one compared module by
-    -- module with the native provider's metadata.
-    it("pins the native and browser type fixtures to the installed providers", function()
+    it("pins the browser type fixture to the installed provider", function()
         local info = fixture({ sdk = true })
         if not info then return end
         local browser = assert(staticmetadata.scan_archive(info.sdk_root .. "/titan.a"))
         assert.equal(assert(strategy:read_file("spec/fixtures/stdlib/titan_stdlib_browser_types.lua")),
             checks.type_fixture(browser),
             "browser type fixture is stale; regenerate it with check_browser_stdlib.lua fixture")
+        -- Exercise the Windows oracle on Unix too, without replacing the
+        -- separate comparison against Unix's installed native archive.
+        local native = checks.native_fixture()
+        assert(checks.inventory(native, browser))
+        assert(checks.check_status(native, browser))
+    end)
+
+    it("pins the native type fixture to the installed archive", function()
+        if platform.windows then
+            pending("platform: Windows installs the native stdlib as a DLL, not a Titan archive")
+            return
+        end
+        local info = fixture({ sdk = true })
+        if not info then return end
         local native_provider = assert(driver.installed_paths(info.prefix)).titan_bin .. "/titan.a"
         local scanned = assert(staticmetadata.scan_archive(native_provider))
-        local expected = assert(loadfile("spec/fixtures/stdlib/titan_stdlib_types.lua"))()
+        local expected = checks.native_fixture()
+        assert.equal(#expected.key_order, #scanned.key_order)
         for _, modname in ipairs(scanned.key_order) do
-            assert.equal(expected[modname:sub(7)], scanned.entries[modname].types, modname)
+            assert.equal(expected.entries[modname].types, scanned.entries[modname].types, modname)
         end
-        local count = 0
-        for _ in pairs(expected) do count = count + 1 end
-        assert.equal(#scanned.key_order, count)
     end)
 end)

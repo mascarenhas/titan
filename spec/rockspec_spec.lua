@@ -1086,7 +1086,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             header_lists = header_lists + 1
         end
         assert.truthy(header_lists > 0)
-        for _, name in ipairs({ "TITAN_RUNTIME_SOURCES", "BROWSER_RUNTIME_SOURCES",
+        for _, name in ipairs({ "TITAN_RUNTIME_SOURCES",
                 "TITAN_SDK_ROOT_HEADERS", "TITAN_SDK_NAMESPACED_HEADERS" }) do
             add_make_list(name)
         end
@@ -1096,7 +1096,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
                 derived[#derived + 1] = lpeglabel .. "/" .. word
             end
         end
-        local scripts, named = { "Makefile", "Makefile.win", "scripts/install_compiler.mk" }, {}
+        local scripts, named = { "Makefile", "Makefile.win", "scripts/install_compiler.mk", "scripts/browser.mk" }, {}
         local index = 1
         while scripts[index] do
             for script in read_file(scripts[index]):gmatch("scripts/[%w_.-]+") do
@@ -1150,6 +1150,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         for _, expected in ipairs(derived) do
             assert.truthy(contains_suffix(expected), expected)
         end
+        assert.truthy(contains_suffix("titan-runtime/browser/_titan_browser/windows_job.titan"))
         for _, retired in ipairs({
             "titan/lua.titan",
             "titan/uv/file.titan",
@@ -1182,9 +1183,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.falsy(path:find("/openssl-build/", 1, true), path)
             assert.falsy(path:match("/openssl%-%d"), path)
         end
-        -- One standard-library tree: outside titan/, only tests and
-        -- documentation may hold Titan source or reuse a standard-library
-        -- file's basename.
+        -- Keep one standard-library tree. The Windows browser job helper is
+        -- a separate build tool, not another standard-library source.
         local root
         for path in pairs(unpacked_files) do
             if path == "Makefile.win" or path:sub(-#"/Makefile.win") == "/Makefile.win" then
@@ -1205,7 +1205,9 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             local file = relative(path)
             local top = file and file:match("^([^/]+)/")
             if top and top ~= "titan" and top ~= "spec" and top ~= "doc" then
-                assert.falsy(file:match("%.titan$"), file)
+                if file ~= "titan-runtime/browser/_titan_browser/windows_job.titan" then
+                    assert.falsy(file:match("%.titan$"), file)
+                end
                 local duplicated = stdlib_files[file:match("[^/]+$")]
                 assert.is_nil(duplicated, file .. " duplicates " .. tostring(duplicated))
             end
@@ -2561,7 +2563,7 @@ describe("relocatable Lua build configuration", function()
             assert(lfs.touch(path, old, old))
             return path
         end
-        for _, path in ipairs({ "Makefile.win", "scripts/install_compiler.mk",
+        for _, path in ipairs({ "Makefile.win", "scripts/install_compiler.mk", "scripts/browser.mk",
                 "scripts/titan_install.lua", "scripts/titan-uninstall",
                 "spec/support/stdlib_test_modules.mk" }) do
             fixture(source, path, read_file(path))
@@ -2770,6 +2772,7 @@ printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
             fixture(source, name, read_file(repository .. "/" .. name))
         end
         fixture(source, "scripts/install_compiler.mk", "")
+        fixture(source, "scripts/browser.mk", read_file(repository .. "/scripts/browser.mk"))
         fixture(source, "scripts/build_windows_runtime.sh", [=[#!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "$1/runtime"

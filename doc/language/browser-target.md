@@ -387,9 +387,9 @@ The page loads exactly six files: itself, `app.mjs`, `app.wasm`,
 
 You need:
 
-* **A Linux or macOS host.** On any other host, including Windows,
-  `--target browser` stops with `browser builds are supported from Linux and
-  macOS hosts (host is windows)`.
+* **Linux, macOS, or Windows with MSYS2 CLANG64.** On Windows, build and run
+  from the CLANG64 shell. Browser builds from native PowerShell or `cmd` are
+  not supported.
 * **Emscripten 6.0.13**, exactly. Install it with
   [emsdk](https://emscripten.org/docs/getting_started/downloads.html):
 
@@ -400,6 +400,11 @@ You need:
   ./emsdk activate 6.0.13
   source ./emsdk_env.sh
   ```
+
+  On Windows use `emsdk.bat install 6.0.13` and `emsdk.bat activate 6.0.13`
+  with Python on `PATH`, then source `emsdk_env.sh` in CLANG64. `EMSDK`,
+  `TITAN_NODE`, and `TITAN_CHROME` can name drive-letter paths with forward
+  slashes, for example `C:/tools/node26/node.exe`.
 
 * **Node 26 or newer with WebAssembly JSPI.** `titanc` uses it for the
   executing check before publishing browser libraries or linking their
@@ -419,8 +424,10 @@ You need:
 
 Titan finds `emcc` through `EMSDK` when it is set and not empty, as
 `$EMSDK/upstream/emscripten/emcc`, and otherwise on `PATH`. `emar` and
-`emranlib` must sit beside that `emcc`. Your `CC`, `AR`, and `RANLIB` settings
-are not used for the browser target. A missing or different Emscripten stops
+`emranlib` must sit beside that `emcc`. On Windows the three tool names end
+in `.exe`, and the native compiler reads semicolon-separated `PATH` entries.
+Your `CC`, `AR`, and `RANLIB` settings are not used for the browser target.
+A missing or different Emscripten stops
 the build with a message that names where Titan looked, the version it found,
 and the commands to fix it:
 
@@ -440,6 +447,9 @@ installation, run:
 source /path/to/emsdk/emsdk_env.sh
 make lua-browser PREFIX="$PREFIX"
 ```
+
+From MSYS2 CLANG64 on Windows, use `make -f Makefile.win lua-browser`
+(or `mingw32-make -f Makefile.win lua-browser`) with the same `PREFIX`.
 
 `make lua-browser` builds the fork's `browser` target and installs it. It
 keeps an existing installation only when the complete browser configuration
@@ -490,6 +500,8 @@ browser Lua record "/home/me/.local/titan/lib/browser/liblua-config.txt" field a
 
 A missing record is reported as `is unavailable: <reason>` and a damaged one
 as `is malformed: <detail>`, with the same install command.
+On Windows the repair command is `mingw32-make -f Makefile.win lua-browser`
+from the Titan checkout, with the same `PREFIX`.
 
 ### Installing the browser SDK
 
@@ -501,6 +513,13 @@ install-compiler-sdk`) and `make lua-browser`, run from the Titan checkout:
 source /path/to/emsdk/emsdk_env.sh
 make browser-sdk PREFIX="$PREFIX"
 ```
+
+On MSYS2 CLANG64, use `make -f Makefile.win browser-sdk PREFIX="$PREFIX"`
+after `make -f Makefile.win compiler` and `lua-browser`. `mingw32-make`
+is also supported. Use the same `TITAN_BUILD_PROFILE` for the SDK and
+the program or test image.
+If the SDK is incomplete, its Windows diagnostic names
+`mingw32-make -f Makefile.win browser-sdk` with the installation settings.
 
 It uses the installed `titanc --target browser` and needs Node 26 or newer
 with JSPI because it publishes the standard library through the ordinary
@@ -524,6 +543,11 @@ root; other chapters refer to this list:
 | `build-profile` | the [build profile](#build-profiles), `production` or `validation`, that compiled the SDK's archives |
 | `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
 | `sdk-digests` | content digests of the browser SDK, written last |
+
+On Windows, the SDK also installs the native runner helper
+`bin/titan-browser-job.exe` and its provider
+`lib/titan/0.6/_titan_browser/windows_job.dll` in the same prefix. Neither file
+is part of an image or page deployment.
 
 The directory is a sibling of the native `lib/titan/0.6/`, never inside it,
 and native builds never search it. `make browser-sdk` works into an empty
@@ -1285,7 +1309,8 @@ its output byte for byte, and exits with its status. A test image built with
 
 `titan-browser-run` is installed in the SDK directory,
 `PREFIX/lib/titan-browser/0.6/titan-browser-run`. Put that directory on `PATH`
-or call it by path:
+or call it by path. In MSYS2 CLANG64 you can invoke the same launcher
+explicitly as `sh "$PREFIX/lib/titan-browser/0.6/titan-browser-run"`:
 
 ```text
 titan-browser-run [--engine node|chromium] [--timeout MS] [--grace MS]
@@ -2006,8 +2031,7 @@ a walk over a deep record graph with `reflect`, has no library limit; under
   four-engine, two-profile recursion-ceiling matrix.
 * A loader instance runs `main` once; calls and explicit notification drains
   remain available afterward. Output sinks may return promises.
-* Only Linux and macOS hosts are supported; `Makefile.win` offers neither
-  `lua-browser` nor `browser-sdk`.
+* Windows-host browser builds use MSYS2 CLANG64, not a native Windows shell.
 * The language server analyzes the host target only.
 * Native source coverage (`--coverage` and its backend/report options) is not
   supported for the browser target.

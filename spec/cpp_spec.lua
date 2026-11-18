@@ -212,6 +212,49 @@ describe("c preprocessor (cpp)", function()
         end)
     end
 
+    it("resumes include_next after a mixed-separator Windows search root with a trailing separator", function()
+        local strategy = require("titan-compiler.io").new_sync()
+        local contents = {
+            ["C:/sdk/before/carrier.h"] = "int wrong_header;\n",
+            ["C:/sdk/link/../compat/carrier.h"] = "#include_next <carrier.h>\n",
+            ["C:/sdk/clang/include/carrier.h"] = "int compiler_carrier;\n",
+        }
+        function strategy:stat(filename)
+            if contents[filename] then return { kind = "file" } end
+        end
+        strategy.lstat = strategy.stat
+        function strategy:read_file(filename)
+            return contents[filename], "file not found"
+        end
+        function strategy:run(argv)
+            local output = ""
+            for _, arg in ipairs(argv) do
+                if arg == "-v" then
+                    output = '#include "..." search starts here:\r\n' ..
+                        " C:/sdk/before\r\n" ..
+                        "#include <...> search starts here:\r\n" ..
+                        " C:\\sdk\\link/../compat\\\r\n" ..
+                        " C:\\sdk/clang\\include\r\n C:\\\r\n \\\\server\\share\\\r\nEnd of search list.\r\n"
+                end
+            end
+            return { started = true, ok = true, output = output }
+        end
+        local windows = platform.windows
+        local ok, failure = xpcall(function()
+            platform.windows = true
+            local context = assert(cpp.new_context({ compiler = { "clang.exe" }, io = strategy }))
+            assert.equal("C:/sdk/link/../compat", context.incdirs.system[1])
+            assert.equal("C:/", context.incdirs.system[3])
+            assert.equal("//server/share/", context.incdirs.system[4])
+            -- Angle lookup excludes the quote-only decoy. The nested directive
+            -- must continue after the actual directory that supplied carrier.h.
+            local parsed = assert(cpp.parse_contents("C:/fixture.c", "#include <carrier.h>\n", context))
+            assert.same({ "int compiler_carrier ;" }, parsed.output)
+        end, debug.traceback)
+        platform.windows = windows
+        assert(ok, failure)
+    end)
+
     describe("shell argument handling", function()
         it("splits quoted and escaped paths without losing argument boundaries", function()
             local words = assert(cpp.split_shell_words(

@@ -216,7 +216,6 @@ local function posix_model_it(name, callback)
         local previous = platform.windows
         local previous_driver = {}
         for key, value in pairs(driver) do previous_driver[key] = value end
-        platform.windows = false
         if previous then
             -- Host module-load paths on Windows carry drive letters (`C:/...`).
             -- Delegate to the real production `driver.initialize_layout` so its
@@ -229,8 +228,7 @@ local function posix_model_it(name, callback)
                 return previous_driver.initialize_layout(context)
             end
         end
-        local completed, failure = xpcall(callback, debug.traceback)
-        platform.windows = previous
+        local completed, failure = xpcall(function() browser_fixtures.with_posix_host(callback) end, debug.traceback)
         for key in pairs(driver) do driver[key] = nil end
         for key, value in pairs(previous_driver) do driver[key] = value end
         assert.truthy(completed, failure)
@@ -315,13 +313,13 @@ describe("target source selection API", function()
                     else
                         assert.is_nil(target)
                         if value == "browser" then
-                            assert.equal("browser builds are supported from Linux and macOS hosts (host is native)", err)
+                            assert.equal("browser builds are supported from Linux, macOS and Windows hosts (host is native)", err)
                         else
                             assert.matches(origin == "TITAN_TARGET" and
                                 "TITAN_TARGET=" .. value or "--target " .. value, err, 1, true)
                         end
                         local reason = value == "native" and "not a compilation target" or
-                            value == "browser" and "supported from Linux and macOS hosts" or
+                            value == "browser" and "supported from Linux, macOS and Windows hosts" or
                             value == "wasm32" and "unknown target" or
                             "native cross-compilation is not supported"
                         assert.matches(reason, err, 1, true)
@@ -332,13 +330,13 @@ describe("target source selection API", function()
             assert.is_true(driver.close_resolver_context(context))
 
             local implementation = driver._browser_target
-            driver._browser_target = setmetatable({ build = function(_, inputs)
-                return assert(implementation.import(browser_fixtures.descriptor(inputs.paths.root)))
+            driver._browser_target = setmetatable({ build = function()
+                return assert(implementation.import(browser_fixtures.descriptor()))
             end }, { __index = implementation })
             if expected == "native" then
                 assert.has_error(function()
                     driver.new_resolver_context({ io = strategy, target = "browser" })
-                end, "browser builds are supported from Linux and macOS hosts (host is native)")
+                end, "browser builds are supported from Linux, macOS and Windows hosts (host is native)")
             else
                 local explicit = driver.new_resolver_context({ io = strategy, target = "browser" })
                 assert.equal("browser", driver.context_target(explicit))
@@ -12887,6 +12885,78 @@ describe("Windows link response files", function()
         end)
     end
 
+    it("keeps the browser compiler envelope ahead of a long GNU response file", function()
+        local compiler = "C:/browser tools/emcc.exe"
+        local arguments = { "-o", "out result.mjs", [[C:\a space\trailing\]] }
+        for index = 1, 800 do
+            arguments[#arguments + 1] = ("C:/generated output directory/module-%04d.o"):format(index)
+        end
+        local payload = assert(platform.windows_response_contents(arguments))
+        assert.is_true(#payload > 32767)
+        process.run = function(argv)
+            assert.same({ "env", "EMCC_CFLAGS=", compiler, "@" .. response }, argv)
+            assert.equal(payload, assert(util.get_file_contents(response, "rb")))
+            return true, "exit", 0
+        end
+        assert.is_true(driver.run_link_command(
+            { "env", "EMCC_CFLAGS=", compiler, table.unpack(arguments) },
+            false, "out result.mjs", { compiler }))
+        assert.is_nil(lfs.attributes(response))
+    end)
+
+    it("captures the browser dependency trace from the same response-file argv", function()
+        if not previous.windows then platform.getenv = os.getenv end
+        local subject = assert(loadfile("titan-compiler/driver.lua"))()
+        local trace = require "titan-compiler.browsertrace"
+        local restore <close> = setmetatable({}, { __close = function()
+            trace.identity = previous.trace_identity
+            driver.remove_path(response)
+        end })
+        previous.trace_identity = trace.identity
+        trace.identity = function() return string.rep("a", 64) end
+        assert(lfs.mkdir(response))
+        local descriptor = browser_fixtures.descriptor()
+        local assets = subject.browserlink.sdk_assets(descriptor.paths)
+        assets.runtime = response .. "/runtime.a"
+        assert(util.set_file_contents(assets.runtime, "!<arch>\n", "wb"))
+        subject.require_browser_sdk = function() return assets end
+        subject.context_target_descriptor = function() return descriptor end
+        subject.validate_program_output_paths = function() return true end
+        local staged = response .. "/image.mjs"
+        local stage = response .. "/stage"
+        assert(lfs.mkdir(stage))
+        subject.staged_library_output = function() return staged, stage end
+        process.run = function(argv)
+            assert.equal("-c", argv[#argv - 3], "only the entrypoint is compiled through process.run")
+            return true, "exit", 0
+        end
+        local dependencies = response .. "/dependencies"
+        local outputs = {}
+        local strategy = { write_file = function(_, filename, bytes)
+            outputs[filename] = bytes
+            return true
+        end }
+        function strategy:run(argv, options)
+            assert.same({ "env", "EMCC_CFLAGS=", descriptor.tools.cc[1], "@" .. staged .. ".rsp" }, argv)
+            assert.is_false(options.stderr_to_stdout)
+            local payload = assert(outputs[staged .. ".rsp"])
+            assert.truthy(payload:find('"-Wl,--trace"\n', 1, true))
+            assert.truthy(payload:find('"C:\\\\generated path\\\\app.o"\n', 1, true))
+            assert.falsy(payload:find("EMCC_CFLAGS=", 1, true))
+            return { started = true, ok = true, output = "one.o\r\ntwo.o\r\n" }
+        end
+        local ok, err = subject.compile_browser_image("entrypoint", response .. "/entry.c",
+            response .. "/program.mjs", { [[C:\generated path\app.o]] }, {}, {}, false, {
+                context = { target = "browser", target_descriptor = descriptor, io = strategy },
+                profile = { purpose = "protocol", assertions = 2 }, link_extra_flags = {},
+                final_link_flags = { "-Wl,--trace" }, dependency_output = dependencies,
+            })
+        assert.is_nil(ok)
+        assert.matches("is not a regular file", err, 1, true)
+        assert.equal("one.o\r\ntwo.o\r\n", outputs[dependencies])
+        assert.is_nil(lfs.attributes(stage))
+    end)
+
     for _, case in ipairs({ { "successful", true, 0 }, { "failed", false, 23 } }) do
         it("reports response removal failure after a " .. case[1] .. " link", function()
             os.execute = function() error("Windows link must use process.run") end
@@ -13015,6 +13085,51 @@ describe("Windows link response files", function()
             return true, "exit", 0
         end
         assert.is_true(driver.run_link_command(argv, false, "result"))
+    end)
+end)
+
+describe("Windows archive command batching", function()
+    it("preserves member order and bounds each CRT command including the prefix", function()
+        local windows, getenv = platform.windows, platform.getenv
+        local restore <close> = setmetatable({}, { __close = function()
+            platform.windows, platform.getenv = windows, getenv
+        end })
+        platform.windows = true
+        if not windows then platform.getenv = os.getenv end
+        -- The driver's private batch planner captures the host's limit at load
+        -- time. Test its policy without exporting it or invoking an archiver.
+        local subject = assert(loadfile("titan-compiler/driver.lua"))()
+        local batches
+        for index = 1, math.huge do
+            local name, value = debug.getupvalue(subject.build_static_archive, index)
+            if not name then break end
+            if name == "archive_batches" then batches = value; break end
+        end
+        assert.is_function(batches)
+        local prefix = { "C:/" .. ("SDK tools with spaces/"):rep(16) .. "emar.exe",
+            "qDc", [[C:\output dir\output.a]] }
+        local source, total = {}, { table.unpack(prefix) }
+        for index = 1, 350 do
+            local filename = ([[C:\staging directory with space\%06d\%s.o]]):format(index, ("x"):rep(64))
+            source[index], total[#total + 1] = filename, filename
+        end
+        local limit = 24 * 1024
+        assert.is_true(#assert(platform.windows_process_command(total)) > 32767)
+        local actual = assert(batches(source, prefix))
+        assert.is_true(#actual >= 2)
+        local seen = {}
+        for index, batch in ipairs(actual) do
+            local command = { table.unpack(prefix) }
+            for _, file in ipairs(batch) do
+                command[#command + 1], seen[#seen + 1] = file, file
+            end
+            assert.is_true(#assert(platform.windows_process_command(command)) <= limit)
+            if index < #actual then
+                command[#command + 1] = actual[index + 1][1]
+                assert.is_true(#assert(platform.windows_process_command(command)) > limit)
+            end
+        end
+        assert.same(source, seen)
     end)
 end)
 

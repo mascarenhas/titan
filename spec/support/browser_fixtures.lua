@@ -18,6 +18,27 @@ M.target_defines = {
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
 }
 
+-- POSIX host models must also use the real POSIX lexical path implementation,
+-- even if the running interpreter loaded the Windows version of path.lua.
+function M.with_posix_host(callback)
+    local saved_windows = platform.windows
+    local native, saved = require "titan-compiler.path", {}
+    if saved_windows then
+        local filename = assert(package.searchpath("titan-compiler.path", package.path))
+        local environment = setmetatable({ package = { config = "/\n;\n?\n!\n-\n" } }, { __index = _G })
+        local posix = assert(loadfile(filename, "t", environment))()
+        for key, value in pairs(posix) do
+            saved[key], native[key] = native[key], value
+        end
+    end
+    platform.windows = false
+    local ok, result = xpcall(callback, debug.traceback)
+    platform.windows = saved_windows
+    for key, value in pairs(saved) do native[key] = value end
+    if not ok then error(result, 0) end
+    return result
+end
+
 function M.fingerprint()
     return { format = "wasm", word_size = 32, linking_version = 2, features = M.features }
 end
@@ -107,6 +128,7 @@ function M.descriptor(root, overrides)
     local record, record_text = M.record()
     local profile = M.profile_data()
     local tools = (platform.windows and "C:" or "") .. "/emsdk/upstream/emscripten/"
+    local suffix = platform.windows and ".exe" or ""
     local build_profile = overrides and overrides.build_profile or "validation"
     local flags = { table.unpack(M.object_flags[build_profile] or {}) }
     for _, define in ipairs({ "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX" }) do
@@ -115,8 +137,8 @@ function M.descriptor(root, overrides)
     for _, define in ipairs(M.target_defines) do flags[#flags + 1] = define end
     local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
         build_profile = build_profile, trace_control = (overrides and overrides.trace_control) or nil,
-        tools = { cc = { tools .. "emcc" }, ar = { tools .. "emar" },
-            ranlib = { tools .. "emranlib" }, version = "6.0.13", source = "EMSDK",
+        tools = { cc = { tools .. "emcc" .. suffix }, ar = { tools .. "emar" .. suffix },
+            ranlib = { tools .. "emranlib" .. suffix }, version = "6.0.13", source = "EMSDK",
             location = tools:sub(1, -2), version_output = "emcc (Emscripten) 6.0.13\n" },
         compile_flags = flags, include_dirs = { paths.lua_source, paths.include },
         target_defines = { table.unpack(M.target_defines) }, paths = paths,

@@ -457,6 +457,12 @@ end
 local explicit_root = platform.getenv("TITAN_ROOT")
 if explicit_root == "" then explicit_root = nil end
 local probe_prefix = platform.getenv("TITAN_PREFIX")
+
+function perf.browser_install_prefix(root)
+    local prefix = platform.getenv("TITAN_BROWSER_REMEDY_PREFIX")
+    if prefix and prefix ~= "" then return prefix end
+    return explicit_root and normalize_absolute_path(explicit_root) == root and explicit_root or root
+end
 if probe_prefix == "" then probe_prefix = nil end
 local probe_cache_disabled = platform.getenv("TITAN_PROBE_CACHE_DISABLE") == "1"
 local configured_installation_root, installation_root_error = explicit_root, nil
@@ -666,6 +672,12 @@ local function select_platform_defaults(uname, is_darwin, compiler_family)
     driver.IS_DARWIN = is_darwin
 end
 
+function perf.browser_host_error(host)
+    if host ~= "linux" and host ~= "darwin" and host ~= "windows" then
+        return "browser builds are supported from Linux, macOS and Windows hosts (host is " .. tostring(host) .. ")"
+    end
+end
+
 -- Browser state is context-owned. Native process globals remain a host profile.
 function driver._finish_target_initialization(context)
     if context.target == "browser" then
@@ -679,10 +691,8 @@ function driver._finish_target_initialization(context)
         context.embedded_interface_provider_rejected = false
         context.embedded_interface_provider_overlap = nil
         context.used_embedded_target_profile_identity = nil
-        if context.host_target ~= "linux" and context.host_target ~= "darwin" then
-            return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
-                tostring(context.host_target) .. ")"
-        end
+        local host_error = perf.browser_host_error(context.host_target)
+        if host_error then return nil, host_error end
         if not context.target_descriptor then
             for _, item in ipairs({
                 { driver.EXTRA_CPPFLAGS, "TITAN_EXTRA_CPPFLAGS" },
@@ -723,6 +733,7 @@ function driver._finish_target_initialization(context)
             end
             local descriptor, err = driver._browser_target.build(context, {
                 paths = paths, runtime_include = runtime_include, compile_flags = extras,
+                install_prefix = perf.browser_install_prefix(paths.root),
                 build_profile = driver.BUILD_PROFILE,
                 trace_control = driver.browser_link_options and
                     (driver.browser_link_options.purpose == "baseline" or
@@ -813,10 +824,11 @@ end
 function driver.require_browser_sdk(context)
     local descriptor, err = driver.context_target_descriptor(context)
     if not descriptor then return nil, err end
-    local rocks_tree = platform.getenv("ROCKS_TREE")
-    if rocks_tree == "" then rocks_tree = nil end
+    local rocks_tree = platform.getenv("TITAN_BROWSER_REMEDY_ROCKS_TREE")
+    if rocks_tree == nil then rocks_tree = platform.getenv("ROCKS_TREE") end
+    local root = driver.INSTALL_PATHS and driver.INSTALL_PATHS.root or descriptor.paths.root
     return driver.browserlink.require_sdk(context, descriptor, {
-        prefix = driver.INSTALL_PATHS and driver.INSTALL_PATHS.root or descriptor.paths.root,
+        prefix = perf.browser_install_prefix(root),
         rocks_tree = rocks_tree,
     })
 end
@@ -908,10 +920,8 @@ function driver.validate_target(context, value, origin)
         return nil, prefix .. ": 'native' selects source files for native hosts; " ..
             "it is not a compilation target"
     elseif value == "browser" then
-        if context.host_target ~= "linux" and context.host_target ~= "darwin" then
-            return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
-                context.host_target .. ")"
-        end
+        local host_error = perf.browser_host_error(context.host_target)
+        if host_error then return nil, host_error end
         return value
     elseif value == "linux" or value == "darwin" or value == "windows" then
         if value == context.host_target then return value end
@@ -1531,7 +1541,7 @@ end
 -- Keep the configured compiler/wrapper prefix outside the response file.
 -- Only Windows links need this transport; ordinary compile/tool commands and
 -- every POSIX command retain their existing execution and diagnostics.
-function driver.run_link_command(argv, verbose, output)
+function driver.run_link_command(argv, verbose, output, browser_cc)
     if not platform.windows then return run_argv(argv, verbose) end
     if type(argv) ~= "table" or #argv == 0 then
         return nil, "link command must be a nonempty argument array"
@@ -1547,8 +1557,13 @@ function driver.run_link_command(argv, verbose, output)
             return nil, "link command must be a dense argument array"
         end
     end
-    local command, err = perf.tool_command(driver.CC, "CC")
-    if not command then return nil, err end
+    local command, err
+    if browser_cc then
+        command = driver._browser_target.compiler_argv(browser_cc)
+    else
+        command, err = perf.tool_command(driver.CC, "CC")
+        if not command then return nil, err end
+    end
     for index = 1, #command do
         if argv[index] ~= command[index] then
             return nil, "link command does not match the configured CC command prefix"
@@ -11468,11 +11483,15 @@ local function run_archive_tool(base, arguments, verbose, discard_output)
     return run_argv(argv, verbose, discard_output)
 end
 
-local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
+local function archive_tool_capabilities(ar, ranlib, probe, object, verbose, browser)
     os.remove(probe)
     local ar_args = { "qDc", probe }
     if object then ar_args[#ar_args + 1] = object end
     local ar_d = run_archive_tool(ar, ar_args, verbose, true)
+    if browser and not ar_d then
+        os.remove(probe)
+        return nil, "browser archive tool " .. string.format("%q", ar[1]) .. " failed deterministic qDc"
+    end
     if not ar_d then
         os.remove(probe)
         ar_args[1] = "qc"
@@ -11486,6 +11505,10 @@ local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
     end
 
     local ranlib_d = run_archive_tool(ranlib, { "-D", probe }, verbose, true)
+    if browser and not ranlib_d then
+        os.remove(probe)
+        return nil, "browser archive tool " .. string.format("%q", ranlib[1]) .. " failed deterministic -D"
+    end
     if not ranlib_d then
         local ranlib_ok, ranlib_term, ranlib_code =
             run_archive_tool(ranlib, { probe }, verbose, true)
@@ -11509,9 +11532,16 @@ end
 -- limits one argument to 128 KiB independently of its larger ARG_MAX. Keep a
 -- deliberately conservative portable ceiling and measure the exact quoted
 -- rendering, including a configured multi-word AR command.
-local ARCHIVE_SHELL_COMMAND_LIMIT = 64 * 1024
+-- Windows CreateProcess has a 32,767 UTF-16-unit limit. A conservative UTF-8
+-- byte bound leaves room for the CRT argv spelling and terminating NUL.
+local ARCHIVE_SHELL_COMMAND_LIMIT = platform.windows and 24 * 1024 or 64 * 1024
 
 local function shell_argv_size(argv)
+    if platform.windows then
+        local rendered, err = platform.windows_process_command(argv)
+        if not rendered then return nil, err end
+        return #rendered
+    end
     local size = 0
     for index, argument in ipairs(argv) do
         local quoted, quote_err = cdriver.shell_quote(argument)
@@ -11533,9 +11563,9 @@ local function archive_batches(paths, prefix)
     end
     local size = fixed_size
     for _, path in ipairs(paths) do
-        local quoted, quote_err = cdriver.shell_quote(path)
-        if not quoted then return nil, quote_err end
-        local contribution = #quoted + 1
+        local argument_size, quote_err = shell_argv_size({ path })
+        if not argument_size then return nil, quote_err end
+        local contribution = argument_size + 1
         if #batch ~= 0 and
            size + contribution > ARCHIVE_SHELL_COMMAND_LIMIT then
             batches[#batches + 1] = batch
@@ -11676,11 +11706,8 @@ function driver.build_static_archive(
     if not ranlib then ranlib, ranlib_err = perf.tool_command(driver.RANLIB, "RANLIB") end
     if not ranlib then return abort(ranlib_err) end
     local capability, capability_err = archive_tool_capabilities(
-        ar, ranlib, probe, staged_paths[1], verbose)
+        ar, ranlib, probe, staged_paths[1], verbose, descriptor ~= nil)
     if not capability then return abort(capability_err) end
-    if descriptor and not capability.deterministic then
-        return abort("browser archive tools require deterministic qDc and -D modes")
-    end
 
     os.remove(temporary)
     local archive_prefix = copy_argv(ar)
@@ -13656,11 +13683,13 @@ function driver.run_standalone_archive_probe(
             return nil, "selected static provider failed executable-context protocol linking (" ..
                 tostring(term) .. (code and (", exit " .. tostring(code)) or "") .. ")"
         end
-        local result = context.io:run({ assets.runner, "--engine", "node", image },
+        local result = context.io:run(driver.browserlink.runner_argv(assets.runner, "--engine", "node", image),
             { stderr_to_stdout = true })
         if type(result) ~= "table" or not result.ok then
+            local detail = type(result) == "table" and (result.output or result.diagnostic)
             return nil, "selected static provider failed executable-context protocol validation " ..
-                "(browser runner exit " .. tostring(type(result) == "table" and result.status or 75) .. ")"
+                "(browser runner exit " .. tostring(type(result) == "table" and result.status or 75) .. ")" ..
+                (detail and detail ~= "" and ": " .. detail:gsub("%s+$", "") or "")
         end
         return true
     end
@@ -13981,13 +14010,25 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local linked, term, code
     if options.dependency_output then
         if verbose then io.stderr:write(assert(command_argv(command)), "\n") end
+        if platform.windows then
+            -- The link and the trace must receive the same emcc arguments.
+            local wrapped = driver._browser_target.compiler_argv(context.target_descriptor.tools.cc)
+            local response, response_error = platform.windows_response_contents(
+                { table.unpack(command, #wrapped + 1) })
+            if not response then return nil, response_error end
+            local response_path = staged .. ".rsp"
+            valid, err = context.io:write_file(response_path, response)
+            if not valid then return nil, err end
+            wrapped[#wrapped + 1] = "@" .. response_path
+            command = wrapped
+        end
         local result = context.io:run(command, { stderr_to_stdout = false })
         if not result.started then return nil, result.diagnostic end
         if not result.ok then return nil, result.why, result.status end
         linked, err = context.io:write_file(options.dependency_output, result.output or "")
         if not linked then return nil, err end
     else
-        linked, term, code = driver.run_link_command(command, verbose, staged)
+        linked, term, code = driver.run_link_command(command, verbose, staged, context.target_descriptor.tools.cc)
         if not linked then return nil, term, code end
     end
     for _, filename in ipairs({ staged, staged_wasm, staged_map }) do
@@ -14097,7 +14138,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
 end
 
 function driver.browser_node_ready(context, assets)
-    local result = context.io:run({ assets.runner, "--probe" }, { stderr_to_stdout = true })
+    local result = context.io:run(driver.browserlink.runner_argv(assets.runner, "--probe"), { stderr_to_stdout = true })
     if type(result) == "table" and result.ok then return true, nil, result.output end
     local detail = type(result) == "table" and (result.output or result.diagnostic) or "runner probe failed"
     local reason = detail and detail:match("Node 26 or newer is required %((.-)%)%s*$")

@@ -462,6 +462,12 @@ function incremental.preprocessed_identities(context, inputs)
         for index, input in ipairs(inputs) do
             local source = required(context.io:tmpname())
             temporaries[#temporaries + 1] = source
+            if platform.windows and context.target == "browser" then
+                -- The CRT's temporary suffix can be .s, which emcc classifies
+                -- as assembly before forwarding the explicit -x c to Clang.
+                source = source .. ".c"
+                temporaries[#temporaries + 1] = source
+            end
             -- Keep the two prefix-map keys distinct even for a relative
             -- strategy tmpname; neither map may replace a full FILE/BASE_FILE
             -- expansion with a basename (or vice versa).
@@ -631,27 +637,13 @@ local function windows_physical_executable(context, executable, selection)
     end
     local function in_path()
         local search = context.executable_path or platform.getenv("PATH") or ""
-        local start = 1
-        while start <= #search do
-            local first = search:sub(start, start)
-            local quoted = first == '"' or first == "'"
-            local after_quote = quoted and
-                (search:find(first, start + 1, true) or #search + 1) or start
-            local finish = search:find(";", after_quote, true) or #search + 1
-            local directory = search:sub(start, finish - 1)
-            if directory ~= "" then
-                if quoted then
-                    if #directory == 1 then
-                        return uncertified_tool("cannot prove malformed Windows executable PATH")
-                    end
-                    directory = directory:sub(2)
-                end
-                local last = directory:sub(-1)
-                if last == '"' or last == "'" then directory = directory:sub(1, -2) end
-                local found, stat, status = in_directory(directory)
-                if found or status then return found, stat, status end
-            end
-            start = finish + 1
+        local directories = platform.windows_path_entries(search)
+        while true do
+            local directory, err = directories()
+            if err then return uncertified_tool("cannot prove " .. err) end
+            if not directory then break end
+            local found, stat, status = in_directory(directory)
+            if found or status then return found, stat, status end
         end
     end
     local function identity(filename, stat)

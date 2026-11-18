@@ -2,7 +2,7 @@ local assert = require "luassert"
 local lfs = require "lfs"
 local files = require "spec.fixtures.target_selection.support"
 local toolchain = require "spec.support.browser_toolchain"
-local repository = assert(lfs.currentdir())
+local repository = toolchain.repository
 local fixture
 
 local function build(info, assertions, tree, module, name, is_test, c_source, wrap, cppflags)
@@ -17,7 +17,7 @@ local function build(info, assertions, tree, module, name, is_test, c_source, wr
             ";require('titan-compiler.driver').browser_link_options={purpose=%q,assertions=%d};",
             is_test and "test" or "program", assertions)
     local image = output .. "/" .. name .. ".mjs"
-    local argv = { info.prefix .. "/bin/lua", "-E", "-e", init, fixture.frontend .. "/titanc",
+    local argv = { info.lua, "-E", "-e", init, fixture.frontend .. "/titanc",
         "-q", "--target", "browser", "--incremental", "--no-uv-bootstrap",
         "--tree", tree, "--output", output, "--exe", image }
     if c_source then
@@ -44,9 +44,9 @@ local function build(info, assertions, tree, module, name, is_test, c_source, wr
 end
 
 local function execute(info, engine, script, images)
-    local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine,
+    local argv = toolchain.runner(info, "--engine", engine,
         "--timeout", "120000", "--grace", "1500", "--root", fixture.root,
-        "--js-test", fixture.source .. "/" .. script, "--" }
+        "--js-test", fixture.source .. "/" .. script, "--")
     for _, image in ipairs(images) do argv[#argv + 1] = image end
     return fixture:run(argv, { TITAN_NODE = info.node.path, TITAN_CHROME = info.chrome.path,
         TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" })

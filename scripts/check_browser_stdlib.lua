@@ -26,15 +26,20 @@ if action == "closure" then
     need(checks.check_archive(second))
     need(checks.check_image(need(strategy:read_file(third)), third))
     print("Browser stdlib closure: selected sources, provider, certified headers, objects and image have no forbidden dependencies.")
-elseif action == "inventory" then
-    assert(first and second, "inventory requires native and browser providers")
-    local native = need(staticmetadata.scan_archive(first))
-    local browser = need(staticmetadata.scan_archive(second))
+elseif action == "inventory" or action == "inventory-fixture" then
+    assert(first and (action == "inventory-fixture" or second), "inventory requires native and browser providers")
+    local native, browser, table_path
+    if action == "inventory-fixture" then
+        native, browser, table_path = checks.native_fixture(), need(staticmetadata.scan_archive(first)), second
+        print("Browser stdlib native interface oracle: checked-in native fixture")
+    else
+        native, browser, table_path = need(staticmetadata.scan_archive(first)), need(staticmetadata.scan_archive(second)), third
+    end
     local rows, modules, recorded = checks.inventory(native, browser)
     need(rows, modules)
     need(checks.check_status(native, browser))
     local text = checks.member_table(rows, recorded)
-    if third then need(strategy:write_file(third, text)) else io.write(text) end
+    if table_path then need(strategy:write_file(table_path, text)) else io.write(text) end
     print(string.format("Browser stdlib inventory: %d modules, %d public members, %d absent members, " ..
         "every status row consistent.", modules, #rows, #recorded))
 elseif action == "output" then
@@ -113,5 +118,6 @@ elseif action == "imports" then
         #arguments - 2, first))
 else
     error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | " ..
+        "inventory-fixture BROWSER [TABLE] | " ..
         "output ROOTS FILTER LOG | fixture BROWSER [FILE] | imports CLASS[,CLASS...] WASM...")
 end

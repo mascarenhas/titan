@@ -99,6 +99,39 @@ local function context(files)
     return ctx, files
 end
 
+describe("browser generated C preprocessing", function()
+    it("preserves C mode and retires the .s reservation and its products on Windows", function()
+        local windows = platform.windows
+        local ok, failure = xpcall(function()
+            platform.windows = true
+            local ctx, storage = context({})
+            local reservation = "C:/temporary.s"
+            local output = "C:/temporary.i"
+            local names = { reservation, output }
+            ctx.target = "browser"
+            ctx.incremental_options = { compile_prefix = { "C:/tool/emcc.exe" } }
+            function ctx.io:tmpname()
+                local name = assert(table.remove(names, 1))
+                storage[name] = ""
+                return name
+            end
+            function ctx.io:run(argv)
+                assert.same({ "-E", "-P", "-x", "c", reservation .. ".c", "-o", output },
+                    { table.unpack(argv, #argv - 6) })
+                assert.equal("int input;", storage[reservation .. ".c"])
+                storage[output] = "int input;\n"
+                return { ok = true }
+            end
+            local identities = assert(incremental.preprocessed_identities(ctx,
+                { { filename = "C:/src/generated.c", contents = "int input;" } }))
+            assert.equal(1, #identities)
+            assert.same({}, storage)
+        end, debug.traceback)
+        platform.windows = windows
+        assert(ok, failure)
+    end)
+end)
+
 local function native_context(files)
     local ctx = context(files)
     function ctx.io:executable_search_cwd() return false end
@@ -1463,6 +1496,21 @@ describe("incremental configuration", function()
         assert.equal("C:/first/tool.exe", identity.path)
         assert.equal("C:/first/tool.exe", selected)
         assert.equal(0, #ctx.io.commands)
+    end)
+
+    it("uses the quoted Windows PATH entry, not the current directory from empty entries", function()
+        local platform = require "titan-compiler.platform"
+        local original = platform.windows
+        local ctx = context({ ["C:/cwd/tool.exe"] = "current", ["C:/tools;with space/tool.exe"] = "selected" })
+        ctx.executable_path = [[;"";'';"C:/tools;with space";]]
+        function ctx.io:cwd() return "C:/cwd" end
+        function ctx.io:executable_search_cwd() return false end
+        platform.windows = true
+        local ok, identity, selected = pcall(incremental.physical_executable, ctx, "tool.exe")
+        platform.windows = original
+        assert.is_true(ok, identity)
+        assert.equal("C:/tools;with space/tool.exe", selected)
+        assert.equal(selected, identity.path)
     end)
 
     it("probes one flagless toolchain description independently of effective options", function()

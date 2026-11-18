@@ -268,6 +268,17 @@ filesystem, module, and process behavior must be tested with CLANG64/UCRT.
 See [Microsoft's UTF-8 process guidance](https://learn.microsoft.com/en-us/windows/apps/design/globalizing/use-utf8-code-page)
 and [Windows DLL search order](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order).
 
+### Windows executable PATH entries
+
+The compiler and the browser runner split the Windows executable `PATH` on
+semicolons. A leading single or double quote protects semicolons up to
+the matched closing quote. Strip a leading and trailing quote from the
+entry before interpreting it; a relative entry is used as given.
+Regular executable lookup skips both empty and quoted-empty entries;
+Emscripten tool discovery treats both as the current directory, as its
+POSIX search does for empty entries. This rule is about how `PATH` entries
+are interpreted, not the separate process policy for search outside `PATH`.
+
 ## Windows loader boundary
 
 `titan-runtime/titan_winloader.h` (`titan_win_load_library`) converts a UTF-8
@@ -1075,14 +1086,15 @@ Pure generated-header fixtures use drive-qualified virtual output paths on
 Windows, so direct code generation and the driver's absolute header plans
 refer to the same location.
 
-Browser builds remain unsupported on Windows. The CLI rejects that host when
-validating `--target browser`, before applying browser-specific option policy.
-The option-policy tests retain the exact disabled-line-directive diagnostic
-as a separate assertion; the Windows child asserts the earlier host rejection.
-[Windows and other hosts](browser-target.md#windows-and-other-hosts) lists
-what else a Windows-host browser build meets: no `Makefile.win` targets,
-extensionless Emscripten tool discovery, no Windows executable-access check,
-a target preprocessing failure, and a POSIX-only runner.
+The CLI admits `--target browser` on Windows; browser option-policy tests
+assert the same disabled-line-directive diagnostic on all three hosts.
+Browser object compilation uses the fork's browser Lua and Emscripten,
+not the native DLL and compiler. Run `lua-browser` and `browser-sdk` through
+`Makefile.win` under MSYS2 CLANG64. The SDK's Wasm archives and JavaScript
+are published under `lib/titan-browser/0.6/`; the runner's job supervisor
+uses the ordinary native executable/DLL layout. The runner is part of
+SDK publication because its Node protocol check exercises the linked
+provider. See [Windows browser builds](browser-target.md#windows-and-other-hosts).
 
 The pre-marker generated-C upgrade fixture reads bytes in binary mode and
 exercises both LF and CRLF output. Removing generated preamble lines must

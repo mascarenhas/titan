@@ -9,16 +9,19 @@
 local lfs = require "lfs"
 local process = require "titan-compiler.process"
 local path = require "titan-compiler.path"
-local repository = assert(lfs.currentdir())
+local platform = require "titan-compiler.platform"
+local repository = path.to_slash(assert(lfs.currentdir()))
 local built = arg[1] == "--built"
 local output = assert(arg[built and 2 or 1], "usage: lua -E spec/browser/build-delivery.lua [--built] OUTPUT")
 assert(not arg[built and 3 or 2], "build-delivery.lua accepts exactly one output directory")
 if not path.is_absolute(output) then output = path.join(repository, output) end
+output = path.to_slash(output)
 local prefix = assert(os.getenv("TITAN_ROOT") or os.getenv("PREFIX"), "TITAN_ROOT or PREFIX is required")
 local doc_check = dofile(path.join(repository, "scripts/doc_check.lua"))
 -- Images use only reviewed imports (scripts/browser_imports.lua).
 local checks = dofile(path.join(repository, "scripts/browser_stdlib.lua"))
 local strategy = require("titan-compiler.io").new_sync()
+local executable_suffix = platform.windows and ".exe" or ""
 
 local function mkdir(directory)
   if lfs.attributes(directory, "mode") == "directory" then return end
@@ -59,19 +62,28 @@ assert(plan.expectations.app and plan.expectations["app-errors"], chapter .. " l
 if built then
   -- The chapter's first page built the server and its own image beside the
   -- application.
-  assert(lfs.attributes(path.join(output, "http-dev-server"), "mode") == "file", "no http-dev-server in " .. output)
+  assert(lfs.attributes(path.join(output, "http-dev-server" .. executable_suffix), "mode") == "file",
+    "no http-dev-server in " .. output)
   assert(checks.check_file_imports(strategy, path.join(output, "out/hello.mjs"), { "entry" }))
 else
   mkdir(output)
-  assert(doc_check.run(plan, {
-    PATH = path.join(prefix, "bin") .. ":" .. assert(os.getenv("PATH")), PREFIX = prefix,
-    TITAN_BUILD_PROFILE = profile,
+  local environment = {
+    PATH = path.join(prefix, "bin") .. (platform.windows and ";" or ":") .. assert(os.getenv("PATH")),
+    PREFIX = prefix, TITAN_BUILD_PROFILE = profile,
     TITAN_ROOT = false, TITAN_TARGET = false, TITAN_PATH_0_6 = false, TITAN_PATH = false,
     TITAN_EXTRA_CPPFLAGS = false, TITAN_EXTRA_CFLAGS = false, TITAN_EXTRA_LDFLAGS = false,
-  }))
+  }
+  if platform.windows then
+    local command = path.join(output, "build-delivery.sh")
+    write(command, plan.script)
+    local result = process.capture({ "sh.exe", path.to_slash(command) }, { env = environment })
+    assert(result.ok, result.output or result.diagnostic)
+  else
+    assert(doc_check.run(plan, environment))
+  end
 
   -- The documented server, built natively from the manual's source.
-  local server = process.capture({ path.join(prefix, "bin/titanc"), "-q", "--incremental",
+  local server = process.capture({ path.join(prefix, "bin/titanc" .. executable_suffix), "-q", "--incremental",
     "--tree", path.join(repository, "doc/language"), "--output", path.join(output, "native"),
     "--exe", path.join(output, "http-dev-server"), "http-dev-server" }, { cwd = repository, env = {
       TITAN_ROOT = prefix, TITAN_BUILD_PROFILE = profile, TITAN_TARGET = "", TITAN_EXTRA_CPPFLAGS = "",

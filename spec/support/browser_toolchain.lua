@@ -16,7 +16,13 @@ local compiler_io = require "titan-compiler.io"
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local installed_prefix = require "spec.support.installed_prefix"
+local browser = require "titan-compiler.browsertarget"
+local browserlink = require "titan-compiler.browserlink"
+local version = require "titan-compiler.version"
 local M = {}
+M.repository = paths.to_slash(assert(require("lfs").currentdir()))
+M.make = platform.windows and (os.getenv("MAKE") or "make") or "make"
+M.makefile = platform.windows and "Makefile.win" or "Makefile"
 
 -- Successful capabilities are cached separately, and absence is never cached:
 -- established capability records stay cheap while a fake environment unit case
@@ -42,50 +48,20 @@ local function check_requirements(requirements)
     return requirements
 end
 
-local function absolute(strategy, filename)
-    return platform.is_absolute(filename) and filename or
-        paths.join(assert(strategy:cwd()), filename)
-end
-
 local function executable(strategy, filename)
     local attributes = strategy:stat(filename)
     return attributes and attributes.kind == "file" and
-        strategy:executable(filename) == true
+        (platform.windows or strategy:executable(filename) == true)
 end
 
 local function discover()
-    if platform.windows then
-        return nil, "browser builds are supported from Linux and macOS hosts"
-    end
     local strategy = compiler_io.new_sync()
-    local emsdk = os.getenv("EMSDK")
-    local cc
-    if emsdk and emsdk ~= "" then
-        cc = absolute(strategy, paths.join(emsdk, "upstream/emscripten/emcc"))
-        if not executable(strategy, cc) then
-            return nil, "emcc not found at " .. string.format("%q", cc)
-        end
-    else
-        for directory in ((os.getenv("PATH") or "") .. ":"):gmatch("(.-):") do
-            local candidate = absolute(strategy, paths.join(directory == "" and "." or directory, "emcc"))
-            if executable(strategy, candidate) then cc = candidate; break end
-        end
-        if not cc then return nil, "emcc not found (EMSDK unset; not on PATH)" end
-    end
-    local result = strategy:run({ cc, "--version" }, { stderr_to_stdout = true })
-    local found = result and result.output and
-        result.output:match("emcc[^\n]- (%d+%.%d+%.%d+)")
-    if not result or not result.ok or found ~= "6.0.13" then
-        return nil, string.format("%q reports Emscripten %s, expected 6.0.13", cc, found or "unknown")
-    end
-    local directory = paths.dirname(cc)
-    local tools = { cc = { cc }, ar = { paths.join(directory, "emar") },
-        ranlib = { paths.join(directory, "emranlib") },
-        clang = { paths.join(paths.dirname(directory), "bin/clang") } }
-    for name, argv in pairs(tools) do
-        if not executable(strategy, argv[1]) then
-            return nil, name .. " not found at " .. string.format("%q", argv[1])
-        end
+    local tools, reason = browser.discover_tools({ io = strategy })
+    if not tools then return nil, reason end
+    local suffix = platform.windows and ".exe" or ""
+    tools.clang = { paths.join(paths.dirname(tools.location), "bin/clang" .. suffix) }
+    if not executable(strategy, tools.clang[1]) then
+        return nil, "clang not found at " .. string.format("%q", tools.clang[1])
     end
     local prefix = installed_prefix.active()
     local base = paths.join(prefix, "lib/browser")
@@ -94,10 +70,12 @@ local function discover()
         local filename = paths.join(base, relative)
         if not strategy:readable(filename) then
             return nil, "browser Lua prerequisite not readable: " .. string.format("%q", filename) ..
-                "; run 'make install-browser PREFIX=" .. prefix .. "' in the Lua fork"
+                "; run '" .. browserlink.install_command("lua", prefix) .. "'" ..
+                (platform.windows and " from the Titan checkout" or " in the Lua fork")
         end
     end
-    return { prefix = prefix, tools = tools,
+    return { prefix = prefix, compiler = paths.join(prefix, "bin/titanc" .. suffix),
+        lua = paths.join(prefix, "bin/lua" .. suffix), tools = tools,
         record_path = paths.join(base, "liblua-config.txt") }
 end
 
@@ -375,7 +353,7 @@ local function run_probe(strategy)
     for _, launcher in ipairs(runner_candidates()) do
         found[#found + 1] = string.format("%q", launcher)
         if executable(strategy, launcher) then
-            local result = strategy:run({ launcher, "--probe" },
+            local result = strategy:run(browserlink.runner_argv(launcher, "--probe"),
                 { stderr_to_stdout = true })
             if not result or not result.started then
                 return nil, "browser runner probe could not start: " .. tostring(
@@ -460,6 +438,30 @@ function M.detect(requirements)
     if wanted.chrome then result.chrome = cache.chrome end
     if wanted.sdk then result.sdk_root = cache.sdk end
     return result
+end
+
+function M.runner(info, ...)
+    return browserlink.runner_argv(info.sdk_root .. "/titan-browser-run", ...)
+end
+
+function M.stage_lua(info, destination)
+    for _, part in ipairs({ "lib/browser", "include" }) do
+        local source, target = paths.join(info.prefix, part), paths.join(destination, part)
+        if platform.windows then
+            require("spec.fixtures.target_selection.support").copy(source, target)
+        else
+            assert(require("lfs").link(source, target, true))
+        end
+    end
+end
+
+function M.stage_runner(info, destination)
+    if not platform.windows then return end
+    local files = require "spec.fixtures.target_selection.support"
+    local root = paths.dirname(paths.dirname(paths.dirname(info.sdk_root)))
+    for _, relative in ipairs(browserlink.windows_runner_files(version.TITAN_LIBRARY_VERSION)) do
+        files.copy(paths.join(root, relative), paths.join(destination, relative))
+    end
 end
 
 function M.require(requirements)

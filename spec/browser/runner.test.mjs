@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, execFile } from "node:child_process";
+import { spawn, spawnSync, execFile } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -13,7 +13,7 @@ import {create} from "../../titan-runtime/browser/titan-browser.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runner = resolve(process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run"));
 const fixture = join(root, "spec/browser/runner-fixtures.mjs");
-const supported = process.platform !== "win32";
+const windows = process.platform === "win32";
 const strict = process.env.TITAN_REQUIRE_BROWSER_TOOLCHAIN === "1";
 const exec = promisify(execFile);
 
@@ -46,8 +46,12 @@ function fixtureRoot(image) {
     return directory;
 }
 
-function launch(args, env = {}) {
-    const child = spawn(runner, args, { cwd: tmpdir(), env: { ...process.env, TITAN_NODE: process.execPath, ...env } });
+function launch(args, env = {}, options = {}) {
+    const launcher = options.launcher ?? (windows ? runner.replaceAll("\\", "/") : runner);
+    const program = windows ? "sh.exe" : launcher;
+    const argv = windows ? [launcher, ...args] : args;
+    const node = windows ? process.execPath.replaceAll("\\", "/") : process.execPath;
+    const child = spawn(program, argv, { cwd: tmpdir(), env: { ...process.env, TITAN_NODE: node, ...env } });
     const stdout = [], stderr = [];
     let hard;
     const deadline = setTimeout(() => {
@@ -66,7 +70,7 @@ function launch(args, env = {}) {
     return { child, result, stdout: () => Buffer.concat(stdout), stderr: () => Buffer.concat(stderr) };
 }
 
-function run(args, env = {}) { return launch(args, env).result; }
+function run(args, env, options) { return launch(args, env, options).result; }
 
 async function chromium(t) {
     const result = await run(["--probe"]);
@@ -98,9 +102,121 @@ async function cleanChromium(result) {
     await absent(path);
     const pid = /\bpid (\d+); profile/.exec(result.stderr.toString());
     if (pid) assert.throws(() => process.kill(Number(pid[1]), 0), { code: "ESRCH" });
-    const { stdout } = await exec("ps", ["-axo", "pid=,args="]);
-    assert.equal(stdout.includes(`--user-data-dir=${path}`), false, `Chromium process still owns ${path}`);
+    if (!windows) {
+        const { stdout } = await exec("ps", ["-axo", "pid=,args="]);
+        assert.equal(stdout.includes(`--user-data-dir=${path}`), false, `Chromium process still owns ${path}`);
+    }
 }
+
+test("Windows engine jobs validate descriptors, retain native IPC and retire engine on either owner loss",
+    { skip: !windows && "platform: requires Windows Job Objects" }, async t => {
+    const helper = resolve(dirname(runner), "../../../bin/titan-browser-job.exe");
+    const providerPath = resolve(dirname(runner), "../../titan/0.6");
+    for (const [name, slot] of [["engine", 3], ["acknowledgement", 4], ["owner", 5]]) {
+        await t.test(`rejects unopened ${name} descriptor`, () => {
+            const stdio = ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe"];
+            stdio[slot] = "ignore";
+            const result = spawnSync(helper, [process.execPath, "-e", "console.log('engine reached')"], {
+                windowsHide: true, stdio, timeout: 10000, encoding: "utf8",
+                env: { ...process.env, TITAN_PATH_0_6: providerPath },
+            });
+            assert.ifError(result.error);
+            assert.equal(result.status, 125, result.stderr);
+            assert.equal(result.stdout, "");
+            assert.match(result.stderr, new RegExp(`^Windows browser job: invalid inherited descriptor slot ${slot}\\r?\\n$`));
+        });
+    }
+    await t.test("forwards CDP pipe EOF before the engine exits", async () => {
+        const worker = "require('node:fs').closeSync(4); setInterval(() => {}, 1000)";
+        const child = spawn(helper, [process.execPath, "-e", worker], {
+            detached: true, windowsHide: true, stdio: ["ignore", "ignore", "pipe", "pipe", "pipe", "pipe", "pipe"],
+            env: { ...process.env, TITAN_PATH_0_6: providerPath },
+        });
+        const closed = new Promise((resolve, reject) => {
+            child.once("error", reject); child.once("close", resolve);
+        });
+        child.stdio[4].resume();
+        child.stdio.at(-1).on("error", () => {});
+        let acknowledgement = "";
+        child.stdio.at(-2).on("data", bytes => { acknowledgement += bytes; });
+        try {
+            await until(() => child.stdio[4].readableEnded || child.exitCode !== null);
+            assert.equal(child.exitCode, null, "helper exited before the CDP pipe closed");
+            child.stdio.at(-1).destroy();
+            assert.equal(await closed, 0);
+            assert.equal(acknowledgement, "1");
+        } finally {
+            child.stdio.at(-1).destroy();
+            if (child.exitCode === null && child.signalCode === null) child.kill();
+        }
+    });
+    for (const mode of ["ipc", "ipc-empty", "ipc-absent", "supervisor-pipe", "helper-death"]) await t.test(mode, async () => {
+        const ipc = mode.startsWith("ipc");
+        const argv = ["", "λ with spaces", 'quote"then slash\\', "C:\\tools\\with space\\"];
+        const path = mode === "ipc" ? "C:\\caller λ;;C:\\with space\\" : mode === "ipc-empty" ? "" : undefined;
+        const worker = ipc
+            ? `process.on('message', value => process.send({value, argv: process.argv.slice(1),
+                path: process.env.TITAN_PATH_0_6 ?? null, saved: process.env.TITAN_BROWSER_JOB_SAVED_PATH ?? null},
+                () => process.exit(37)))`
+            : `const child = require('node:child_process').spawn(process.execPath,
+                ['-e', 'setInterval(() => {}, 1000)'], {detached: true, stdio: 'ignore'});
+               console.log(process.pid + ' ' + child.pid); setInterval(() => {}, 1000)`;
+        const child = spawn(helper, [process.execPath, "-e", worker, "--", ...argv], {
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "pipe", ...(ipc ? ["ipc"] : []), "pipe", "pipe"],
+            env: { ...process.env, TITAN_PATH_0_6: providerPath,
+                TITAN_BROWSER_JOB_SAVED_PATH: path === undefined ? "0" : `1${path}` },
+        });
+        const closed = new Promise((resolve, reject) => {
+            child.once("error", reject); child.once("close", resolve);
+        });
+        let deadline;
+        const expired = new Promise((_, reject) => {
+            deadline = setTimeout(() => reject(new Error(`Windows ${mode} job did not settle`)), 10000);
+        });
+        const settle = pending => Promise.race([pending, expired]);
+        const started = pending => settle(Promise.race([pending, closed.then(status => {
+            throw new Error(`Windows ${mode} helper exited before readiness (${status})`);
+        })]));
+        let proof = "";
+        child.stdio.at(-2).on("data", bytes => { proof += bytes; });
+        child.stdio.at(-1).on("error", () => {});
+        child.stderr.on("data", bytes => { if (strict) process.stderr.write(bytes); });
+        try {
+            if (ipc) {
+                const replied = new Promise(resolve => child.once("message", resolve));
+                child.send({ text: "spaces and λ" });
+                assert.deepEqual(await started(replied), { value: { text: "spaces and λ" }, argv, path: path ?? null, saved: null });
+                assert.equal(await settle(closed), 37);
+                assert.equal(proof, "1");
+            } else {
+                const text = await started(new Promise(resolve => {
+                    let line = "";
+                    child.stdout.setEncoding("utf8").on("data", chunk => {
+                        line += chunk;
+                        if (line.includes("\n")) resolve(line.trim());
+                    });
+                }));
+                const pids = text.split(" ").map(Number);
+                assert.equal(new Set([child.pid, ...pids]).size, 3, text);
+                assert.ok(pids.every(pid => pid > 0), text);
+                if (mode === "supervisor-pipe") child.stdio.at(-1).destroy();
+                else child.kill();
+                await settle(closed);
+                assert.equal(proof, mode === "supervisor-pipe" ? "1" : "");
+                for (const pid of pids) {
+                    await until(() => {
+                        try { process.kill(pid, 0); return false; }
+                        catch (error) { if (error.code === "ESRCH") return true; throw error; }
+                    });
+                }
+            }
+        } finally {
+            clearTimeout(deadline);
+            if (child.exitCode === null && child.signalCode === null) child.kill();
+        }
+    });
+});
 
 async function until(check, milliseconds = 5000) {
     const deadline = performance.now() + milliseconds;
@@ -131,9 +247,11 @@ async function descendantGone(files) {
     const leader = Number(await readFile(files.leader, "utf8"));
     assert.ok(record.pid > 0 && leader > 0 && record.pid !== leader, "fixture did not create a separate descendant");
     assert.ok(record.argv.every(arg => !arg.includes("--user-data-dir")), "descendant unexpectedly matched profile fallback");
-    assert.match(await readFile(files.term, "utf8"), /TERM\n/, "descendant never observed and resisted group SIGTERM");
-    assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" }, "TERM-resistant descendant survived");
-    assert.throws(() => process.kill(-leader, 0), { code: "ESRCH" }, "owned process group survived");
+    if (!windows) {
+        assert.match(await readFile(files.term, "utf8"), /TERM\n/, "descendant never observed and resisted group SIGTERM");
+        assert.throws(() => process.kill(-leader, 0), { code: "ESRCH" }, "owned process group survived");
+    }
+    assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" }, "owned descendant survived");
 }
 
 async function cleanupTrackedRun(execution, files, directory) {
@@ -144,9 +262,18 @@ async function cleanupTrackedRun(execution, files, directory) {
         }
     } finally {
         try {
-            // Retire the recorded, test-owned group even if a regression failed.
-            const leader = Number(await readFile(files.leader, "utf8"));
-            if (leader > 0) process.kill(-leader, "SIGKILL");
+            // Retire only recorded fixture processes if a regression failed.
+            if (windows) {
+                for (const [file, decode] of [[files.leader, Number], [files.record, text => JSON.parse(text).pid]]) {
+                    try {
+                        const pid = decode(await readFile(file, "utf8"));
+                        if (pid > 0) process.kill(pid);
+                    } catch (error) { if (!["ENOENT", "ESRCH"].includes(error.code)) throw error; }
+                }
+            } else {
+                const leader = Number(await readFile(files.leader, "utf8"));
+                if (leader > 0) process.kill(-leader, "SIGKILL");
+            }
         } catch (error) { if (!["ENOENT", "ESRCH"].includes(error.code)) throw error; }
         finally { await rm(directory, { recursive: true, force: true }); }
     }
@@ -238,31 +365,54 @@ test("public image observation forwards aborts and traps but leaves handled prot
     ]);
 });
 
-test("launcher rejects absent and wrong-major Node without stdout", { skip: !supported }, async () => {
-    const missing = join(tmpdir(), "titan-missing-node-329");
+test("launcher rejects absent and wrong-major Node without stdout", async t => {
+    const absent = await mkdtemp(join(tmpdir(), "titan-missing-tools-"));
+    t.after(() => rm(absent, { recursive: true, force: true }));
+    const missing = join(absent, windows ? "node.exe" : "node");
+    const chrome = join(absent, windows ? "chrome.exe" : "chrome");
     const result = await run(["--probe"], { TITAN_NODE: missing });
     assert.equal(result.status, 75);
     assert.equal(result.stdout.length, 0);
     assert.equal(result.stderr.toString(), `titan-browser-run: Node 26 or newer is required (node not executable at "${missing}")\n`);
-    const noPath = await run(["--probe"], { TITAN_NODE: undefined, PATH: "" });
-    assert.equal(noPath.status, 75);
-    assert.equal(noPath.stdout.length, 0);
-    assert.equal(noPath.stderr.toString(), "titan-browser-run: Node 26 or newer is required (node not found (TITAN_NODE unset; not on PATH))\n");
-    const explicit = await run(["--probe"], { PATH: "", TITAN_CHROME: "/missing/chrome-329" });
-    assert.equal(explicit.status, 0, explicit.stderr.toString());
-    const dir = await mkdtemp(join(tmpdir(), "titan-node-resolver-"));
-    try {
-        const node = join(dir, "node");
-        await writeFile(node, "#!/bin/sh\nprintf 'v24.19.0\\n'\n", { mode: 0o755 });
-        const wrong = await run(["--probe"], { TITAN_NODE: node });
+    const node = windows ? process.execPath.replaceAll("\\", "/") : process.execPath;
+    for (const [name, path] of [["missing on PATH", undefined], ["absolute interpreter", node]]) {
+        await t.test(name, async () => {
+            const env = { ...process.env, TITAN_CHROME: chrome, TITAN_NODE: path };
+            const { stdout, stderr, code = 0 } = await exec(windows ? "sh.exe" : "/bin/sh", [
+                "-c", 'PATH=; export PATH; exec "$0" "$@"', windows ? runner.replaceAll("\\", "/") : runner, "--probe",
+            ], { cwd: tmpdir(), env }).catch(error => error);
+            assert.equal(code, path ? 0 : 75, stderr);
+            if (!path) {
+                assert.equal(stdout, "");
+                assert.equal(stderr, "titan-browser-run: Node 26 or newer is required (node not found (TITAN_NODE unset; not on PATH))\n");
+            }
+        });
+    }
+    await t.test("wrong-major interpreter", async st => {
+        const directory = await mkdtemp(join(tmpdir(), "titan-node-resolver-"));
+        st.after(() => rm(directory, { recursive: true, force: true }));
+        let oldNode = process.env.EMSDK_NODE;
+        if (windows && !oldNode) return st.skip("capability: EMSDK_NODE does not name the pinned older Node executable");
+        if (!windows) {
+            oldNode = join(directory, "node");
+            await writeFile(oldNode, "#!/bin/sh\nprintf 'v24.19.0\\n'\n", { mode: 0o755 });
+        }
+        const { stdout } = await exec(oldNode, ["--version"]);
+        const version = stdout.trim();
+        assert.ok(Number(version.match(/^v(\d+)\./)?.[1]) < 26, version);
+        const wrong = await run(["--probe"], { TITAN_NODE: oldNode });
         assert.equal(wrong.status, 75);
         assert.equal(wrong.stdout.length, 0);
-        assert.equal(wrong.stderr.toString(), `titan-browser-run: Node 26 or newer is required ("${node}" reports v24.19.0; expected Node 26 or newer)\n`);
-    } finally { await rm(dir, { recursive: true, force: true }); }
+        assert.match(wrong.stderr.toString(), /Node 26 or newer is required/);
+        assert.ok(wrong.stderr.toString().includes(`reports ${version}; expected Node 26 or newer`));
+    });
 });
 
-test("probe is closed JSON and needs no SDK or browser launch", { skip: !supported }, async () => {
-    const result = await run(["--probe"], { TITAN_CHROME: "/missing/chrome-329" });
+test("probe is closed JSON and needs no SDK or browser launch", async t => {
+    const directory = await mkdtemp(join(tmpdir(), "titan-missing-chrome-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const chrome = join(directory, windows ? "chrome.exe" : "chrome");
+    const result = await run(["--probe"], { TITAN_CHROME: chrome });
     assert.equal(result.status, 0, result.stderr.toString());
     assert.equal(result.stderr.length, 0);
     assert.equal(result.stdout.toString().split("\n").length, 2);
@@ -273,19 +423,60 @@ test("probe is closed JSON and needs no SDK or browser launch", { skip: !support
     assert.equal(info.node.ok, true);
     assert.equal(info.node.reason, null);
     assert.equal(info.chrome.ok, false);
-    assert.equal(info.chrome.path, "/missing/chrome-329");
+    assert.equal(info.chrome.path, chrome);
     assert.equal(info.chrome.version, null);
     assert.ok(info.chrome.reason);
 });
 
-test("CLI misuse is 2 and absent image is harness 75", { skip: !supported }, async () => {
+test("Windows launcher accepts native backslashes in both absolute paths",
+    { skip: !windows && "platform: requires MSYS2 Windows paths" }, async t => {
+    const directory = await mkdtemp(join(tmpdir(), "titan-missing-chrome-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const result = await run(["--probe"], { TITAN_NODE: process.execPath, TITAN_CHROME: join(directory, "chrome.exe") },
+        { launcher: runner });
+    assert.equal(result.status, 0, result.stderr.toString());
+    assert.equal(JSON.parse(result.stdout).node.version, process.version);
+});
+
+test("Windows Chromium PATH respects quoted entries and never searches empty entries",
+    { skip: !windows && "platform: requires a native Win32 PATH" }, async t => {
+    const directory = await mkdtemp(join(tmpdir(), "titan-chrome-path-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const alias = basename(process.execPath);
+    const quoted = join(directory, "tools; with space");
+    await mkdir(quoted);
+    // A real executable with a deliberately unrecognized Chrome banner.
+    await copyFile(process.execPath, join(quoted, alias));
+    const entries = `;;"";'';`;
+    // Bypass MSYS for this probe so the Windows PATH syntax reaches Node verbatim.
+    const probe = async path => {
+        const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH"));
+        const result = await exec(process.execPath, [runner + ".mjs", "--probe"], {
+            cwd: dirname(process.execPath), env: { ...env, PATH: path, TITAN_CHROME: alias },
+        });
+        return JSON.parse(result.stdout).chrome;
+    };
+    const absent = await probe(entries);
+    assert.match(absent.reason, /not found/);
+    assert.equal(absent.version, null);
+    for (const quote of ['"', "'"]) {
+        const found = await probe(`${entries}${quote}${quoted}${quote};`);
+        assert.equal(found.path, join(quoted, alias));
+        assert.equal(found.version, process.version);
+        assert.equal(found.reason, "unrecognized Chrome/Chromium version banner");
+    }
+});
+
+test("CLI misuse is 2 and absent image is harness 75", async t => {
     for (const args of [[], ["--engine", "bad", fixture], ["--timeout", "0", fixture], ["--grace", "-1", fixture], ["--cdp", "bad", fixture]]) {
         const result = await run(args);
         assert.equal(result.status, 2, result.stderr.toString());
         assert.equal(result.stdout.length, 0);
         assert.match(result.stderr.toString(), /usage: titan-browser-run/);
     }
-    const result = await run(["/missing/image-329.mjs"]);
+    const directory = await mkdtemp(join(tmpdir(), "titan-missing-image-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const result = await run([join(directory, "image.mjs")]);
     assert.equal(result.status, 75);
     assert.equal(result.stdout.length, 0);
     assert.match(result.stderr.toString(), /titan-browser-run: harness failure:/);
@@ -293,7 +484,7 @@ test("CLI misuse is 2 and absent image is harness 75", { skip: !supported }, asy
 
 for (const engine of ["node", "chromium"]) {
     for (const cdp of engine === "node" ? ["pipe"] : ["pipe", "port"]) {
-        test(`portable frozen context, GC, exact bytes, and cleanup (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`portable frozen context, GC, exact bytes, and cleanup (${engine}/${cdp})`, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const result = await run(["--engine", engine, "--cdp", cdp, "--grace", "20", "--root", root, "--js-test", fixture]);
             assert.equal(result.status, 0, result.stderr.toString());
@@ -310,7 +501,7 @@ for (const engine of ["node", "chromium"]) {
             assert.deepEqual(forwarded.stdout, Buffer.from(JSON.stringify(args)));
             if (engine === "chromium") await cleanChromium(forwarded);
         });
-        test(`real CLI test image preserves bytes and 0/1/2 status (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`real CLI test image preserves bytes and 0/1/2 status (${engine}/${cdp})`, async t => {
             const image = testImage(t);
             if (!image) return;
             if (engine === "chromium" && !await chromium(t)) return;
@@ -359,7 +550,7 @@ for (const engine of ["node", "chromium"]) {
                 "Usage: <test-executable> [-h|--help] [-v|--verbose] [-f PATTERN|--filter=PATTERN]...\n");
             if (engine === "chromium") for (const result of [passed, failed, skipped, empty, invalid]) await cleanChromium(result);
         });
-        test(`uncaught real-image completion corruption remains a harness failure (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`uncaught real-image completion corruption remains a harness failure (${engine}/${cdp})`, async t => {
             const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
             if (!named) {
                 if (strict) assert.fail("TITAN_BROWSER_LOADER_IMAGE must name the compiled fidelity fixture");
@@ -376,7 +567,7 @@ for (const engine of ["node", "chromium"]) {
                 if (engine === "chromium") await cleanChromium(result);
             });
         });
-        test(`failure categories and bounded cleanup (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`failure categories and bounded cleanup (${engine}/${cdp})`, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const image = process.env.TITAN_BROWSER_RUNNER_IMAGE && resolve(process.env.TITAN_BROWSER_RUNNER_IMAGE);
             const directory = fixtureRoot(image);
@@ -432,7 +623,7 @@ for (const engine of ["node", "chromium"]) {
             ["binding bytes", "abort-binding", "bytes"], ["binding format", "abort-binding", "format"],
             ["binding allocation", "abort-binding", "allocation"],
         ]) {
-            test(`fatal ${phase} abort completes disposal before shutdown (${engine}/${cdp})`, { skip: !supported }, async t => {
+            test(`fatal ${phase} abort completes disposal before shutdown (${engine}/${cdp})`, async t => {
                 const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
                 if (!named) {
                     if (strict) assert.fail("TITAN_BROWSER_LOADER_IMAGE must name the compiled fidelity fixture");
@@ -452,7 +643,7 @@ for (const engine of ["node", "chromium"]) {
                 if (engine === "chromium") await cleanChromium(result);
             });
         }
-        test(`JS module/path isolation and long deadlines (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`JS module/path isolation and long deadlines (${engine}/${cdp})`, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const directory = await mkdtemp(join(tmpdir(), "titan runner-"));
             try {
@@ -461,37 +652,55 @@ for (const engine of ["node", "chromium"]) {
                 await mkdir(inside); await mkdir(outside);
                 await writeFile(join(outside, "secret"), "not a served asset");
                 await writeFile(join(outside, "image.mjs"), "export default function forbidden() {};\n");
-                await symlink(outside, join(inside, "escape"), "dir");
                 const file = join(inside, "fixture unicode λ.mjs");
+                const args = ["--engine", engine, "--cdp", cdp, "--grace", "0", "--js-test", file];
+                await t.test("link escape stays outside the root", async st => {
+                    const escape = join(inside, "escape");
+                    try {
+                        await symlink(outside, escape, windows ? "junction" : "dir");
+                        assert.equal(await readFile(join(escape, "secret"), "utf8"), "not a served asset");
+                        assert.equal(await readFile(join(escape, "image.mjs"), "utf8"), "export default function forbidden() {};\n");
+                    } catch (error) {
+                        if (!windows || !["EPERM", "EACCES", "UNKNOWN"].includes(error.code)) throw error;
+                        return st.skip(`capability: Windows link cannot be created or traversed (${error.code})`);
+                    }
+                    await writeFile(file, `export async function run(context) {
+                        for (const [method, path] of [["bytes", "escape/secret"], ["image", "escape/image.mjs"]]) {
+                            let rejected = false;
+                            try { await context[method](path); } catch { rejected = true; }
+                            context.assert(rejected, "link escaped --root");
+                        }
+                    }\n`);
+                    const escaped = await run(args);
+                    assert.equal(escaped.status, 0, escaped.stderr.toString());
+                    if (engine === "chromium") await cleanChromium(escaped);
+                });
                 // Fetch and instantiate a real sibling Wasm whose filename contains
                 // URL query/fragment characters, not merely inspect its locateFile URL.
-                await writeFile(join(inside, "sibling #?.wasm"), new Uint8Array([
+                const wasmName = windows ? "sibling #.wasm" : "sibling #?.wasm";
+                const factoryName = windows ? "factory #.mjs" : "factory #?.mjs";
+                await writeFile(join(inside, wasmName), new Uint8Array([
                     0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 127,
                     3, 2, 1, 0, 7, 10, 1, 6, 97, 110, 115, 119, 101, 114, 0, 0,
                     10, 6, 1, 4, 0, 65, 42, 11,
                 ]));
-                await writeFile(join(inside, "factory #?.mjs"), `export default async ({locateFile}) => {
-                    const filename = locateFile("sibling #?.wasm");
+                await writeFile(join(inside, factoryName), `export default async ({locateFile}) => {
+                    const filename = locateFile(${JSON.stringify(wasmName)});
                     const bytes = typeof process === "object" && process.versions?.node ?
                         await (await import("node:fs/promises")).readFile(filename) :
                         await (await fetch(filename)).arrayBuffer();
                     return new WebAssembly.Instance(await WebAssembly.compile(bytes)).exports.answer();
                 };\n`);
                 await writeFile(file, `export async function run(context) {
-                    for (const [method, path] of [["bytes", "escape/secret"], ["image", "escape/image.mjs"]]) {
-                        let rejected = false;
-                        try { await context[method](path); } catch { rejected = true; }
-                        context.assert(rejected, "symlink escaped --root");
-                    }
-                    const image = await context.image("factory #?.mjs");
+                    const image = await context.image(${JSON.stringify(factoryName)});
                     context.assert(await image.create({locateFile: image.locateFile}) === 42,
                         "real special-name sibling Wasm was not fetched and instantiated");
                 }\n`);
-                const isolated = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--js-test", file]);
+                const isolated = await run(args);
                 assert.equal(isolated.status, 0, isolated.stderr.toString());
                 if (engine === "chromium") await cleanChromium(isolated);
                 await writeFile(file, "export const notRun = true;\n");
-                const missing = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--js-test", file]);
+                const missing = await run(args);
                 assert.equal(missing.status, 75, missing.stderr.toString());
                 assert.match(missing.stderr.toString(), /JS test module must export run\(context\)/);
                 if (engine === "chromium") await cleanChromium(missing);
@@ -502,7 +711,7 @@ for (const engine of ["node", "chromium"]) {
             assert.doesNotMatch(large.stderr.toString(), /TimeoutOverflowWarning/);
             if (engine === "chromium") await cleanChromium(large);
         });
-        test(`application signed status is masked only at CLI exit (${engine}/${cdp})`, { skip: !supported }, async t => {
+        test(`application signed status is masked only at CLI exit (${engine}/${cdp})`, async t => {
             const image = testImage(t);
             if (!image) return;
             if (engine === "chromium" && !await chromium(t)) return;
@@ -519,7 +728,8 @@ for (const engine of ["node", "chromium"]) {
 }
 
 for (const cdp of ["pipe", "port"]) {
-    test(`launch/connect failure retires only its own process and profile (${cdp})`, { skip: !supported }, async t => {
+    test(`launch/connect failure retires only its own process and profile (${cdp})`,
+        { skip: windows && "platform: launches executable POSIX shell scripts as Chromium substitutes" }, async t => {
         const directory = await mkdtemp(join(tmpdir(), "titan-chrome-launch-"));
         const chrome = join(directory, "chrome");
         const banner = "if [ \"$1\" = --version ]; then printf 'Chromium 156.0.8078.80\\n'; exit 0; fi\n" +
@@ -570,7 +780,8 @@ for (const cdp of ["pipe", "port"]) {
     });
 }
 
-test("port discovery retries partial files and bounds malformed content", { skip: !supported }, async t => {
+test("port discovery retries partial files and bounds malformed content",
+    { skip: windows && "platform: fake Chromium uses a POSIX shebang and SIGTERM handler" }, async t => {
     for (const initial of ["empty", "port", "garbage", "missing"]) await t.test(initial, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-chrome-port-"));
         try {
@@ -633,8 +844,27 @@ test("port discovery retries partial files and bounds malformed content", { skip
     });
 });
 
-test("Node retires TERM-resistant descendants independently of its worker leader", { skip: !supported }, async t => {
-    for (const mode of ["leader-exit", "deadline", "SIGINT", "SIGTERM"]) await t.test(mode, async () => {
+test("Windows runner reports worker IPC disconnect before its deadline", {
+    skip: !windows && "platform: checks EOF through the Windows Job Object helper",
+}, async t => {
+    const directory = await mkdtemp(join(tmpdir(), "titan-node-ipc-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const worker = join(directory, "worker.mjs");
+    await writeFile(worker, `export async function run() {
+        setInterval(() => {}, 1000);
+        process.disconnect();
+        await new Promise(() => {});
+    }\n`);
+    const result = await run(["--engine", "node", "--timeout", "6000", "--grace", "0", "--js-test", worker]);
+    assert.equal(result.status, 75, result.stderr.toString());
+    assert.match(result.stderr.toString(), /harness failure: Node worker IPC disconnected before shutdown/);
+    assert.doesNotMatch(result.stderr.toString(), /cleanup failed/);
+});
+
+test("Node retires owned descendants independently of its worker leader", async t => {
+    for (const mode of ["leader-exit", "deadline", "SIGINT", "SIGTERM"]) await t.test(mode, {
+        skip: windows && mode.startsWith("SIG") && "platform: requires delivery of catchable POSIX signals",
+    }, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-node-group-"));
         const files = await descendantFixture(directory);
         let execution;
@@ -671,7 +901,8 @@ test("Node retires TERM-resistant descendants independently of its worker leader
 });
 
 for (const cdp of ["pipe", "port"]) {
-    test(`Chromium retires TERM-resistant profile-less descendants (${cdp})`, { skip: !supported }, async t => {
+    test(`Chromium retires TERM-resistant profile-less descendants (${cdp})`,
+        { skip: windows && "platform: exercises POSIX shebang and process-group termination" }, async t => {
         for (const mode of ["leader-exit", "deadline", "SIGINT", "SIGTERM"]) await t.test(mode, async () => {
             const directory = await mkdtemp(join(tmpdir(), "titan-chrome-group-"));
             const files = await descendantFixture(directory);
@@ -719,7 +950,8 @@ for (const cdp of ["pipe", "port"]) {
         });
     });
 
-    test(`SIGINT and SIGTERM retire Chromium while real Wasm is busy (${cdp})`, { skip: !supported }, async t => {
+    test(`SIGINT and SIGTERM retire Chromium while real Wasm is busy (${cdp})`,
+        { skip: windows && "platform: Windows child.kill does not deliver catchable POSIX signals" }, async t => {
         if (!await chromium(t)) return;
         for (const signal of ["SIGINT", "SIGTERM"]) await t.test(signal, async () => {
             const execution = launch(["--engine", "chromium", "--cdp", cdp, "--timeout", "10000",
@@ -742,7 +974,8 @@ for (const cdp of ["pipe", "port"]) {
     });
 }
 
-test("owned group EPERM distinguishes retired members from live permission failures", { skip: !supported }, async t => {
+test("owned group EPERM distinguishes retired members from live permission failures",
+    { skip: windows && "platform: exercises POSIX process-group permission handling" }, async t => {
     for (const mode of ["empty", "zombie", "stale", "other-group", "live", "pid-denied"]) await t.test(mode, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-group-eperm-"));
         const files = await descendantFixture(directory);
@@ -791,7 +1024,8 @@ test("owned group EPERM distinguishes retired members from live permission failu
     });
 });
 
-test("exact-profile PID EPERM ignores only retired processes", { skip: !supported }, async t => {
+test("exact-profile PID EPERM ignores only retired processes",
+    { skip: windows && "platform: exercises POSIX ps and PID permission handling" }, async t => {
     for (const mode of ["profile-zombie", "profile-stale", "profile-denied"]) await t.test(mode, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-profile-eperm-"));
         const files = await descendantFixture(directory);
@@ -822,8 +1056,7 @@ test("exact-profile PID EPERM ignores only retired processes", { skip: !supporte
 });
 
 for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium", "port"]]) {
-    test(`required trace fails before main for direct and host-test images (${engine}/${cdp})`,
-        {skip: !supported}, async t => {
+    test(`required trace fails before main for direct and host-test images (${engine}/${cdp})`, async t => {
         const image = await missingTableImage(t);
         if (!image || (engine === "chromium" && !await chromium(t))) return;
         const directory = fixtureRoot(image.file);
@@ -849,7 +1082,7 @@ for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium"
     });
 }
 
-test("required trace uses the existing lazy initialization and disposal lifecycle", {skip: !supported}, async t => {
+test("required trace uses the existing lazy initialization and disposal lifecycle", async t => {
     const image = await missingTableImage(t);
     if (!image) return;
     const {default: createImage} = await import(pathToFileURL(image.file).href);
@@ -994,7 +1227,8 @@ test("imported runner helpers leave CLI dormant and preserve supervisor behavior
     assert.equal(within(root, dirname(root)), false);
 });
 
-test("direct invocation through a symlink still runs the runner CLI", {skip: !supported}, async () => {
+test("direct invocation through a symlink still runs the runner CLI",
+    { skip: windows && "capability: unprivileged Windows links may not be traversable" }, async () => {
     const directory = await mkdtemp(join(tmpdir(), "titan-runner-import-"));
     try {
         const link = join(directory, "runner.mjs");

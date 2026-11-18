@@ -598,8 +598,8 @@ fallback](#the-titan-path).
   selection](target-source-selection.md), as a separate argument or as
   `--target=<label>` (`-t` stays `--tree`). Without it, `titanc` reads
   `TITAN_TARGET`; absent or empty selects the host. The host's own OS label
-  (`linux`, `darwin`, or `windows`) and, on Linux and macOS hosts, `browser`
-  are accepted; `native`, other OS labels, and unknown values are errors.
+  (`linux`, `darwin`, or `windows`) and, on Linux, macOS and Windows hosts,
+  `browser` are accepted; `native`, other OS labels, and unknown values are errors.
   `browser` compiles objects, library archives, and `.mjs`/`.wasm` programs
   and tests with Emscripten and requires `--output` ([Compiling for the
   browser target](browser-target.md)).

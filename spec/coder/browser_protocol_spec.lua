@@ -4,9 +4,11 @@ local compiler_io = require "titan-compiler.io"
 local files = require "spec.fixtures.target_selection.support"
 local fixtures = require "spec.support.browser_fixtures"
 local lfs = require "lfs"
+local paths = require "titan-compiler.path"
+local platform = require "titan-compiler.platform"
 local temporary = require "spec.support.temporary"
 local toolchain = require "spec.support.browser_toolchain"
-local repository = assert(lfs.currentdir())
+local repository = toolchain.repository
 local workspace, prefix, effective_root
 
 -- Deliberately callable, structurally valid corruption. The executing probe,
@@ -15,7 +17,6 @@ local HOOK = [[
 local driver = require "titan-compiler.driver"
 local metadata = require "titan-compiler.staticmetadata"
 local util = require "titan-compiler.util"
-local cdriver = require "c-parser.cdriver"
 local original = driver.link_provider_pair
 function driver.link_provider_pair(request)
     local mode = os.getenv("TITAN_PROTOCOL_CORRUPTION")
@@ -45,9 +46,8 @@ function driver.link_provider_pair(request)
         assert(util.set_file_contents(cfile, source))
         local argv = assert(driver.generated_compile_prefix(request.context))
         for _, argument in ipairs({ "-c", cfile, "-o", filename }) do argv[#argv + 1] = argument end
-        local quoted = {}
-        for index, argument in ipairs(argv) do quoted[index] = assert(cdriver.shell_quote(argument)) end
-        assert(os.execute(table.concat(quoted, " ")))
+        local result = request.context.io:run(argv, { stderr_to_stdout = true })
+        assert(result.ok, result.output or result.diagnostic)
     end
     return original(request)
 end
@@ -104,12 +104,12 @@ end
 local oversized = os.getenv("TITAN_PROTOCOL_OVERSIZED")
 if oversized and oversized ~= "" then
     local link = driver.run_link_command
-    function driver.run_link_command(argv, verbose, output)
-        local linked, term, code = link(argv, verbose, output)
+    function driver.run_link_command(argv, verbose, output, ...)
+        local linked, term, code = link(argv, verbose, output, ...)
         if linked and output and output:match("[.]mjs$") then
             local wasm = output:gsub("[.]mjs$", ".wasm")
-            assert(util.set_file_contents(wasm, assert(util.get_file_contents(oversized, "rb"))))
-            assert(util.set_file_contents(wasm .. ".map", assert(util.get_file_contents(oversized .. ".map", "rb"))))
+            assert(util.set_file_contents(wasm, assert(util.get_file_contents(oversized, "rb")), "wb"))
+            assert(util.set_file_contents(wasm .. ".map", assert(util.get_file_contents(oversized .. ".map", "rb")), "wb"))
         end
         return linked, term, code
     end
@@ -119,7 +119,8 @@ if oversized and oversized ~= "" then
         local strategy = new_sync(...)
         local run = strategy.run
         function strategy:run(argv, options)
-            if argv[1]:match("titan%-browser%-run$") and argv[2] == "--engine" then
+            local runner = argv[1] == "sh.exe" and 2 or 1
+            if argv[runner] and argv[runner]:match("titan%-browser%-run$") and argv[runner + 1] == "--engine" then
                 error("oversize protocol image reached the runner")
             end
             return run(self, argv, options)
@@ -133,8 +134,7 @@ local function prepare(info)
     workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
     prefix = workspace .. "/prefix"; effective_root = prefix
     files.mkdir(prefix .. "/lib")
-    assert(lfs.link(info.prefix .. "/lib/browser", prefix .. "/lib/browser", true))
-    assert(lfs.link(info.prefix .. "/include", prefix .. "/include", true))
+    toolchain.stage_lua(info, prefix)
     local source = browserlink.sdk_assets(fixtures.paths(info.prefix))
     local destination = browserlink.sdk_assets(fixtures.paths(prefix))
     for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
@@ -142,7 +142,8 @@ local function prepare(info)
         files.copy(source[key], destination[key])
     end
     -- The source launcher is executable; binary copying alone does not retain it.
-    assert(compiler_io.new_sync():run({ "chmod", "+x", destination.runner }).ok)
+    if not platform.windows then assert(compiler_io.new_sync():run({ "chmod", "+x", destination.runner }).ok) end
+    toolchain.stage_runner(info, prefix)
     files.write(workspace .. "/hook.lua", HOOK)
     files.write(workspace .. "/src/pkg/left.titan", "function answer(): integer return 42 end\n")
     files.write(workspace .. "/src/pkg/right.titan", "function twice(n: integer): integer return n * 2 end\n")
@@ -159,7 +160,7 @@ local function cli(info, mode, ...)
         "TITAN_PROTOCOL_CORRUPTION=" .. (mode or ""), "TITAN_PROTOCOL_LOG=" .. workspace .. "/executions",
         "TITAN_PROTOCOL_IMAGES=" .. workspace .. "/probe-images",
         "TITAN_PROTOCOL_OVERSIZED=" .. (info.oversized or ""),
-        info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc", info.verbose and "-v" or "-q",
+        info.lua, "-E", "-e", setup, repository .. "/titanc", info.verbose and "-v" or "-q",
         "--target", "browser",
         "--tree", workspace .. "/src", "--output", workspace .. "/out" }
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
@@ -213,7 +214,7 @@ describe("browser executing provider protocol", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare(info)
         local missing = workspace .. "/missing Node"
-        local unavailable = { prefix = info.prefix, node = info.node, node_override = missing }
+        local unavailable = { prefix = info.prefix, lua = info.lua, node = info.node, node_override = missing }
         local expected = "browser provider validation requires Node 26 or newer: node not executable at " ..
             string.format("%q", missing) .. "; set TITAN_NODE to a Node 26 or newer executable"
         local result = cli(unavailable, nil, "--incremental", "pkg.left")
@@ -241,16 +242,18 @@ describe("browser executing provider protocol", function()
             local archive = workspace .. "/out/pkg/left.a"
             local predecessor = files.read(archive)
             files.write(workspace .. "/src/pkg/left.titan", "function answer(): integer return 43 end\n")
-            local fault = { prefix = info.prefix, node = info.node, publication_fault = mode }
+            local fault = { prefix = info.prefix, lua = info.lua, node = info.node, publication_fault = mode }
             result = cli(fault, nil, "--incremental", "pkg.left")
             assert.is_false(result.ok)
+            local companion = paths.join(assert(compiler_io.new_sync():realpath(workspace)), "out/pkg/left.so")
             local expected = mode == "before-commit" and "injected browser pre-commit failure" or
-                mode == "rename" and "injected browser archive rename failure" or workspace .. "/out/pkg/left.so"
+                mode == "rename" and "injected browser archive rename failure" or
+                string.format("has native companion %q", companion)
             assert.truthy(result.output:find(expected, 1, true), result.output)
             assert.equal(predecessor, files.read(archive))
             assert.equal("execute\nexecute\n", files.read(workspace .. "/executions"))
             if mode == "late-companion" then
-                assert.equal("preserve late companion", files.read(workspace .. "/out/pkg/left.so"))
+                assert.equal("preserve late companion", files.read(companion))
             end
             no_staged_images(workspace .. "/out")
         end)
@@ -282,7 +285,7 @@ describe("browser executing provider protocol", function()
         local candidate, map = fixtures.oversized_body("native_guard_case", "native_input.c")
         local filename = workspace .. "/candidate.wasm"
         files.write(filename, candidate); files.write(filename .. ".map", map)
-        local rejected = cli({ prefix = info.prefix, node = info.node, oversized = filename },
+        local rejected = cli({ prefix = info.prefix, lua = info.lua, node = info.node, oversized = filename },
             nil, "--incremental", "pkg.left")
         assert.is_false(rejected.ok, rejected.output)
         assert.matches("selected static provider failed executable-context protocol linking", rejected.output, 1, true)
@@ -336,17 +339,18 @@ function main(args: {string}): integer
 end
 ]])
         effective_root = info.prefix
-        local consumer = { prefix = info.prefix, node = info.node, titan_path = library, verbose = true }
+        local consumer = { prefix = info.prefix, lua = info.lua, node = info.node, titan_path = library, verbose = true }
         result = cli(consumer, nil, "consumer")
         assert.is_true(result.ok, result.output)
         -- The link takes pkg.* from the installed archive and compiles no
         -- source for them.
-        assert.truthy(result.output:find(library .. "/pkg.a", 1, true), result.output)
-        assert.is_nil(result.output:find("pkg/left", 1, true), result.output)
-        assert.is_nil(result.output:find("pkg/right", 1, true), result.output)
+        local output = require("titan-compiler.path").to_slash(result.output)
+        assert.truthy(output:find(library .. "/pkg.a", 1, true), result.output)
+        assert.is_nil(output:find("pkg/left", 1, true), result.output)
+        assert.is_nil(output:find("pkg/right", 1, true), result.output)
         toolchain.check_imports(workspace .. "/out/consumer.mjs", { "entry" })
         for _, engine in ipairs({ "node", "chromium" }) do
-            local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine, "--grace", "0" }
+            local argv = toolchain.runner(info, "--engine", engine, "--grace", "0")
             if engine == "chromium" then argv[#argv + 1] = "--chrome"; argv[#argv + 1] = info.chrome.path end
             argv[#argv + 1] = workspace .. "/out/consumer.mjs"
             result = compiler_io.new_sync():run(argv, { stderr_to_stdout = false })

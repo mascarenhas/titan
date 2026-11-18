@@ -15,6 +15,9 @@ local toolchain = require "spec.support.browser_toolchain"
 local installed_prefix = require "spec.support.installed_prefix"
 local temporary = require "spec.support.temporary"
 local files = require "spec.fixtures.target_selection.support"
+local path_separator = platform.windows and ";" or ":"
+local sdk_remedy = platform.windows and "mingw32-make -f Makefile.win browser-sdk" or "make browser-sdk"
+local lua_remedy = platform.windows and "mingw32-make -f Makefile.win lua-browser" or "make install-browser"
 
 local EXPECTED_RUNTIME_MEMBERS = {
     "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o",
@@ -53,6 +56,9 @@ local function contains(text, fragment)
 end
 
 local function run_with_env(strategy, env, argv)
+    if platform.windows then
+        return strategy:run(argv, { env = env, stderr_to_stdout = true })
+    end
     local full_argv = { "env" }
     local keys = {}
     for k in pairs(env or {}) do keys[#keys + 1] = k end
@@ -124,15 +130,18 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         return workspace
     end
 
-    it("declares lua-browser and browser-sdk only in POSIX Makefile and keeps Makefile.win free of browser targets", function()
+    it("includes the same opt-in browser targets from both host Makefiles", function()
         local makefile = assert(strategy:read_file(paths.join(repository, "Makefile")))
         local makefile_win = assert(strategy:read_file(paths.join(repository, "Makefile.win")))
 
-        contains(makefile, "lua-browser:")
-        contains(makefile, "browser-sdk:")
-        contains(makefile, "scripts/lua_browser.sh")
-        contains(makefile, "scripts/browser_sdk.lua")
-        contains(makefile, "--print-c-objects")
+        local fragment = assert(strategy:read_file(paths.join(repository, "scripts/browser.mk")))
+        for _, host in ipairs({ makefile, makefile_win }) do contains(host, "scripts/browser.mk") end
+        contains(fragment, "lua-browser:")
+        contains(fragment, "scripts/lua_browser.sh")
+        local sdk_recipe = assert(fragment:match("\nbrowser%-sdk:[^\n]*\n(.-)\n\n"))
+        assert.truthy(sdk_recipe:match("^\t%+@%$%(RECURSIVE_WRAPPER_GUARD%)"),
+            "browser-sdk must preserve the dry-run/query guard")
+        contains(sdk_recipe, "scripts/build_browser_sdk.sh")
 
         -- Ordinary Make targets must not invoke lua-browser or browser-sdk or inherit TITAN_TARGET.
         local all_rule = assert(makefile:match("\nall:[^\n]*\n\t([^\n]+)"))
@@ -140,8 +149,9 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.is_nil(all_rule:find("browser-sdk", 1, true))
         contains(makefile, "unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET;")
 
-        assert.is_nil(makefile_win:find("lua%-browser"))
-        assert.is_nil(makefile_win:find("browser%-sdk"))
+        local windows_all = assert(makefile_win:match("\nall:([^\n]*)"))
+        assert.is_nil(windows_all:find("lua-browser", 1, true))
+        assert.is_nil(windows_all:find("browser-sdk", 1, true))
     end)
 
     it("maps browser SDK assets into the sibling lib/titan-browser/<ver>/ tree and diagnoses missing required assets in order", function()
@@ -178,6 +188,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local descriptor = assert(browser.import(fixtures.descriptor(root)))
         local descriptor_assets = browserlink.sdk_assets(descriptor.paths)
         local present = {}
+        local make = sdk_remedy
         local function norm_key(filename)
             return paths.to_slash(paths.normalize(filename))
         end
@@ -200,8 +211,8 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
             assert.is_nil(ok)
             assert.equal(
-                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
-                    descriptor_assets[key], root),
+                string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s'",
+                    descriptor_assets[key], make, root),
                 err)
             local ok_empty_tree, err_empty_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
                 prefix = root,
@@ -209,8 +220,8 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             })
             assert.is_nil(ok_empty_tree)
             assert.equal(
-                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
-                    descriptor_assets[key], root),
+                string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s'",
+                    descriptor_assets[key], make, root),
                 err_empty_tree)
             local ok_tree, err_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
                 prefix = root,
@@ -218,10 +229,20 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             })
             assert.is_nil(ok_tree)
             assert.equal(
-                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s ROCKS_TREE=%s\'',
-                    descriptor_assets[key], root, root .. "-rocks"),
+                string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s ROCKS_TREE=%s'",
+                    descriptor_assets[key], make, root, root .. "-rocks"),
                 err_tree)
             present[norm_key(descriptor_assets[key])] = key == "build_profile" and descriptor.build_profile .. "\n" or "ok"
+        end
+        if platform.windows then
+            for _, relative in ipairs(browserlink.windows_runner_files(version.TITAN_LIBRARY_VERSION)) do
+                local filename = paths.join(root, relative)
+                local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
+                assert.is_nil(ok)
+                assert.equal(string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s'",
+                    filename, make, root), err)
+                present[norm_key(filename)] = "ok"
+            end
         end
 
         -- lpeglabel, provider, and sdk_digests are not bootstrap readiness prerequisites.
@@ -236,23 +257,53 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.is_nil(mismatch)
         assert.equal(string.format("browser SDK %q was built with the %s profile, but this build uses %s; " ..
             "set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
-            "'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin, other,
-            descriptor.build_profile, other, descriptor.build_profile, descriptor.build_profile), mismatch_err)
+            "'%s PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin, other,
+            descriptor.build_profile, other, descriptor.build_profile, make, descriptor.build_profile), mismatch_err)
         local _, tree_err = browserlink.require_sdk({ io = fake_io }, descriptor,
             { prefix = root, rocks_tree = root .. "-rocks" })
-        assert.truthy(tree_err:find("'make browser-sdk PREFIX=<prefix> ROCKS_TREE=<tree> TITAN_BUILD_PROFILE=" ..
+        assert.truthy(tree_err:find("'" .. make .. " PREFIX=<prefix> ROCKS_TREE=<tree> TITAN_BUILD_PROFILE=" ..
             descriptor.build_profile .. "'", 1, true), tree_err)
         for _, content in ipairs({ "", "debug\n", descriptor.build_profile, descriptor.build_profile .. "\n\n" }) do
             present[record] = content
             local invalid, invalid_err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
             assert.is_nil(invalid)
-            assert.equal(string.format("browser SDK build profile %q is invalid; run 'make browser-sdk PREFIX=%s'",
-                descriptor_assets.build_profile, root), invalid_err)
+            assert.equal(string.format("browser SDK build profile %q is invalid; run '%s PREFIX=%s'",
+                descriptor_assets.build_profile, make, root), invalid_err)
         end
     end)
 
+    it("renders the complete SDK repair with the user's root syntax on both hosts", function()
+        local descriptor = { paths = driver.installed_paths(
+            platform.windows and "C:/sdk-root" or "/sdk-root", "browser") }
+        local missing = string.format("browser SDK is incomplete: missing %q; run '",
+            descriptor.paths.libtitan)
+        local context = { io = { stat = function() return nil end } }
+        local original = platform.windows
+        local ok, failure = xpcall(function()
+            for _, row in ipairs({
+                { false, "./sdk", "./separate", "make browser-sdk PREFIX=./sdk ROCKS_TREE=./separate" },
+                { true, [[C:\sdk]], [[C:\separate]],
+                    [[mingw32-make -f Makefile.win browser-sdk PREFIX=C:\sdk ROCKS_TREE=C:\separate]] },
+            }) do
+                platform.windows = row[1]
+                local result, err = browserlink.require_sdk(context, descriptor, {
+                    prefix = row[2], rocks_tree = row[3],
+                })
+                assert.is_nil(result)
+                assert.equal(missing .. row[4] .. "'", err)
+            end
+            platform.windows = false
+            assert.equal("run 'luarocks make' or 'make install-compiler-sdk' first",
+                browserlink.compiler_remedy())
+            platform.windows = true
+            assert.equal("run 'mingw32-make -f Makefile.win compiler' first", browserlink.compiler_remedy())
+        end, debug.traceback)
+        platform.windows = original
+        assert(ok, failure)
+    end)
+
     it("removes only the files browser-sdk installed with make uninstall-browser-sdk", function()
-        local makefile = assert(strategy:read_file(paths.join(repository, "Makefile")))
+        local makefile = assert(strategy:read_file(paths.join(repository, "scripts/browser.mk")))
         contains(makefile, "uninstall-browser-sdk:")
         contains(makefile, "scripts/titan_install.lua uninstall-browser-sdk")
         local installer = assert(loadfile(paths.join(repository, "scripts/titan_install.lua")))()
@@ -262,6 +313,19 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         files.mkdir(directory)
         for _, name in ipairs(installer.browser_sdk_owned) do files.write(directory .. "/" .. name, name) end
         files.write(directory .. "/app.a", "user archive")
+        local host_files = platform.windows and browserlink.windows_runner_files(release) or {}
+        for _, relative in ipairs(host_files) do
+            local filename = paths.join(root, relative)
+            files.mkdir(paths.dirname(filename))
+            files.write(filename, relative)
+        end
+        local user_native = root .. "/lib/titan/" .. release .. "/app.dll"
+        local private_dir = root .. "/lib/titan/" .. release .. "/_titan_browser"
+        local neighbor = private_dir .. "/neighbor.dll"
+        if platform.windows then
+            files.write(user_native, "user provider")
+            files.write(neighbor, "private neighbor")
+        end
         local lua = paths.join(installed_prefix.active(), "bin/lua" .. (platform.windows and ".exe" or ""))
         local function uninstall()
             return strategy:run({ lua, "-E", paths.join(repository, "scripts/titan_install.lua"),
@@ -272,11 +336,20 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         for _, name in ipairs(installer.browser_sdk_owned) do
             assert.is_nil(lfs.symlinkattributes(directory .. "/" .. name), name)
         end
+        for _, relative in ipairs(host_files) do
+            assert.is_nil(lfs.symlinkattributes(paths.join(root, relative)), relative)
+        end
+        if platform.windows then
+            assert.equal("user provider", files.read(user_native))
+            assert.equal("private neighbor", files.read(neighbor))
+            assert(os.remove(neighbor))
+        end
         assert.equal("user archive", files.read(directory .. "/app.a"))
         -- Nothing left to remove succeeds, and the directories go once empty.
         assert(os.remove(directory .. "/app.a"))
         result = uninstall()
         assert.is_true(result.ok, result.output)
+        if platform.windows then assert.is_nil(lfs.attributes(private_dir)) end
         assert.is_nil(lfs.attributes(root .. "/lib/titan-browser"))
         assert.equal("directory", lfs.attributes(root .. "/lib", "mode"))
         -- A directory where an SDK file belongs stops the removal before it starts.
@@ -294,7 +367,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         if not info then pending(why) return end
         local peer = paths.join(info.sdk_root, "titan-protobuf.mjs")
         local source = assert(strategy:read_file(paths.join(repository, "titan-runtime/browser/titan-protobuf.mjs")))
-        local rebuild = "staged portable peer is missing or stale; run 'make browser-sdk PREFIX=" .. info.prefix .. "'"
+        local rebuild = "staged portable peer is missing or stale; run '" .. sdk_remedy .. " PREFIX=" .. info.prefix .. "'"
         local staged = assert(strategy:read_file(peer), rebuild)
         assert.equal(source, staged, rebuild)
         local result = strategy:run({
@@ -399,19 +472,17 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
 
     it("bootstraps lfs and compiler modules from TITAN_INSTALL_TREE before PREFIX and rejects incomplete PREFIX browser Lua", function()
         if platform.windows then
-            pending("POSIX browser_sdk.lua bootstrap test")
-            return
+            local info, why = toolchain.require()
+            if not info then pending("capability: Windows bootstrap fixture needs emsdk: " .. why); return end
         end
         local active_prefix = installed_prefix.active()
         local root = new_workspace("-sdk-bootstrap-order")
         local bare_prefix = paths.join(root, "bare-prefix")
         local rocks_tree = paths.join(root, "rocks-tree")
-        local fake_em = paths.join(root, "emscripten")
         files.mkdir(paths.join(bare_prefix, "bin"))
-        files.mkdir(fake_em)
 
-        -- Populate rocks_tree with lfs.so, titan.so, and titan-compiler Lua modules,
-        -- while leaving bare_prefix without lfs.so or titan.so.
+        -- Populate only rocks_tree with the installed Lua modules and DLLs
+        -- (shared objects on POSIX), including lfs and Titan support.
         copy_tree(strategy, paths.join(active_prefix, "lib/lua/5.5"), paths.join(rocks_tree, "lib/lua/5.5"))
         copy_tree(strategy, paths.join(active_prefix, "share/lua/5.5"), paths.join(rocks_tree, "share/lua/5.5"))
         copy_tree(strategy, paths.join(active_prefix, "include"), paths.join(rocks_tree, "include"))
@@ -433,28 +504,30 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
             assert(strategy:write_file(paths.join(rocks_tree, "lib/browser/include/" .. name), content))
         end
 
-        for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do
-            local p = paths.join(fake_em, tool)
-            assert(strategy:write_file(p, "#!/bin/sh\necho 'emcc (Emscripten) 6.0.13'\n"))
-            assert(strategy:run({ "chmod", "0755", p }, { stderr_to_stdout = true }).ok)
+        local env = { PREFIX = bare_prefix, TITAN_INSTALL_TREE = rocks_tree, ROCKS_TREE = rocks_tree }
+        if not platform.windows then
+            local fake_em = paths.join(root, "emscripten")
+            files.mkdir(fake_em)
+            for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do
+                local p = paths.join(fake_em, tool)
+                assert(strategy:write_file(p, "#!/bin/sh\necho 'emcc (Emscripten) 6.0.13'\n"))
+                assert(strategy:run({ "chmod", "0755", p }, { stderr_to_stdout = true }).ok)
+            end
+            env.PATH = fake_em .. ":/usr/bin:/bin"
+            env.EMSDK = ""
         end
 
-        local res = run_with_env(strategy, {
-            PATH = fake_em .. ":/usr/bin:/bin",
-            EMSDK = "",
-            PREFIX = bare_prefix,
-            TITAN_INSTALL_TREE = rocks_tree,
-            ROCKS_TREE = rocks_tree,
-        }, {
-            paths.join(active_prefix, "bin/lua"), "-E",
+        local res = run_with_env(strategy, env, {
+            paths.join(active_prefix, platform.windows and "bin/lua.exe" or "bin/lua"), "-E",
             paths.join(repository, "scripts/browser_sdk.lua"),
             "prepare", paths.join(root, "build"),
         })
         assert.is_false(res.ok)
         assert.is_nil(res.output:find("WRONG_ROOT_PRECEDENCE", 1, true), res.output)
         assert.is_nil(res.output:find("LuaFileSystem", 1, true), res.output)
-        contains(res.output, bare_prefix .. "/lib/browser/liblua-config.txt")
-        contains(res.output, "make install-browser PREFIX=" .. bare_prefix)
+        local prefix_name = paths.to_slash(bare_prefix)
+        contains(res.output, prefix_name .. "/lib/browser/liblua-config.txt")
+        contains(res.output, "install it with '" .. lua_remedy .. " PREFIX=" .. bare_prefix .. "'")
         -- Existing destination files were not deleted or consumed.
         assert.equal("keep-existing-tree", strategy:read_file(sentinel))
     end)
@@ -474,14 +547,14 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
         local fork_rev = assert(record_bytes:match("fork_revision=([0-9a-f]+)"))
         local em_dir = paths.dirname(info.tools.cc[1])
         local base_env = {
-            PATH = em_dir .. ":" .. (os.getenv("PATH") or ""),
+            PATH = em_dir .. path_separator .. (os.getenv("PATH") or ""),
             FORK_REVISION = fork_rev,
             CCACHE_DISABLE = "1",
         }
 
         local function run_lua_browser(extra_args)
             local argv = {
-                "make", "--no-print-directory", "lua-browser",
+                toolchain.make, "--no-print-directory", "-f", toolchain.makefile, "lua-browser",
                 "PREFIX=" .. temp_prefix,
                 "LUA_DIR=" .. temp_lua,
                 "FORK_REVISION=" .. fork_rev,
@@ -583,7 +656,7 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
                 "-sNO_WASM_LEGACY_EXCEPTIONS", "-s NO_WASM_LEGACY_EXCEPTIONS=1",
                 "-mno-exception-handling" }) do
             local config = run_with_env(strategy, base_env, {
-                "make", "-s", "--no-print-directory", "-C", paths.join(temp_lua, "src"),
+                toolchain.make, "-s", "--no-print-directory", "-C", paths.join(temp_lua, "src"),
                 "browser-config", "BROWSER_CC=" .. info.tools.cc[1], "MYCFLAGS=" .. flag,
             })
             assert.is_true(config.ok, config.output)
@@ -604,6 +677,10 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
     end)
 
     it("clears ambient EMCC_CFLAGS in fork browser entrypoints and reuse without changing native goals", function()
+        if platform.windows then
+            pending("platform: the flag-isolation fixture uses executable POSIX shebang compiler wrappers")
+            return
+        end
         local info, why = toolchain.require()
         if not info then pending(why) return end
         local root = new_workspace("-lua-browser-ambient")
@@ -678,7 +755,7 @@ exec cc "$@"
         end
     end)
 
-    it("installs browser-sdk into an empty differing ROCKS_TREE, verifies archives/digests/stack size, and keeps compiler SDK emsdk-free", function()
+    it("installs browser-sdk into an empty differing ROCKS_TREE and verifies archives, digests, and stack size", function()
         local info, why = toolchain.require({ node = true })
         if not info then pending(why) return end
 
@@ -693,7 +770,8 @@ exec cc "$@"
         local em_dir = paths.dirname(info.tools.cc[1])
         local node_dir = paths.dirname(info.node.path)
         local sdk_env = {
-            PATH = em_dir .. ":" .. node_dir .. ":" .. (os.getenv("PATH") or ""),
+            PATH = table.concat({ em_dir, node_dir, paths.join(info.prefix, "bin"), os.getenv("PATH") or "" },
+                path_separator),
             TITAN_NODE = info.node.path,
             CCACHE_DISABLE = "1",
         }
@@ -735,7 +813,7 @@ end
             TITAN_ROOT = no_sdk_root,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser",
+            info.compiler, "--target", "browser",
             "--output", app_out, "-c", "--incremental", "--print-c-objects",
             "--c-source", paths.join(app_dir, "helper.c"),
         })
@@ -750,16 +828,17 @@ end
             TITAN_ROOT = no_sdk_root,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser",
+            info.compiler, "--target", "browser",
             "--tree", app_dir .. ";" .. repository, "--output", app_out,
             "--exe", paths.join(app_out, "app.mjs"),
             "--test", "main_app",
         })
         assert.is_false(link_missing_res.ok)
+        local sdk_prefix = paths.to_slash(no_sdk_root)
+        local runtime = sdk_prefix .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a"
         contains(link_missing_res.output,
-            string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s ROCKS_TREE=%s\'',
-                no_sdk_root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a",
-                no_sdk_root, no_sdk_root))
+            string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s ROCKS_TREE=%s'",
+                runtime, sdk_remedy, no_sdk_root, no_sdk_root))
 
         local link_empty_rocks_res = run_with_env(strategy, {
             PATH = sdk_env.PATH,
@@ -768,54 +847,62 @@ end
             TITAN_ROOT = no_sdk_root,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser",
+            info.compiler, "--target", "browser",
             "--tree", app_dir .. ";" .. repository, "--output", app_out,
             "--exe", paths.join(app_out, "app.mjs"),
             "--test", "main_app",
         })
         assert.is_false(link_empty_rocks_res.ok)
         contains(link_empty_rocks_res.output,
-            string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
-                no_sdk_root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a",
-                no_sdk_root))
+            string.format("browser SDK is incomplete: missing %q; run '%s PREFIX=%s'",
+                runtime, sdk_remedy, no_sdk_root))
         assert.is_nil(link_empty_rocks_res.output:find("ROCKS_TREE=", 1, true), link_empty_rocks_res.output)
 
         -- An explicit old Node is diagnosed. An old EMSDK-bundled Node must
         -- not override the qualifying Node selected through ordinary PATH.
-        local fake_node_dir = paths.join(root, "fake-node24")
-        local good_node_dir = paths.join(root, "node26")
-        local fake_emsdk = paths.join(root, "fake-emsdk")
-        local fake_emsdk_node_dir = paths.join(fake_emsdk, "node/24.19.0_64bit/bin")
-        files.mkdir(fake_node_dir)
-        files.mkdir(fake_emsdk_node_dir)
-        files.mkdir(good_node_dir)
-        local bad_node = paths.join(fake_node_dir, "node")
-        assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v24.19.0'\n"))
-        assert(strategy:run({ "chmod", "0755", bad_node }, { stderr_to_stdout = true }).ok)
-        assert(lfs.link(bad_node, paths.join(fake_emsdk_node_dir, "node"), true))
-        assert(lfs.link(info.node.path, paths.join(good_node_dir, "node"), true))
-        assert(lfs.link(paths.dirname(em_dir), paths.join(fake_emsdk, "upstream"), true))
+        local bad_node, bad_version, candidate_path, emsdk
+        if platform.windows then
+            bad_node = assert(os.getenv("EMSDK_NODE"), "activate emsdk to test with its bundled Node")
+            local version_result = strategy:run({ bad_node, "--version" })
+            assert.is_true(version_result.ok, version_result.output or version_result.diagnostic)
+            bad_version = assert(version_result.output:match("^(v24%.[%d.]+)"))
+            candidate_path = table.concat({ node_dir, paths.dirname(bad_node), sdk_env.PATH }, path_separator)
+        else
+            local fake_node_dir = paths.join(root, "fake-node24")
+            local good_node_dir = paths.join(root, "node26")
+            emsdk = paths.join(root, "fake-emsdk")
+            local bundled_node_dir = paths.join(emsdk, "node/24.19.0_64bit/bin")
+            files.mkdir(fake_node_dir)
+            files.mkdir(bundled_node_dir)
+            files.mkdir(good_node_dir)
+            bad_node, bad_version = paths.join(fake_node_dir, "node"), "v24.19.0"
+            assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v24.19.0'\n"))
+            assert(strategy:run({ "chmod", "0755", bad_node }, { stderr_to_stdout = true }).ok)
+            assert(lfs.link(bad_node, paths.join(bundled_node_dir, "node"), true))
+            assert(lfs.link(info.node.path, paths.join(good_node_dir, "node"), true))
+            assert(lfs.link(paths.dirname(em_dir), paths.join(emsdk, "upstream"), true))
+            candidate_path = table.concat({ good_node_dir, fake_node_dir, sdk_env.PATH }, path_separator)
+        end
 
         local bad_node_res = run_with_env(strategy, {
-            PATH = em_dir .. ":" .. (os.getenv("PATH") or ""),
+            PATH = sdk_env.PATH,
             TITAN_NODE = bad_node,
             CCACHE_DISABLE = "1",
         }, {
-            "make", "--no-print-directory", "browser-sdk",
+            toolchain.make, "--no-print-directory", "-f", toolchain.makefile, "browser-sdk",
             "PREFIX=" .. info.prefix,
             "ROCKS_TREE=" .. rocks_tree,
             "TITAN_BROWSER_BUILD_DIR=" .. build_dir,
             "TITAN_BUILD_PROFILE=validation",
         })
         assert.is_false(bad_node_res.ok)
-        contains(bad_node_res.output,
-            string.format('browser provider validation requires Node 26 or newer: %q reports v24.19.0; expected Node 26 or newer; set TITAN_NODE to a Node 26 or newer executable',
-                assert(strategy:realpath(bad_node))))
+        contains(bad_node_res.output, "reports " .. bad_version ..
+            "; expected Node 26 or newer; set TITAN_NODE to a Node 26 or newer executable")
 
         -- Run into an empty differing ROCKS_TREE with Node 26 on PATH.
         local sdk_res = run_with_env(strategy, {
-            PATH = good_node_dir .. ":" .. fake_node_dir .. ":" .. em_dir .. ":" .. (os.getenv("PATH") or ""),
-            EMSDK = fake_emsdk,
+            PATH = candidate_path,
+            EMSDK = emsdk or os.getenv("EMSDK"),
             TITAN_NODE = "",
             CCACHE_DISABLE = "1",
             -- Both ambient spellings must be replaced, not appended to the
@@ -823,7 +910,7 @@ end
             TITAN_EXTRA_CPPFLAGS = "-include /missing/ambient-titan-cppflags.h",
             CPPFLAGS = "-include /missing/ambient-cppflags.h",
         }, {
-            "make", "--no-print-directory", "browser-sdk",
+            toolchain.make, "--no-print-directory", "-f", toolchain.makefile, "browser-sdk",
             "PREFIX=" .. info.prefix,
             "ROCKS_TREE=" .. rocks_tree,
             "TITAN_BROWSER_BUILD_DIR=" .. build_dir,
@@ -831,8 +918,15 @@ end
         })
         assert.is_true(sdk_res.ok, sdk_res.output)
 
-        -- Native provider directory in rocks_tree must remain untouched/absent.
-        assert.is_nil(strategy:stat(paths.join(rocks_tree, "lib/titan")))
+        -- The browser install creates only its own native helper on Windows.
+        local host_files = platform.windows and browserlink.windows_runner_files(version.TITAN_LIBRARY_VERSION) or {}
+        if platform.windows then
+            local native_tree = paths.join(rocks_tree, "lib/titan", version.TITAN_LIBRARY_VERSION)
+            assert.same({ "_titan_browser" }, strategy:list(native_tree))
+            assert.same({ "windows_job.dll" }, strategy:list(paths.join(native_tree, "_titan_browser")))
+        else
+            assert.is_nil(strategy:stat(paths.join(rocks_tree, "lib/titan")))
+        end
 
         -- Staged browser Lua in rocks_tree matches PREFIX/lib/browser.
         local browser_paths = driver.installed_paths(rocks_tree, "browser")
@@ -954,6 +1048,9 @@ end
         }) do
             expected_digest_files[#expected_digest_files + 1] = assets[key]
         end
+        for _, relative in ipairs(host_files) do
+            expected_digest_files[#expected_digest_files + 1] = paths.join(rocks_tree, relative)
+        end
         local expected_real_set = {}
         for _, filepath in ipairs(expected_digest_files) do
             local real = assert(strategy:realpath(filepath))
@@ -981,14 +1078,13 @@ end
             TITAN_ROOT = rocks_tree,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            info.compiler, "--target", "browser", "-q",
             "--tree", app_dir, "--output", app_out, "--exe", test_exe,
             "--test", "main_app",
         })
         assert.is_true(build_test.ok, build_test.output)
-        local run_test = run_with_env(strategy, sdk_env, {
-            assets.runner, "--engine", "node", test_exe,
-        })
+        local run_test = run_with_env(strategy, sdk_env,
+            browserlink.runner_argv(assets.runner, "--engine", "node", test_exe))
         assert.is_true(run_test.ok, run_test.output)
         contains(run_test.output, "[       OK ] main_app.test_browser_coroutine_stack")
         contains(run_test.output, "[  PASSED  ] 1 test.")
@@ -1039,7 +1135,7 @@ end
             TITAN_ROOT = rocks_tree,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            info.compiler, "--target", "browser", "-q",
             "--output", sjlj_out, "-c", "--incremental", "--print-c-objects",
             "--c-source", paths.join(sjlj_src, "sjlj_helper.c"),
             "--c-source", paths.join(sjlj_src, "plain_helper.c"),
@@ -1057,7 +1153,7 @@ end
             TITAN_ROOT = rocks_tree,
             TITAN_PROBE_CACHE_DISABLE = "1",
         }, {
-            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            info.compiler, "--target", "browser", "-q",
             "--tree", sjlj_src, "--output", sjlj_out, "--incremental",
             "--c-source", paths.join(sjlj_src, "sjlj_helper.c"),
             "--c-source", paths.join(sjlj_src, "plain_helper.c"),
@@ -1089,7 +1185,16 @@ end
         assert.same({ "sjlj_pkg.catcher", "sjlj_pkg.plain" }, scanned_untargeted.key_order)
         assert.equal(4, #scanned_targeted.members)
 
-        -- 4. Native compiler-SDK installation (used by luarocks make) succeeds without emsdk on PATH or EMSDK.
+    end)
+
+    it("installs the native static compiler SDK without emsdk and checks its coroutine stack", function()
+        if platform.windows then
+            pending("platform: this native link fixture uses the Unix static Lua, Titan, and libbacktrace archives")
+            return
+        end
+        local info, why = toolchain.require({ node = true })
+        if not info then pending(why) return end
+        local root = new_workspace("-native-compiler-sdk")
         local native_tree = paths.join(root, "native-compiler-sdk")
         local clean_path = {}
         for entry in (os.getenv("PATH") or ""):gmatch("[^:]+") do

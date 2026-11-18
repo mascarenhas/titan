@@ -26,7 +26,7 @@ describe("browser HTTP and WebSocket clients", function()
         if not info then pending(why) return end
         local env = {TITAN_ROOT = info.prefix, TITAN_NODE = info.node.path, TITAN_CHROME = info.chrome.path}
         -- The builder creates its output tree before invoking either compiler.
-        local build = process.capture({info.prefix .. "/bin/lua", "-E", "spec/browser/build-net.lua", output},
+        local build = process.capture({info.lua, "-E", "spec/browser/build-net.lua", output},
             {cwd = repository, env = env})
         assert.is_true(build.ok, build.output or build.diagnostic)
         for _, engine in ipairs({"node", "chromium"}) do

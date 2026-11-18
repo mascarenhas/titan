@@ -11,7 +11,8 @@ local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 local process = require "titan-compiler.process"
-local repository = assert(lfs.currentdir())
+local repository = toolchain.repository
+local sdk_remedy = platform.windows and "mingw32-make -f Makefile.win browser-sdk" or "make browser-sdk"
 local workspace
 
 local function read(filename)
@@ -56,7 +57,7 @@ local function cli(info, ...)
     local argv = { "env", "TITAN_ROOT=" .. (info.sdk_prefix or info.prefix), "TITAN_TARGET=", "TITAN_PATH_0_6=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=" .. (info.extra_cflags or ""),
         "TITAN_EXTRA_LDFLAGS=", "TITAN_BUILD_PROFILE=" .. (info.profile or driver.BUILD_PROFILE),
-        info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
+        info.lua, "-E", "-e", setup, repository .. "/titanc",
         "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", info.output or workspace .. "/out" }
     for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
     return run(argv)
@@ -78,10 +79,13 @@ local ok, why, code = driver.compile_browser_image(driver.browser_c_image_conten
 assert(ok, tostring(why) .. (code and (", exit " .. code) or ""))
 assert(driver.close_resolver_context(context))
 ]], workspace .. "/src", output, name, worker, table.concat(quoted_flags, ","))
+    -- Keep literal C line continuations out of the host command line.
+    local filename = workspace .. "/" .. name .. "-build.lua"
+    files.write(filename, string.format("package.path=%q..package.path;",
+        repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script)
     local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-        info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
-            repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script })
+        info.lua, "-E", filename })
     assert.is_true(result.ok, result.output or result.diagnostic)
     return output .. "/" .. name .. ".mjs"
 end
@@ -374,6 +378,7 @@ describe("browser image profile and SDK readiness", function()
         local descriptor = fixtures.descriptor()
         local assets = browserlink.sdk_assets(descriptor.paths)
         local present = {}
+        local make = sdk_remedy
         local context = { io = {
             stat = function(_, filename) return present[filename] and { kind = "file" } end,
             read_file = function(_, filename)
@@ -385,13 +390,19 @@ describe("browser image profile and SDK readiness", function()
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
-                "; run 'make browser-sdk PREFIX=/prefix ROCKS_TREE=/rocks'", err)
+                "; run '" .. make .. " PREFIX=/prefix ROCKS_TREE=/rocks'", err)
             present[assets[key]] = true
+        end
+        if platform.windows then
+            local paths = require "titan-compiler.path"
+            for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
+                present[paths.join(descriptor.paths.root, relative)] = true
+            end
         end
         assert.same(assets, assert(browserlink.require_sdk(context, descriptor, { prefix = "/prefix" })))
         present[assets.runtime] = nil
         local _, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix" })
-        assert.truthy(err:find("run 'make browser-sdk PREFIX=/prefix'", 1, true))
+        assert.truthy(err:find("run '" .. make .. " PREFIX=/prefix'", 1, true))
     end)
 
     it("renders native stdio and unavailable file syscalls in every launcher", function()
@@ -703,13 +714,16 @@ describe("browser image profile and SDK readiness", function()
         files.write(workspace .. "/src/plain.titan", "function main(args: {string}): integer\n    return 0\nend\n")
         local sdk = read(info.sdk_root .. "/build-profile"):match("^(%l+)\n$")
         local other = sdk == "production" and "validation" or "production"
-        local result = cli({ prefix = info.prefix, profile = other }, "plain")
+        local result = cli({ prefix = info.prefix, lua = info.lua, profile = other }, "plain")
         assert.is_false(result.ok, "a link under another profile was accepted")
         local log = result.output or result.diagnostic or ""
-        -- The SDK path is the descriptor's spelling of the installation root.
-        assert.truthy(log:find(string.format("/lib/titan-browser/0.6\" was built with the %s profile, but this build " ..
+        -- The diagnosis quotes the descriptor's path spelling, including
+        -- escaped backslashes from Windows.
+        local make = sdk_remedy
+        assert.truthy(log:gsub("\\+", "/"):find(string.format(
+            "/lib/titan-browser/0.6\" was built with the %s profile, but this build " ..
             "uses %s; set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
-            "'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", sdk, other, sdk, other, other), 1, true), log)
+            "'%s PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", sdk, other, sdk, other, make, other), 1, true), log)
         assert.is_nil(lfs.attributes(workspace .. "/out/plain.mjs"))
     end)
 
@@ -719,7 +733,7 @@ describe("browser image profile and SDK readiness", function()
         files.mkdir(workspace .. "/src")
         files.write(workspace .. "/src/plain.titan",
             "function answer(): integer\n    return 1\nend\n")
-        local result = cli({ prefix = info.prefix,
+        local result = cli({ prefix = info.prefix, lua = info.lua,
             compiler_setup = "require('titan-compiler.driver').browser_link_options={assertions=2};" },
             "-c", "plain")
         assert.is_false(result.ok, "a purposeless preset was accepted")
@@ -749,7 +763,7 @@ describe("browser image profile and SDK readiness", function()
             { arguments = { "plain", "--ldflag=--pre-js=pre.js" }, expected = "browser " .. profile ..
                 " link profile does not accept --pre-js; add JavaScript with EM_JS or EM_ASM in a --c-source helper" },
         }) do
-            local result = cli({ prefix = info.prefix, extra_cflags = case.extra_cflags },
+            local result = cli({ prefix = info.prefix, lua = info.lua, extra_cflags = case.extra_cflags },
                 table.unpack(case.arguments))
             assert.is_false(result.ok, "the CLI accepted an owned option: " .. case.expected)
             local log = result.output or result.diagnostic or ""
@@ -863,13 +877,20 @@ describe("real browser test image", function()
         if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
-        files.write(workspace .. "/src/long_double.titan", read(repository .. "/spec/fixtures/browser_images/long_double.titan"))
+        local source = read(repository .. "/spec/fixtures/browser_images/long_double.titan")
+        files.write(workspace .. "/src/long_double.titan", source)
+        if platform.windows then
+            -- The UCRT printf expects double for %Lg; MinGW's formatter
+            -- accepts CLANG64's extended long double.
+            files.write(workspace .. "/src/long_double.windows.titan",
+                (source:gsub("ffi%.printf%(", "ffi.__mingw_printf(")))
+        end
         local setup = string.format("package.path=%q..package.path;",
             repository .. "/?.lua;" .. repository .. "/?/init.lua;")
-        local native_image = workspace .. "/native/long_double"
+        local native_image = workspace .. "/native/long_double" .. (platform.windows and ".exe" or "")
         local native_build = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=", "TITAN_PATH_0_6=",
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-            info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc", "-q", "--incremental",
+            info.lua, "-E", "-e", setup, repository .. "/titanc", "-q", "--incremental",
             "--tree", workspace .. "/src", "--output", workspace .. "/native", "--exe", native_image, "long_double" })
         assert.is_true(native_build.ok, native_build.output)
         local native = run({native_image})
@@ -889,8 +910,8 @@ describe("real browser test image", function()
         local browser_build = cli(info, "--incremental", "--exe", workspace .. "/out/long_double.mjs", "long_double")
         assert.is_true(browser_build.ok, browser_build.output)
         for _, engine in ipairs({"node", "chromium"}) do
-            local result = run({info.sdk_root .. "/titan-browser-run", "--engine", engine, "--grace", "0",
-                workspace .. "/out/long_double.mjs"})
+            local result = run(toolchain.runner(info, "--engine", engine, "--grace", "0",
+                workspace .. "/out/long_double.mjs"))
             assert.is_true(result.ok, result.output)
             local browser_precision, browser_double = result.output:match("precision=(%d+)/(%d+)")
             assert.is_true(tonumber(browser_precision) > tonumber(browser_double), result.output)
@@ -941,7 +962,7 @@ describe("real browser test image", function()
             local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=", "TITAN_PATH_0_6=",
                 "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
                 "TITAN_PROBE_CACHE_DISABLE=1", "CCACHE_DISABLE=1",
-                info.prefix .. "/bin/lua", "-E", "-e", setup .. options, repository .. "/titanc",
+                info.lua, "-E", "-e", setup .. options, repository .. "/titanc",
                 "-v", "--target", "browser", "--no-uv-bootstrap", "--tree", fixture,
                 "-o", workspace .. "/out", "--exe", workspace .. "/out/" .. name .. ".mjs",
                 "--c-source", fixture .. "/trace_support.c" }
@@ -1017,8 +1038,8 @@ describe("real browser test image", function()
         files.mkdir(workspace .. "/src")
         local image = c_image(info, "dynamic-guards", read(repository .. "/spec/fixtures/browser_images/dynamic-guards.c"))
         for _, engine in ipairs({ "node", "chromium" }) do
-            local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
-                "--chrome", info.chrome.path, "--grace", "0", image })
+            local result = run(toolchain.runner(info, "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", image))
             assert.is_true(result.ok, result.output or result.diagnostic)
             assert.truthy(result.output:find("dynamic-guards=5", 1, true), result.output)
         end
@@ -1046,7 +1067,7 @@ describe("real browser test image", function()
         assert.is_true(driver.validate_browser_provider(runtime))
         -- Only objects and archives carry the compiler's metadata payloads.
         local objdump = require("titan-compiler.path").join(
-            require("titan-compiler.path").dirname(info.tools.clang[1]), "llvm-objdump")
+            require("titan-compiler.path").dirname(info.tools.clang[1]), "llvm-objdump" .. (platform.windows and ".exe" or ""))
         for _, image in ipairs({ "image_main", "explicit-program" }) do
             assert.equal("file", lfs.attributes(workspace .. "/out/" .. image .. ".mjs", "mode"))
             local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/" .. image .. ".wasm")))
@@ -1073,9 +1094,9 @@ describe("real browser test image", function()
         local fixture = workspace .. "/out/program-results.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/program-results.mjs"))
         for _, engine in ipairs({ "node", "chromium" }) do
-            result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+            result = run(toolchain.runner(info, "--engine", engine,
                 "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--",
-                "image_main.mjs", "explicit-program.mjs" })
+                "image_main.mjs", "explicit-program.mjs"))
             assert.is_true(result.ok, result.output or result.diagnostic)
         end
     end)
@@ -1105,7 +1126,7 @@ end
             options[#options + 1] = name
             local result = cli(info, table.unpack(options))
             assert.is_true(result.ok, result.output or result.diagnostic)
-            result = run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", workspace .. "/out/" .. name .. ".mjs" })
+            result = run(toolchain.runner(info, "--grace", "0", workspace .. "/out/" .. name .. ".mjs"))
             assert.equal(status, result.status, result.output or result.diagnostic)
         end
     end)
@@ -1127,8 +1148,8 @@ end
         local fixture = workspace .. "/out/entry-results.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/entry-results.mjs"))
         for _, engine in ipairs({ "node", "chromium" }) do
-            local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine,
-                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--" }
+            local argv = toolchain.runner(info, "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--")
             for _, name in ipairs(names) do argv[#argv + 1] = name end
             local result = run(argv)
             assert.is_true(result.ok, result.output or result.diagnostic)
@@ -1143,8 +1164,8 @@ end
         local fixture = workspace .. "/out/stdio-only.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/stdio-only.mjs"))
         for _, engine in ipairs({ "node", "chromium" }) do
-            local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
-                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--", "stdio-image.mjs" })
+            local result = run(toolchain.runner(info, "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--", "stdio-image.mjs"))
             assert.is_true(result.ok, result.output or result.diagnostic)
             assert.is_nil(result.output:find("TITAN_UNEXPECTED_HOST_SHELL", 1, true), result.output)
         end
@@ -1157,9 +1178,8 @@ end
         files.write(workspace .. "/src/image_main.titan", read(repository .. "/spec/fixtures/browser_images/program.titan"))
         local prefix = workspace .. "/prefix"
         files.mkdir(prefix); files.mkdir(prefix .. "/lib")
-        assert(lfs.link(info.prefix .. "/lib/browser", prefix .. "/lib/browser", true))
-        assert(lfs.link(info.prefix .. "/include", prefix .. "/include", true))
-        local isolated = { prefix = info.prefix, sdk_prefix = prefix }
+        toolchain.stage_lua(info, prefix)
+        local isolated = { prefix = info.prefix, lua = info.lua, sdk_prefix = prefix }
         local result = cli(isolated, "-c", "--incremental", "image_main")
         assert.is_true(result.ok, result.output or result.diagnostic)
         assert.equal("file", lfs.attributes(workspace .. "/out/image_main.o", "mode"))
@@ -1170,7 +1190,7 @@ end
         assert.is_false(result.ok)
         local runtime = browserlink.sdk_assets(fixtures.paths(prefix)).runtime
         assert.truthy(result.output:find("browser SDK is incomplete: missing " .. string.format("%q", runtime) ..
-            "; run 'make browser-sdk PREFIX=" .. prefix .. "'", 1, true), result.output)
+            "; run '" .. sdk_remedy .. " PREFIX=" .. prefix .. "'", 1, true), result.output)
         assert.is_nil(lfs.attributes(workspace .. "/out/image_main.mjs"))
         assert.is_nil(lfs.attributes(workspace .. "/out/image_main.wasm"))
     end)
@@ -1191,7 +1211,7 @@ assert(driver.close_resolver_context(context))
 ]], workspace, entrypoint, executable, map)
         local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-            info.prefix .. "/bin/lua", "-E", "-e",
+            info.lua, "-E", "-e",
             string.format("package.path=%q..package.path;", repository .. "/?.lua;" ..
                 repository .. "/?/init.lua;") .. script })
         assert.is_true(result.ok, result.output or result.diagnostic)
@@ -1222,8 +1242,8 @@ process.stdout.write(names[0]);
         assert.truthy(symbol:find("ℳ", 1, true), symbol)
         assert.is_nil(symbol:find("\\u2133", 1, true))
         for _, row in ipairs({ { symbol, 0 }, { symbol .. "_absent", 17 } }) do
-            result = run({ info.sdk_root .. "/titan-browser-run", "--engine", "node", "--grace", "0",
-                workspace .. "/out/trace_names.mjs", "--", row[1] })
+            result = run(toolchain.runner(info, "--engine", "node", "--grace", "0",
+                workspace .. "/out/trace_names.mjs", "--", row[1]))
             assert.equal(row[2], result.status, result.output or result.diagnostic)
         end
     end)
@@ -1235,10 +1255,11 @@ process.stdout.write(names[0]);
         local script = string.format([[
 local driver = require "titan-compiler.driver"
 local strategy = require("titan-compiler.io").new_sync()
+local read_response = require("spec.support.browser_process_audit").read_link_response
 local real_run, links = strategy.run, 0
 function strategy:run(argv, options)
     local count = 0
-    for _, flag in ipairs(argv) do
+    for _, flag in ipairs(read_response(argv[#argv]) or argv) do
         if flag == "-Wl,--trace" then count = count + 1 end
     end
     if count > 0 then
@@ -1274,7 +1295,7 @@ assert(driver.close_resolver_context(context))
 ]], workspace .. "/src", workspace .. "/out")
         local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-            info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
+            info.lua, "-E", "-e", string.format("package.path=%q..package.path;",
                 repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script })
         assert.is_true(result.ok, result.output or result.diagnostic)
         assert.match("^[0-9a-f]+$", image_identity(info, workspace .. "/out/repeated.mjs"))
@@ -1293,7 +1314,7 @@ end
 ]])
         files.write(workspace .. "/src/control-helper.c", "int control_helper(void) { return 37; }\n")
         local library_flag = "-L" .. workspace .. "/src"
-        local variant = { prefix = info.prefix, compiler_setup = string.format([[
+        local variant = { prefix = info.prefix, lua = info.lua, compiler_setup = string.format([[
 local driver = require "titan-compiler.driver"
 driver.browser_link_options = {purpose='baseline',assertions=0,optimization='O2'}
 local run_link = driver.run_link_command
@@ -1324,7 +1345,7 @@ end
         local result = cli(variant, "--incremental", "--c-source", workspace .. "/src/control-helper.c",
             "--ldflag=-Os", "--ldflag=" .. library_flag, "--ldflag=-Wl,--no-demangle", "image_control")
         assert.is_true(result.ok, result.output or result.diagnostic)
-        assert.truthy(result.output:find("control protocol link\n", 1, true),
+        assert.truthy(result.output:match("control protocol link\r?\n"),
             "measurement control did not execute the real static-provider protocol link")
         local image = workspace .. "/out/image_control.mjs"
         local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/image_control.wasm")))
@@ -1363,7 +1384,7 @@ end
             '#include "optimized.h"\nint titan_image_optimized(void) { return TITAN_IMAGE_OPTIMIZED; }\n')
         local identities = {}
         for _, optimization in ipairs({ "O1", "O2" }) do
-            local variant = { prefix = info.prefix, output = workspace .. "/" .. optimization,
+            local variant = { prefix = info.prefix, lua = info.lua, output = workspace .. "/" .. optimization,
                 compiler_setup = "require('titan-compiler.driver').browser_link_options=" ..
                     "{purpose='baseline',assertions=2,optimization='" .. optimization .. "'};" }
             local result = cli(variant, "-c", "--incremental", "--jobs", "2", "--c-source",
@@ -1408,7 +1429,7 @@ end
             local at = assert(header:find("foreign_inline_" .. name .. "(", 1, true))
             local definition = assert(header:find("foreign_inline_" .. name .. "(", at + 1, true))
             local before = header:sub(1, definition - 1)
-            assert.truthy(before:match('#line %d+ "[^\n]-definitions[.]titan"\n[^\n]*$'), name)
+            assert.truthy(before:match('#line %d+ "[^\r\n]-definitions[.]titan"\r?\n[^\r\n]*$'), name)
         end
         result = run({ info.node.path, "--input-type=module", "-e", [[
 import assert from 'node:assert/strict';
@@ -1481,8 +1502,8 @@ end
             assert.is_true(exports[name], "missing browser gateway " .. name)
         end
         assert.is_nil(exports.titan_browser_gate_guarded)
-        result = run({ info.sdk_root .. "/titan-browser-run", "--engine", "node", "--grace", "0",
-            workspace .. "/out/image_case.mjs", "--", "--filter=^image_case[.]test_trivial$" })
+        result = run(toolchain.runner(info, "--engine", "node", "--grace", "0",
+            workspace .. "/out/image_case.mjs", "--", "--filter=^image_case[.]test_trivial$"))
         assert.is_true(result.ok, result.output or result.diagnostic)
         assert.truthy(result.output:find("[==========] 1 test ran.", 1, true), result.output)
         assert.truthy(result.output:find("[  PASSED  ] 1 test.", 1, true), result.output)

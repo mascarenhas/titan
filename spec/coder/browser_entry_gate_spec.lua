@@ -5,7 +5,7 @@ local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local sha256 = require "titan-compiler.sha256"
-local repository = assert(lfs.currentdir())
+local repository = toolchain.repository
 local fixture = repository .. "/spec/fixtures/browser_runtime"
 local workspace
 
@@ -42,7 +42,7 @@ local function build(info, assertions, module, name, is_test, c_source)
     local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         "TITAN_PATH_0_6=", "TITAN_PROBE_CACHE_DISABLE=1", "CCACHE_DISABLE=1",
-        info.prefix .. "/bin/lua", "-E", "-e", code, repository .. "/titanc",
+        info.lua, "-E", "-e", code, repository .. "/titanc",
         "--target", "browser", "-q", "--incremental", "--no-uv-bootstrap",
         "--tree", fixture, "--output", output, "--exe", output .. "/" .. name .. ".mjs",
         "--c-source", fixture .. "/" .. (c_source or "gate.c") }
@@ -81,11 +81,10 @@ describe("browser real runtime entry gate", function()
             -- Node is deliberately first; the exact same image pair then runs
             -- through the installed Chromium runner, not a research adapter.
             for _, engine in ipairs({ "node", "chromium" }) do
-                local runner = info.sdk_root .. "/titan-browser-run"
-                local ok, log = run({ runner, "--engine", engine, "--timeout", "120000",
+                local ok, log = run(toolchain.runner(info, "--engine", engine, "--timeout", "120000",
                     "--grace", "1500", "--root", workspace, "--js-test", workspace .. "/entry-gate.mjs", "--",
                     "assertions-" .. assertions .. "/gate.mjs",
-                    "assertions-" .. assertions .. "/final-fiber.mjs" })
+                    "assertions-" .. assertions .. "/final-fiber.mjs"))
                 -- Print the complete per-item evidence even for failed lanes.
                 io.stdout:write(string.format("\nGATE assertions=%d engine=%s\n%s\n", assertions, engine, log))
                 io.stdout:flush()
@@ -93,9 +92,9 @@ describe("browser real runtime entry gate", function()
                 assert.truthy(log:find('"verdict":"PASS"', 1, true), log)
                 assert.truthy(log:find('"items":9', 1, true), log)
                 assert.truthy(log:find('"waits":', 1, true), log)
-                local guard_ok, guard_log = run({ runner, "--engine", engine, "--timeout", "30000",
+                local guard_ok, guard_log = run(toolchain.runner(info, "--engine", engine, "--timeout", "30000",
                     "--grace", "1500", "--root", workspace, "--js-test", workspace .. "/guard-regression.mjs", "--",
-                    "assertions-" .. assertions .. "/gate.mjs" })
+                    "assertions-" .. assertions .. "/gate.mjs"))
                 io.stdout:write(string.format("\nGUARD regression assertions=%d engine=%s\n%s\n",
                     assertions, engine, guard_log))
                 io.stdout:flush()
@@ -108,10 +107,10 @@ describe("browser real runtime entry gate", function()
             files.write(workspace .. "/entry-lifetimes.mjs", read(fixture .. "/entry-lifetimes.mjs"))
             build(info, assertions, "entry_lifetimes", "entry-lifetimes", false, "entry_lifetimes.c")
             for _, engine in ipairs({ "node", "chromium" }) do
-                local ok, log = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                local ok, log = run(toolchain.runner(info, "--engine", engine,
                     "--timeout", "30000", "--grace", "1500", "--root", workspace,
                     "--js-test", workspace .. "/entry-lifetimes.mjs", "--",
-                    "assertions-" .. assertions .. "/entry-lifetimes.mjs" })
+                    "assertions-" .. assertions .. "/entry-lifetimes.mjs"))
                 io.stdout:write(string.format("\nENTRY LIFETIMES assertions=%d engine=%s\n%s\n",
                     assertions, engine, log))
                 io.stdout:flush()

@@ -8,8 +8,11 @@ local types = require "titan-compiler.types"
 local browserlink = require "titan-compiler.browserlink"
 local driver = require "titan-compiler.driver"
 local browser_fixtures = require "spec.support.browser_fixtures"
+local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
+local output_junction
 
-local repository = assert(lfs.currentdir())
+local repository = toolchain.repository
 local modules = { "bundle.first", "bundle.second" }
 local fixture, native_root, browser_root, provider_images
 local semantic_driver, semantic_contexts, saved_registry
@@ -104,6 +107,10 @@ describe("browser incremental compilation", function()
         native_root, browser_root = fixture.root .. "/native-out", fixture.root .. "/browser-out"
     end
     after_each(function()
+        if output_junction then
+            assert(lfs.rmdir(output_junction))
+            output_junction = nil
+        end
         for _, context in ipairs(semantic_contexts or {}) do
             assert(semantic_driver.close_resolver_context(context))
         end
@@ -164,8 +171,10 @@ function io_module.new_sync(...)
         local result = run(self, argv, options)
         if result.ok then
             for index, flag in ipairs(argv) do
-                if flag == "-o" and argv[index + 1]:match("[.]mjs$") then
-                    local wasm = argv[index + 1]:gsub("[.]mjs$", ".wasm")
+                local output = flag == "-o" and argv[index + 1] or
+                    (flag:match("^@.+[.]mjs[.]rsp$") and flag:sub(2, -5))
+                if output and output:match("[.]mjs$") then
+                    local wasm = output:gsub("[.]mjs$", ".wasm")
                     assert(self:write_file(wasm, assert(self:read_file(%q))))
                     assert(self:write_file(wasm .. ".map", assert(self:read_file(%q))))
                 end
@@ -178,7 +187,7 @@ end
 ]], mjs, observed, candidate_path, map_path))
             local function hooked(setup, collect)
                 local child_coverage = collect ~= false and fixture.collector:init_code() or ""
-                local argv = { info.prefix .. "/bin/lua", "-E", "-e",
+                local argv = { info.lua, "-E", "-e",
                     string.format("package.path=%q..package.path;", fixture.frontend .. "/?.lua;" ..
                         fixture.frontend .. "/?/init.lua;") .. child_coverage .. ";" .. setup,
                     fixture.frontend .. "/titanc", "--tree", fixture.source, "--output", fixture.output }
@@ -204,7 +213,7 @@ end
                 assert.is_nil(name:find(".stage.tmp.", 1, true), name)
                 assert.is_nil(name:find(".old.tmp.", 1, true), name)
             end
-            local ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+            local ran = fixture:run(toolchain.runner(info, "--grace", "0", mjs))
             assert.is_true(ran.ok, ran.output)
             local recovered = fixture:compile(arguments)
             assert.is_true(recovered.ok, recovered.output)
@@ -264,7 +273,7 @@ end
                 end
             end
         end
-        local result = fixture:run({ info.sdk_root .. "/titan-browser-run", "--engine", "node", "--grace", "0", image })
+        local result = fixture:run(toolchain.runner(info, "--engine", "node", "--grace", "0", image))
         assert.is_true(result.ok, result.output)
     end)
 
@@ -306,14 +315,14 @@ end
         local result = fixture:compile(arguments)
         assert.is_true(result.ok, result.output)
         local record = record_path(fixture.output)
-        local trace = fixtures.read(record:gsub("/record$", "/link.d"))
+        local trace = paths.to_slash(fixtures.read(record:gsub("/record$", "/link.d")))
         assert.truthy(trace:find(archive .. "(helper(part).o)", 1, true), trace)
         assert.truthy(trace:find(direct, 1, true), trace)
         result = fixture:compile(arguments)
         assert.is_true(result.ok, result.output)
         assert.matches("Titan link hit", result.output, 1, true)
         local image = fixture.output .. "/pair_main.mjs"
-        local ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", image })
+        local ran = fixture:run(toolchain.runner(info, "--grace", "0", image))
         assert.is_true(ran.ok, ran.output)
         fixtures.write(helper, "int archive_answer(void) { return 7; }\n")
         payload()
@@ -321,7 +330,7 @@ end
         assert.is_true(result.ok, result.output)
         assert.matches("Titan link miss", result.output, 1, true)
         assert.matches("Titan object hit pair_main", result.output, 1, true)
-        ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", image })
+        ran = fixture:run(toolchain.runner(info, "--grace", "0", image))
         assert.is_false(ran.ok)
         assert.equal(7, ran.status)
     end)
@@ -403,8 +412,10 @@ if map_case == "map-missing" or map_case == "map-malformed" then
             local result = run(self, argv, options)
             if result.ok then
                 for index, flag in ipairs(argv) do
-                    if flag == "-o" and argv[index + 1]:match("[.]mjs$") then
-                        local map = argv[index + 1]:gsub("[.]mjs$", ".wasm.map")
+                    local output = flag == "-o" and argv[index + 1] or
+                        (flag:match("^@.+[.]mjs[.]rsp$") and flag:sub(2, -5))
+                    if output and output:match("[.]mjs$") then
+                        local map = output:gsub("[.]mjs$", ".wasm.map")
                         if map_case == "map-missing" then assert(os.remove(map))
                         else assert(self:write_file(map, "malformed source map")) end
                     end
@@ -427,7 +438,7 @@ end
             local setup = string.format("package.path=%q..package.path;",
                 fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;") ..
                 fixture.collector:init_code() .. ";\n" .. string.format("dofile(%q);", hook)
-            local argv = { info.prefix .. "/bin/lua", "-E", "-e", setup, fixture.frontend .. "/titanc",
+            local argv = { info.lua, "-E", "-e", setup, fixture.frontend .. "/titanc",
                 "--tree", fixture.source, "--output", fixture.output }
             for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
             result = fixture:run(argv)
@@ -453,12 +464,12 @@ end
                 assert.is_nil(name:find(".stage.tmp.", 1, true), name)
                 assert.is_nil(name:find(".old.tmp.", 1, true), name)
             end
-            local ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+            local ran = fixture:run(toolchain.runner(info, "--grace", "0", mjs))
             assert.is_true(ran.ok, ran.output)
             result = fixture:compile(arguments)
             assert.is_true(result.ok, result.output)
             assert.matches("Titan link miss", result.output, 1, true)
-            ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+            ran = fixture:run(toolchain.runner(info, "--grace", "0", mjs))
             assert.is_false(ran.ok)
             assert.equal(7, ran.status)
         end)
@@ -470,11 +481,28 @@ end
         local physical_output = fixture.root .. "/physical-out"
         fixtures.mkdir(physical_output)
         fixture.output = fixture.root .. "/output-alias"
-        assert(lfs.link(physical_output, fixture.output, true))
+        if platform.windows then
+            local junction = require("titan-compiler.io").new_sync():run({ "cmd.exe", "/d", "/c", "mklink", "/J",
+                (fixture.output:gsub("/", "\\")), (physical_output:gsub("/", "\\")) })
+            if not junction.ok then
+                pending("capability: same-volume directory junction creation unavailable: " ..
+                    tostring(junction.output or junction.diagnostic))
+                return
+            end
+            output_junction = fixture.output
+            local traversed, reason, code = require("titan")._stat_precise(output_junction, true)
+            if not traversed and code == 448 then
+                pending("capability: Windows refuses traversal of this directory junction (Win32 448)")
+                return
+            end
+            assert(traversed and traversed.kind == "directory", reason)
+        else
+            assert(lfs.link(physical_output, fixture.output, true))
+        end
         local root = fixture.root .. "/sdk"
         fixtures.mkdir(root .. "/lib")
-        assert(lfs.link(info.prefix .. "/lib/browser", root .. "/lib/browser", true))
-        assert(lfs.link(info.prefix .. "/include", root .. "/include", true))
+        toolchain.stage_lua(info, root)
+        toolchain.stage_runner(info, root)
         local assets = browserlink.sdk_assets(driver.installed_paths(root, "browser"))
         local installed = browserlink.sdk_assets(driver.installed_paths(info.prefix, "browser"))
         local keys = { "runtime", "js_library", "bridge_library", "trace_library",
@@ -564,7 +592,7 @@ end
         local setup = string.format("package.path=%q..package.path;",
             fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;") ..
             fixture.collector:init_code() .. ";\n" .. string.format("dofile(%q);", hook)
-        local argv = { info.prefix .. "/bin/lua", "-E", "-e", setup, fixture.frontend .. "/titanc",
+        local argv = { info.lua, "-E", "-e", setup, fixture.frontend .. "/titanc",
             "--tree", fixture.source, "--output", fixture.output }
         for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
         local failed = fixture:run(argv, environment)
@@ -581,10 +609,10 @@ end
             assert.is_nil(name:find(".stage.tmp.", 1, true), name)
             assert.is_nil(name:find(".old.tmp.", 1, true), name)
         end
-        local ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+        local ran = fixture:run(toolchain.runner(info, "--grace", "0", mjs))
         assert.is_true(ran.ok, ran.output)
         assert.matches("Titan link miss", build(), 1, true)
-        ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+        ran = fixture:run(toolchain.runner(info, "--grace", "0", mjs))
         assert.is_false(ran.ok)
         assert.equal(7, ran.status)
     end)
@@ -619,8 +647,8 @@ end
             fixtures.write(directory .. "/publish_main.wasm", wasm[".wasm"])
             fixtures.write(directory .. "/publish_main.wasm.map", map[".wasm.map"])
             fixtures.write(directory .. "/publish_main.wasm.trace", table_[".wasm.trace"])
-            return fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0",
-                directory .. "/publish_main.mjs" })
+            return fixture:run(toolchain.runner(info, "--grace", "0",
+                directory .. "/publish_main.mjs"))
         end
         for _, interrupted in ipairs({ { "after-table", old }, { "after-map", new } }) do
             local ran = run(interrupted[1], old, old, interrupted[2], new)
@@ -643,13 +671,14 @@ end
         prepare_fixture()
         compiled(fixture.host, native_root)
         local native = remember(native_root)
-        local native_archive = fixtures.read(native_root .. "/bundle.a")
+        local native_filename = native_root .. (platform.windows and "/bundle.dll" or "/bundle.a")
+        local native_provider = fixtures.read(native_filename)
         local native_record = record_path(native_root)
         local native_record_bytes = fixtures.read(native_record)
         compiled("browser", browser_root)
         assert.equal("browser\n", fixtures.read(browser_root .. "/.titan-target"))
         assert.is_nil(lfs.attributes(native_root .. "/.titan-target"))
-        assert.is_nil(lfs.attributes(browser_root .. "/bundle.so"))
+        assert.is_nil(lfs.attributes(browser_root .. (platform.windows and "/bundle.dll" or "/bundle.so")))
         local browser = remember(browser_root)
         for _, name in ipairs(modules) do
             local bytes = fixtures.read(object_path(browser_root, name))
@@ -677,7 +706,7 @@ end
         local host_warm = compiled(fixture.host, native_root)
         decisions(host_warm, native)
         assert.matches("Titan link hit", host_warm, 1, true)
-        assert.equal(native_archive, fixtures.read(native_root .. "/bundle.a"))
+        assert.equal(native_provider, fixtures.read(native_filename))
         assert.equal(native_record_bytes, fixtures.read(native_record))
     end)
 

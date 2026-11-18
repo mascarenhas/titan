@@ -3,10 +3,12 @@ local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local filesystem = require "spec.support.filesystem"
+local files = require "spec.fixtures.target_selection.support"
 local fixtures = require "spec.support.browser_fixtures"
 local lfs = require "lfs"
 local layouts = require "titan-compiler.nominallayout"
 local path = require "titan-compiler.path"
+local platform = require "titan-compiler.platform"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local temporary = require "spec.support.temporary"
 local toolchain = require "spec.support.browser_toolchain"
@@ -133,19 +135,15 @@ local function native_inventory(root)
 end
 
 local function browser_context(root, options)
-    local context = driver.new_resolver_context(options)
-    context.target = "browser"
-    -- Synthetic policy fixtures model a supported host, not Windows browser
-    -- compilation. Keep these observations coherent across target reentry.
-    context.uname, context.is_darwin = "Linux", false
-    context.target_descriptor = assert(require("titan-compiler.browsertarget").import(fixtures.descriptor(root)))
-    assert(driver.initialize_platform(context))
-    return context
+    options = options or {}
+    options.target = "browser"
+    local descriptor = assert(require("titan-compiler.browsertarget").import(fixtures.descriptor(root)))
+    return driver._new_resolver_context(options, descriptor)
 end
 
 describe("browser providers", function()
     local root, original_loadlib, original_execute, original_popen, original_source, original_bin
-    local audit_guard, original_new_sync, original_new_resolver
+    local audit_guard, original_new_sync
     local original_process_run, original_process_capture
     before_each(function()
         root = temporary.name("-browser-providers"); mkdir(root)
@@ -153,7 +151,6 @@ describe("browser providers", function()
         require("titan")._loadlib = function() error("browser called _loadlib") end
         original_execute, original_popen = os.execute, io.popen
         original_new_sync = compiler_io.new_sync
-        original_new_resolver = driver.new_resolver_context
         local process = require("titan-compiler.process")
         original_process_run, original_process_capture = process.run, process.capture
         original_source, original_bin = driver.TITAN_SOURCE_PATH, driver.TITAN_BIN_PATH
@@ -162,7 +159,6 @@ describe("browser providers", function()
     after_each(function()
         if audit_guard then audit_guard.restore(); audit_guard = nil end
         compiler_io.new_sync = original_new_sync
-        driver.new_resolver_context = original_new_resolver
         local process = require("titan-compiler.process")
         process.run, process.capture = original_process_run, original_process_capture
         require("titan")._loadlib = original_loadlib
@@ -172,30 +168,12 @@ describe("browser providers", function()
         remove(root)
     end)
 
-    it("models supported browser fixtures even from a Windows host observation", function()
-        driver.new_resolver_context = function(options)
-            local context = original_new_resolver(options)
-            context.uname, context.is_darwin = "Windows", false
-            return context
-        end
+    it("keeps the observed host when activating a browser provider context", function()
+        local host = files.host()
         local context = browser_context(root)
-        driver.new_resolver_context = original_new_resolver
-        assert.equal("Linux", context.uname)
-        assert.is_false(context.is_darwin)
-        assert.equal("linux", context.host_target)
-        local descriptor = context.target_descriptor
-        assert.equal(descriptor, driver.context_target_descriptor(context))
-        assert.equal("linux", context.host_target)
-        assert(driver.close_resolver_context(context))
-    end)
-    it("retains production rejection of real Windows browser host observations", function()
-        local context = driver.new_resolver_context()
-        context.target = "browser"
-        context.uname, context.is_darwin = "Windows", false
-        local ok, err = driver.initialize_platform(context)
-        assert.is_nil(ok)
-        assert.equal("browser builds are supported from Linux and macOS hosts (host is windows)", err)
-        assert.is_nil(context.target_descriptor)
+        assert.equal(host, context.host_target)
+        assert.equal("browser", context.target)
+        assert.equal(context.target_descriptor, driver.context_target_descriptor(context))
         assert(driver.close_resolver_context(context))
     end)
 
@@ -364,7 +342,7 @@ describe("browser providers", function()
     it("refuses symlink companions without touching their target", function()
         local available, message = filesystem.symlink_capability()
         if not available then
-            pending(message)
+            pending("capability: " .. message)
             return
         end
         local context = browser_context(root)
@@ -506,6 +484,30 @@ describe("browser providers", function()
         assert.equal(4, #commands)
     end)
 
+    it("names the browser archiver that fails its deterministic capability check", function()
+        local platform = require "titan-compiler.platform"
+        local process = require "titan-compiler.process"
+        local primary = root .. "/primary.o"
+        write(primary, wasm("pkg.mod"))
+        local context = browser_context(root)
+        local tools = context.target_descriptor.tools
+        local destination = root .. "/out/pkg.a"
+        for _, command in ipairs({ tools.ar[1], tools.ranlib[1] }) do
+            process.capture = function(argv)
+                if not platform.windows then argv = assert(cdriver.split_shell_words(argv[3])) end
+                return { started = true, ok = argv[1] ~= command, why = "exit", status = 3, output = "" }
+            end
+            local staged, err = driver.stage_browser_provider({
+                context = context, public_dso = destination, target = fixtures.fingerprint(),
+                archive_inputs = { { kind = "object", input = primary } },
+            })
+            assert.is_nil(staged)
+            assert.matches("browser archive tool " .. string.format("%q", command), err, 1, true)
+            assert.matches("failed deterministic", err, 1, true)
+        end
+        assert(driver.close_resolver_context(context))
+    end)
+
     it("does not add target probes to native provider lookup", function()
         local context = driver.new_resolver_context()
         context.io.run = function() error("unexpected native target probe") end
@@ -606,7 +608,7 @@ function require(name)
         local function after_tool(argv, tool)
             if tool ~= "emranlib" or os.getenv("BROWSER_CORRUPTION") ~= "corrupt-member" then return end
             local filename = argv[#argv]
-            if not filename:match("/output[.]a$") or corrupted[filename] then return end
+            if not filename:match("[/\\]output[.]a$") or corrupted[filename] then return end
             corrupted[filename] = true
             local parsed = assert(original_require("titan-compiler.staticmetadata").scan_archive(filename))
             local file = assert(io.open(filename, "r+b"))
@@ -624,7 +626,7 @@ function require(name)
                 ar = { assert(os.getenv("BROWSER_AR")) },
                 ranlib = { assert(os.getenv("BROWSER_RANLIB")) } },
             record = function(tool, operation)
-                local file = assert(io.open(assert(os.getenv("BROWSER_COMMAND_LOG")), "a"))
+                local file = assert(io.open(assert(os.getenv("BROWSER_COMMAND_LOG")), "ab"))
                 file:write(tool, " ", operation, "\n"); file:close()
             end,
             after = after_tool,
@@ -665,11 +667,8 @@ function require(name)
                 for _, argument in ipairs({ "-c", cfile, "-o", filename }) do
                     argv[#argv + 1] = argument
                 end
-                local quoted = {}
-                for index, argument in ipairs(argv) do
-                    quoted[index] = assert(original_require("c-parser.cdriver").shell_quote(argument))
-                end
-                assert(os.execute(table.concat(quoted, " ")))
+                local result = request.context.io:run(argv, { stderr_to_stdout = true })
+                assert(result.ok, result.output or result.diagnostic)
             end
             return stage(request)
         end
@@ -690,7 +689,7 @@ describe("browser providers real toolchain", function()
             "BROWSER_CC=" .. info.tools.cc[1], "BROWSER_AR=" .. info.tools.ar[1],
             "BROWSER_RANLIB=" .. info.tools.ranlib[1], "BROWSER_AUDIT_HOOK=" .. root .. "/hook.lua",
             "BROWSER_CORRUPTION=" .. (corruption or ""),
-            info.prefix .. "/bin/lua", "-e",
+            info.lua, "-e",
             string.format("package.path=%q..package.path", repo .. "/?.lua;" .. repo .. "/?/init.lua;") }
     end
     local function run_cli(corruption, ...)
@@ -706,10 +705,9 @@ describe("browser providers real toolchain", function()
         -- the provider and manifest in this isolated publication destination.
         info = real_info
         root = temporary.name("-browser-real-provider"); mkdir(root)
-        repo = assert(lfs.currentdir()); prefix = root .. "/prefix"
+        repo = toolchain.repository; prefix = root .. "/prefix"
         mkdir(prefix .. "/lib")
-        assert(lfs.link(info.prefix .. "/lib/browser", prefix .. "/lib/browser", true))
-        assert(lfs.link(info.prefix .. "/include", prefix .. "/include", true))
+        toolchain.stage_lua(info, prefix)
         sdk = fixtures.paths(prefix).titan_bin; mkdir(sdk)
         log = root .. "/commands"
         write(root .. "/hook.lua", PROVIDER_HOOK)
@@ -721,8 +719,13 @@ describe("browser providers real toolchain", function()
         local source = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(info.prefix))
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
                 "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
-            assert(lfs.link(source[key], assets[key], true))
+            if platform.windows then
+                files.copy(source[key], assets[key])
+            else
+                assert(lfs.link(source[key], assets[key], true))
+            end
         end
+        toolchain.stage_runner(info, prefix)
     end
     after_each(function()
         if root then remove(root) end
@@ -772,9 +775,13 @@ describe("browser providers real toolchain", function()
         prepare(info)
         local profile = native_inventory(root).target_profile
         local encoded = assert(require("titan-compiler.graphcodec").encode(profile))
+        local filename = root .. "/native-profile"
+        write(filename, encoded)
         local script = string.format([[
 local driver = require("titan-compiler.driver")
-local native = assert(require("titan-compiler.graphcodec").decode(%q))
+local file = assert(io.open(%q, "rb"))
+local native = assert(require("titan-compiler.graphcodec").decode(assert(file:read("a"))))
+assert(file:close())
 local context = driver.new_resolver_context({
     target = "browser", analysis_only = true,
     embedded_interface_provider = { provider_file = "/native-host.so",
@@ -788,11 +795,11 @@ assert(service.profile.identity ~= native.identity)
 local result = service:_run_source("baseline", "typedef char browser_pointer[(sizeof(void*) == 4) ? 1 : -1];")
 assert(result.classification == "success", result.diagnostic)
 assert(driver.close_resolver_context(context))
-]], encoded)
+]], filename)
         local argv = lua_argv()
         argv[#argv + 1], argv[#argv + 2] = "-e", script
         local result = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
-        assert.is_true(result.ok, result.output)
+        assert.is_true(result.ok, result.output or result.diagnostic)
     end)
     it("refuses a stale native companion before a warm archive certificate hit", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
@@ -805,7 +812,9 @@ assert(driver.close_resolver_context(context))
         write(companion, "preserve me")
         result = run_cli(nil, "--incremental", "pkg.left")
         assert.is_false(result.ok)
-        assert.matches(companion, result.output, 1, true)
+        assert.matches("has native companion", result.output, 1, true)
+        local diagnostic = platform.windows and path.to_slash(result.output:gsub("\\\\", "\\")) or result.output
+        assert.matches(companion, diagnostic, 1, true)
         assert.equal(original, read(archive_path)); assert.equal("preserve me", read(companion))
     end)
 

@@ -2,6 +2,7 @@ import { spawn, execFile } from "node:child_process";
 import { constants, fstatSync } from "node:fs";
 import { access, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
+import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,6 +10,8 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 const assets = dirname(fileURLToPath(import.meta.url));
+const windows = process.platform === "win32";
+const jobHelper = resolve(assets, "../../../bin/titan-browser-job.exe");
 const diagnostic = text => process.stderr.write(`titan-browser-run: ${text}\n`);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -71,11 +74,31 @@ function parse(argv) {
     return options;
 }
 
+// Mirrors platform.windows_path_entries in regular executable mode; see
+// doc/implementation/windows-build.md#windows-executable-path-entries.
+function* windowsPathEntries(search) {
+    let start = 0;
+    while (start < search.length) {
+        const first = search[start];
+        const quoted = first === '"' || first === "'";
+        const close = quoted ? search.indexOf(first, start + 1) : start;
+        const separator = close < 0 ? -1 : search.indexOf(";", close);
+        const finish = separator < 0 ? search.length : separator;
+        if (quoted && finish === start + 1) throw new Error("malformed Windows executable PATH");
+        const directory = search.slice(start + Number(quoted), finish).replace(/["']$/, "");
+        if (directory) yield directory;
+        start = finish + 1;
+    }
+}
+
 async function executable(value) {
     if (!value) return null;
-    const candidates = value.includes("/") || value.includes("\\") ? [resolve(value)] :
-        (process.env.PATH ?? "").split(delimiter).map(dir => resolve(dir || ".", value));
-    for (const path of candidates) {
+    const explicit = value.includes("/") || value.includes("\\");
+    const tool = windows && !explicit && !value.toLowerCase().endsWith(".exe") ? `${value}.exe` : value;
+    const search = process.env.PATH ?? "";
+    const entries = explicit ? [""] : windows ? windowsPathEntries(search) : search.split(delimiter);
+    for (const directory of entries) {
+        const path = resolve(directory, tool);
         try {
             await access(path, constants.X_OK);
             if ((await stat(path)).isFile()) return path;
@@ -88,7 +111,7 @@ async function chromeInfo(override) {
     let path = null;
     const chosen = override ?? process.env.TITAN_CHROME;
     if (chosen !== undefined) path = await executable(chosen);
-    else for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome-headless-shell"]) {
+    else for (const name of [...(windows ? ["chrome"] : []), "google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome-headless-shell"]) {
         path = await executable(name);
         if (path) break;
     }
@@ -187,6 +210,46 @@ function waitExit(child, ms) {
         child.once("exit", done);
     });
 }
+
+function spawnEngine(executable, args, stdio) {
+    if (!windows) return spawn(executable, args, { detached: true, stdio });
+    // Node still owns its IPC/CDP pipe construction. The native helper
+    // forwards those handles and keeps these two private slots out of Chrome
+    // and the worker: drain acknowledgement, then supervisor lifetime.
+    // Scope the helper's provider lookup to its own installation without
+    // replacing the engine's Titan path (the Node worker can launch Titan).
+    const env = { ...process.env };
+    const pathVariable = "TITAN_PATH_0_6";
+    const inheritedKey = Object.keys(env).find(key => key.toUpperCase() === pathVariable);
+    env.TITAN_BROWSER_JOB_SAVED_PATH = inheritedKey === undefined ? "0" : `1${env[inheritedKey]}`;
+    if (inheritedKey !== undefined) delete env[inheritedKey];
+    env[pathVariable] = resolve(assets, "../../titan/0.6");
+    const child = spawn(jobHelper, [executable, ...args], {
+        detached: true, windowsHide: true, stdio: [...stdio, "pipe", "pipe"], env,
+    });
+    let acknowledgements = 0;
+    child.stdio[stdio.length]?.on("data", bytes => {
+        if (bytes.length === 1 && bytes[0] === 49 && acknowledgements === 0) acknowledgements = 1;
+        else acknowledgements = -1;
+    });
+    child.stdio[stdio.length]?.on("error", () => { acknowledgements = -1; });
+    child.stdio[stdio.length + 1]?.on("error", () => {});
+    child.retireJob = async () => {
+        child.stdio[stdio.length + 1]?.destroy();
+        if (!await waitExit(child, 3000)) {
+            child.kill();
+            if (!await waitExit(child, 1000)) throw new Error("Windows browser job helper did not exit");
+        }
+        // Get the helper's dedicated byte after the process exits. No engine
+        // ever owns that endpoint, so its EOF does not depend on engine stdio.
+        const proof = child.stdio[stdio.length];
+        if (proof && !proof.readableEnded && !proof.destroyed) {
+            await bounded(new Promise(resolve => proof.once("close", resolve)), 1000);
+        }
+        if (acknowledgements !== 1) throw new Error("Windows browser job retirement was not confirmed");
+    };
+    return child;
+}
 async function hasLiveMembers(group, pid) {
     // Darwin can report EPERM for an empty group or zombie-only membership.
     // Inspect only the owned PGID/PID and confirm non-zombie rows individually:
@@ -255,6 +318,9 @@ async function retireGroup(child) {
 // are always pipes into them, so a redirect to a file is visible only here.
 function streamKind(stream) {
     if (stream.isTTY) return "tty";
+    // For Windows named pipes Node already selects a Socket; its fstat
+    // cannot classify the libuv pipe mode as FIFO or socket.
+    if (windows && stream instanceof Socket) return "pipe";
     const status = fstatSync(stream.fd);
     return status.isFile() ? "file" : status.isFIFO() || status.isSocket() ? "pipe" : undefined;
 }
@@ -262,9 +328,8 @@ function streamKind(stream) {
 class NodeEngine {
     constructor(monitor) { this.monitor = monitor; }
     async start(config) {
-        const child = this.child = spawn(process.execPath, ["--expose-gc", join(assets, "titan-browser-node-worker.mjs")], {
-            detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
-        });
+        const child = this.child = spawnEngine(process.execPath,
+            ["--expose-gc", join(assets, "titan-browser-node-worker.mjs")], ["ignore", "pipe", "pipe", "ipc"]);
         this.drained = new Promise(resolve => child.once("close", resolve));
         child.stdout.pipe(process.stdout, { end: false });
         child.stderr.pipe(process.stderr, { end: false });
@@ -285,7 +350,7 @@ class NodeEngine {
         if (!child) return;
         if (!exited(child) && child.connected) child.send({ type: "shutdown" }, () => {});
         await waitExit(child, 500);
-        try { await retireGroup(child); }
+        try { await (windows ? child.retireJob() : retireGroup(child)); }
         finally {
             // close, unlike exit, follows EOF/drain of both output pipes.
             await bounded(this.drained, 1000);
@@ -354,9 +419,8 @@ class ChromiumEngine {
         else args.push("--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0");
         // Root-only act containers must opt in explicitly; ordinary runs keep the sandbox.
         if (process.getuid?.() === 0 && process.env.TITAN_BROWSER_ROOT_NO_SANDBOX === "1") args.push("--no-sandbox");
-        const child = this.child = spawn(this.chrome.path, args, {
-            detached: true, stdio: this.options.cdp === "pipe" ? ["ignore", "ignore", "pipe", "pipe", "pipe"] : ["ignore", "ignore", "pipe"],
-        });
+        const child = this.child = spawnEngine(this.chrome.path, args,
+            this.options.cdp === "pipe" ? ["ignore", "ignore", "pipe", "pipe", "pipe"] : ["ignore", "ignore", "pipe"]);
         diagnostic(`Chromium ${this.chrome.version}; executable ${JSON.stringify(this.chrome.path)}; CDP ${this.options.cdp}; pid ${child.pid}; profile ${JSON.stringify(this.profile)}`);
         this.drained = new Promise(resolve => child.once("close", resolve));
         this.engineLog = "";
@@ -384,7 +448,7 @@ class ChromiumEngine {
             while (!this.closing && !this.monitor.failure) {
                 try {
                     const text = await readFile(join(this.profile, "DevToolsActivePort"), "utf8");
-                    const [port, websocketPath] = text.trim().split("\n");
+                    const [port, websocketPath] = text.trim().split(/\r?\n/);
                     if (/^\d+$/.test(port) && websocketPath?.startsWith("/devtools/browser/")) {
                         endpoint = `ws://127.0.0.1:${port}${websocketPath}`;
                         break;
@@ -394,7 +458,10 @@ class ChromiumEngine {
                     if (performance.now() - malformedSince > 1000) {
                         throw new Error(`invalid DevToolsActivePort: ${JSON.stringify(text)}`);
                     }
-                } catch (error) { if (error.code !== "ENOENT") throw error; }
+                } catch (error) {
+                    // Windows can expose the file before Chromium's exclusive write closes it.
+                    if (error.code !== "ENOENT" && !(windows && error.code === "EBUSY")) throw error;
+                }
                 await delay(20);
             }
             if (!endpoint || this.closing) return;
@@ -478,12 +545,18 @@ class ChromiumEngine {
     }
     async close() {
         this.closing = true;
+        let profileSafe = !windows || !this.child;
         try {
             if (this.cdp?.send) await bounded(this.cdp.request("Browser.close").catch(() => {}), 500);
             if (this.child) {
                 await waitExit(this.child, 1500);
-                try { await retireGroup(this.child); }
-                finally { await this.removeProfileProcesses(); }
+                if (windows) {
+                    await this.child.retireJob();
+                    profileSafe = true;
+                } else {
+                    try { await retireGroup(this.child); }
+                    finally { await this.removeProfileProcesses(); }
+                }
             }
         } finally {
             this.cdp?.close();
@@ -496,7 +569,7 @@ class ChromiumEngine {
             try {
                 if (this.server) { this.server.closeAllConnections(); await new Promise(resolve => this.server.close(resolve)); }
             } finally {
-                if (this.profile) {
+                if (this.profile && profileSafe) {
                     await rm(this.profile, { recursive: true, force: true, maxRetries: 4, retryDelay: 50 });
                     diagnostic(`cleanup: profile ${JSON.stringify(this.profile)} removed`);
                 }
@@ -551,7 +624,6 @@ async function main() {
         return 0;
     }
     if (chrome && !chrome.ok) { diagnostic("headless Chromium not found; set TITAN_CHROME to a Chrome executable"); return 75; }
-    if (process.platform === "win32") throw new Error("browser execution is supported from Linux and macOS hosts");
     const file = await realpath(resolve(options.file));
     const root = await realpath(resolve(options.root ?? dirname(file)));
     if (!(await stat(root)).isDirectory() || !(await stat(file)).isFile() || !within(root, file)) throw new Error("FILE must be a regular file beneath --root");

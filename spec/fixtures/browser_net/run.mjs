@@ -5,6 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {chromiumTrust} from './nss_trust.mjs';
 
 const fixture = dirname(fileURLToPath(import.meta.url));
+const windows = process.platform === 'win32';
 const options = {};
 for (let index = 2; index < process.argv.length; ++index) {
   const key = process.argv[index];
@@ -29,6 +30,8 @@ const interrupt = () => { interrupted = true; for (const child of children) sign
 process.on('SIGINT', interrupt); process.on('SIGTERM', interrupt);
 function signal(child, name) {
   if (!child.pid) return;
+  // The fixture peers have no children; the runner owns its own engine job.
+  if (windows) { child.kill(name); return; }
   try { process.kill(-child.pid, name); } catch (error) { if (error.code !== 'ESRCH') throw error; }
 }
 function start(command, args, env) {
@@ -60,7 +63,8 @@ try {
   const verified = engine === 'node' || (engine === 'chromium' && await chromiumTrust(home, ca));
   const env = {...process.env, NODE_EXTRA_CA_CERTS: ca,
     ...(engine === 'chromium' && process.platform === 'linux' ? {HOME: home} : {})};
-  const native = start(join(root, 'native/server'), [join(root, 'images'), join(repository, 'spec/fixtures/ssl'), join(fixture, 'untrusted.pem')], env);
+  const server = windows ? 'native/server.exe' : 'native/server';
+  const native = start(join(root, server), [join(root, 'images'), join(repository, 'spec/fixtures/ssl'), join(fixture, 'untrusted.pem')], env);
   const [http, valid, wrongHost, untrusted] = await ready(native);
   native.stdout.on('data', chunk => process.stdout.write(chunk));
   const raw = start(process.execPath, [join(fixture, 'wire_peer.mjs')], env);

@@ -64,6 +64,31 @@ function platform.absolute(path, cwd, strategy)
     return nil, err
 end
 
+-- See doc/implementation/windows-build.md#windows-executable-path-entries.
+-- Keep the runner's JavaScript mirror in sync with regular executable mode.
+function platform.windows_path_entries(search, include_empty)
+    local start = 1
+    local limit = #search + (include_empty and 1 or 0)
+    return function()
+        while start <= limit do
+            local first = search:sub(start, start)
+            local quoted = first == '"' or first == "'"
+            local after_quote = quoted and
+                (search:find(first, start + 1, true) or #search + 1) or start
+            local finish = search:find(";", after_quote, true) or #search + 1
+            local directory = search:sub(start, finish - 1)
+            start = finish + 1
+            if quoted then
+                if #directory == 1 then return nil, "malformed Windows executable PATH" end
+                directory = directory:sub(2)
+            end
+            local last = directory:sub(-1)
+            if last == '"' or last == "'" then directory = directory:sub(1, -2) end
+            if directory ~= "" or include_empty then return directory end
+        end
+    end
+end
+
 local function checked_word(word, index, shell)
     if type(word) ~= "string" then
         return nil, "command argument " .. index .. " must be a string"

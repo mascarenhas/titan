@@ -1000,7 +1000,7 @@ if not finalized then
     exit(table.concat(finalize_errors, "\n"))
 end
 local selected_static_archives = {}
-if platform.windows and #resolver_context.selected_static_providers > 0 then
+if target == "windows" and #resolver_context.selected_static_providers > 0 then
     exit("Windows Titan dependencies require DLL providers; static Titan archives are not supported")
 end
 for _, static_provider in ipairs(
@@ -1305,7 +1305,7 @@ if main_module then
     -- The standalone archive probe belongs to the link step that follows it.
     if reporter and link_name then reporter:link_begin(link_name) end
     local probe_ok, probe_err = true
-    if not platform.windows then
+    if target ~= "windows" then
         probe_ok, probe_err = driver.run_standalone_archive_probe(
             archive_entries, archive_names, ofiles, selected_static_archives,
             nil, args.verbose, extra_objects,
@@ -1364,7 +1364,7 @@ else
         driver.classify_native_payloads(extra_objects, native_target)
     if not native_payload then exit(payload_err) end
     if reporter and link_name then reporter:link_begin(link_name) end
-    if platform.windows then
+    if target == "windows" then
         local temporary, temporary_directory =
             driver.staged_library_output(provider_output)
         if not temporary then

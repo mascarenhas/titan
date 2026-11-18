@@ -3,12 +3,11 @@ local toolchain = require "spec.support.browser_toolchain"
 local compiler_io = require "titan-compiler.io"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
-local lfs = require "lfs"
-local repository = assert(lfs.currentdir())
+local repository = toolchain.repository
 local fixture = repository .. "/spec/fixtures/browser_stdlib"
 local checks = dofile("scripts/browser_stdlib.lua")
 local modules = {}
-for _, root in ipairs(assert(checks.browser_roots(compiler_io.new_sync(), repository .. "/Makefile"))) do
+for _, root in ipairs(assert(checks.browser_roots(compiler_io.new_sync()))) do
     modules[#modules + 1] = assert(root:match("^titan%.([%w_]+)$"), root)
 end
 local workspace
@@ -30,7 +29,7 @@ local function build_command(info, module, options)
     local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         "TITAN_PATH_0_6=", "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_JOBS=1",
-        info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
+        info.lua, "-E", "-e", setup, repository .. "/titanc",
         "--target", "browser", "-q", "--incremental", "--test",
         "--tree", fixture .. ";" .. repository .. "/spec/stdlib/titan",
         "--output", workspace .. "/images/" .. name, "--exe", workspace .. "/" .. image(name) }
@@ -74,11 +73,11 @@ describe("browser stdlib initialization and byte fidelity gate", function()
         for _, module in ipairs(modules) do names[#names + 1] = "init_" .. module end
         for _, name in ipairs(names) do toolchain.check_imports(workspace .. "/" .. image(name), { "entry" }) end
         for _, engine in ipairs({ "node", "chromium" }) do
-            local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine,
+            local argv = toolchain.runner(info, "--engine", engine,
                 "--timeout", "120000", "--grace", "1500", "--root", workspace,
                 "--js-test", workspace .. "/gate.mjs", "--",
                 tostring(#modules), image("init_subset"), image("fidelity_test"),
-                image("init_lua_states"), image("init_async_bootstrap") }
+                image("init_lua_states"), image("init_async_bootstrap"))
             for _, module in ipairs(modules) do argv[#argv + 1] = image("init_" .. module) end
             local ok, log = run(argv)
             io.stdout:write("\nSTDLIB GATE engine=" .. engine .. "\n" .. log .. "\n")

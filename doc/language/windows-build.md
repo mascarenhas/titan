@@ -173,6 +173,29 @@ selects an external standalone LuaRocks executable. Close Titan consumers
 first; after a locked-file cleanup failure, close them, reinstall the rock to
 restore the command, and run it again.
 
+## Build for the browser
+
+Use the MSYS2 CLANG64 shell, not native `cmd` or PowerShell, for the browser
+build. Activate [emsdk 6.0.13](browser-target.md#prerequisites), install
+Node 26 or newer (separate from emsdk's bundled Node), and set `TITAN_NODE`
+to that executable or put it first on `PATH`. Then, with the native
+compiler already installed in `PREFIX`, run:
+
+```sh
+make -f Makefile.win lua-browser PREFIX="$PREFIX"
+make -f Makefile.win browser-sdk PREFIX="$PREFIX"
+titanc --target browser -o out-browser --exe out-browser/app.mjs app
+sh "$PREFIX/lib/titan-browser/0.6/titan-browser-run" out-browser/app.mjs
+```
+
+The browser SDK installs separately from native Lua and the native provider.
+Set the same `TITAN_BUILD_PROFILE` for `browser-sdk` and its consumers; the
+`titan-stdlib-browser-test` target defaults to `validation`. For Chromium
+tests also set `TITAN_CHROME` to the headless executable.
+The shell launcher accepts either slash direction in its own path or an
+explicit `TITAN_NODE`. See [the browser runner](browser-target.md#testing-from-the-command-line)
+for the `chromium` engine and its transport options.
+
 ## Long double on worker threads
 
 Windows starts every new thread with 53-bit x87 precision, while a Titan

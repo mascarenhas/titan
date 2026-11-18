@@ -27,6 +27,20 @@ local function shell_words(command)
     end
     return assert(cdriver.split_shell_words(command))
 end
+
+function M.read_link_response(argument)
+    if not (argument and (argument:match("^@.+[.]mjs[.]rsp$") or
+                          argument:match("^@.+[.]mjs[.]link[.]rsp[.]tmp[.][^/\\]+$"))) then
+        return nil
+    end
+    -- The compiler's GNU quoting only escapes backslashes and double quotes,
+    -- both supported by split_shell_words.
+    local file = assert(io.open(argument:sub(2), "rb"))
+    local bytes = assert(file:read("a"))
+    assert(file:close())
+    return assert(cdriver.split_shell_words(bytes))
+end
+
 local function render(argv)
     local words = {}
     for index, value in ipairs(argv) do words[index] = assert(cdriver.shell_quote(value)) end
@@ -48,6 +62,10 @@ function M.install(options)
         if (argv[1] == "/bin/sh" or argv[1] == "sh") and argv[2] == "-c" then
             assert(#argv == 3, "browser process audit rejected shell argv")
             return normalize(argv[3])
+        end
+        if argv[1] == "sh.exe" and options.runner and
+                argv[2] == options.runner:gsub("\\", "/") then
+            return { options.runner, table.unpack(argv, 3) }
         end
         if argv[1] == "env" or argv[1] == "/usr/bin/env" then
             local index = 2
@@ -75,12 +93,14 @@ function M.install(options)
             -- The module check reads two emcc settings, then runs emcc's Node
             -- with emcc's acorn over the staged module.
             local emcc = options.tools.cc and options.tools.cc[#options.tools.cc]
-            if emcc and #argv == 2 and argv[1] == (emcc:gsub("emcc$", "em-config")) and
+            local em_config = emcc and emcc:gsub("emcc%.exe$", "em-config.exe"):gsub("emcc$", "em-config")
+            if emcc and #argv == 2 and argv[1]:gsub("\\", "/") == em_config:gsub("\\", "/") and
                 (argv[2] == "NODE_JS" or argv[2] == "EMSCRIPTEN_ROOT") then
                 operation, tool = "query", "em-config"
             end
             if options.module_check and #argv >= 4 and argv[#argv - 2] == options.module_check and
-                argv[#argv - 1]:match("/node_modules/acorn/dist/acorn[.]mjs$") and argv[#argv]:match("[.]mjs$") then
+                argv[#argv - 1]:gsub("\\", "/"):match("/node_modules/acorn/dist/acorn[.]mjs$") and
+                argv[#argv]:match("[.]mjs$") then
                 operation, tool = "check", "module-check"
             end
             for _, entry in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
@@ -92,6 +112,9 @@ function M.install(options)
                 if matches then
                     tool = entry[2]
                     local args = { table.unpack(argv, #prefix + 1) }
+                    if entry[1] == "cc" and #args == 1 then
+                        args = M.read_link_response(args[1]) or args
+                    end
                     if #args == 1 and args[1] == "--version" then operation = "query"
                     elseif entry[1] == "cc" then
                         for index, flag in ipairs(args) do

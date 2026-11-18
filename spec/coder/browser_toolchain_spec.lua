@@ -7,7 +7,7 @@ local depfile = require "titan-compiler.depfile"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
-local repository = assert(lfs.currentdir())
+local repository = toolchain.repository
 local paths = require "titan-compiler.path"
 local workspace
 
@@ -20,7 +20,7 @@ end
 local function run(info, code, ...)
     local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=" .. (info.target or ""), "CCACHE_DISABLE=1",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-        "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1", info.prefix .. "/bin/lua", "-E", "-e",
+        "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1", info.lua, "-E", "-e",
         string.format("package.path=%q..package.path;", repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. code }
     if info.emcc_cflags then table.insert(argv, 2, "EMCC_CFLAGS=" .. info.emcc_cflags) end
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
@@ -132,7 +132,7 @@ end
             local output = workspace .. "/ambient-out-" .. index
             files.mkdir(output)
             local image = output .. "/ambient.mjs"
-            local poisoned = { prefix = info.prefix, output = output, emcc_cflags = ambient }
+            local poisoned = { prefix = info.prefix, lua = info.lua, output = output, emcc_cflags = ambient }
             local checked = string.format([[
 local driver = require "titan-compiler.driver"
 local incremental = require "titan-compiler.incremental"
@@ -171,7 +171,7 @@ assert(driver.close_resolver_context(restored))
             assert.is_true(ok, log)
             local wat = output .. "/ambient.wat"
             local disassembled = compiler_io.new_sync():run({
-                paths.join(paths.dirname(info.tools.clang[1]), "wasm-dis"),
+                paths.join(paths.dirname(info.tools.clang[1]), "wasm-dis" .. (package.config:sub(1, 1) == "\\" and ".exe" or "")),
                 output .. "/ambient.wasm", "-o", wat,
             }, { stderr_to_stdout = true })
             assert.is_true(disassembled.ok, disassembled.output)
@@ -179,9 +179,8 @@ assert(driver.close_resolver_context(restored))
             assert.truthy(instructions:match("%(try%s"), "legacy Wasm EH try was not emitted")
             assert.is_nil(instructions:find("(try_table", 1, true), "ambient flags changed the EH encoding")
             assert.is_nil(instructions:match('%(import [^\n]-"invoke_'), "ambient flags restored JS SJLJ")
-            local executed = compiler_io.new_sync():run({
-                info.sdk_root .. "/titan-browser-run", "--engine", "node", "--root", output, image,
-            }, { stderr_to_stdout = true })
+            local executed = compiler_io.new_sync():run(toolchain.runner(info,
+                "--engine", "node", "--root", output, image), { stderr_to_stdout = true })
             assert.is_true(executed.ok, executed.output)
         end
     end)
@@ -252,10 +251,15 @@ end
         local dependencies = assert(depfile.parse(read(dependency)))
         local lua_headers = {}
         for _, filename in ipairs(dependencies) do
-            local name = filename:match("([^/]+)$")
+            local compared = paths.to_slash(filename)
+            local name = compared:match("([^/]+)$")
             if header_names[name] then
                 lua_headers[name] = true
-                assert.equal(info.prefix .. "/lib/browser/include/" .. name, filename,
+                local expected = info.prefix .. "/lib/browser/include/" .. name
+                if require("titan-compiler.platform").windows then
+                    compared, expected = compared:lower(), expected:lower()
+                end
+                assert.equal(expected, compared,
                     "unverified Lua header origin in generated module: " .. filename)
             end
         end
@@ -285,7 +289,7 @@ int browser_helper(void) { return 42; }
     it("requires owned output even when browser selection came from the environment", function()
         local info, why = toolchain.require(); if not info then pending(why) return end
         prepare()
-        local selected = { prefix = info.prefix, target = "browser" }
+        local selected = { prefix = info.prefix, lua = info.lua, target = "browser" }
         local ok, output = run(selected, "", repository .. "/titanc",
             "-q", "-c", "--tree", workspace .. "/source", "object_fixture")
         assert.is_false(ok)
@@ -318,12 +322,10 @@ local CHROME_OK = { path = "/opt/chrome/chrome-headless-shell",
 describe("browser toolchain capabilities", function()
     local prefixes
 
-    -- These cases drive POSIX fixture executables; the helper itself rejects a
-    -- Windows host before any capability work, so the same host fact is the
-    -- honest pending reason there.
+    -- These capability tests create executable POSIX shell fixtures.
     local function posix_only()
         if platform.windows then
-            pending("browser builds are supported from Linux and macOS hosts")
+            pending("platform: capability fixture launches a POSIX shebang program")
             return true
         end
         return false
@@ -351,16 +353,18 @@ describe("browser toolchain capabilities", function()
                 "lib/browser/include/luaconf.h", "lib/browser/include/lstate.h" }) do
             files.write(root .. "/" .. relative, "")
         end
-        local em = root .. "/emsdk/upstream/emscripten"
-        files.write(em .. "/emcc", "#!/bin/sh\n" ..
-            "echo 'emcc (Emscripten gcc/clang-like replacement) 6.0.13'\n")
-        make_executable(em .. "/emcc")
-        for _, name in ipairs({ "emar", "emranlib" }) do
-            files.write(em .. "/" .. name, "#!/bin/sh\nexit 0\n")
-            make_executable(em .. "/" .. name)
+        if not platform.windows then
+            local em = root .. "/emsdk/upstream/emscripten"
+            files.write(em .. "/emcc", "#!/bin/sh\n" ..
+                "echo 'emcc (Emscripten gcc/clang-like replacement) 6.0.13'\n")
+            make_executable(em .. "/emcc")
+            for _, name in ipairs({ "emar", "emranlib" }) do
+                files.write(em .. "/" .. name, "#!/bin/sh\nexit 0\n")
+                make_executable(em .. "/" .. name)
+            end
+            files.write(root .. "/emsdk/upstream/bin/clang", "#!/bin/sh\nexit 0\n")
+            make_executable(root .. "/emsdk/upstream/bin/clang")
         end
-        files.write(root .. "/emsdk/upstream/bin/clang", "#!/bin/sh\nexit 0\n")
-        make_executable(root .. "/emsdk/upstream/bin/clang")
         prefixes = prefixes or {}
         prefixes[#prefixes + 1] = root
         return root
@@ -426,7 +430,7 @@ describe("browser toolchain capabilities", function()
         for key, value in pairs(environment) do
             if key ~= "strict" then argv[#argv + 1] = key .. "=" .. value end
         end
-        argv[#argv + 1] = validation_prefix .. "/bin/lua"
+        argv[#argv + 1] = validation_prefix .. "/bin/lua" .. (platform.windows and ".exe" or "")
         argv[#argv + 1] = "-E"
         argv[#argv + 1] = "-e"
         argv[#argv + 1] = string.format(
@@ -438,7 +442,7 @@ describe("browser toolchain capabilities", function()
 
     local function fixture_environment(root, strict)
         return { strict = strict, PREFIX = root, ROCKS_TREE = "",
-            EMSDK = root .. "/emsdk" }
+            EMSDK = platform.windows and (os.getenv("EMSDK") or "") or root .. "/emsdk" }
     end
 
     it("reports Node and Chrome from the installed runner probe without changing the compile-only result", function()
@@ -769,10 +773,13 @@ print("cache-ok")
         assert.truthy(output:find("cache%-ok"), output)
     end)
 
-    it("accepts empty requirements and rejects malformed requirement tables", function()
-        if posix_only() then return end
+    it("accepts explicit empty requirements like compile-only detection", function()
+        if platform.windows then
+            local info, why = toolchain.require()
+            if not info then pending(why); return end
+        end
         local root = fixture_prefix()
-        install_probe(root, NODE_OK, CHROME_OK)
+        if not platform.windows then install_probe(root, NODE_OK, CHROME_OK) end
         local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local base = assert(toolchain.detect())
@@ -783,7 +790,9 @@ print("empty-ok")
 ]])
         assert.is_true(ok, output)
         assert.truthy(output:find("empty%-ok"), output)
+    end)
 
+    it("rejects malformed requirement tables before tool discovery", function()
         for _, literal in ipairs({ "true", '{ node = "yes" }', '{ nope = true }' }) do
             local code = [[
 local toolchain = require "spec.support.browser_toolchain"
@@ -793,7 +802,7 @@ local called_require = pcall(toolchain.require, REQUIREMENT)
 assert(not called_require, "invalid requirements must raise through require too")
 print("invalid-ok")
 ]]
-            local invalid_ok, invalid_output = helper_child(fixture_environment(root),
+            local invalid_ok, invalid_output = helper_child({},
                 (code:gsub("REQUIREMENT", literal)))
             assert.is_true(invalid_ok, literal .. ": " .. invalid_output)
             assert.truthy(invalid_output:find("invalid%-ok"), literal .. ": " .. invalid_output)
@@ -801,13 +810,12 @@ print("invalid-ok")
     end)
 
     it("falls back to the source runner before the SDK exists", function()
-        if posix_only() then return end
         local info, why = toolchain.require({ node = true })
         if not info then pending(why) return end
         local root = fixture_prefix()
-        local ok, output = helper_child({ strict = false, PREFIX = root,
-            ROCKS_TREE = "", EMSDK = root .. "/emsdk",
-            TITAN_NODE = os.getenv("TITAN_NODE") or "" }, [[
+        local environment = fixture_environment(root)
+        environment.TITAN_NODE = info.node.path
+        local ok, output = helper_child(environment, [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason = toolchain.detect({ node = true })
 assert(found, tostring(reason))

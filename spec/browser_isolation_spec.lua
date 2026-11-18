@@ -38,7 +38,7 @@ end
 -- Isolate descriptor verification (covered by its own specs) with a validated,
 -- frozen fixture. Constructors, accessors and cache activation remain real.
 describe("browser semantic cache isolation", function()
-    local subject, root, contexts, saved_registry, saved_browser, saved_initialize_platform
+    local subject, root, contexts, saved_registry, saved_browser
     local provider_fixture, provider_images
     local function context(target, data, analysis_only)
         subject._browser_target = setmetatable({
@@ -57,21 +57,10 @@ describe("browser semantic cache isolation", function()
         subject = fresh_driver()
         subject.TITAN_SOURCE_PATH = root
         saved_browser = subject._browser_target
-        saved_initialize_platform = subject.initialize_platform
-        subject.initialize_platform = function(ctx)
-            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing and
-               platform.windows and ctx.target == "browser" and not ctx._platform_initialized then
-                -- Model the supported host observation, not Windows browser
-                -- support. Keep native Windows provider lookup genuine.
-                ctx.uname, ctx.is_darwin, ctx._platform_initialized = "Linux", false, true
-            end
-            return saved_initialize_platform(ctx)
-        end
     end)
     after_each(function()
         for _, ctx in ipairs(contexts) do assert(subject.close_resolver_context(ctx)) end
         subject._browser_target = saved_browser
-        subject.initialize_platform = saved_initialize_platform
         types.registry = saved_registry
         local owned_fixture, images = provider_fixture, provider_images
         provider_fixture, provider_images = nil, nil
