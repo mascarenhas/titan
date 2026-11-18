@@ -134,6 +134,10 @@ local function normalized_absolute(value)
         compiler_paths.to_slash(compiler_paths.normalize(value)) == compiler_paths.to_slash(value)
 end
 
+local function tool_path(directory, name)
+    return compiler_paths.to_slash(compiler_paths.join(directory, platform.windows and name .. ".exe" or name))
+end
+
 -- Match emcc 6.0.13's joined/split settings, bare =1 and boolean NO_ aliases.
 local function setting_value(flags, index, name)
     local flag = flags[index]
@@ -199,8 +203,7 @@ local function validate(data, context)
     for _, item in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
         local command = tools[item[1]]
         if not argv(command) or #command ~= 1 or not normalized_absolute(command[1]) or
-            compiler_paths.to_slash(command[1]) ~=
-                compiler_paths.to_slash(compiler_paths.join(tools.location, item[2])) then
+            compiler_paths.to_slash(command[1]) ~= tool_path(tools.location, item[2]) then
             return nil, "invalid browser tool argv"
         end
     end
@@ -380,10 +383,12 @@ local function include_root(strategy, directory)
     return compiler_paths.to_slash(compiler_paths.normalize(directory))
 end
 
-local function executable(strategy, filename)
+local function tool_candidate(strategy, filename)
     local info = strategy:stat(filename)
-    return info and info.kind == "file" and type(strategy.executable) == "function" and
-        strategy:executable(filename) == true
+    -- On Windows a regular .exe is only a candidate; tools() must also launch
+    -- it successfully. POSIX retains its effective X_OK check before launch.
+    return info and info.kind == "file" and (platform.windows or
+        type(strategy.executable) == "function" and strategy:executable(filename) == true)
 end
 
 local INSTALL = "; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
@@ -391,8 +396,8 @@ local function tools(context)
     local strategy = context.io
     local emsdk, cc = platform.getenv("EMSDK")
     if emsdk and emsdk ~= "" then
-        cc = assert(absolute(strategy, compiler_paths.join(emsdk, "upstream/emscripten/emcc")))
-        if not executable(strategy, cc) then
+        cc = assert(absolute(strategy, tool_path(compiler_paths.join(emsdk, "upstream/emscripten"), "emcc")))
+        if not tool_candidate(strategy, cc) then
             return nil, "browser target requires Emscripten 6.0.13: emcc not found at " ..
                 string.format("%q", cc) .. " (EMSDK=" .. string.format("%q", emsdk) .. ")" .. INSTALL
         end
@@ -400,9 +405,9 @@ local function tools(context)
         local separator = platform.windows and ";" or ":"
         for directory in ((platform.getenv("PATH") or "") .. separator):gmatch("(.-)" .. separator) do
             local candidate, err = absolute(strategy,
-                compiler_paths.join(directory == "" and "." or directory, "emcc"))
+                tool_path(directory == "" and "." or directory, "emcc"))
             if not candidate then return nil, err end
-            if executable(strategy, candidate) then cc = candidate; break end
+            if tool_candidate(strategy, candidate) then cc = candidate; break end
         end
         if not cc then
             return nil, "browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on PATH)" .. INSTALL
@@ -417,14 +422,24 @@ local function tools(context)
         return nil, "browser target requires Emscripten 6.0.13: " .. string.format("%q", cc) ..
             " reports " .. found .. INSTALL
     end
-    local location = compiler_paths.dirname(cc)
+    local location = compiler_paths.to_slash(compiler_paths.dirname(cc))
     local out = { cc = { cc }, version = found, source = emsdk and emsdk ~= "" and "EMSDK" or "PATH",
         location = location, version_output = result.output }
-    for key, name in pairs({ ar = "emar", ranlib = "emranlib" }) do
-        local filename = compiler_paths.join(location, name)
-        if not executable(strategy, filename) then
+    for _, item in ipairs({ { "ar", "emar" }, { "ranlib", "emranlib" } }) do
+        local key, name = item[1], item[2]
+        local filename = tool_path(location, name)
+        if not tool_candidate(strategy, filename) then
             return nil, "browser target requires Emscripten 6.0.13: " .. name .. " not found at " ..
                 string.format("%q", filename) .. " (emcc=" .. string.format("%q", cc) .. ")" .. INSTALL
+        end
+        if platform.windows then
+            local probe = strategy:run({ filename, "--version" }, { stderr_to_stdout = true })
+            if type(probe) ~= "table" or not probe.ok then
+                local diagnostic = type(probe) == "table" and (probe.diagnostic or probe.output)
+                return nil, "browser target requires Emscripten 6.0.13: cannot execute " .. name ..
+                    " at " .. string.format("%q", filename) ..
+                    (diagnostic and diagnostic ~= "" and ": " .. diagnostic:gsub("%s+$", "") or "") .. INSTALL
+            end
         end
         out[key] = { filename }
     end

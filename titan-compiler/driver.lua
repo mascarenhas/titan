@@ -666,6 +666,12 @@ local function select_platform_defaults(uname, is_darwin, compiler_family)
     driver.IS_DARWIN = is_darwin
 end
 
+function perf.browser_host_error(host)
+    if host ~= "linux" and host ~= "darwin" and host ~= "windows" then
+        return "browser builds are supported from Linux, macOS and Windows hosts (host is " .. tostring(host) .. ")"
+    end
+end
+
 -- Browser state is context-owned. Native process globals remain a host profile.
 function driver._finish_target_initialization(context)
     if context.target == "browser" then
@@ -679,10 +685,8 @@ function driver._finish_target_initialization(context)
         context.embedded_interface_provider_rejected = false
         context.embedded_interface_provider_overlap = nil
         context.used_embedded_target_profile_identity = nil
-        if context.host_target ~= "linux" and context.host_target ~= "darwin" then
-            return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
-                tostring(context.host_target) .. ")"
-        end
+        local host_error = perf.browser_host_error(context.host_target)
+        if host_error then return nil, host_error end
         if not context.target_descriptor then
             for _, item in ipairs({
                 { driver.EXTRA_CPPFLAGS, "TITAN_EXTRA_CPPFLAGS" },
@@ -908,10 +912,8 @@ function driver.validate_target(context, value, origin)
         return nil, prefix .. ": 'native' selects source files for native hosts; " ..
             "it is not a compilation target"
     elseif value == "browser" then
-        if context.host_target ~= "linux" and context.host_target ~= "darwin" then
-            return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
-                context.host_target .. ")"
-        end
+        local host_error = perf.browser_host_error(context.host_target)
+        if host_error then return nil, host_error end
         return value
     elseif value == "linux" or value == "darwin" or value == "windows" then
         if value == context.host_target then return value end

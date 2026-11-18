@@ -387,9 +387,9 @@ The page loads exactly six files: itself, `app.mjs`, `app.wasm`,
 
 You need:
 
-* **A Linux or macOS host.** On any other host, including Windows,
-  `--target browser` stops with `browser builds are supported from Linux and
-  macOS hosts (host is windows)`.
+* **A Linux or macOS host** for the complete SDK and runner workflow below.
+  The compiler also accepts compile-only browser work from MSYS2 CLANG64
+  on Windows with Emscripten and the fork's installed browser Lua.
 * **Emscripten 6.0.13**, exactly. Install it with
   [emsdk](https://emscripten.org/docs/getting_started/downloads.html):
 
@@ -419,8 +419,10 @@ You need:
 
 Titan finds `emcc` through `EMSDK` when it is set and not empty, as
 `$EMSDK/upstream/emscripten/emcc`, and otherwise on `PATH`. `emar` and
-`emranlib` must sit beside that `emcc`. Your `CC`, `AR`, and `RANLIB` settings
-are not used for the browser target. A missing or different Emscripten stops
+`emranlib` must sit beside that `emcc`. On Windows the three tool names end
+in `.exe`, and the native compiler reads semicolon-separated `PATH` entries.
+Your `CC`, `AR`, and `RANLIB` settings are not used for the browser target.
+A missing or different Emscripten stops
 the build with a message that names where Titan looked, the version it found,
 and the commands to fix it:
 
@@ -2006,8 +2008,8 @@ a walk over a deep record graph with `reflect`, has no library limit; under
   four-engine, two-profile recursion-ceiling matrix.
 * A loader instance runs `main` once; calls and explicit notification drains
   remain available afterward. Output sinks may return promises.
-* Only Linux and macOS hosts are supported; `Makefile.win` offers neither
-  `lua-browser` nor `browser-sdk`.
+* `Makefile.win` does not install the browser SDK, and the browser runner
+  does not execute images on Windows.
 * The language server analyzes the host target only.
 * Native source coverage (`--coverage` and its backend/report options) is not
   supported for the browser target.

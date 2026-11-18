@@ -107,6 +107,7 @@ function M.descriptor(root, overrides)
     local record, record_text = M.record()
     local profile = M.profile_data()
     local tools = (platform.windows and "C:" or "") .. "/emsdk/upstream/emscripten/"
+    local suffix = platform.windows and ".exe" or ""
     local build_profile = overrides and overrides.build_profile or "validation"
     local flags = { table.unpack(M.object_flags[build_profile] or {}) }
     for _, define in ipairs({ "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX" }) do
@@ -115,8 +116,8 @@ function M.descriptor(root, overrides)
     for _, define in ipairs(M.target_defines) do flags[#flags + 1] = define end
     local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
         build_profile = build_profile, trace_control = (overrides and overrides.trace_control) or nil,
-        tools = { cc = { tools .. "emcc" }, ar = { tools .. "emar" },
-            ranlib = { tools .. "emranlib" }, version = "6.0.13", source = "EMSDK",
+        tools = { cc = { tools .. "emcc" .. suffix }, ar = { tools .. "emar" .. suffix },
+            ranlib = { tools .. "emranlib" .. suffix }, version = "6.0.13", source = "EMSDK",
             location = tools:sub(1, -2), version_output = "emcc (Emscripten) 6.0.13\n" },
         compile_flags = flags, include_dirs = { paths.lua_source, paths.include },
         target_defines = { table.unpack(M.target_defines) }, paths = paths,

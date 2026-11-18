@@ -1033,6 +1033,17 @@ local function probe_include_paths(config)
             local path = line:gsub("^%s+", "")
                 :gsub("%s+%(framework directory%)$", "")
             if path ~= "" then
+                if platform.windows then
+                    -- Windows joins and parent lookup canonicalize separators.
+                    -- #include_next compares the opened header's parent with
+                    -- the supplying search root before moving to the next one.
+                    local normalized, path_error = platform.path.normalize(path)
+                    if not normalized then
+                        return nil, "invalid C include search directory " .. string.format("%q", path) ..
+                            ": " .. path_error
+                    end
+                    path = normalized
+                end
                 table.insert(paths[mode], path)
             end
         end

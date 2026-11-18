@@ -3,6 +3,7 @@ local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local filesystem = require "spec.support.filesystem"
+local files = require "spec.fixtures.target_selection.support"
 local fixtures = require "spec.support.browser_fixtures"
 local lfs = require "lfs"
 local layouts = require "titan-compiler.nominallayout"
@@ -133,19 +134,15 @@ local function native_inventory(root)
 end
 
 local function browser_context(root, options)
-    local context = driver.new_resolver_context(options)
-    context.target = "browser"
-    -- Synthetic policy fixtures model a supported host, not Windows browser
-    -- compilation. Keep these observations coherent across target reentry.
-    context.uname, context.is_darwin = "Linux", false
-    context.target_descriptor = assert(require("titan-compiler.browsertarget").import(fixtures.descriptor(root)))
-    assert(driver.initialize_platform(context))
-    return context
+    options = options or {}
+    options.target = "browser"
+    local descriptor = assert(require("titan-compiler.browsertarget").import(fixtures.descriptor(root)))
+    return driver._new_resolver_context(options, descriptor)
 end
 
 describe("browser providers", function()
     local root, original_loadlib, original_execute, original_popen, original_source, original_bin
-    local audit_guard, original_new_sync, original_new_resolver
+    local audit_guard, original_new_sync
     local original_process_run, original_process_capture
     before_each(function()
         root = temporary.name("-browser-providers"); mkdir(root)
@@ -153,7 +150,6 @@ describe("browser providers", function()
         require("titan")._loadlib = function() error("browser called _loadlib") end
         original_execute, original_popen = os.execute, io.popen
         original_new_sync = compiler_io.new_sync
-        original_new_resolver = driver.new_resolver_context
         local process = require("titan-compiler.process")
         original_process_run, original_process_capture = process.run, process.capture
         original_source, original_bin = driver.TITAN_SOURCE_PATH, driver.TITAN_BIN_PATH
@@ -162,7 +158,6 @@ describe("browser providers", function()
     after_each(function()
         if audit_guard then audit_guard.restore(); audit_guard = nil end
         compiler_io.new_sync = original_new_sync
-        driver.new_resolver_context = original_new_resolver
         local process = require("titan-compiler.process")
         process.run, process.capture = original_process_run, original_process_capture
         require("titan")._loadlib = original_loadlib
@@ -172,30 +167,12 @@ describe("browser providers", function()
         remove(root)
     end)
 
-    it("models supported browser fixtures even from a Windows host observation", function()
-        driver.new_resolver_context = function(options)
-            local context = original_new_resolver(options)
-            context.uname, context.is_darwin = "Windows", false
-            return context
-        end
+    it("keeps the observed host when activating a browser provider context", function()
+        local host = files.host()
         local context = browser_context(root)
-        driver.new_resolver_context = original_new_resolver
-        assert.equal("Linux", context.uname)
-        assert.is_false(context.is_darwin)
-        assert.equal("linux", context.host_target)
-        local descriptor = context.target_descriptor
-        assert.equal(descriptor, driver.context_target_descriptor(context))
-        assert.equal("linux", context.host_target)
-        assert(driver.close_resolver_context(context))
-    end)
-    it("retains production rejection of real Windows browser host observations", function()
-        local context = driver.new_resolver_context()
-        context.target = "browser"
-        context.uname, context.is_darwin = "Windows", false
-        local ok, err = driver.initialize_platform(context)
-        assert.is_nil(ok)
-        assert.equal("browser builds are supported from Linux and macOS hosts (host is windows)", err)
-        assert.is_nil(context.target_descriptor)
+        assert.equal(host, context.host_target)
+        assert.equal("browser", context.target)
+        assert.equal(context.target_descriptor, driver.context_target_descriptor(context))
         assert(driver.close_resolver_context(context))
     end)
 

@@ -1351,11 +1351,14 @@ precedence.
 
 `browsertarget.EMSCRIPTEN_VERSION` is the single constant `6.0.13`. When
 `EMSDK` is set and nonempty it is authoritative: the tools are
-`$EMSDK/upstream/emscripten/{emcc,emar,emranlib}`. Otherwise `emcc` is the
-first executable regular file named `emcc` along `PATH` (an empty entry means
-`.`), and `emar`/`emranlib` must be executable siblings in the same
-directory. The host `CC`, `AR`, and `RANLIB` are never consulted. All three
-tools are recorded as absolute one-word argv arrays. `emcc --version` runs
+`$EMSDK/upstream/emscripten/{emcc,emar,emranlib}`. Otherwise Titan searches
+`PATH` for the compiler (an empty entry means `.`) and selects `emar` and
+`emranlib` only beside it. On Windows the basenames end in `.exe` and `PATH`
+is semicolon-delimited. Windows selects regular files and requires the
+selected tools' `--version` invocations to succeed. POSIX selects regular
+files with effective execute permission. The host `CC`, `AR`, and `RANLIB`
+are never consulted. All three tools are recorded as absolute one-word argv
+arrays. `emcc --version` runs
 once, with stderr merged, and its first `emcc ... <major>.<minor>.<patch>`
 version is compared with the pin.
 
@@ -1493,6 +1496,12 @@ are cross-checked with the record. A trivial C object compiled with the same
 prefix is classified by the Wasm reader, and its fingerprint must equal the
 expected baseline. No probe links or executes anything.
 
+Clang on Windows may report both slash styles in its include-search banner.
+The preprocessor normalizes those directories to the same Windows spelling
+as an opened header's parent before `#include_next` compares them. Search
+order is unchanged; a header's forwarding directive resumes after the
+directory that supplied it.
+
 ### Freezing and identity
 
 The descriptor is recursively immutable. Every table is replaced by a proxy
@@ -1588,8 +1597,8 @@ original, later lock boundary.
 
 1. discards the embedded interface provider, its rejection and overlap state,
    and the used embedded target-profile identity;
-2. rejects hosts other than Linux and macOS:
-   `browser builds are supported from Linux and macOS hosts (host is <host>)`,
+2. rejects hosts other than Linux, macOS, and Windows:
+   `browser builds are supported from Linux, macOS and Windows hosts (host is <host>)`,
    and rejects `driver.EMIT_LINE_DIRECTIVES == false` (`--no-line-directives`
    or `TITAN_NO_LINE_DIRECTIVES=1`) with `browser target owns option
    --no-line-directives (TITAN_NO_LINE_DIRECTIVES)`;
@@ -4346,31 +4355,15 @@ native runtime build are never entered.
 
 ## Windows and other hosts
 
-Browser builds are supported from Linux and macOS hosts. On Windows, and on a
-native host without an OS label, `driver.validate_target` and the library
-initialization boundary both reject the target with `browser builds are
-supported from Linux and macOS hosts (host is <host>)`:
-`browser builds are supported from Linux and macOS hosts (host is windows)` on
-Windows, and `browser builds are supported from Linux and macOS hosts (host is
-native)` on an unlabeled native host. `Makefile.win` has neither
-`lua-browser` nor `browser-sdk`, and the runner refuses to execute an image on
-Windows (`harness failure: browser execution is supported from Linux and macOS
-hosts`). The fork's `make install-browser` refuses a native Windows shell, but
-from an MSYS2 CLANG64 shell with emsdk 6.0.13 it builds and installs the
-browser Lua.
+The driver admits `browser` on Linux, macOS, and Windows. A native host with
+no OS label still receives `browser builds are supported from Linux, macOS
+and Windows hosts (host is native)`. Browser compilation on Windows uses MSYS2
+CLANG64 and the fork's browser Lua; `make install-browser` in the Lua
+submodule works there with the pinned emsdk. The compiler does not enable
+native cross-compilation.
 
-Lifting the compiler's refusal alone does not make a Windows-host build work.
-In the order a build meets them:
-
-* emsdk installs `emcc.exe`, `emar.exe` and `emranlib.exe`, while the
-  descriptor looks for extensionless `emcc` on the `EMSDK` and `PATH` routes
-  and for extensionless siblings beside it;
-* the native Windows `io` support has no executable-access check, so
-  `io.Sync:executable` refuses a real `emcc.exe`;
-* with both worked around, preprocessing `lua.h` for the target does not find
-  `stdarg.h` among the include roots given to the C preprocessor;
-* `titan-browser-run` is a POSIX `sh` launcher, and the browser specs pend on
-  Windows, including the browser source-resolution checks.
+`Makefile.win` does not yet install the browser SDK, and the runner does not
+execute images on Windows. Compile-only work does not require either.
 
 ## Documentation checks
 

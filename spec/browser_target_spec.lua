@@ -17,6 +17,13 @@ local lfs = require "lfs"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local FAKE_ROOT = platform.windows and "C:/fake" or "/fake"
+local function tool_suffix()
+    return platform.windows and ".exe" or ""
+end
+
+local function tool_call_count()
+    return platform.windows and 4 or 2
+end
 
 local function fresh_driver()
     local saved = package.loaded["titan-compiler.driver"]
@@ -39,15 +46,19 @@ local function fake_context(options)
         [key(paths.liblua)] = options.archive or archive }
     for name, contents in pairs(headers) do files[key(paths.lua_source .. "/" .. name)] = contents end
     if options.header then files[key(paths.lua_source .. "/lua.h")] = options.header end
-    local directory = FAKE_ROOT .. "/emsdk/upstream/emscripten"
-    for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do files[key(directory .. "/" .. tool)] = "fake launcher" end
-    if options.missing then files[key(directory .. "/" .. options.missing)] = nil end
+    local tool_root = options.tool_root or FAKE_ROOT
+    local directory = tool_root .. "/emsdk/upstream/emscripten"
+    local suffix = tool_suffix()
+    for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do
+        files[key(directory .. "/" .. tool .. suffix)] = "fake launcher"
+    end
+    if options.missing then files[key(directory .. "/" .. options.missing .. suffix)] = nil end
     if options.missing_record then files[key(paths.lua_record)] = nil end
     if options.missing_archive then files[key(paths.liblua)] = nil end
     local calls, serial = {}, 0
     local directories = { [key(paths.lua_source)] = true }
     local strategy = setmetatable({}, { __index = compiler_io.new_sync() })
-    function strategy:cwd() return FAKE_ROOT end
+    function strategy:cwd() return tool_root end
     function strategy:realpath(filename) return key(filename) end
     function strategy:stat(filename)
         filename = key(filename)
@@ -72,11 +83,15 @@ local function fake_context(options)
     function strategy:unlink(filename) files[key(filename)] = nil; return true end
     function strategy:mkdir(filename) directories[key(filename)] = true; return true end
     function strategy:rmdir(filename) directories[key(filename)] = nil; return true end
-    function strategy:tmpname() serial = serial + 1; return FAKE_ROOT .. "/probe-" .. serial end
+    function strategy:tmpname() serial = serial + 1; return tool_root .. "/probe-" .. serial end
     function strategy:run(argv)
         calls[#calls + 1] = { table.unpack(argv) }
         if argv[1] == "uname" then return { started = true, ok = true, output = options.uname or "Linux\n" } end
         if argv[#argv] == "--version" then
+            if options.unstartable and key(argv[#argv - 1]) ==
+                    directory .. "/" .. options.unstartable .. suffix then
+                return { started = false, ok = false, diagnostic = "not a Windows executable" }
+            end
             return { started = true, ok = true, output = "emcc (Emscripten) " .. (options.version or "6.0.13") .. "\n" }
         end
         for index, flag in ipairs(argv) do
@@ -87,7 +102,7 @@ local function fake_context(options)
     return { io = strategy, extra_ffi_include_dirs = {} },
         { paths = paths, runtime_include = paths.include,
             build_profile = options.build_profile or "validation",
-            probe_cache_directory = FAKE_ROOT .. "/probes/browser-6.0.13/" .. cprobe_cache.VERSION },
+            probe_cache_directory = tool_root .. "/probes/browser-6.0.13/" .. cprobe_cache.VERSION },
         calls, files, record
 end
 
@@ -103,10 +118,10 @@ local function remove_flag(data, flag)
 end
 
 describe("browser target descriptor", function()
-    local saved_getenv, saved_profile, saved_classify, saved_registry
+    local saved_getenv, saved_profile, saved_classify, saved_registry, saved_windows
     local workspace
     before_each(function()
-        saved_registry = types.registry
+        saved_registry, saved_windows = types.registry, platform.windows
         saved_getenv, saved_profile, saved_classify = platform.getenv,
             cdriver.target_profile_inputs, staticmetadata.classify_object
         platform.getenv = function(name)
@@ -120,7 +135,7 @@ describe("browser target descriptor", function()
     after_each(function()
         platform.getenv, cdriver.target_profile_inputs, staticmetadata.classify_object =
             saved_getenv, saved_profile, saved_classify
-        types.registry = saved_registry
+        types.registry, platform.windows = saved_registry, saved_windows
         if workspace then files.remove(workspace); workspace = nil end
     end)
 
@@ -164,9 +179,9 @@ describe("browser target descriptor", function()
         assert.has_error(function() descriptor.lua.record.sjlj = "emscripten" end, "browser target descriptor is immutable")
         assert.has_error(function() table.insert(descriptor.compile_flags, "-flto") end,
             "browser target descriptor is immutable")
-        assert.equal(2, #calls)
+        assert.equal(tool_call_count(), #calls)
         assert.same({ "env", "EMCC_CFLAGS=", descriptor.tools.cc[1], "--version" }, calls[1])
-        local flags = table.concat(calls[2], " ")
+        local flags = table.concat(calls[#calls], " ")
         contains(flags, "-c")
         contains(flags, "-sSUPPORT_LONGJMP=wasm")
         contains(flags, "-sWASM_LEGACY_EXCEPTIONS=1")
@@ -185,7 +200,7 @@ describe("browser target descriptor", function()
         local rebuilt = assert(browser.import(data))
         assert.same(data, browser.export(rebuilt))
         assert.equal(descriptor.identity, rebuilt.identity)
-        assert.equal(2, #calls)
+        assert.equal(tool_call_count(), #calls)
         data.compile_flags[1] = "changed after import"
         assert.equal("--std=c99", rebuilt.compile_flags[1])
         assert.is_nil(browser.import(data))
@@ -238,10 +253,10 @@ describe("browser target descriptor", function()
         { "relative tool location", function(data) data.tools.location = "./emscripten" end },
         { "unnormalized tool location", function(data) data.tools.location = data.tools.location .. "/." end },
         { "unnormalized tool argv", function(data)
-            data.tools.cc[1] = data.tools.location .. "/./emcc"
+            data.tools.cc[1] = data.tools.location .. "/./emcc" .. tool_suffix()
         end },
         { "tool outside its installation", function(data)
-            data.tools.ar[1] = data.tools.location .. "/other/emar"
+            data.tools.ar[1] = data.tools.location .. "/other/emar" .. tool_suffix()
         end },
         { "unnormalized probe root", function(data) data.probe_cache_directory = data.probe_cache_directory .. "/." end },
         { "invalid cflags syntax", function(data) data.lua.record.cflags = "'" end },
@@ -597,6 +612,47 @@ describe("browser target descriptor", function()
         contains(err, "emcc not found (EMSDK unset; not on PATH)")
     end)
 
+    it("uses native Windows executable names for both routes and transported sibling tools", function()
+        platform.windows = true
+        local root = "C:/Windows fixture"
+        local directory = root .. "/emsdk/upstream/emscripten"
+        for _, route in ipairs({ "EMSDK", "PATH" }) do
+            platform.getenv = function(name)
+                if name == "EMSDK" and route == "EMSDK" then return root .. "/emsdk" end
+                if name == "PATH" then return "D:/not-empty;" .. directory end
+            end
+            local context, inputs = fake_context({ root = root, tool_root = root })
+            local descriptor = assert(browser.build(context, inputs))
+            assert.equal(route, descriptor.tools.source)
+            assert.equal(directory .. "/emcc.exe", descriptor.tools.cc[1])
+            assert.equal(directory .. "/emar.exe", descriptor.tools.ar[1])
+            assert.equal(directory .. "/emranlib.exe", descriptor.tools.ranlib[1])
+            local data = browser.export(descriptor)
+            assert(browser.import(data))
+            data.tools.ranlib[1] = directory .. "/emranlib"
+            fixtures.identify(data)
+            local imported, err = browser.import(data)
+            assert.is_nil(imported)
+            assert.equal("invalid browser tool argv", err)
+        end
+    end)
+
+    it("rejects Windows archive programs that exist but cannot be launched", function()
+        platform.windows = true
+        local root = "C:/fixture"
+        platform.getenv = function(name)
+            if name == "EMSDK" then return root .. "/emsdk" end
+        end
+        for _, name in ipairs({ "emar", "emranlib" }) do
+            local context, inputs = fake_context({ root = root, tool_root = root, unstartable = name })
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, "cannot execute " .. name)
+            contains(err, name .. ".exe")
+            contains(err, "not a Windows executable")
+        end
+    end)
+
     it("diagnoses a missing record with the fork install command", function()
         local context, inputs = fake_context({ missing_record = true })
         local descriptor, err = browser.build(context, inputs)
@@ -887,22 +943,27 @@ describe("browser target descriptor", function()
             assert.is_true(result.started)
             assert.is_false(result.ok)
             assert.equal(1, result.status)
-            -- CLI target validation precedes the browser option policy on an
-            -- unsupported host; neither rejection reaches tool discovery.
-            contains(result.output, platform.windows and
-                "browser builds are supported from Linux and macOS hosts (host is windows)" or line_error)
+            contains(result.output, line_error)
             assert.is_nil(result.output:find("stack traceback", 1, true))
         end)
     end
 
-    it("rejects Windows and other unsupported hosts before tool discovery", function()
+    it("rejects an unlabeled browser host before tool discovery", function()
         local subject = fresh_driver()
-        for _, target in ipairs({ "windows", "native" }) do
-            local context = { target = "browser", host_target = target }
-            local ok, err = subject._finish_target_initialization(context)
-            assert.is_nil(ok)
-            assert.equal("browser builds are supported from Linux and macOS hosts (host is " .. target .. ")", err)
-        end
+        local ok, err = subject._finish_target_initialization({ target = "browser", host_target = "native" })
+        assert.is_nil(ok)
+        assert.equal("browser builds are supported from Linux, macOS and Windows hosts (host is native)", err)
+    end)
+
+    it("admits the browser target from Windows without admitting native cross-compilation", function()
+        local subject = fresh_driver()
+        local context = subject.new_resolver_context()
+        context.uname, context.is_darwin = "Windows", false
+        assert.equal("browser", subject.validate_target(context, "browser", "--target"))
+        local target, err = subject.validate_target(context, "linux", "--target")
+        assert.is_nil(target)
+        contains(err, "native cross-compilation is not supported (host is windows)")
+        assert(subject.close_resolver_context(context))
     end)
     it("builds once per context and keeps the browser probe namespace out of native globals", function()
         local getenv = platform.getenv
@@ -930,7 +991,7 @@ describe("browser target descriptor", function()
         local context = subject.new_resolver_context({ io = template.io, target = "browser" })
         local descriptor = assert(subject.context_target_descriptor(context))
         assert.equal(descriptor, subject.context_target_descriptor(context))
-        assert.equal(2, #calls)
+        assert.equal(tool_call_count(), #calls)
         assert.equal(FAKE_ROOT .. "/cache-prefix/var/cache/titan-probes/browser-6.0.13/" ..
             cprobe_cache.VERSION, descriptor.probe_cache_directory)
         assert.equal(native_cache, subject.PROBE_CACHE_DIRECTORY)

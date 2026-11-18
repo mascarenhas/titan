@@ -3009,7 +3009,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--no-line-directives` | Omit generated Titan `#line` directives. | |
 | `-u`, `--lua <dir>` | Lua source tree (`driver.LUA_SOURCE_PATH`). | Source checkouts only. |
 | `-t`, `--tree <dir>` | Source root, or an ordered `;`-separated list of roots searched in order (`driver.TITAN_SOURCE_PATH`, default `.`). | |
-| `-T`, `--target <label>` | [Source-selection target](target-source-selection.md#the-titanc-option); overrides `TITAN_TARGET`, and an empty value means the host. The host's own OS label and, on Linux and macOS hosts, `browser` ([browser target](browser-target.md)) are accepted; `native`, another OS label, and unknown values are errors. `--target=<label>` is also accepted. | Validated before any lookup; ignored by `--print-root`. `browser` requires `--output`. |
+| `-T`, `--target <label>` | [Source-selection target](target-source-selection.md#the-titanc-option); overrides `TITAN_TARGET`, and an empty value means the host. The host's own OS label and, on Linux, macOS, and Windows hosts, `browser` ([browser target](browser-target.md)) are accepted; `native`, another OS label, and unknown values are errors. `--target=<label>` is also accepted. | Validated before any lookup; ignored by `--print-root`. `browser` requires `--output`. |
 | `-o`, `--output <dir>` | Folder for generated files, preserving the source hierarchy. | |
 | `-I`, `--include-dir <dir>` | Native include directory for C headers, probes, generated C, and `--c-source`; repeatable, order kept, searched before the SDK. | |
 | `-D`, `--define <def>` | Native preprocessor definition `NAME[=VALUE]`; repeatable, order kept. | |
