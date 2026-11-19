@@ -72,24 +72,27 @@ local function ensure_dir(dir)
     return true
 end
 
+local function install_mode(filename, executable)
+    -- MSYS sh reads the launcher as a script; NTFS has no POSIX mode.
+    if platform.windows then return end
+    local mode = executable and "0755" or "0644"
+    local result = strategy:run({ "chmod", mode, filename }, { stderr_to_stdout = true })
+    if not result or not result.ok then fail("cannot chmod '" .. filename .. "'") end
+end
+
+local function write_asset(filename, bytes, executable)
+    local written, err = strategy:write_file(filename, bytes)
+    if not written then fail("cannot write '" .. filename .. "': " .. tostring(err)) end
+    install_mode(filename, executable)
+end
+
 local function copy_file_atomic(source, destination, executable)
     local bytes, read_err = strategy:read_file(source)
     if not bytes then
         fail("cannot read '" .. source .. "': " .. tostring(read_err))
     end
     ensure_dir(assert(paths.dirname(destination)))
-    local written, write_err = strategy:write_file(destination, bytes)
-    if not written then
-        fail("cannot write '" .. destination .. "': " .. tostring(write_err))
-    end
-    -- MSYS sh reads the launcher as a script on Windows; NTFS has no POSIX
-    -- execute mode to preserve for a native Titan invocation.
-    if platform.windows then return bytes end
-    local mode = executable and "0755" or "0644"
-    local chmod_res = strategy:run({ "chmod", mode, destination }, { stderr_to_stdout = true })
-    if not chmod_res or not chmod_res.ok then
-        fail("cannot chmod '" .. destination .. "'")
-    end
+    write_asset(destination, bytes, executable)
     return bytes
 end
 
@@ -246,9 +249,26 @@ end
 if action == "prepare" then
     local build_dir = assert(select(2, ...), "build_dir is required")
     local repo_root = select(3, ...)
+    -- A failed rebuild must not advertise the previous semantic publication
+    -- or a link-ready SDK while the Lua, runtime and provider inputs change.
+    local destination = driver.installed_paths(install_tree, "browser")
+    for _, filename in ipairs({
+        paths.join(destination.titan_bin, "analysis-target"),
+        destination.sdk_digests,
+        paths.join(destination.titan_bin, "build-profile"),
+        paths.join(destination.titan_bin, "absent-modules"),
+        paths.join(destination.titan_bin, "titan.a"),
+    }) do
+        local existing, stat_error = strategy:lstat(filename)
+        if stat_error then fail(stat_error) end
+        if existing then
+            local removed, err = strategy:unlink(filename)
+            if not removed then fail("cannot retire '" .. filename .. "': " .. tostring(err)) end
+        end
+    end
     stage_differing_roots()
     ensure_dir(build_dir)
-    local context, descriptor, assets = new_browser_context(build_dir)
+    local context, descriptor = new_browser_context(build_dir)
     if repo_root and repo_root ~= "" then
         local node_ok, node_err = driver.browser_node_ready(context, {
             runner = repo_root .. "/titan-runtime/browser/titan-browser-run",
@@ -256,9 +276,6 @@ if action == "prepare" then
         if not node_ok then
             fail(node_err)
         end
-    end
-    if lfs.symlinkattributes(assets.sdk_digests) then
-        strategy:unlink(assets.sdk_digests)
     end
     ensure_dir(descriptor.paths.titan_bin)
     assert(driver.close_resolver_context(context))
@@ -281,6 +298,8 @@ elseif action == "stage-runtime" then
     local context, descriptor, assets = new_browser_context(build_dir)
     archive_certified_objects(context, descriptor, assets.runtime, runtime_members, runtime_paths)
     archive_certified_objects(context, descriptor, assets.lpeglabel, lpeg_members, lpeg_paths)
+    install_mode(assets.runtime)
+    install_mode(assets.lpeglabel)
     if getenv("TITAN_VERBOSE") == "1" then
         io.stderr:write("browser-sdk: LPegLabel descriptor object flags: ",
             table.concat(descriptor.compile_flags, " "), "\n")
@@ -303,8 +322,7 @@ elseif action == "stage-runtime" then
         end
     end
     -- The archives above follow this profile; links refuse another one.
-    local recorded, record_err = strategy:write_file(assets.build_profile, descriptor.build_profile .. "\n")
-    if not recorded then fail("cannot write '" .. assets.build_profile .. "': " .. tostring(record_err)) end
+    write_asset(assets.build_profile, descriptor.build_profile .. "\n")
 
     local rocks_tree = os.getenv("TITAN_BROWSER_REMEDY_ROCKS_TREE")
     if rocks_tree == nil then rocks_tree = getenv("ROCKS_TREE") end
@@ -369,14 +387,12 @@ elseif action == "finalize" then
     end
     local absent_bytes = table.concat(absent_lines)
     local absent_file = paths.join(descriptor.paths.titan_bin, "absent-modules")
-    local written, write_err = strategy:write_file(absent_file, absent_bytes)
-    if not written then fail("cannot write '" .. absent_file .. "': " .. tostring(write_err)) end
+    write_asset(absent_file, absent_bytes)
     local analysis_file = paths.join(descriptor.paths.titan_bin, "analysis-target")
     local analysis_bytes, analysis_err = browser_target.encode_analysis(context, descriptor,
         provider_digest, sha256.hex_via(support._sha256_binary, absent_bytes))
     if not analysis_bytes then fail("cannot encode '" .. analysis_file .. "': " .. tostring(analysis_err)) end
-    written, write_err = strategy:write_file(analysis_file, analysis_bytes)
-    if not written then fail("cannot write '" .. analysis_file .. "': " .. tostring(write_err)) end
+    write_asset(analysis_file, analysis_bytes)
 
     -- Collect all installed browser SDK inputs for sdk-digests (written LAST).
     local digest_inputs = {
@@ -421,6 +437,7 @@ elseif action == "finalize" then
         },
     }
     assert(incremental.write_sdk_digests(digest_ctx, assets.sdk_digests, digest_inputs))
+    install_mode(assets.sdk_digests)
     assert(driver.close_resolver_context(context))
 else
     fail("unknown action: " .. tostring(action))

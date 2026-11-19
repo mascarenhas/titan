@@ -130,19 +130,75 @@ local function valid_fingerprint(data)
     return true
 end
 
-local function valid_lua_defines(defines)
-    local previous
-    for _, flag in ipairs(defines) do
-        if not flag:match("^%-D[A-Za-z_][A-Za-z0-9_]*") or previous and not util.bytewise_less(previous, flag) then
-            return false
-        end
-        previous = flag
-    end
-    return true
-end
-
 local function text(value)
     return type(value) == "string" and not value:find("[%z\r\n]")
+end
+
+local function canonical_words(value)
+    local words, err = cdriver.split_shell_words(value)
+    if not words then return nil, err end
+    if table.concat(words, " ") ~= value then return nil, "noncanonical list" end
+    return words
+end
+
+local function lua_defines(value)
+    if not text(value) or not utf8.len(value) then return nil, "text encoding" end
+    local defines, err = canonical_words(value)
+    if not defines then return nil, err end
+    local previous, browser, posix
+    for _, flag in ipairs(defines) do
+        local name = flag:match("^%-D([A-Za-z_][A-Za-z0-9_]*)$") or
+            flag:match("^%-D([A-Za-z_][A-Za-z0-9_]*)=[^%s]+$")
+        if not name or previous and not util.bytewise_less(previous, flag) then
+            return nil, "expected sorted unique -D tokens"
+        end
+        if name == "LUA_USE_DLOPEN" or name == "LUA_USE_LINUX" or name == "LUA_USE_MACOSX" then
+            return nil, name .. " is unavailable for browser Lua"
+        end
+        if name == "LUA_USE_BROWSER" then browser = true end
+        if name == "LUA_USE_POSIX" then posix = true end
+        previous = flag
+    end
+    if not (browser and posix) then return nil, "requires LUA_USE_BROWSER and LUA_USE_POSIX" end
+    return defines
+end
+
+local function lua_numeric(profile)
+    return "integer=" .. profile.lua_integer .. ",float=" .. profile.lua_number
+end
+
+-- These are physical C ABI traits of the pinned wasm32 Emscripten target,
+-- not defaults from the analysis host. Lua's typedefs are separately
+-- configurable and compared to the validated browser Lua record.
+local function validate_browser_profile(profile, numeric)
+    if numeric ~= lua_numeric(profile) then return nil, "inconsistent browser numeric profile" end
+    local error_message = "C profile does not describe the browser's wasm32 target"
+    if profile.char_bit ~= 8 or not profile.char_signed or
+        profile.size_t ~= "unsigned long" or profile.ptrdiff_t ~= "long" then
+        return nil, error_message
+    end
+    for _, pair in ipairs({
+        { "_Bool", 8 }, { "char", 8 }, { "signed char", 8 }, { "unsigned char", 8 },
+        { "short", 16 }, { "unsigned short", 16 }, { "int", 32 }, { "unsigned int", 32 },
+        { "long", 32 }, { "unsigned long", 32 }, { "long long", 64 }, { "unsigned long long", 64 },
+        { "__int128", 128 }, { "unsigned __int128", 128 },
+    }) do
+        local entry = profile.integers[pair[1]]
+        local bits = pair[2]
+        local precision = entry and (pair[1] == "_Bool" and 1 or bits - (entry.type.signed and 1 or 0))
+        if not entry or entry.type.bits ~= bits or entry.precision ~= precision then
+            return nil, error_message
+        end
+    end
+    for _, traits in ipairs({ { "float", 32, 24, 128 }, { "double", 64, 53, 1024 },
+            { "long double", 128, 113, 16384 } }) do
+        local entry = profile.floats[traits[1]]
+        if entry.radix ~= 2 or entry.bits ~= traits[2] or
+            entry.mantissa_digits ~= traits[3] or entry.maximum_exponent ~= traits[4] then
+            return nil, error_message
+        end
+    end
+    return true
 end
 
 local function argv(value)
@@ -302,9 +358,8 @@ local function validate(data, context)
     local profile, err = csemantics.import_profile(data.profile_data)
     if not profile then return nil, err end
     if data.profile_identity ~= profile.identity then return nil, "invalid browser profile identity" end
-    if data.lua.record.numeric ~= "integer=" .. profile.lua_integer .. ",float=" .. profile.lua_number then
-        return nil, "inconsistent browser numeric profile"
-    end
+    local browser_profile, profile_error = validate_browser_profile(profile, data.lua.record.numeric)
+    if not browser_profile then return nil, profile_error end
     local identity = data.identity
     data.identity = nil
     local expected = descriptor_identity(data, context)
@@ -335,7 +390,7 @@ local function analysis_codec_options(context)
     return {
         max_bytes = ANALYSIS_LIMIT, max_string_bytes = ANALYSIS_LIMIT,
         max_nodes = 128, max_entries = 1024,
-        sha256_binary = context.cache_adapter and context.cache_adapter.sha256_binary,
+        sha256_binary = context and context.cache_adapter and context.cache_adapter.sha256_binary,
     }
 end
 
@@ -347,7 +402,7 @@ function M.encode_analysis(context, descriptor, provider_sha256, absent_sha256)
     assert(data and data.tools, "browser build descriptor required")
     assert(hex(provider_sha256, 64) and hex(absent_sha256, 64), "browser asset digests required")
     return graphcodec.encode({
-        target = data.label, triple = data.triple, fingerprint = FINGERPRINT,
+        target = data.label, triple = data.triple, fingerprint = copy(data.fingerprint),
         abi = version.TITAN_ABI_VERSION, release = version.TITAN_VERSION,
         emscripten_version = data.tools.version, build_profile = data.build_profile,
         profile_data = copy(data.profile_data),
@@ -355,6 +410,7 @@ function M.encode_analysis(context, descriptor, provider_sha256, absent_sha256)
             fork_revision = data.lua.record.fork_revision,
             headers_sha256 = data.lua.record.headers_sha256,
             defines = data.lua.record.lua_defines,
+            numeric = data.lua.record.numeric,
         },
         provider_sha256 = provider_sha256, absent_sha256 = absent_sha256,
     }, analysis_codec_options(context))
@@ -372,26 +428,20 @@ function M.decode_analysis(context, bytes)
         return nil, "incompatible browser semantic target"
     end
     if not valid_fingerprint(data.fingerprint) then return nil, "invalid browser Wasm fingerprint" end
-    if not fields(data.lua, { "fork_revision", "headers_sha256", "defines" }) or
-        not hex(data.lua.fork_revision, 40) or not hex(data.lua.headers_sha256, 64) or
-        not text(data.lua.defines) then
+    if not fields(data.lua, { "fork_revision", "headers_sha256", "defines", "numeric" }) or
+        not hex(data.lua.fork_revision, 40) or not hex(data.lua.headers_sha256, 64) then
         return nil, "invalid browser Lua facts"
     end
-    local defines = cdriver.split_shell_words(data.lua.defines)
-    if not defines or #defines == 0 or not valid_lua_defines(defines) then
-        return nil, "invalid browser Lua defines"
-    end
+    local defines, define_error = lua_defines(data.lua.defines)
+    if not defines then return nil, "invalid browser Lua defines: " .. define_error end
     if not hex(data.provider_sha256, 64) or not hex(data.absent_sha256, 64) then
         return nil, "invalid browser semantic asset digests"
     end
     local profile
     profile, err = csemantics.import_profile(data.profile_data)
     if not profile then return nil, err end
-    if profile.char_bit ~= 8 or profile.integers.long.type.bits ~= 32 or
-        profile.integers[profile.size_t].type.bits ~= 32 or
-        profile.integers[profile.ptrdiff_t].type.bits ~= 32 then
-        return nil, "C profile does not describe the browser's wasm32 target"
-    end
+    local browser_profile, profile_error = validate_browser_profile(profile, data.lua.numeric)
+    if not browser_profile then return nil, profile_error end
     return data
 end
 
@@ -596,12 +646,9 @@ local function mismatch(paths, record, key, expected, recorded)
 end
 
 local function record_list(record, paths, key)
-    local words, err = cdriver.split_shell_words(record[key])
+    local words, err = canonical_words(record[key])
     if not words then
         return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", key) .. ": " .. err)
-    end
-    if table.concat(words, " ") ~= record[key] then
-        return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", key) .. ": noncanonical list")
     end
     return words
 end
@@ -628,10 +675,9 @@ validate_record = function(record, paths)
     local features, feature_error = record_list(record, paths, "wasm_features")
     if not features then return nil, feature_error end
     if record.wasm_features ~= FEATURES then return nil, mismatch(paths, record, "wasm_features", FEATURES) end
-    local defines, split_error = record_list(record, paths, "lua_defines")
-    if not defines then return nil, split_error end
-    if not valid_lua_defines(defines) then
-        return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": expected sorted unique -D tokens")
+    local defines, define_error = lua_defines(record.lua_defines)
+    if not defines then
+        return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": " .. define_error)
     end
     local flags, flags_error = record_list(record, paths, "cflags")
     if not flags then return nil, flags_error end
@@ -832,7 +878,7 @@ function M.build(context, inputs)
             defines, paths.lua_source, inputs.runtime_include or paths.include, inputs.compile_flags)
         if not config then return nil, profile_error end
         local profile = config.profile
-        local numeric = "integer=" .. profile.lua_integer .. ",float=" .. profile.lua_number
+        local numeric = lua_numeric(profile)
         if numeric ~= record.numeric then return nil, mismatch(remedy_paths, record, "numeric", numeric) end
         local fingerprint, fingerprint_error = probe_fingerprint(context, config)
         if not fingerprint then return nil, fingerprint_error end

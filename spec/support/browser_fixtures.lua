@@ -46,6 +46,7 @@ end
 function M.profile_inputs()
     local macros = {
         __CHAR_BIT__ = "8", __SIZEOF_BOOL__ = "1", __SIZEOF_SHORT__ = "2",
+        __SIZEOF_INT128__ = "16",
         __SIZEOF_INT__ = "4", __SIZEOF_LONG__ = "4", __SIZEOF_LONG_LONG__ = "8",
         __SIZEOF_FLOAT__ = "4", __SIZEOF_DOUBLE__ = "8", __SIZEOF_LONG_DOUBLE__ = "16",
         __FLT_RADIX__ = "2", __FLT_MAX_EXP__ = "128", __DBL_MAX_EXP__ = "1024",

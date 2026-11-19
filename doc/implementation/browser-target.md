@@ -18,7 +18,7 @@ The implementation is spread over:
 * `titan-compiler/browsertarget.lua`, which locates and pins the Emscripten
   tools, reads and verifies the fork's Lua build record, probes the target C
   facts, owns each build profile's object flags (`object_flags`), and builds,
-  freezes, exports, and imports the browser target descriptor;
+  freezes, exports, and imports the browser build and semantic descriptors;
 * `titan-compiler/browserlink.lua`, which owns the SDK asset layout
   (`sdk_assets`), the SDK readiness check (`require_sdk`), the link profile
   (`profile`), the owned-option check for user link extras
@@ -298,6 +298,11 @@ require:
   paths. SHA-256 digests bind it to the exact `titan.a` and `absent-modules`
   contents. These three files can move together without the build
   `sdk-digests` manifest, which records installation-specific observations.
+  `browsertarget.encode_analysis` projects the validated live descriptor.
+  `browsertarget.decode_analysis` accepts only that closed data shape, with a
+  64 KiB payload bound, at most 128 graph nodes and at most 1,024 entries.
+  It checks the pinned Wasm and C ABI traits and the Lua record's numeric
+  types and canonical browser defines before returning the semantic facts.
 
 The language manual's [browser SDK
 file list](../language/browser-target.md#installing-the-browser-sdk) names every
@@ -411,12 +416,12 @@ When `TITAN_NODE` is unset or empty, the script unsets it and leaves ordinary
 build directory is `TITAN_BROWSER_BUILD_DIR` (default
 `$(TITAN_OUTPUT_DIR)/browser-sdk`), a browser `--output` root.
 
-1. `scripts/browser_sdk.lua prepare` stages a differing root (below), checks
-   Node 26+ up front with `driver.browser_node_ready` against the checkout's
-   runner (`browser provider validation requires Node 26 or newer: <reason>;
-   set TITAN_NODE to a Node 26 or newer executable`), removes a stale `sdk-digests` so that
-   an interrupted run cannot leave a manifest describing old files, and creates
-   `titan_bin`.
+1. `scripts/browser_sdk.lua prepare` retires the previous provider,
+   absent-module list, `analysis-target`, `build-profile`, and `sdk-digests`
+   before staging a differing root (below). It checks Node 26+ up front
+   with `driver.browser_node_ready` against the checkout's runner (`browser
+   provider validation requires Node 26 or newer: <reason>; set TITAN_NODE
+   to a Node 26 or newer executable`) and creates `titan_bin`.
 2. `titanc --target browser --output <build> -c --incremental
    --print-c-objects` compiles the five runtime sources and the five
    LPegLabel sources as `--c-source` nodes; Make reads the certified object
@@ -4614,6 +4619,8 @@ same texts.
   include-root resolution, the probe-cache directory, worker import, the
   compiler-probe feature diagnostic, the browser `--coverage` refusal, and the
   Windows host scope.
+  The semantic codec round-trips both build profiles without tools and
+  rejects malformed fields even when their graph checksum is valid.
 * `spec/browser_isolation_spec.lua` — semantic-cache generations and guards,
   the native → browser → native sequence, output markers, toolchain-detail
   hashing, and unchanged native link records.
@@ -4698,7 +4705,9 @@ same texts.
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
   `TITAN_EXTRA_CPPFLAGS`, the twenty-one-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
-  order and contents, the standalone `-shared-mem` archive regression, the
+  order and contents, retirement on an interrupted build, installed modes
+  under a restrictive umask, the three-file semantic pack relocated without
+  build inputs, the standalone `-shared-mem` archive regression, and the
   readiness order with the `build-profile` record's mismatch and invalid
   forms, and `make uninstall-browser-sdk` against a synthesized SDK holding a
   user archive (kept files, empty-directory pruning, refusal before removal).

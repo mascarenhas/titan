@@ -16,6 +16,7 @@ local path = require "titan-compiler.path"
 local lfs = require "lfs"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
+local graphcodec = require "titan-compiler.graphcodec"
 local FAKE_ROOT = platform.windows and "C:/fake" or "/fake"
 local LUA_REMEDY = platform.windows and "mingw32-make -f Makefile.win lua-browser" or "make install-browser"
 local function tool_suffix()
@@ -217,6 +218,72 @@ describe("browser target descriptor", function()
         data.compile_flags[1] = "changed after import"
         assert.equal("--std=c99", rebuilt.compile_flags[1])
         assert.is_nil(browser.import(data))
+    end)
+
+    it("round-trips data-only semantic profiles for both build profiles without tools", function()
+        local provider, absent = ("a"):rep(64), ("b"):rep(64)
+        for _, build_profile in ipairs({ "production", "validation" }) do
+            local descriptor = assert(browser.import(fixtures.descriptor(nil, { build_profile = build_profile })))
+            local bytes = assert(browser.encode_analysis(nil, descriptor, provider, absent))
+            local data = assert(browser.decode_analysis(nil, bytes))
+            assert.equal(build_profile, data.build_profile)
+            assert.equal(provider, data.provider_sha256)
+            assert.equal(absent, data.absent_sha256)
+            assert.equal(descriptor.lua.record.numeric, data.lua.numeric)
+            assert.same(browser.export(descriptor.fingerprint), data.fingerprint)
+            assert.same(browser.export(descriptor.profile_data), data.profile_data)
+            assert.is_nil(data.tools)
+            assert.is_nil(data.paths)
+        end
+        assert.has_error(function() browser.encode_analysis(nil, {}, provider, absent) end)
+        local descriptor = assert(browser.import(fixtures.descriptor()))
+        assert.has_error(function() browser.encode_analysis(nil, descriptor, "bad", absent) end)
+    end)
+
+    it("rejects malformed semantic data even with a valid graph checksum", function()
+        local descriptor = assert(browser.import(fixtures.descriptor()))
+        local bytes = assert(browser.encode_analysis(nil, descriptor, ("a"):rep(64), ("b"):rep(64)))
+        for _, case in ipairs({
+            { "incompatible", function(data) data.target = "linux" end },
+            { "incompatible", function(data) data.triple = "wasm64" end },
+            { "incompatible", function(data) data.abi = "1" end },
+            { "incompatible", function(data) data.release = "0.0.0" end },
+            { "incompatible", function(data) data.build_profile = "debug" end },
+            { "incompatible", function(data) data.emscripten_version = "6.0.0" end },
+            { "incompatible", function(data) data.paths = {} end },
+            { "fingerprint", function(data) data.fingerprint.features = "" end },
+            { "Lua facts", function(data) data.lua.headers_sha256 = nil end },
+            { "Lua facts", function(data) data.lua.fork_revision = "bad" end },
+            { "inconsistent browser numeric profile", function(data) data.lua.numeric = "integer=int,float=double" end },
+            { "asset digests", function(data) data.provider_sha256 = "" end },
+            { "asset digests", function(data) data.absent_sha256 = ("Z"):rep(64) end },
+            { "target profile data", function(data) data.profile_data = {} end },
+        }) do
+            local data = assert(browser.decode_analysis(nil, bytes))
+            case[2](data)
+            local decoded, err = browser.decode_analysis(nil, assert(graphcodec.encode(data)))
+            assert.is_nil(decoded)
+            contains(err, case[1])
+        end
+        for _, defines in ipairs({
+            "-DFOO=1", " '-DLUA_USE_BROWSER' -DLUA_USE_POSIX ", "-DLUA_USE_BROWSER!bad -DLUA_USE_POSIX",
+            "-DLUA_USE_BROWSER -DLUA_USE_POSIX=\255", "-DLUA_USE_BROWSER -DLUA_USE_DLOPEN=1 -DLUA_USE_POSIX",
+        }) do
+            local data = assert(browser.decode_analysis(nil, bytes))
+            data.lua.defines = defines
+            local decoded, err = browser.decode_analysis(nil, assert(graphcodec.encode(data)))
+            assert.is_nil(decoded)
+            contains(err, "invalid browser Lua defines")
+        end
+        local data = assert(browser.decode_analysis(nil, bytes))
+        local profile = assert(csemantics.import_profile(data.profile_data))
+        local extended = profile.floats["long double"]
+        extended.bits, extended.mantissa_digits, extended.maximum_exponent = 64, 53, 1024
+        profile.integers["__int128"], profile.integers["unsigned __int128"] = nil, nil
+        data.profile_data = assert(csemantics.export_profile(profile))
+        local decoded, err = browser.decode_analysis(nil, assert(graphcodec.encode(data)))
+        assert.is_nil(decoded)
+        contains(err, "does not describe the browser's wasm32 target")
     end)
 
     it("rejects unknown, cyclic and executable transport fields", function()
@@ -809,7 +876,7 @@ describe("browser target descriptor", function()
         { "sjlj", "emscripten" }, { "wasm_features", "+sign-ext" },
         { "numeric", "integer=int,float=float" },
         { "archive_sha256", string.rep("0", 64) }, { "headers_sha256", string.rep("0", 64) },
-        { "lua_defines", "-DLUA_USE_POSIX" },
+        { "lua_defines", "-DEXTRA -DLUA_USE_BROWSER -DLUA_USE_POSIX" },
     }) do
         it("identifies mismatched record field " .. case[1], function()
             local context, inputs = fake_context({ record = { [case[1]] = case[2] } })

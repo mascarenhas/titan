@@ -593,7 +593,8 @@ The pieces build in this order:
 5. it publishes the browser standard library, checked against the runtime from
    step 4 and checked to use no libuv, OpenSSL, llhttp, or SQLite header,
    archive, or symbol; and
-6. it writes the SDK digest manifest last.
+6. it publishes the browser type-checking profile and writes the SDK digest
+   manifest last.
 
 A missing browser SDK is reported only when a program or test is linked or a
 library is published, and then names the command that installs it:
