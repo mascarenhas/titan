@@ -284,6 +284,15 @@ describe("browser target descriptor", function()
         local decoded, err = browser.decode_analysis(nil, assert(graphcodec.encode(data)))
         assert.is_nil(decoded)
         contains(err, "does not describe the browser's wasm32 target")
+        -- Full build descriptors still carry the actual configured C facts;
+        -- do not impose the editor pack's pinned C profile on ordinary builds.
+        local build = fixtures.descriptor(nil, {
+            profile_data = data.profile_data, profile_identity = data.profile_data.identity,
+        })
+        local built = assert(browser.import(build))
+        local encoded, encode_error = browser.encode_analysis(nil, built, ("a"):rep(64), ("b"):rep(64))
+        assert.is_nil(encoded)
+        contains(encode_error, "does not describe the browser's wasm32 target")
     end)
 
     it("rejects unknown, cyclic and executable transport fields", function()

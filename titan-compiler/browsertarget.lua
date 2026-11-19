@@ -358,8 +358,9 @@ local function validate(data, context)
     local profile, err = csemantics.import_profile(data.profile_data)
     if not profile then return nil, err end
     if data.profile_identity ~= profile.identity then return nil, "invalid browser profile identity" end
-    local browser_profile, profile_error = validate_browser_profile(profile, data.lua.record.numeric)
-    if not browser_profile then return nil, profile_error end
+    if data.lua.record.numeric ~= lua_numeric(profile) then
+        return nil, "inconsistent browser numeric profile"
+    end
     local identity = data.identity
     data.identity = nil
     local expected = descriptor_identity(data, context)
@@ -401,11 +402,17 @@ function M.encode_analysis(context, descriptor, provider_sha256, absent_sha256)
     local data = proxy_data[descriptor]
     assert(data and data.tools, "browser build descriptor required")
     assert(hex(provider_sha256, 64) and hex(absent_sha256, 64), "browser asset digests required")
+    local profile_data = copy(data.profile_data)
+    local profile, err = csemantics.import_profile(profile_data)
+    if not profile then return nil, err end
+    local valid
+    valid, err = validate_browser_profile(profile, data.lua.record.numeric)
+    if not valid then return nil, err end
     return graphcodec.encode({
         target = data.label, triple = data.triple, fingerprint = copy(data.fingerprint),
         abi = version.TITAN_ABI_VERSION, release = version.TITAN_VERSION,
         emscripten_version = data.tools.version, build_profile = data.build_profile,
-        profile_data = copy(data.profile_data),
+        profile_data = profile_data,
         lua = {
             fork_revision = data.lua.record.fork_revision,
             headers_sha256 = data.lua.record.headers_sha256,
