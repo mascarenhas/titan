@@ -90,11 +90,13 @@ class FullSDKPackTests(unittest.TestCase):
         self.addCleanup(root.cleanup)
         self.root = Path(root.name)
         installed = Path(os.environ["TITAN_PACK_TEST_PREFIX"]).resolve()
-        self.lua = installed / "bin/lua"
         self.prefix = self.root / "private SDK"
         self.relative = Path("lib/titan-browser/0.6")
         self.assets = self.prefix / self.relative
         self.assets.mkdir(parents=True)
+        self.lua = self.prefix / "bin/lua"
+        self.lua.parent.mkdir()
+        shutil.copy2(installed / "bin/lua", self.lua)
         for leaf in (*pack.SEMANTIC_FILES, "build-profile"):
             shutil.copyfile(installed / self.relative / leaf, self.assets / leaf)
         for directory in ("share/lua/5.5", "lib/lua/5.5", "share/titan"):
@@ -147,7 +149,7 @@ assert(incremental.write_sdk_digests(digest, copied .. "/sdk-digests", files))
 
     def make_pack(self, output, **overrides):
         values = {
-            "PREFIX": self.prefix, "ROCKS_TREE": self.prefix, "TITAN_LUA": self.lua,
+            "PREFIX": self.prefix, "ROCKS_TREE": self.prefix,
             "SOURCE_ROCK": self.rock, "TITAN_COMMIT": self.commit, "PACK_OUTPUT": output,
             "TITAN_BUILD_PROFILE": self.profile,
         }

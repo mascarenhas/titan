@@ -65,6 +65,8 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 
 PACK_PYTHON ?= python3
 PACK_GIT_ROOT ?= .
+BROWSER_PACK_PREFIX ?= $(PREFIX)
+BROWSER_PACK_LUA ?= $(TITAN_LUA)
 # Python resolves POSIX paths itself without Make splitting on spaces.
 BROWSER_PACK_PATH ?= $(1)
 .PHONY: browser-semantic-pack
@@ -72,13 +74,13 @@ browser-semantic-pack: ## Package an installed browser SDK's semantic assets and
 	@test -n $(call make_shell_quote,$(strip $(SOURCE_ROCK))) || { echo 'browser-semantic-pack: SOURCE_ROCK is required' >&2; exit 2; }
 	@test -n $(call make_shell_quote,$(strip $(TITAN_COMMIT))) || { echo 'browser-semantic-pack: TITAN_COMMIT is required' >&2; exit 2; }
 	@test -n $(call make_shell_quote,$(strip $(PACK_OUTPUT))) || { echo 'browser-semantic-pack: PACK_OUTPUT is required' >&2; exit 2; }
-	@test -n $(call make_shell_quote,$(strip $(PREFIX))) || { echo 'browser-semantic-pack: PREFIX is required' >&2; exit 2; }
-	@test -n $(call make_shell_quote,$(strip $(TITAN_LUA))) || { echo 'browser-semantic-pack: TITAN_LUA is required' >&2; exit 2; }
+	@test -n $(call make_shell_quote,$(strip $(BROWSER_PACK_PREFIX))) || { echo 'browser-semantic-pack: PREFIX is required' >&2; exit 2; }
+	@test -n $(call make_shell_quote,$(strip $(BROWSER_PACK_LUA))) || { echo 'browser-semantic-pack: TITAN_LUA is required' >&2; exit 2; }
 	@test -n $(call make_shell_quote,$(strip $(PACK_GIT_ROOT))) || { echo 'browser-semantic-pack: PACK_GIT_ROOT is required' >&2; exit 2; }
 	$(call make_shell_quote,$(PACK_PYTHON)) scripts/browser_semantic_pack.py \
-	  --lua $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(TITAN_LUA))) \
-	  --prefix $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(PREFIX))) \
-	  --rocks-tree $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX)))) \
+	  --lua $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(BROWSER_PACK_LUA))) \
+	  --prefix $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(BROWSER_PACK_PREFIX))) \
+	  --rocks-tree $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(BROWSER_PACK_PREFIX)))) \
 	  --rock $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(SOURCE_ROCK))) \
 	  --commit $(call make_shell_quote,$(TITAN_COMMIT)) \
 	  --output $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(PACK_OUTPUT))) \

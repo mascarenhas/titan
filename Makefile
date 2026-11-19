@@ -40,6 +40,8 @@ ifeq ($(origin PREFIX),undefined)
   _TITAN_PATH_PREFIX := $(shell sh $(call make_shell_quote,$(dir $(lastword $(MAKEFILE_LIST)))scripts/detect_lua_prefix.sh) 2>/dev/null)
   PREFIX := $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(CURDIR)/.lua-validation,$(if $(strip $(_TITAN_PATH_PREFIX)),$(_TITAN_PATH_PREFIX),/usr/local))
 endif
+# The offline pack delegates path normalization to Python, including spaces.
+BROWSER_PACK_PREFIX := $(PREFIX)
 override PREFIX := $(abspath $(PREFIX))
 
 # Must match the Lua source layout resolved by titan-compiler/driver.lua and
@@ -473,6 +475,9 @@ ROCK_LUA        ?= $(LUA_BIN)
 STDLIB_USE_INSTALLED_RUNTIME ?= $(if $(wildcard $(TITAN_INSTALL_TREE)/bin/titanc),1,0)
 TITAN_ROOT ?=
 export TITAN_ROOT
+ifeq ($(origin TITAN_LUA),undefined)
+  BROWSER_PACK_LUA = $(BROWSER_PACK_PREFIX)/bin/lua
+endif
 TITAN_LUA ?= $(or $(realpath $(ROCK_LUA)),$(ROCK_LUA))
 # Stdlib development uses the deployed compiler and its matching SDK once
 # installed. The checkout compiler remains the bootstrap path and an explicit
