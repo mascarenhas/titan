@@ -6199,10 +6199,13 @@ printf '%s\n' "${schedule[@]}"
                     '"$PREFIX/bin/luarocks" make',
                     'make browser-sdk PREFIX="$PREFIX"',
                     "titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js",
-                    'test -z "${EMSDK:-}"', "! command -v emcc",
                     'TITAN_PROBE_CACHE_DISABLE: "1"', "if: failure()",
                 }) do
                     assert.equal(1, count_literal(job, contract), contract)
+                end
+                local native_install = step_containing(job, '"$PREFIX/bin/luarocks" make')
+                for _, guard in ipairs({ 'test -z "${EMSDK:-}"', "! command -v emcc" }) do
+                    assert.equal(1, count_literal(native_install, guard), guard)
                 end
                 local previous = 0
                 for _, command in ipairs({
@@ -6290,6 +6293,16 @@ printf '%s\n' "${schedule[@]}"
                 end
             end
             assert.equal(1, suite_shards)
+            local pack_gate = named_step(browser_stdlib_job, "Verify the offline browser semantic release pack")
+            for _, contract in ipairs({
+                "if: matrix.shard == 'scheduler'",
+                'test -z "${EMSDK:-}"',
+                "! command -v emcc",
+                'TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover',
+                "browser_semantic_pack_test.py -v",
+            }) do
+                assert.equal(1, count_literal(pack_gate, contract), contract)
+            end
             local stdlib_gate_step = step_containing(browser_stdlib_job,
                 '"$PREFIX/bin/busted" -c -o gtest -v')
             assert.truthy(stdlib_gate_step:find(
