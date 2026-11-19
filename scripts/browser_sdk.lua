@@ -385,6 +385,8 @@ elseif action == "finalize" then
     local analysis_bytes, analysis_err = browser_target.encode_analysis(context, descriptor,
         provider_digest, sha256.hex_via(support._sha256_binary, absent_bytes))
     if not analysis_bytes then fail("cannot encode '" .. analysis_file .. "': " .. tostring(analysis_err)) end
+    local decoded, decode_error = browser_target.decode_analysis(context, analysis_bytes)
+    if not decoded then fail("cannot validate '" .. analysis_file .. "': " .. tostring(decode_error)) end
     write_asset(analysis_file, analysis_bytes)
 
     -- Collect all installed browser SDK inputs for sdk-digests (written LAST).
