@@ -18,7 +18,7 @@ The implementation is spread over:
 * `titan-compiler/browsertarget.lua`, which locates and pins the Emscripten
   tools, reads and verifies the fork's Lua build record, probes the target C
   facts, owns each build profile's object flags (`object_flags`), and builds,
-  freezes, exports, and imports the browser target descriptor;
+  freezes, exports, and imports the browser build and semantic descriptors;
 * `titan-compiler/browserlink.lua`, which owns the SDK asset layout
   (`sdk_assets`), the SDK readiness check (`require_sdk`), the link profile
   (`profile`), the owned-option check for user link extras
@@ -98,8 +98,9 @@ The browser target supports four kinds of work, all with an explicit
 
 `titanc` never runs a program or test image it links; the [runner](#the-runner)
 does. The only image `titanc` executes is the temporary protocol probe.
-The language server analyzes the host-native selection only: it ignores
-`TITAN_TARGET` and creates no browser context.
+Semantic clients can instead select a [browser analysis
+target](driver.md#browser-analysis-target); this uses the real SDK library
+interfaces without building an image. It does not read `TITAN_TARGET`.
 
 ### Bootstrap order
 
@@ -112,7 +113,8 @@ browser-sdk` builds and installs the runtime archive, loader library and
 runner tool into `lib/titan-browser/<ver>/`; (5) it publishes the [core
 stdlib provider](#the-browser-standard-library), protocol-probes it against
 the runtime staged in step (4), and checks its dependency closure; (6) it
-writes the browser SDK digest manifest last. Missing browser-SDK
+publishes the semantic target alongside the absent-module list and writes
+the browser SDK digest manifest last. Missing browser-SDK
 paths are diagnosed, naming `make browser-sdk`, only when a program or test
 is linked or when library-mode publication runs the executing protocol check;
 compile-only work needs only the verified Lua pieces.
@@ -285,11 +287,27 @@ The SDK also installs `titan-protobuf.mjs` in `titan_bin`. This standalone ES
 module encodes and decodes copied JavaScript values using a portable protobuf
 description. Pages deploy and import it separately; the compiler neither
 links it nor embeds it in an image, so it is not a `browserlink.sdk_assets`
-entry. Likewise `absent-modules` in `titan_bin` lists the modules the browser
-target lacks, one `<module>\t<reason>` line each, which `browser_sdk.lua
-finalize` writes from the [status inventory](#subset-parity-gate). The
-compiler reads it only to word a [missing-module
-diagnostic](#the-absent-module-diagnostic), so `sdk-digests` does not record it.
+entry. The SDK also publishes two data-only files that the linker does not
+require:
+
+* `absent-modules` lists the modules the target lacks, one `<module>\t<reason>`
+  line each, for [missing-module diagnostics](#the-absent-module-diagnostic).
+* `analysis-target` records the Titan release and ABI, Emscripten pin, browser
+  Wasm fingerprint, exported C profile, and the verified Lua header digest and
+  defines. It uses the bounded graph codec, with no tool or installation
+  paths. SHA-256 digests bind it to the exact `titan.a` and `absent-modules`
+  contents. These three files can move together without the build
+  `sdk-digests` manifest, which records installation-specific observations.
+  `browsertarget.encode_analysis` projects the validated live descriptor.
+  `browsertarget.decode_analysis` accepts only that closed data shape, with a
+  64 KiB payload bound, at most 128 graph nodes and at most 1,024 entries.
+  It checks the pinned Wasm and C ABI traits and the Lua record's numeric
+  types and canonical browser defines before returning the semantic facts.
+  The encoder visits string keys in bytewise order before assigning graph
+  reference IDs, so identical semantic inputs give identical bytes in
+  separate Lua processes. Companion pack tooling re-encodes decoded data
+  through the same `browsertarget.encode_analysis_data` entry point.
+
 The language manual's [browser SDK
 file list](../language/browser-target.md#installing-the-browser-sdk) names every
 installed file once; `installer.browser_sdk_owned` is the same list in code,
@@ -301,6 +319,46 @@ define ([Runtime guards](#runtime-guards)). Neither the native `lib/titan/<ver>`
 nor the native Lua headers are ever written; the common Titan headers
 `include/{minicoro.h,titan.h,transfer.h}` and
 `include/titan/{ffi.h,browser.h}` are the native SDK's own files.
+
+### Publishing the browser semantic pack
+
+The release companion for editor distribution is produced offline with
+Python 3.9 or newer, Git (including the pinned submodule objects), and the
+installed Titan Lua. Start from the unpacked, verified source rock or its
+byte-identical checkout, and the finished `make browser-sdk` installation:
+
+```sh
+make browser-semantic-pack PREFIX="$P" ROCKS_TREE="$P" \
+    SOURCE_ROCK="$R/titan-0.6.0-1.src.rock" TITAN_COMMIT="$C" \
+    PACK_OUTPUT="$O/titan-0.6.0-1-browser-semantics.tar.gz"
+```
+
+Use the full 40-hex Titan commit and an existing output directory outside
+the SDK. With unpacked rock sources, set `PACK_GIT_ROOT` to a local checkout
+that has the named commit and its gitlinks. `PACK_PYTHON` selects the Python
+executable. The producer compares the rock and live source files with the
+commit and recursive gitlinks, and checks the deployed compiler sources,
+notices, full browser provider inventory and semantic bytes in the selected
+SDK. It checks the semantic-file digests against the final `sdk-digests`
+record. The SDK's recorded build profile must match `TITAN_BUILD_PROFILE`;
+the public release uses `production`, and `validation` is for local
+candidates. The producer changes neither input and does not run Emscripten,
+Node, or a compiler build.
+
+The only payloads are `titan.a`, `analysis-target` and `absent-modules` at
+their SDK-relative paths and the corresponding Titan and third-party notices
+under `share/titan/`. `manifest.json` carries release/tag, Titan commit,
+source-rock basename and SHA-256, library/ABI/API, Emscripten pin and build
+profile, payload sizes and digests, and the matched SDK digest rows without
+their absolute paths or stat observations. The manifest is sorted compact
+UTF-8 JSON with a final LF. The gzip-compressed ustar has only regular
+files, in bytewise path order, with fixed metadata and zero timestamps.
+Identical input bytes and provenance produce identical output bytes; rebuilding
+the SDK elsewhere is not a promise of identical input bytes.
+
+Only the three semantic SDK files are needed for ordinary editor checking.
+The manifest and notices convey release provenance and attribution, and the
+WebAssembly build and image-runtime files are not part of this artifact.
 
 ### Readiness and the missing-SDK diagnostic
 
@@ -362,12 +420,12 @@ When `TITAN_NODE` is unset or empty, the script unsets it and leaves ordinary
 build directory is `TITAN_BROWSER_BUILD_DIR` (default
 `$(TITAN_OUTPUT_DIR)/browser-sdk`), a browser `--output` root.
 
-1. `scripts/browser_sdk.lua prepare` stages a differing root (below), checks
-   Node 26+ up front with `driver.browser_node_ready` against the checkout's
-   runner (`browser provider validation requires Node 26 or newer: <reason>;
-   set TITAN_NODE to a Node 26 or newer executable`), removes a stale `sdk-digests` so that
-   an interrupted run cannot leave a manifest describing old files, and creates
-   `titan_bin`.
+1. `scripts/browser_sdk.lua prepare` retires the previous provider,
+   absent-module list, `analysis-target`, `build-profile`, and `sdk-digests`
+   before staging a differing root (below). It checks Node 26+ up front
+   with `driver.browser_node_ready` against the checkout's runner (`browser
+   provider validation requires Node 26 or newer: <reason>; set TITAN_NODE
+   to a Node 26 or newer executable`) and creates `titan_bin`.
 2. `titanc --target browser --output <build> -c --incremental
    --print-c-objects` compiles the five runtime sources and the five
    LPegLabel sources as `--c-source` nodes; Make reads the certified object
@@ -400,7 +458,8 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    `titan.path`, `titan.peg`, `titan.protobuf`, `titan.reflect`,
    `titan.string`, `titan.test`, `titan.timer`, `titan.transfer`, `titan.url`,
    and `titan.websocket`; copies it to `titan.a`; writes `absent-modules`
-   from the [status inventory](#subset-parity-gate); and finally writes
+   from the [status inventory](#subset-parity-gate) and `analysis-target`
+   from the validated compiler descriptor; and finally writes
    `sdk-digests` with `incremental.write_sdk_digests` and the existing
    schema.
 
@@ -809,8 +868,9 @@ delivered.
 When no lookup finds a module, every not-found site of the loaders,
 publication revalidation, and external resolution calls
 `driver.missing_module_message(context, modname, source_required)`. For a
-browser context it reads `absent-modules` from the descriptor's `titan_bin`
-once per resolver context; a listed module reports `module '<m>' is not
+browser build it reads `absent-modules` from the descriptor's `titan_bin`
+once per resolver context. Browser analysis uses the validated list bound to
+its semantic target. A listed module reports `module '<m>' is not
 available for target 'browser': <reason>` for a plain and a `.titan` import
 alike. Any other name, and any build without the file (no SDK installed yet,
 or a native target), keeps `module '<m>' not found` or `source module '<m>'
@@ -4563,6 +4623,8 @@ same texts.
   include-root resolution, the probe-cache directory, worker import, the
   compiler-probe feature diagnostic, the browser `--coverage` refusal, and the
   Windows host scope.
+  The semantic codec round-trips both build profiles without tools and
+  rejects malformed fields even when their graph checksum is valid.
 * `spec/browser_isolation_spec.lua` — semantic-cache generations and guards,
   the native → browser → native sequence, output markers, toolchain-detail
   hashing, and unchanged native link records.
@@ -4647,7 +4709,9 @@ same texts.
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
   `TITAN_EXTRA_CPPFLAGS`, the twenty-one-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
-  order and contents, the standalone `-shared-mem` archive regression, the
+  order and contents, retirement on an interrupted build, installed modes
+  under a restrictive umask, the three-file semantic pack relocated without
+  build inputs, the standalone `-shared-mem` archive regression, and the
   readiness order with the `build-profile` record's mismatch and invalid
   forms, and `make uninstall-browser-sdk` against a synthesized SDK holding a
   user archive (kept files, empty-directory pruning, refusal before removal).

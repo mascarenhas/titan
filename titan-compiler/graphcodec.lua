@@ -51,11 +51,21 @@ local function checksum(bytes, options)
     return result
 end
 
+-- Canonical string-keyed maps use byte order, independent of the Lua locale.
+local function bytewise_less(a, b)
+    for index = 1, math.min(#a, #b) do
+        local left, right = a:byte(index), b:byte(index)
+        if left ~= right then return left < right end
+    end
+    return #a < #b
+end
+
 local function encode(root, options)
     local bound = limits(options)
     local work = graphcodec.work(options)
     work(0, true)
     local nodes, ids, records = {}, {}, {}
+    local canonical = options.canonical_string_keys
     local external = options.external or {}
     local filter = options.filter
     local entry_count, byte_count = 0, 4
@@ -118,14 +128,30 @@ local function encode(root, options)
             "invalid graph annotations")
         record.annotations = value(annotations)
         -- next/rawget deliberately do not invoke payload metamethods.
-        for key, item in next, node do
-            if not filter or filter(node, key, item) then
-                entry_count = entry_count + 1
-                assert(entry_count <= bound.max_entries,
-                    "graph entry limit exceeded")
-                record[#record + 1] = value(key) .. value(item)
-            else
+        if canonical then
+            local keys = {}
+            for key, item in next, node do
                 work()
+                if not filter or filter(node, key, item) then
+                    assert(type(key) == "string", "canonical graphs require string keys")
+                    entry_count = entry_count + 1
+                    assert(entry_count <= bound.max_entries, "graph entry limit exceeded")
+                    keys[#keys + 1] = key
+                end
+            end
+            table.sort(keys, bytewise_less)
+            for _, key in ipairs(keys) do
+                record[#record + 1] = value(key) .. value(rawget(node, key))
+            end
+        else
+            for key, item in next, node do
+                if not filter or filter(node, key, item) then
+                    entry_count = entry_count + 1
+                    assert(entry_count <= bound.max_entries, "graph entry limit exceeded")
+                    record[#record + 1] = value(key) .. value(item)
+                else
+                    work()
+                end
             end
         end
         records[index] = record

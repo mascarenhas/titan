@@ -884,6 +884,11 @@ end
             candidate_path = table.concat({ good_node_dir, fake_node_dir, sdk_env.PATH }, path_separator)
         end
 
+        local stale_directory = driver.installed_paths(rocks_tree, "browser").titan_bin
+        files.mkdir(stale_directory)
+        local retired = { "analysis-target", "sdk-digests", "build-profile", "absent-modules", "titan.a" }
+        for _, name in ipairs(retired) do files.write(paths.join(stale_directory, name), "previous publication\n") end
+
         local bad_node_res = run_with_env(strategy, {
             PATH = sdk_env.PATH,
             TITAN_NODE = bad_node,
@@ -898,8 +903,22 @@ end
         assert.is_false(bad_node_res.ok)
         contains(bad_node_res.output, "reports " .. bad_version ..
             "; expected Node 26 or newer; set TITAN_NODE to a Node 26 or newer executable")
+        for _, name in ipairs(retired) do assert.is_nil(strategy:lstat(paths.join(stale_directory, name)), name) end
 
-        -- Run into an empty differing ROCKS_TREE with Node 26 on PATH.
+        -- An interrupted publication leaves no admission markers. Rebuild it
+        -- under a restrictive POSIX umask with the qualifying Node on PATH.
+        local sdk_argv = {
+            toolchain.make, "--no-print-directory", "-f", toolchain.makefile, "browser-sdk",
+            "PREFIX=" .. info.prefix,
+            "ROCKS_TREE=" .. rocks_tree,
+            "TITAN_BROWSER_BUILD_DIR=" .. build_dir,
+            "TITAN_BUILD_PROFILE=validation",
+        }
+        if not platform.windows then
+            local command = { "sh", "-c", 'umask 0077; exec "$@"', "sh" }
+            for _, argument in ipairs(sdk_argv) do command[#command + 1] = argument end
+            sdk_argv = command
+        end
         local sdk_res = run_with_env(strategy, {
             PATH = candidate_path,
             EMSDK = emsdk or os.getenv("EMSDK"),
@@ -909,13 +928,7 @@ end
             -- browser provider's lpeglabel-only include policy.
             TITAN_EXTRA_CPPFLAGS = "-include /missing/ambient-titan-cppflags.h",
             CPPFLAGS = "-include /missing/ambient-cppflags.h",
-        }, {
-            toolchain.make, "--no-print-directory", "-f", toolchain.makefile, "browser-sdk",
-            "PREFIX=" .. info.prefix,
-            "ROCKS_TREE=" .. rocks_tree,
-            "TITAN_BROWSER_BUILD_DIR=" .. build_dir,
-            "TITAN_BUILD_PROFILE=validation",
-        })
+        }, sdk_argv)
         assert.is_true(sdk_res.ok, sdk_res.output)
 
         -- The browser install creates only its own native helper on Windows.
@@ -961,6 +974,12 @@ end
         table.sort(owned)
         table.sort(written)
         assert.same(owned, written)
+        if not platform.windows then
+            for _, name in ipairs(owned) do
+                assert.equal(name == "titan-browser-run" and "rwxr-xr-x" or "rw-r--r--",
+                    lfs.attributes(paths.join(browser_paths.titan_bin, name), "permissions"), name)
+            end
+        end
         local expected_fp = fixtures.fingerprint()
 
         local runtime_ar = assert(staticmetadata.scan_archive(assets.runtime, { target = expected_fp }))
@@ -1024,6 +1043,42 @@ end
                 sha256_stream = support._sha256_stream,
             },
         }
+        local analysis_file = paths.join(browser_paths.titan_bin, "analysis-target")
+        local absent_file = paths.join(browser_paths.titan_bin, "absent-modules")
+        local semantic_bytes = assert(strategy:read_file(analysis_file))
+        local semantic = assert(browser.decode_analysis(digest_ctx, semantic_bytes))
+        local live = assert(browser.build(digest_ctx, {
+            paths = browser_paths, build_profile = "validation",
+        }))
+        assert.same(browser.export(live.fingerprint), semantic.fingerprint)
+        assert.same(browser.export(live.profile_data), semantic.profile_data)
+        assert.equal(live.lua.record.headers_sha256, semantic.lua.headers_sha256)
+        assert.equal(live.lua.record.lua_defines, semantic.lua.defines)
+        assert.equal(live.lua.record.numeric, semantic.lua.numeric)
+        assert.equal(live.lua.record.fork_revision, semantic.lua.fork_revision)
+        assert.equal(live.tools.version, semantic.emscripten_version)
+        assert.equal(version.TITAN_ABI_VERSION, semantic.abi)
+        assert.equal(version.TITAN_VERSION, semantic.release)
+        assert.equal("validation", semantic.build_profile)
+        assert.equal(incremental.file_digest(digest_ctx, assets.provider), semantic.provider_sha256)
+        assert.equal(incremental.file_digest(digest_ctx, absent_file), semantic.absent_sha256)
+        for _, producer_path in ipairs({ rocks_tree, info.prefix, build_dir, repository, em_dir, info.tools.cc[1] }) do
+            assert.is_nil(semantic_bytes:find(producer_path, 1, true), producer_path)
+        end
+        assert.is_nil(browser.decode_analysis(digest_ctx, semantic_bytes:sub(1, -2)))
+
+        local relocated = driver.installed_paths(paths.join(root, "relocated editor SDK"), "browser")
+        for _, name in ipairs({ "analysis-target", "absent-modules", "titan.a" }) do
+            copy_tree(strategy, paths.join(browser_paths.titan_bin, name), paths.join(relocated.titan_bin, name))
+        end
+        local offline = setmetatable({
+            run = function() error({ unexpected = "browser semantic admission started a process" }) end,
+        }, { __index = strategy })
+        local moved = assert(driver.browser_analysis_target(relocated.root, { io = offline }))
+        assert.equal(assert(strategy:realpath(paths.join(relocated.titan_bin, "titan.a"))), moved.provider_file)
+        assert.is_nil(strategy:lstat(relocated.sdk_digests))
+        assert.is_nil(strategy:lstat(relocated.liblua))
+
         assert(incremental.load_sdk_digests(digest_ctx, assets.sdk_digests))
         local recorded = assert(digest_ctx.incremental and digest_ctx.incremental.sdk)
         assert.is_nil(recorded.files[assert(strategy:realpath(assets.sdk_digests))])
@@ -1031,6 +1086,8 @@ end
         local expected_digest_files = {
             browser_paths.liblua,
             browser_paths.lua_record,
+            analysis_file,
+            absent_file,
             paths.join(browser_paths.titan_bin, "titan-protobuf.mjs"),
         }
         local staged_lua_headers = assert(strategy:list(browser_paths.lua_source))

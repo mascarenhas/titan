@@ -58,9 +58,9 @@ function driver.activate_target_caches(context, identity)
     assert(type(identity) == "string" and identity ~= "",
         "semantic cache target identity is required")
     if semantic_target_identity ~= identity then
-        -- The first owner adopts tables installed by an embedding host.
-        -- A real target change rebinds the complete nominal closure.
-        if semantic_target_identity ~= nil then
+        -- The first native owner can adopt a host-installed registry. A
+        -- browser semantic target must never adopt native nominal state.
+        if semantic_target_identity ~= nil or context.browser_semantics then
             driver.imported = {}
             types.registry = {}
         end
@@ -770,6 +770,7 @@ function driver.context_target_descriptor(context)
     if context == nil then return nil end
     driver.assert_target_context(context)
     if context.target ~= "browser" then return nil end
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local ok, err = driver.initialize_platform(context)
     if not ok then return nil, err end
     return context.target_descriptor
@@ -843,6 +844,10 @@ function driver.browser_program_path(stem, explicit)
 end
 
 function driver.context_target_identity(context)
+    if context and context.browser_semantics then
+        driver.assert_target_context(context)
+        return context.browser_semantics.cache_owner
+    end
     local descriptor, err = driver.context_target_descriptor(context)
     if err then return nil, err end
     if descriptor then return descriptor.identity end
@@ -879,6 +884,7 @@ function driver.initialize_platform(context)
     end
     compiler_io.validate(context.io, 2)
     if not context._target_initializing then driver.assert_target_context(context) end
+    if context.browser_semantics then return true end
     if context._platform_initialized then
         initialize_source_target(context)
         if context.target ~= "browser" then select_platform_defaults(context.uname, context.is_darwin) end
@@ -938,6 +944,10 @@ function driver.configure_foreign_c(context)
     end
     compiler_io.validate(context.io, 2)
     driver.assert_target_context(context)
+    if context.browser_semantics then
+        context.foreign_c_configuration_id = driver.FOREIGN_C_CONFIGURATION_ID
+        return true
+    end
     local io_strategy = context.io
     local platform_ok, platform_result = driver.initialize_platform(context)
     local platform_err = not platform_ok and platform_result or nil
@@ -1195,6 +1205,110 @@ local function default_digest_adapter()
         sha256_stream = type(stream) == "function" and stream or nil }
 end
 
+do
+    local accepted = setmetatable({}, { __mode = "k" })
+
+    function perf.browser_semantics(handle)
+        return accepted[handle]
+    end
+
+    function driver.browser_analysis_target(prefix, options)
+        options = options or {}
+        local strategy = options.io or compiler_io.new_sync()
+        compiler_io.validate(strategy, 2)
+        local cache_ok, cache_error = cacheadapter.validate(options.cache_adapter)
+        if not cache_ok then return nil, cache_error end
+        local context = { io = strategy, cache_adapter = options.cache_adapter or default_digest_adapter() }
+        local root, root_error
+        if prefix == nil then
+            root, root_error = driver.compiler_root(strategy)
+        elseif type(prefix) == "string" and prefix ~= "" then
+            root, root_error = normalize_root(prefix, strategy)
+        else
+            return nil, "browser analysis requires a nonempty SDK prefix"
+        end
+        if not root then return nil, root_error end
+        local paths = driver.installed_paths(root, "browser")
+        local directory = paths.titan_bin
+        local function read_asset(name, max_bytes)
+            local filename = path.join(directory, name)
+            local info, err = strategy:stat(filename)
+            if not info then error(filename .. ": " .. (err or "missing file"), 0) end
+            if info.kind ~= "file" then error(filename .. ": expected a regular file", 0) end
+            local physical = assert(strategy:realpath(filename))
+            local bytes = incremental.file_contents(context, physical, max_bytes)
+            return bytes, incremental.file_digest(context, physical), physical
+        end
+
+        local ok, result = pcall(function()
+            local analysis_file = path.join(directory, "analysis-target")
+            local bytes = read_asset("analysis-target", 64 * 1024)
+            local data, err = driver._browser_target.decode_analysis(context, bytes)
+            if not data then error(analysis_file .. ": " .. err, 0) end
+            local profile = assert(csemantics.import_profile(data.profile_data))
+
+            local absent_file = path.join(directory, "absent-modules")
+            local absent, absent_digest = read_asset("absent-modules", 64 * 1024)
+            if absent_digest ~= data.absent_sha256 then error(absent_file .. ": digest disagrees with analysis-target", 0) end
+            local reasons = {}
+            for line in absent:gmatch("([^\n]*)\n") do
+                local name, reason = line:match("^([^\t\r]+)\t([^\t\r%z]+)$")
+                if not name or not staticmetadata.valid_module_name(name) or reasons[name] then
+                    error(absent_file .. ": invalid absent-module record", 0)
+                end
+                reasons[name] = reason
+            end
+            if absent ~= "" and absent:sub(-1) ~= "\n" then
+                error(absent_file .. ": missing final newline", 0)
+            end
+
+            local archive, archive_digest, provider_file = read_asset("titan.a", 256 * 1024 * 1024)
+            if archive_digest ~= data.provider_sha256 then
+                error(provider_file .. ": digest disagrees with analysis-target", 0)
+            end
+            local provider
+            provider, err = staticmetadata.scan_bytes(archive, provider_file, {
+                target = data.fingerprint,
+                expected_abi = driver.TITAN_ABI_VERSION,
+                validate_types = function(name, serialized, origin)
+                    local interface, decode_error = driver.decode_module_interface(serialized, name, origin)
+                    if not interface then return nil, decode_error end
+                    local valid, profile_error = types.normalize_portable_c_numeric_types(interface, profile)
+                    if not valid then return nil, profile_error end
+                    return interface
+                end,
+            })
+            if not provider then error(err, 0) end
+            if provider.kind ~= "archive" or #provider.key_order == 0 then
+                error(provider_file .. ": expected a nonempty Wasm provider archive", 0)
+            end
+            local valid, provider_error = driver.validate_browser_provider(provider)
+            if not valid then error(provider_error, 0) end
+            for name in pairs(reasons) do
+                if provider.entries[name] then error(absent_file .. ": lists provider module " .. name, 0) end
+            end
+            local identity = "browser-analysis:sha256:" .. incremental.digest(context, "browser-analysis-target", data)
+            local view = { identity = identity, directory = directory, provider_file = provider_file }
+            local handle = setmetatable({}, {
+                __index = view,
+                __newindex = function() error("browser analysis target is immutable", 2) end,
+                __metatable = false,
+            })
+            accepted[handle] = {
+                identity = identity, provider_file = provider_file, paths = paths, target = data,
+                cache_owner = identity .. ":" .. root .. ":" .. provider_file,
+                entries = provider.entries, key_order = provider.key_order, absent = reasons,
+            }
+            return handle
+        end)
+        if ok then return result end
+        if type(result) ~= "string" then error(result, 0) end
+        return nil, "target 'browser' needs a matching browser SDK at " .. string.format("%q", directory) ..
+            ": " .. result .. "; install or rebuild it with '" ..
+            driver.browserlink.install_command("sdk", root) .. "'"
+    end
+end
+
 -- Implementation notes: doc/implementation/driver.md#drivernew_resolver_contextoptions
 function driver._new_resolver_context(options, target_descriptor)
     options = options or {}
@@ -1204,6 +1318,14 @@ function driver._new_resolver_context(options, target_descriptor)
     if options.target ~= nil and options.target ~= "" and
        not source_labels[options.target] then
         error("invalid source selection target '" .. tostring(options.target) .. "'", 2)
+    end
+    local browser_semantics
+    if options.browser_analysis_target ~= nil then
+        browser_semantics = perf.browser_semantics(options.browser_analysis_target)
+        if not browser_semantics or options.target ~= "browser" or options.analysis_only ~= true or
+            options.output_root ~= nil or target_descriptor ~= nil then
+            error("browser_analysis_target requires a valid browser handle and an analysis-only browser context without output", 2)
+        end
     end
     local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
     if not cache_valid then error(cache_error, 2) end
@@ -1304,10 +1426,28 @@ function driver._new_resolver_context(options, target_descriptor)
     if not extra_ffi_include_dirs then
         error("invalid extra_ffi_include_dirs: " .. tostring(include_error), 2)
     end
+    local browser_foreign_flags, browser_foreign_flags_error
+    if browser_semantics then
+        browser_foreign_flags = {}
+        for _, flag in ipairs(driver.NATIVE_COMPILE_FLAGS or driver.EXTRA_CPPFLAGS or {}) do
+            browser_foreign_flags[#browser_foreign_flags + 1] = flag
+        end
+        if not driver.NATIVE_COMPILE_FLAGS then
+            browser_foreign_flags_error = (driver.EXTRA_CPPFLAGS == nil and cppflags_error) or
+                (driver.EXTRA_CFLAGS == nil and cflags_error) or nil
+            for _, flag in ipairs(driver.EXTRA_CFLAGS or {}) do
+                browser_foreign_flags[#browser_foreign_flags + 1] = flag
+            end
+        end
+    end
     local context = {
         _resolver_context = true,
         _target_initializing = true,
         target_descriptor = target_descriptor,
+        browser_semantics = browser_semantics,
+        browser_foreign_modules = browser_semantics and {} or nil,
+        browser_foreign_flags = browser_foreign_flags,
+        browser_foreign_flags_error = browser_foreign_flags_error,
         io = io_strategy,
         target = options.target ~= "" and options.target or nil,
         cache_adapter = options.cache_adapter or default_digest_adapter(),
@@ -1349,12 +1489,20 @@ function driver._new_resolver_context(options, target_descriptor)
         -- this invocation: each recorded header is checked at most once.
         header_validation = {},
     }
-    local initialized, layout_error = driver.initialize_layout(context)
-    if not initialized then
+    local initialized, layout_error
+    if browser_semantics then
+        context._layout_initialized = true
+    else
+        initialized, layout_error = driver.initialize_layout(context)
+    end
+    if not browser_semantics and not initialized then
         context._target_initializing = nil
         error("cannot initialize compiler layout: " .. tostring(layout_error), 2)
     end
-    if context.target and context.target ~= "browser" then
+    if browser_semantics then
+        context.target_profile = assert(csemantics.import_profile(browser_semantics.target.profile_data))
+        driver.activate_target_caches(context, browser_semantics.cache_owner)
+    elseif context.target and context.target ~= "browser" then
         driver.activate_target_caches(context, context.target)
     else
         local target_error
@@ -1366,7 +1514,7 @@ function driver._new_resolver_context(options, target_descriptor)
         end
     end
     context.relocation_roots = require("titan-compiler.relocation").roots(context.io, {
-        sdk = configured_installation_root,
+        sdk = browser_semantics and browser_semantics.paths.root or configured_installation_root,
         compiler = driver.SOURCE_CHECKOUT_ROOT,
         output = context.output_root,
     })
@@ -1963,25 +2111,28 @@ function driver.toolchain_descriptor(context)
     }
 end
 
+function perf.source_overlap(context, provider)
+    for _, name in ipairs(provider.key_order) do
+        local imported = driver.imported[name]
+        if context.source_modules[name] or (imported and imported ~= CIRCULAR_MARK and
+            (imported.ast or imported.kind == "source")) then
+            return name
+        end
+    end
+end
+
 local function available_embedded_interface_provider(context)
     local provider = context.embedded_interface_provider
     if not provider or context.embedded_interface_provider_rejected then
         return nil
     end
-    for _, name in ipairs(provider.key_order) do
-        local imported = driver.imported[name]
-        local cached_source = imported and imported ~= CIRCULAR_MARK and
-            (imported.ast or imported.kind == "source")
-        if context.source_modules[name] or cached_source then
-            -- One source identity rejects the complete physical inventory. This
-            -- mirrors archive overlap rather than mixing independently selected
-            -- entries from one embedded executable with project source. A
-            -- process-global source cache is still selected source provenance,
-            -- even when this context did not rediscover its project catalog.
-            context.embedded_interface_provider_rejected = true
-            context.embedded_interface_provider_overlap = name
-            return nil
-        end
+    -- One source identity rejects the whole bundled inventory, including
+    -- source entries already known to the process but not this resolver.
+    local overlap = perf.source_overlap(context, provider)
+    if overlap then
+        context.embedded_interface_provider_rejected = true
+        context.embedded_interface_provider_overlap = overlap
+        return nil
     end
     return provider
 end
@@ -1992,6 +2143,14 @@ end
 function driver.completion_binary_catalog(context)
     driver.assert_target_context(context)
     local result = {}
+    local semantic = context.browser_semantics
+    if semantic and not perf.source_overlap(context, semantic) then
+        for name, entry in pairs(semantic.entries) do
+            local docs = entry.decoded_types._documentation
+            result[name] = { serialized = entry.types, kind = "static",
+                filename = semantic.provider_file, documentation = docs and documentation.copy(docs) }
+        end
+    end
     -- Finalization selects whole archives, including siblings that ordinary
     -- imports never loaded. Capture their interfaces without selecting any
     -- additional providers or publishing siblings into driver.imported.
@@ -2059,10 +2218,46 @@ local function context_file_digest(context)
     return context.file_digest
 end
 
+function perf.browser_probe_configuration(context)
+    local semantic = context.browser_semantics
+    if context.browser_foreign_flags_error then return nil, context.browser_foreign_flags_error end
+    local toolchain, err = driver._browser_target.analysis_toolchain(context, semantic,
+        driver.installed_paths(semantic.paths.root).lua_source, context.browser_foreign_flags)
+    if not toolchain then return nil, err end
+    if context.transient_caches or probe_cache_disabled then return toolchain, "" end
+    local cache_root
+    cache_root, err = normalize_root(probe_prefix or semantic.paths.root, context.io)
+    if not cache_root then return nil, err end
+    return toolchain, root_join(cache_root, "var/cache/titan-probes/browser-" ..
+        driver._browser_target.EMSCRIPTEN_VERSION .. "/" .. cprobe_cache.VERSION)
+end
+
+function perf.browser_probe_error(context, reason)
+    if reason ~= nil and type(reason) ~= "string" then error(reason, 0) end
+    context.browser_foreign_identity = "browser-foreign-unavailable"
+    context.probe_service_error = "browser foreign C work needs Emscripten " ..
+        driver._browser_target.EMSCRIPTEN_VERSION .. " and matching SDK headers: " ..
+        (reason or "could not initialize the browser C probe")
+    return nil, context.probe_service_error
+end
+
+function driver.browser_foreign_cache_identity(options)
+    local context = options and options.context
+    if not (context and context.browser_semantics) then
+        return nil, "browser foreign cache identity requires a browser analysis context"
+    end
+    driver.assert_target_context(context)
+    if options.validate and context.browser_foreign_identity == nil then
+        driver.get_probe_service(context)
+    end
+    return context.browser_foreign_identity
+end
+
 function driver.get_probe_service(context)
     driver.assert_target_context(context)
-    if context.foreign_c_configuration_id ~=
-       driver.FOREIGN_C_CONFIGURATION_ID then
+    local semantic = context.browser_semantics
+    if not semantic and context.foreign_c_configuration_id ~=
+        driver.FOREIGN_C_CONFIGURATION_ID then
         local configured, configure_err = driver.configure_foreign_c(context)
         if not configured then
             context.probe_service_error = configure_err
@@ -2070,7 +2265,7 @@ function driver.get_probe_service(context)
         end
     end
     local configuration_id = driver.FOREIGN_C_CONFIGURATION_ID
-    if context.probe_configuration_id ~= configuration_id then
+    if not semantic and context.probe_configuration_id ~= configuration_id then
         if context.probe_service then
             local closed, close_err = context.probe_service:close()
             if not closed then
@@ -2086,7 +2281,15 @@ function driver.get_probe_service(context)
     if context.probe_service_error then
         return nil, context.probe_service_error
     end
-    local toolchain, err = driver.toolchain_descriptor(context)
+    local toolchain, err, browser_cache_directory
+    if semantic then
+        local ok, result, detail = pcall(perf.browser_probe_configuration, context)
+        if not ok then return perf.browser_probe_error(context, result) end
+        if not result then return perf.browser_probe_error(context, detail) end
+        toolchain, browser_cache_directory = result, detail
+    else
+        toolchain, err = driver.toolchain_descriptor(context)
+    end
     if not toolchain then
         context.probe_service_error = err
         return nil, err
@@ -2119,7 +2322,7 @@ function driver.get_probe_service(context)
     for _, directory in ipairs(toolchain.include_dirs or {}) do
         include_dirs[#include_dirs + 1] = directory
     end
-    if not context.target_descriptor then
+    if not context.target_descriptor and not semantic then
         for _, directory in ipairs(context.extra_ffi_include_dirs or {}) do
             include_dirs[#include_dirs + 1] = directory
         end
@@ -2158,14 +2361,25 @@ function driver.get_probe_service(context)
         execution_trace = execution_trace,
         toolchain = toolchain,
         verbose = context.probe_verbose,
-        cache_directory = context.transient_caches and "" or
+        cache_directory = browser_cache_directory or (context.transient_caches and "" or
             (context.target_descriptor and context.target_descriptor.probe_cache_directory or
-                (not context.target_descriptor and driver.PROBE_CACHE_DIRECTORY or nil)),
+                (not context.target_descriptor and driver.PROBE_CACHE_DIRECTORY or nil))),
         jobs = driver.probe_batch_jobs(context),
     })
     if not service then
+        if semantic then return perf.browser_probe_error(context, err) end
         context.probe_service_error = err
         return nil, err
+    end
+    if semantic then
+        local process_options = service:cdriver_process_options()
+        local identity, identity_error = cdriver.preprocessor_cache_identity(process_options)
+        if not identity then
+            service:close()
+            return perf.browser_probe_error(context, identity_error)
+        end
+        context.browser_foreign_identity = "browser-foreign:sha256:" .. incremental.digest(context,
+            "browser-foreign-cache", { toolchain = toolchain.target_identity, preprocessor = identity })
     end
     context.probe_service = service
     return service
@@ -2176,6 +2390,7 @@ end
 -- every native probe still crosses get_probe_service's live-target boundary.
 function driver.get_target_profile(context)
     driver.assert_target_context(context)
+    if context.browser_semantics then return context.target_profile end
     if context.target == "browser" then
         local descriptor, err = driver.context_target_descriptor(context)
         if not descriptor then return nil, err end
@@ -2212,6 +2427,20 @@ function driver.language_server_cache_identity(options)
     local context = options and options.context
     if type(context) ~= "table" or context.io == nil then
         return nil, "cache identity requires a resolver context"
+    end
+    if context.browser_semantics then
+        driver.assert_target_context(context)
+        local cwd, err = context.io:cwd()
+        if not cwd then return nil, err end
+        return "titan-language-server-cache-v1:sha256:" .. incremental.digest(context,
+            "browser-language-server-cache", {
+                version = driver.LANGUAGE_SERVER_API_VERSION, target = context.browser_semantics.cache_owner,
+                graphcodec = graphcodec.VERSION, projectcache = projectcache.VERSION,
+                foreigncache = foreigncache.VERSION, header_cache = cdriver.HEADER_CACHE_VERSION,
+                cwd = cwd, include_dirs = context.extra_ffi_include_dirs,
+                compile_flags = context.browser_foreign_flags,
+                flags_error = context.browser_foreign_flags_error,
+            })
     end
     local profile, err = driver.get_target_profile(context)
     if not profile then return nil, err end
@@ -2829,9 +3058,12 @@ end
 do
     local reasons_by_context = setmetatable({}, { __mode = "k" })
     function driver.missing_module_message(context, modname, source_required)
-        local descriptor = context and context.target == "browser" and driver.context_target_descriptor(context)
-        if descriptor then
-            local reasons = reasons_by_context[context]
+        local semantic = context and context.browser_semantics
+        local descriptor = not semantic and context and context.target == "browser" and
+            driver.context_target_descriptor(context)
+        if semantic or descriptor then
+            driver.assert_target_context(context)
+            local reasons = semantic and semantic.absent or reasons_by_context[context]
             if not reasons then
                 reasons = {}
                 local text = context.io:read_file(path.join(descriptor.paths.titan_bin, "absent-modules"))
@@ -4547,6 +4779,22 @@ function driver.find_compiled_interface(paths, modname, context)
 end
 
 local function inspect_static_provider(context, filename, relative)
+    local semantic = context.browser_semantics
+    if semantic and filename == semantic.provider_file then
+        local provider = context.provider_cache[filename]
+        if provider then return provider end
+        provider = { archive = filename, relative_archive = relative, kind = "metadata",
+            key_order = { table.unpack(semantic.key_order) }, entries = {} }
+        local memo = {}
+        for name, entry in pairs(semantic.entries) do
+            provider.entries[name] = {
+                abi = entry.abi, types = entry.types, origin = entry.origin,
+                type = types.clone_graph(entry.decoded_types, memo),
+            }
+        end
+        context.provider_cache[filename] = provider
+        return provider
+    end
     local decoded = perf.provider_decoding_cache(context, filename)
     local cached = context.provider_cache[filename]
     if cached and context.provider_cache_identity[filename] == decoded then
@@ -4554,8 +4802,13 @@ local function inspect_static_provider(context, filename, relative)
         return cached
     end
 
-    local browser, descriptor_error = driver.context_target_descriptor(context)
-    if descriptor_error then return nil, descriptor_error end
+    local browser, descriptor_error
+    if semantic then
+        browser = semantic.target
+    else
+        browser, descriptor_error = driver.context_target_descriptor(context)
+        if descriptor_error then return nil, descriptor_error end
+    end
     local options = {
         target = browser and browser.fingerprint or nil,
         io = context.io,
@@ -4626,21 +4879,34 @@ function driver.find_static_interface(paths, modname, context)
 
     local roots, roots_error
     if context.target == "browser" then
-        local descriptor, descriptor_error = driver.context_target_descriptor(context)
-        if not descriptor then return nil, descriptor_error end
+        local browser_paths
+        if context.browser_semantics then
+            browser_paths = context.browser_semantics.paths
+        else
+            local descriptor, descriptor_error = driver.context_target_descriptor(context)
+            if not descriptor then return nil, descriptor_error end
+            browser_paths = descriptor.paths
+        end
         roots, roots_error = driver.titan_bin_path_entries(paths, ".")
-        if roots then table.insert(roots, 1, descriptor.paths.titan_bin) end
+        if roots then table.insert(roots, 1, browser_paths.titan_bin) end
     else
         roots, roots_error = driver.titan_bin_path_entries(paths)
     end
     if not roots then return nil, roots_error end
-    for _, root in ipairs(roots) do
+    for root_index, root in ipairs(roots) do
         local absolute_root, root_error = normalize_root(root, context.io)
         if not absolute_root then return nil, root_error end
         for index, relative in ipairs(candidates) do
             if not occupied[relative] then
                 local filename = join_path(absolute_root, relative)
-                local attributes, attribute_error = context.io:lstat(filename)
+                local semantic = root_index == 1 and relative == "titan.a" and context.browser_semantics
+                local attributes, attribute_error
+                if semantic then
+                    filename = semantic.provider_file
+                    attributes = true
+                else
+                    attributes, attribute_error = context.io:lstat(filename)
+                end
                 if attribute_error then
                     return nil, "cannot inspect static provider candidate '" ..
                         filename .. "': " .. tostring(attribute_error)
@@ -4648,14 +4914,16 @@ function driver.find_static_interface(paths, modname, context)
                     occupied[relative] = true
                     -- Preserve lstat occupancy (including usable symlinks),
                     -- but never open a FIFO/device/directory as an archive.
-                    local followed, followed_error = context.io:stat(filename)
-                    if followed_error then
-                        return nil, "cannot inspect static provider candidate '" ..
-                            filename .. "': " .. tostring(followed_error)
-                    elseif not followed or followed.kind ~= "file" then
-                        return nil, "static provider candidate '" ..
-                            filename .. "' for module '" .. modname ..
-                            "' is not a readable regular file"
+                    if not semantic then
+                        local followed, followed_error = context.io:stat(filename)
+                        if followed_error then
+                            return nil, "cannot inspect static provider candidate '" ..
+                                filename .. "': " .. tostring(followed_error)
+                        elseif not followed or followed.kind ~= "file" then
+                            return nil, "static provider candidate '" ..
+                                filename .. "' for module '" .. modname ..
+                                "' is not a readable regular file"
+                        end
                     end
                     local provider, provider_err =
                         inspect_static_provider(context, filename, relative)
@@ -4845,6 +5113,9 @@ local function check_source_module(
             return driver.get_target_profile(context)
         end,
         probe_service_provider = function()
+            if context.browser_foreign_modules then
+                context.browser_foreign_modules[modname] = true
+            end
             return driver.get_probe_service(context)
         end,
         prepare_ffi_header = function(checked_ast)
@@ -5002,6 +5273,7 @@ function driver.incremental_configuration(context)
         error("configuration certification requires a resolver context", 2)
     end
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     if context.incremental_configuration then
         return context.incremental_configuration
     end
@@ -5108,6 +5380,9 @@ function driver.defaultloader(static_deps, options)
     options = options or {}
     local context = options.context
     driver.assert_target_context(context)
+    if context.browser_semantics and (options.incremental or options.plan_mode or options.worker_plan) then
+        error("browser analysis context cannot compile or link", 2)
+    end
     local source_roots = options.source_roots or {}
     -- The object code-generation policy certification compares records
     -- against; compilation requests of the same invocation use these values.
@@ -6727,6 +7002,7 @@ function driver.restore_source_object(context, modname, source, record, options)
         error("restoring an object requires a resolver context", 2)
     end
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local binding = context.loader and loader_contexts[context.loader]
     if not binding or binding.context ~= context or not binding.restore then
         error("restoring an object requires a loader bound to its " ..
@@ -7004,6 +7280,7 @@ end
 -- as closed data: driver paths and flags, resolver and code-generation
 -- policy, actual compiler inventory, and a certificate only when certifiable.
 function driver.worker_configuration(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local configuration, configuration_error, status =
         driver.incremental_configuration(context)
     if not configuration and status ~= "uncertified" then
@@ -7173,6 +7450,7 @@ end
 -- An interruption at any later point leaves no acceptable object.
 function driver.invalidate_source_object(context, modname, source)
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local stem = driver.module_output_stem(
         source.native_output or source.main, modname)
     local primary = stem .. ".o"
@@ -7220,6 +7498,7 @@ end
 -- {{from, to, role}}, diagnostics = {} }` or `nil, diagnostics text`.
 function driver.compile_planned_module(context, modname, options)
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     options = options or {}
     local plan = options.plan
     if type(plan) ~= "table" or plan.protocol ~= version.BUILD_WORKER_PROTOCOL
@@ -7424,6 +7703,7 @@ end
 -- `imports`), with status `built` rather than `hit` when uncertified.
 function driver.publish_staged_module(context, result)
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local modname = result.modname
     local primary, parts = nil, {}
     for _, staged in ipairs(result.staged or {}) do
@@ -8236,6 +8516,9 @@ end
 
 function driver.compile_module(modname, mod, static_deps, verbose, options)
     if options and options.context then driver.assert_target_context(options.context) end
+    if options and options.context and options.context.browser_semantics then
+        return nil, "browser analysis context cannot compile or link"
+    end
     if mod.compiled then return true, nil, nil end
     local ok, err, libname, native_references, objects = driver.compile(
         modname, mod.ast, mod.native_output or mod.filename,
@@ -8956,6 +9239,9 @@ local function prepare_compile(
         header_plan)
     local context = options and options.context
     if context then driver.assert_target_context(context) end
+    if context and context.browser_semantics then
+        return nil, "analysis-only compiler output cannot be compiled"
+    end
     if not staticmetadata.valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             string.format("%q", modname)
@@ -9774,8 +10060,12 @@ function perf.assert_compile_request_contexts(requests)
     for _, request in ipairs(requests) do
         assert(type(request) == "table", "each compilation request must be a table")
         local context = request.options and request.options.context
-        if context then driver.assert_target_context(context) end
+        if context then
+            driver.assert_target_context(context)
+            if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
+        end
     end
+    return true
 end
 
 local function validate_compile_requests(requests)
@@ -9830,7 +10120,8 @@ end
 -- extend this plan with provider/entrypoint outputs before materialization.
 function driver.plan_compile_requests(
         requests, verbose, native_inputs, symbol_owners, header_plans)
-    perf.assert_compile_request_contexts(requests)
+    local allowed, context_error = perf.assert_compile_request_contexts(requests)
+    if not allowed then return nil, context_error end
     validate_compile_requests(requests)
     local plans, outputs, inputs, symbols, errors = {}, {}, {}, {}, {}
     local input_seen, headers_by_name = {}, {}
@@ -9907,9 +10198,10 @@ function driver.compile_modules(requests, parallelism, verbose, plans)
     assert(type(requests) == "table", "requests must be a table")
     assert(type(parallelism) == "number" and parallelism >= 1 and
         parallelism % 1 == 0, "parallelism must be a positive integer")
-    perf.assert_compile_request_contexts(requests)
-    local results, plan_err = {}
-    if not plans then plans, plan_err = driver.plan_compile_requests(requests, verbose) end
+    local allowed, plan_err = perf.assert_compile_request_contexts(requests)
+    local results = {}
+    if allowed and not plans then plans, plan_err = driver.plan_compile_requests(requests, verbose) end
+    if not allowed then plans = nil end
     if not plans then
         for index in ipairs(requests) do results[index] = { err = plan_err } end
         return results
@@ -10576,6 +10868,7 @@ end
 -- explicitly owned, empty browser root can acquire one.
 function driver.validate_output_target(context, directory, create)
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local strategy = context.io
     local selected = driver.context_target(context)
     local marker = path.join(directory, ".titan-target")
@@ -10731,6 +11024,7 @@ end
 -- `protection.output_tools` are the compiler and output-tool identities.
 function driver.cleanup_stale_staging(context, outputs, locks, protection)
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     if not platform.windows then return true end
     if not locks or not locks.entries or #locks.entries == 0 then
         return nil, "stale staging cleanup requires held output locks"
@@ -11780,6 +12074,9 @@ function driver.build_static_archive(
 end
 
 function driver.stage_browser_provider(request)
+    if request.context and request.context.browser_semantics then
+        return nil, "browser analysis context cannot compile or link"
+    end
     local staged, directory = driver.staged_library_output(request.public_dso)
     if not staged then return nil, directory end
     local result, err = driver.build_static_archive(
@@ -12986,6 +13283,7 @@ end
 -- Success records `plan.reservations` and the validated `plan.inputs`.
 function driver.preflight_build_outputs(context, plan, options)
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     if options.output_root then
         local valid, target_error = driver.validate_output_target(
             context, options.output_root, true)
@@ -13390,6 +13688,9 @@ end
 function driver.publish_provider_bundle(
         staged_dso, staged_archive, public_dso, options)
     options = options or {}
+    if options.context and options.context.browser_semantics then
+        return nil, "browser analysis context cannot compile or link"
+    end
     if options.archive_only then
         local valid, err = driver.validate_provider_output_paths(
             public_dso, options.native_inputs, nil, options.context)
@@ -14138,6 +14439,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
 end
 
 function driver.browser_node_ready(context, assets)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local result = context.io:run(driver.browserlink.runner_argv(assets.runner, "--probe"), { stderr_to_stdout = true })
     if type(result) == "table" and result.ok then return true, nil, result.output end
     local detail = type(result) == "table" and (result.output or result.diagnostic) or "runner probe failed"

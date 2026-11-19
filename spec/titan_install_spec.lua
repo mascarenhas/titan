@@ -481,25 +481,10 @@ assert(os.remove(arg[0]))
         for _, name in ipairs(browser_lua_preserved) do
             write(prefix .. "/" .. name, name)
         end
-        local browser_sdk_owned = {
-            "lib/titan-browser/0.6/libtitan.a",
-            "lib/titan-browser/0.6/libtitan-lpeglabel.a",
-            "lib/titan-browser/0.6/titan.a",
-            "lib/titan-browser/0.6/titan-browser.mjs",
-            "lib/titan-browser/0.6/titan-protobuf.mjs",
-            "lib/titan-browser/0.6/titan-browser-library.js",
-            "lib/titan-browser/0.6/titan-browser-bridge.js",
-            "lib/titan-browser/0.6/titan-browser-trace.js",
-            "lib/titan-browser/0.6/titan-browser-run",
-            "lib/titan-browser/0.6/titan-browser-run.mjs",
-            "lib/titan-browser/0.6/titan-browser-node-worker.mjs",
-            "lib/titan-browser/0.6/titan-browser-page.mjs",
-            "lib/titan-browser/0.6/titan-browser-module-check.mjs",
-            "lib/titan-browser/0.6/build-profile",
-            "lib/titan-browser/0.6/absent-modules",
-            "lib/titan-browser/0.6/sdk-digests",
-            "lib/titan-browser/0.5/libtitan.a",
-        }
+        local browser_sdk_owned = { "lib/titan-browser/0.5/libtitan.a" }
+        for _, name in ipairs(installer.browser_sdk_owned) do
+            browser_sdk_owned[#browser_sdk_owned + 1] = "lib/titan-browser/0.6/" .. name
+        end
         for _, name in ipairs(browser_sdk_owned) do
             write(prefix .. "/" .. name, name)
         end

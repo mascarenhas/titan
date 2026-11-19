@@ -542,6 +542,7 @@ root; other chapters refer to this list:
 | `titan-browser-module-check.mjs` | the [module check](#c-helpers-and-emscripten-apis) that `titanc` runs on each linked image module, under emcc's Node with emcc's acorn parser |
 | `build-profile` | the [build profile](#build-profiles), `production` or `validation`, that compiled the SDK's archives |
 | `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
+| `analysis-target` | the relocatable browser type-checking profile, bound to the standard library and absent-module list |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
 On Windows, the SDK also installs the native runner helper
@@ -564,6 +565,19 @@ installed and keeps any other file in `lib/titan-browser/0.6/`, such as a
 library archive; `titan-uninstall` removes them too. See [what each command
 removes](installation.md#what-each-command-removes).
 
+### Editor type checking
+
+A browser-target editor root can check imports and show types and completion
+without the browser build tools. It needs a matching Titan compiler and
+`titan.a`, `analysis-target` and `absent-modules` together under the selected
+SDK's `lib/titan-browser/0.6/`. These files are not a build SDK. If an explicitly
+selected SDK is missing or has incompatible browser files, rebuild that SDK
+with `make browser-sdk` or select a matching one.
+
+Real C header or acceptance probes still need Emscripten 6.0.13 and matching
+SDK headers. Without those inputs, only the source requiring a C probe gets
+a diagnostic. Browser type checking never substitutes a native C compiler.
+
 ### Bootstrap order
 
 The pieces build in this order:
@@ -579,7 +593,8 @@ The pieces build in this order:
 5. it publishes the browser standard library, checked against the runtime from
    step 4 and checked to use no libuv, OpenSSL, llhttp, or SQLite header,
    archive, or symbol; and
-6. it writes the SDK digest manifest last.
+6. it publishes the browser type-checking profile and writes the SDK digest
+   manifest last.
 
 A missing browser SDK is reported only when a program or test is linked or a
 library is published, and then names the command that installs it:
@@ -604,8 +619,8 @@ Pass `--target browser` (or `-T browser`, or `--target=browser`), or set
 `TITAN_TARGET=browser` in the environment. The option wins over the variable.
 See [choosing the target](target-source-selection.md#choosing-the-target--t--target-and-titan_target)
 for the complete vocabulary. Only the `titanc` command reads `TITAN_TARGET`;
-the compiler library and the language server do not. Editors analyze the host
-target only.
+the compiler library and the language server do not. Editor roots select
+their target separately; see [editor type checking](#editor-type-checking).
 
 Source files for the browser use the `browser` label described in [target
 source selection](target-source-selection.md): `name.browser.titan` is
@@ -2032,7 +2047,6 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 * A loader instance runs `main` once; calls and explicit notification drains
   remain available afterward. Output sinks may return promises.
 * Windows-host browser builds use MSYS2 CLANG64, not a native Windows shell.
-* The language server analyzes the host target only.
 * Native source coverage (`--coverage` and its backend/report options) is not
   supported for the browser target.
 

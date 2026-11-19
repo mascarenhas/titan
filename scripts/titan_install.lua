@@ -363,6 +363,7 @@ installer.browser_sdk_owned = {
     "titan-browser-module-check.mjs",
     "build-profile",
     "absent-modules",
+    "analysis-target",
     "sdk-digests",
 }
 
