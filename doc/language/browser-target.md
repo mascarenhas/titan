@@ -619,8 +619,8 @@ Pass `--target browser` (or `-T browser`, or `--target=browser`), or set
 `TITAN_TARGET=browser` in the environment. The option wins over the variable.
 See [choosing the target](target-source-selection.md#choosing-the-target--t--target-and-titan_target)
 for the complete vocabulary. Only the `titanc` command reads `TITAN_TARGET`;
-the compiler library and the language server do not. Editors analyze the host
-target only.
+the compiler library and the language server do not. Editor roots select
+their target separately; see [editor type checking](#editor-type-checking).
 
 Source files for the browser use the `browser` label described in [target
 source selection](target-source-selection.md): `name.browser.titan` is
@@ -2047,7 +2047,6 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 * A loader instance runs `main` once; calls and explicit notification drains
   remain available afterward. Output sinks may return promises.
 * Windows-host browser builds use MSYS2 CLANG64, not a native Windows shell.
-* The language server analyzes the host target only.
 * Native source coverage (`--coverage` and its backend/report options) is not
   supported for the browser target.
 

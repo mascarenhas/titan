@@ -355,14 +355,15 @@ any other directory that is not a module.
 
 ## Editors
 
-The language server analyzes the host target only. It groups variants under
-their logical module and follows the selection, composition, privacy, and
-precedence rules of this chapter. A variant the host target does not select is
-not analyzed and gets one information-severity diagnostic that names the
-selected member, or says that the family has no active variant; the default
-contributors of a folder module absent for the host are reported the same way.
-Such files get no semantic completion. `TITAN_TARGET` has no effect on the
-server, and there is no setting to choose another target.
+The language server defaults to the native host target. In vscode-titan,
+`target = "browser"` in a root's `titan-config.lua` selects
+[browser type checking](browser-target.md#editor-type-checking). The server
+groups variants under their logical module and applies the selection,
+composition, privacy, and precedence rules for that root. An unselected
+variant is not analyzed and gets one information diagnostic naming the
+selected member or saying that no variant applies. The default contributors
+of a folder module with no applicable main get the same diagnostic. Such
+files get no semantic completion. `TITAN_TARGET` has no effect on the server.
 
 See [target source selection](../implementation/target-source-selection.md) in
 the implementation manual for the resolver, the driver API, and the build
