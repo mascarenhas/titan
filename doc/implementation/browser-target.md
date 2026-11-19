@@ -311,6 +311,46 @@ nor the native Lua headers are ever written; the common Titan headers
 `include/{minicoro.h,titan.h,transfer.h}` and
 `include/titan/{ffi.h,browser.h}` are the native SDK's own files.
 
+### Publishing the browser semantic pack
+
+The release companion for editor distribution is produced offline with
+Python 3.9 or newer, Git (including the pinned submodule objects), and the
+installed Titan Lua. Start from the unpacked, verified source rock or its
+byte-identical checkout, and the finished `make browser-sdk` installation:
+
+```sh
+make browser-semantic-pack PREFIX="$P" ROCKS_TREE="$P" \
+    SOURCE_ROCK="$R/titan-0.6.0-1.src.rock" TITAN_COMMIT="$C" \
+    PACK_OUTPUT="$O/titan-0.6.0-1-browser-semantics.tar.gz"
+```
+
+Use the full 40-hex Titan commit and an existing output directory outside
+the SDK. With unpacked rock sources, set `PACK_GIT_ROOT` to a local checkout
+that has the named commit and its gitlinks. `PACK_PYTHON` selects the Python
+executable. The producer compares the rock and live source files with the
+commit and recursive gitlinks, and checks the deployed compiler sources,
+notices, full browser provider inventory and semantic bytes in the selected
+SDK. It checks the semantic-file digests against the final `sdk-digests`
+record. The SDK's recorded build profile must match `TITAN_BUILD_PROFILE`;
+the public release uses `production`, and `validation` is for local
+candidates. The producer changes neither input and does not run Emscripten,
+Node, or a compiler build.
+
+The only payloads are `titan.a`, `analysis-target` and `absent-modules` at
+their SDK-relative paths and the corresponding Titan and third-party notices
+under `share/titan/`. `manifest.json` carries release/tag, Titan commit,
+source-rock basename and SHA-256, library/ABI/API, Emscripten pin and build
+profile, payload sizes and digests, and the matched SDK digest rows without
+their absolute paths or stat observations. The manifest is sorted compact
+UTF-8 JSON with a final LF. The gzip-compressed ustar has only regular
+files, in bytewise path order, with fixed metadata and zero timestamps.
+Identical input bytes and provenance produce identical output bytes; rebuilding
+the SDK elsewhere is not a promise of identical input bytes.
+
+Only the three semantic SDK files are needed for ordinary editor checking.
+The manifest and notices convey release provenance and attribution, and the
+WebAssembly build and image-runtime files are not part of this artifact.
+
 ### Readiness and the missing-SDK diagnostic
 
 `browserlink.require_sdk(context, descriptor, install)` checks, in the order

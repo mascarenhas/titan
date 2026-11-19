@@ -63,6 +63,20 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 	  $(call make_shell_quote,$(BROWSER_COMPILER_REMEDY)) \
 	  $(foreach source,$(TITAN_RUNTIME_SOURCES) $(BROWSER_LPEGLABEL_SOURCES),--c-source $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(source))))
 
+PACK_PYTHON ?= python3
+PACK_GIT_ROOT ?= .
+.PHONY: browser-semantic-pack
+browser-semantic-pack: ## Package an installed browser SDK's semantic assets and source-rock provenance
+	$(call make_shell_quote,$(PACK_PYTHON)) scripts/browser_semantic_pack.py \
+	  --lua $(call make_shell_quote,$(TITAN_LUA)) \
+	  --prefix $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(PREFIX))) \
+	  --rocks-tree $(call make_shell_quote,$(BROWSER_INSTALL_TREE)) \
+	  --rock $(call make_shell_quote,$(SOURCE_ROCK)) \
+	  --commit $(call make_shell_quote,$(TITAN_COMMIT)) \
+	  --output $(call make_shell_quote,$(PACK_OUTPUT)) \
+	  --git-root $(call make_shell_quote,$(PACK_GIT_ROOT)) \
+	  --profile $(call make_shell_quote,$(TITAN_BUILD_PROFILE))
+
 # Implementation notes: doc/implementation/build-script-audit.md#installation-and-publication
 uninstall-browser-sdk: ## Remove the files browser-sdk installed, keeping other files in their directory
 	$(call make_shell_quote,$(TITAN_LUA)) -E scripts/titan_install.lua uninstall-browser-sdk \

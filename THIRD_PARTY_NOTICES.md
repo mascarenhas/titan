@@ -1,5 +1,14 @@
 # Third-party notices
 
+## Browser standard provider and semantic pack
+
+The browser standard provider `titan.a` and the semantic pack containing it
+include the Go-derived path algorithms, the lpeg_patterns-derived URI grammar,
+the namespaced LPegLabel/LPeg engine and Relabel translation, the Lua-derived
+string algorithms, and the ta-regex-derived parser. Their full attributions
+and license texts are listed below. The semantic pack contains no Lua runtime
+archive or native standard provider.
+
 ## Experimental Windows builds
 
 `Makefile.win` packages the pinned Lua, libuv, llhttp, and SQLite providers
