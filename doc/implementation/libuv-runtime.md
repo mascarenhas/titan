@@ -966,8 +966,7 @@ gate](browser-target.md#subset-parity-gate) leaves out of the comparison.
 
 ## Allocation profile
 
-These properties of the current design were established by matched allocation
-measurements (archived with the issue #196 benchmarks; see
+These properties were established by matched allocation measurements (see
 [benchmark archives](benchmark-archives.md)). Keep them when changing the
 scheduler or adapter APIs:
 
@@ -1148,7 +1147,7 @@ automatic `titan_thread_channel_wait` cell), and `Thread:join` and the
 another state or thread may hold an endpoint clone, or the joined worker may
 still be running. Finalizers run newest first, so the coroutine can be finalized
 before or after the endpoint or `Thread` handle it waits on. In neither order
-may a queue still link the node once `coro_gc` releases the stack (issue #262).
+may a queue still link the node once `coro_gc` releases the stack.
 
 State close [unwinds](coroutines.md#unwinding-an-abandoned-coroutine) every
 suspended coroutine before it releases the stack, so each parked wait is
@@ -1227,7 +1226,7 @@ applies.
 `request_exit(code)` obtains the current Task, records only the first code,
 unbinds the Runtime's transfer loop before cancellation can enter cleanup,
 cancels every unfinished Task, and raises the caller's own cancellation. The
-`closing` flag is unchanged; accepted cleanup awaits and native callbacks still
+`closing` stays unset; accepted cleanup awaits and native callbacks continue to
 retire through the ordinary driver. The standalone bootstrap returns that code
 after ordinary cleanup, and `run` refuses new Tasks once exit is requested. A
 manual Lua/Titan host keeps control after its loop call; this operation never

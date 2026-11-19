@@ -1,254 +1,127 @@
-# Design philosophy and history
+# Design principles and lineage
 
-Titan is a statically-typed, ahead-of-time-compiled programming language
-designed as a *sister language* to [Lua](https://www.lua.org): it looks
-and feels like Lua, runs inside the Lua runtime, operates directly on Lua
-data, and exists for one reason — to let the performance-sensitive parts
-of a Lua system be written in something that is still recognizably Lua.
-This chapter explains the reasoning behind that design, where the project
-came from, and the principles that decide what goes into the language.
+Titan is a statically typed, ahead-of-time-compiled sister language to
+[Lua](https://www.lua.org). It shares Lua's syntax, values, and garbage
+collector so that performance-sensitive parts of a Lua system—or complete
+standalone programs and WebAssembly modules—can be written in a language that
+remains recognizably Lua while compiling to native C speed.
 
-## The problem Titan answers
+## The Lua performance bargain
 
-Lua programmers who care about performance learn a private dialect of
-contortions: caching library functions in locals, writing
-`xs[#xs + 1] = v` instead of `table.insert`, replacing `ipairs` with a
-manual numeric loop. The language is high-level, but its users routinely
-trade that away, line by line, for speed. The founding observation of
-Titan (presented by Hugo Musso Gualandi at the Lua Workshop 2017, in
-collaboration with André Maidl, Fabio Mascarenhas, Gabriel Ligneul and
-Hisham Muhammad¹) was that there are only two ways out of this:
+Lua programmers who chase speed end up writing a cramped dialect: caching
+library functions in locals, replacing `table.insert` with `xs[#xs + 1] = v`,
+and hand-unrolling `ipairs` into numeric loops. The language is clean and
+expressive, yet users repeatedly trade clarity away for throughput.
 
-1. **Optimize the Lua implementation.** The state of the art is
-   just-in-time compilation, and Lua is lucky to have LuaJIT, a
-   best-in-class JIT. But JITs are labor-intensive to build and maintain,
-   their tooling is an open problem, they lag behind language evolution,
-   and they do not optimize evenly — the gap between code the JIT
-   compiles well and code it punts on can be an order of magnitude, and
-   it is hard to predict which side of the gap a program falls on.
+There are two structural ways out of that trap:
 
-2. **Use a different language for the hot parts.** This is the original
-   scripting-language bargain: the scripting language is dynamically
-   typed, interpreted, flexible glue; the system language is statically
-   typed, compiled, structured and efficient; each plays to its
-   strengths. For Lua that traditionally means C through the C API — but
-   the C API is hard to use, stack-based, and semantically mismatched
-   with Lua. Rewriting in C is only worth it for large chunks of code,
-   both because of the rewriting effort and because every crossing of
-   the language boundary costs.
+1. **Build a tracing or method JIT for Lua.** LuaJIT demonstrates how fast a
+   great JIT can be, but JIT compilers are expensive to maintain, lag behind
+   language evolution, and create performance cliffs—code the JIT traces runs
+   at near-C speed, while code that aborts a trace drops an order of magnitude
+   with little warning.
+2. **Pair Lua with a compiled system language.** This is the classic
+   scripting-language bargain: use Lua for flexible glue and a statically
+   typed compiled language for the hot code. Traditionally that second
+   language is C through the Lua C API, which is stack-based, error-prone, and
+   semantically distant from Lua—making the crossing worthwhile only for large
+   subsystems.
 
-Titan is a bet on the second path, redesigned so that the bargain stops
-hurting: a system-programming language *made for Lua*. Instead of pairing
-Lua with C, pair it with a language that has Lua's syntax and data model
-but a static type system and an ahead-of-time compiler. The programmer
-moves a function or a module — not a whole program — across the boundary,
-and the boundary itself is engineered to be nearly free.
+Titan takes the second path and removes the friction from the boundary. Rather
+than pairing Lua with C, Titan pairs Lua with a statically typed language
+designed specifically for Lua's runtime and data model. Moving a function or a
+module across the boundary requires no foreign marshalling layer, and calling
+between Titan and Lua is cheap enough to use routinely.
 
-It is worth stating what Titan is *not*. It is not Typed Lua: the goal is
-not to add annotations to existing Lua programs and check them, but to
-define a new language that is free to restrict Lua's semantics where
-those semantics are what make Lua slow. Titan's semantics are close to a
-*subset* of Lua — close enough that a Lua programmer can read and write
-Titan immediately — but it is a different language, and it makes
-different promises.
+Titan is deliberately a **separate language**, not a gradual type checker
+layered onto existing Lua scripts. Restricting dynamic features that defeat
+ahead-of-time optimization—such as arbitrary metatables on Titan structs or
+polymorphic numeric dispatch—is what lets the compiler emit straight-line C
+without fallback paths.
 
-## The core commitments
+## Five core design commitments
 
-**Seamless interoperation.** A compiled Titan module is, from Lua's point
-of view, just a module: you `require` it, call its functions, read and
-write its exported variables, index its records. Titan functions receive
-and return Lua-compatible values; Maps are ordinary Lua tables, while Arrays
-cross the boundary as canonical Titan userdata proxies over private Lua
-tables. Titan shares Lua's garbage collector rather than bringing its own.
-Crossing from Lua into Titan costs one target-directed dynamic conversion per argument —
-comparable to what a careful C function would do with the `luaL_check*`
-API. Exact Titan-to-Titan calls cost nothing beyond a C function call. A
-statically known non-exact callable edge may realize a fresh target-tagged
-native adapter; when it cannot, a branded value keeps the strict generic entry
-instead of pretending to be a Lua boundary. Genuine Lua still calls the source
-coercive entry. Container crossings remain shallow:
-genuine-Lua Array writes are dynamically converted by the Array's carried
-writer, raw Lua Map writes are not intercepted, and every later typed
-Array/Map read strictly establishes the requested value before native use.
-The distinction is where Titan's safety lives: dynamic conversion is applied
-only at an explicitly dynamic boundary, while gradual views pay strict checks
-when their contents are observed. The canonical split is the
-[normative boundary matrix](types.md#normative-boundary-matrix). (See
-[Lua interoperability](lua-interop.md) and, for the machinery,
-[the implementation documentation](../implementation/lua-interop-internals.md).)
+1. **Lua compatibility outranks expressiveness.**
+   Titan values cross into Lua and back cleanly; a feature that has no
+   faithful Lua representation or changes the meaning of Lua-looking code does
+   not belong in the language. Arithmetic reproduces Lua bit for bit—including
+   floor division (`//`), modulo (`%`), shifts, overflow, and exact mixed
+   `integer`/`float` comparisons—even where C's operators disagree. Truthiness
+   follows Lua everywhere: only `nil` and `false` are falsy.
 
-Interfaces keep that boundary explicit. A statically known satisfying record
-or union converts by constructing a nominal wrapper and causes its generated
-module to advertise that checked pair. Lua and `value` can pass an existing
-exact wrapper or use that compiler witness to wrap bare full userdata. This
-preserves a faithful userdata representation and a well-defined error without
-adding structural method search at a dynamic edge.
+2. **Safety at the boundary is non-negotiable.**
+   Where Lua absorbs an unexpected type by coercing, consulting a metamethod,
+   or taking a slow generic path, Titan fails early with a clear runtime
+   error. Crossing from Lua or an explicit `as` cast applies a consistent
+   target-directed conversion; typed reads from Arrays, Maps, and implicit
+   `value` projections enforce strict runtime guards. Lua code can never
+   corrupt Titan's type invariants—the worst it can trigger is a normal error
+   thrown back across the boundary. The sole unsafe escape hatch is the C
+   foreign function interface (`foreign`), which is syntactically explicit.
 
-**Fail early instead of falling back.** Where Lua reacts to an unexpected
-value by taking a slower generic path — coercing, consulting a
-metamethod, growing a representation — Titan raises an error. If a
-parameter is declared `{integer}` and receives something else, that is a
-run-time error at the boundary; if `xs[i]` does not hold an integer where
-an integer is promised, that is a run-time error at the access. These
-restrictions are not incidental: they are what allow the compiler to
-generate straight-line C with unboxed values and no fallback paths, and
-they double as compiler-checked documentation of what the code actually
-expects. The flip side of the bargain is honored dynamically — the checks
-never silently disappear, so Lua code can never corrupt Titan data, only
-get an error thrown back at it.
+3. **Optimization-friendly data on a single garbage collector.**
+   Lua uses one table structure for everything; Titan splits its data so the
+   compiler can specialize storage directly:
+   - **Arrays (`{T}`)** are dense, positive-indexed containers with
+     deterministic `#` length, exposed to Lua through canonical userdata
+     proxies so Titan reads and writes skip generic hash dispatch.
+   - **Maps (`{K: V}`)** are ordinary Lua tables for key/value lookup and
+     seamless table interoperation.
+   - **Records** are fixed-slot nominal structs whose field accesses compile
+     to indexed loads rather than table lookups.
+   - **Tagged unions** are closed nominal sums with positional or named
+     payload parts and direct tag dispatch in `case`.
+   - **Interfaces** provide nominal behavioral views satisfied structurally at
+     conversion sites, wrapping concrete records or unions without making
+     concrete layouts structural or requiring runtime method search.
 
-**Optimization-friendly data.** Lua has exactly one table data structure;
-Titan deliberately splits its container types. Arrays (`{T}`) are canonical
-userdata proxies over private, array-part-only backing tables; maps (`{K:V}`)
-remain ordinary Lua tables. Both can be handed to Lua, but only Titan creates
-valid Array proxies. The static types let the compiler use their storage
-directly, skipping generic VM access paths. Records are also userdata:
-nominal, fixed-shape values with their fields at fixed slots, the moral
-equivalent of structs, designed so that `p.x` compiles to an indexed load
-rather than a hash lookup. Nominal [unions](unions.md) apply the same idea to
-alternatives: one absolute integer tag and at most one fixed payload slot
-permit direct construction and switch dispatch while `case` keeps the
-representation opaque. The FFI extends the same idea outward: C
-functions and C pointers get Titan types, so binding a C library is a
-declaration, not a hand-written adapter. (History note: in the 2017
-slides records were spelled `struct` and the FFI was an inline
-`foreign C [[...]]` block, LuaJIT-style; they became `record` and
-`foreign import "header.h"` as the design matured.)
+   All Titan values live on Lua's garbage collector—no reference counting, no
+   second heap, and no cross-runtime cycles.
 
-Nominal [Interfaces](interfaces.md) add behavioral abstraction without turning
-record or union layout structural. Direct concrete calls stay specialized;
-conversion constructs a compact wrapper whose declaration-order vtable
-supports calls through the Interface contract. Wrapper allocation and identity
-are visible consequences of requesting that abstraction. Once compiled code
-contains such a conversion, module initialization also advertises that checked
-pair on the concrete metatable. A later `value` or Lua boundary can therefore
-recover the same abstraction from bare userdata without structural reflection;
-unwitnessed matching method sets remain irrelevant.
+4. **Pay-as-you-go dynamism without general subtyping.**
+   Static types are the default, but interoperating with Lua requires explicit
+   escape hatches. Option types (`T?`) give nil-tolerant code a checked,
+   first-class shape with automatic checked unwrapping at use sites; `value`
+   holds any Lua-representable value while keeping operations around it
+   statically checked until narrowed. Titan avoids general subtyping: direct
+   conversions (`integer` to `float`, `T` to `T?`, concrete record to
+   Interface) apply at typed sinks and never silently lift through containers
+   or function types, keeping performance costs visible and local.
 
-**Pay-as-you-go dynamism.** Static types are the default, but Lua is next
-door, and pretending otherwise would make the boundary unusable. The
-`value` type is the deliberate escape hatch: a `value` can hold anything
-Lua can produce. Conversions from ordinary non-C Titan values *to* `value`
-are free and implicit; a boxable C scalar first checks its
-`lua_Integer`/`lua_Number` carrier, while C aggregates and function pointers
-are not boxable. Conversions *from* `value` are implicit where the context names a type —
-compiled, like the boundary, into a single run-time check. Option types
-(`T?`) play the same role for the smaller question of "this or nil",
-giving nil-tolerant code a checked, first-class shape instead of an
-untyped one. The design intent in both cases is the same: dynamism is
-available, explicit in the types, and paid for only where it is used.
+5. **Lean on existing toolchains.**
+   Titan compiles to C and hands optimization to the system C compiler—and to
+   Emscripten when targeting WebAssembly in the browser—rather than
+   maintaining a custom code generator or JIT. Generated C targets Lua's
+   pinned internal headers directly instead of going through the dynamically
+   typed Lua C API, avoiding redundant stack shuffling and type checks. The
+   trade-off is explicit: each Titan release pairs with a pinned minor version
+   of Lua (Lua 5.5.1), trading version independence for predictable,
+   straight-line native code.
 
-Titan consequently does not need general subtyping. Even `T -> T?` is a named
-conversion because representations may differ, and concrete-to-Interface use
-is another direct conversion with a wrapper. Neither automatically lifts
-through an Array, Map, or Function; gradual consistency remains the separate,
-symmetric relation used for checked views.
+## Lineage
 
-**An implementation that leans on what exists.** Titan compiles to C and
-hands the result to the system C compiler — no interpreter of its own, no
-JIT, no custom backend; decades of C toolchain do the optimizing. More
-unusually, the generated C bypasses the Lua C API and works directly
-against the interpreter's internal headers. The C API is "dynamically
-typed" — every operation re-checks its operands, adjusts stacks, guards
-errors — and Titan's static types make almost all of that redundant. Going
-under the API is measurably faster and allows real specialization (an
-array access compiles to an array access), at a known cost: each Titan
-release is tied to a specific minor version of Lua, and tracking a new
-Lua release means re-deriving the generated code against the new
-internals. The current [value representation and GC invariants](../implementation/values-and-gc.md)
-document that coupling, and [upgrading the pinned Lua](../implementation/codegen-overview.md#upgrading-the-pinned-lua)
-describes how an interpreter upgrade is checked against the generated code.
+Titan grew out of LabLua at PUC-Rio. Its lineage begins with **Typed Lua**,
+which explored adding static types to Lua itself, and led to the insight that
+a restricted, ahead-of-time-compiled sister language could achieve far better
+predictability and speed. Hugo Musso Gualandi presented that design at the
+Lua Workshop 2017 alongside André Maidl, Fabio Mascarenhas, Gabriel Ligneul,
+and Hisham Muhammad,¹ and the group built the initial `titan-v0` compiler.
 
-## A short history
+The work subsequently branched along two complementary goals:
 
-Titan grew out of LabLua at PUC-Rio. The lineage starts with Typed Lua
-and the question of what static types could do for Lua; Titan's answer —
-a separate, restricted, compiled sister language rather than annotations
-over Lua — was taken to a proof of concept by the five workshop authors
-in late 2017, as the `titan-v0` compiler whose git history this
-repository still continues.
+- **Pallene**, led by Hugo Gualandi, pursued a minimal Lua-subset language
+  focused on compiler research and gradual-typing performance studies.
+- **Titan**, led by Fabio Mascarenhas, pursued a complete, practical systems
+  language—adding separate compilation and multi-module providers, nominal
+  records, unions, Interfaces, generics, first-class closures, `defer`/`catch`
+  error handling, a direct C FFI and C callback subset, a rich libuv-backed
+  asynchronous and multi-threaded standard library, and a WebAssembly browser
+  target.
 
-The project then forked along its two natures. Hugo Gualandi's
-continuation became **Pallene**, the research vehicle: a minimal
-Lua-subset language for studying the performance of gradually-typed
-sister languages, kept small on purpose. **Titan** continued as the engineering track under Fabio
-Mascarenhas, accumulating the features a practical language needs. The
-pull-request history tells that story directly: the typechecker
-sketch (#20) and the early code generator (#26, #29, #35); module-level
-globals (#33) and the GC-safety discipline (#56); a real module system
-with separate compilation and dynamic loading (#40/#44, #66, #81); the
-`value` type and explicit casts (#92); the C FFI by Hisham Muhammad
-(#107), who also contributed maps (#229) and the Lua-faithful semantics
-for `//`, `%` and shifts (#216); multiple returns and multiple assignment
-(#172, #178); records with methods (#201); standalone executables (#230);
-making compiled modules loadable by a stock Lua, with no global C state so
-one module can serve several Lua states (#231, #233/#235); the
-static-when-source, dynamic-otherwise linking policy (#237); option types
-(#239, refined by #250, #255); and the beginnings of the error-handling
-story (#257). The [implementation documentation](../implementation/index.md)
-describes where each of these lives today.
-
-The current prototype includes nominal tagged unions and non-exhaustive `case`.
-Variants are deliberately not first-class types, constructors are positional,
-and every arm is an ordinary full block. The first version therefore reuses
-the existing nominal, function, option, and error-handling models instead of
-creating parallel ones.
-
-The prototype separates gradual consistency from direct and written coercions.
-Typed Array/Map observations and branded exact-tag
-mismatches use strict guards, while written `value as/is T` and genuine Lua
-boundaries share a broader target-directed conversion. Arrays carry their Lua-write
-policy, and function closures distinguish exact native, strict Titan-generic,
-and coercive Lua entries. The fixed closure/native contract supports
-conditional non-exact target wrappers: eligible source closures
-get a consumer-local native adapter and strict relay, while other values retain
-the generic fallback. This adds no provider ABI surface. It also adds nominal Interface declarations,
-structural record/union satisfaction at statically known conversion sites,
-fresh wrappers, concrete downcasts, and compiler-witnessed dynamic Interface
-boundaries. The discovery protocol adds private generated functions and
-per-state metatable entries without changing the provider ABI. These
-coordinated representations are part of ABI 2 and use the matched Lua 5.5.1
-runtime.
-
-## Principles, distilled
-
-When a design question comes up, the project has historically resolved it
-by these lights, roughly in order:
-
-1. **Lua compatibility outranks expressiveness.** Titan values cross into
-   Lua and back; any feature that would give Titan values no faithful Lua
-   representation, or that would change the meaning of Lua-looking code,
-   is suspect. Arithmetic, for instance, follows Lua exactly — `//`, `%`
-   and shifts reproduce Lua's results bit for bit even where C's
-   operators disagree.
-2. **Safety at the boundary is non-negotiable.** Lua code must not be
-   able to corrupt Titan data structures or type assumptions; the worst
-   it can get is a run-time error with a good message. Checks may be
-   moved and deduplicated, never dropped.
-3. **The Lua GC is the only GC.** Titan allocates Lua objects, keeps them
-   visible to Lua's collector at every step, and emits the write barriers
-   the collector requires. No reference counting, no shadow heaps.
-4. **Performance comes from specialization, not cleverness.** The
-   compiler wins by knowing types and shapes statically and emitting the
-   obvious direct code, then letting the C compiler optimize. Where Lua
-   semantics demand branches (shift amounts, division signs), they are
-   written so constant operands let the C compiler delete them.
-5. **Restrictions are features when they buy the above.** Nominal
-   records, unions, and Interfaces, no user-defined metatables on Titan data — each is a smaller
-   language in exchange for a faster and more predictable one, and each can
-   be revisited as the design matures (see the roadmap in the
-   [README](../../README.md)). First-class functions began as one of these
-   restrictions and have since been lifted: functions are now values that
-   can be stored, passed, returned and called — with a zero-overhead fast
-   path for exact Titan-to-Titan calls — and that has grown to include
-   anonymous functions that close over enclosing locals and bound instance-
-   method references; only foreign/FFI functions remain non-values.
+For how these principles translate into the compiler, runtime, and generated
+C, see the [implementation documentation](../implementation/index.md).
 
 ---
 
-¹ Hugo Musso Gualandi, *Titan: A System Programming Language made for
-Lua*, Lua Workshop 2017 —
-[slides](https://www.lua.org/wshop17/Gualandi.pdf). The framing of the
-problem and the core commitments in this chapter follow that
-presentation; the post-2017 history is reconstructed from the project's
-pull-request record.
+¹ Hugo Musso Gualandi, *Titan: A System Programming Language made for Lua*,
+Lua Workshop 2017 ([slides](https://www.lua.org/wshop17/Gualandi.pdf)).

@@ -412,7 +412,7 @@ resource crosses the sessions.
 Profile selection, prefixes and command ownership are in [repository
 workflow](repository-workflow.md#choose-the-matching-profile-and-command); the
 per-component optimization policy is in [build
-profiles](../language/build-profiles.md). The test harness adds these flag
+profiles](../language/toolchain.md#build-profiles). The test harness adds these flag
 rules:
 
 - The native aggregate and its fresh child compilers receive the profile's

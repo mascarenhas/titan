@@ -1,431 +1,258 @@
-# Unions
+# Tagged Unions and Pattern Matching
 
-Titan unions are nominal tagged values. A union declaration lists a fixed set
-of named variants; each variant carries zero or more named payload parts. Construction is explicit through a generated function, and inspection
-is explicit through a `case` statement.
+A tagged union represents a closed set of named alternatives, each carrying zero or more typed payload parts. Values are constructed through generated variant constructors and inspected with `case` statements.
 
 ```titan
 union Message
     quit()
     write(string)
-    move(x: float, y: float)
+    move(x: float, y: float, note: string?)
 end
 
 function describe(message: Message): string
     case message
     when write(text) then
         return "write: " .. text
-    when move(x, y) then
-        return "move to " .. x .. ", " .. y
+    when move { y, x, comment = note } then
+        local suffix = comment and (" (" .. comment .. ")") or ""
+        return "move to " .. x .. ", " .. y .. suffix
     when quit() then
         return "quit"
-    else
-        return "unknown"
     end
 end
 ```
 
-Every arm begins with the reserved word `when`. There is no fallthrough:
-exactly the matching arm runs. The optional `else` runs when no listed arm
-matches.
-`when` is reserved as a statement keyword. Declaration/member positions that
-use `AnyName` still admit keyword spellings; local payload binders use ordinary
-non-keyword names. See [the grammar](grammar.md).
+Every arm starts with `when`. Only the matching arm runs—there is no fallthrough between arms—and an optional `else` arm runs when no listed variant matches.
 
-## Declaring unions and variants
+## Declaring a union
 
-The general form is:
+Union declarations appear at module top level and must contain at least one variant:
 
 ```text
 [local] union Name
     [local] empty_variant()
-    [local] payload_variant(PayloadType)
-    [local] parts_variant(first: FirstType, second: SecondType)
-    ...
+    [local] single_part(PayloadType)
+    [local] named_parts(first: FirstType, second: SecondType)
 end
 ```
 
-A union must declare at least one variant. Variant names are unique within the
-union. A `local union` and a `local` variant are visible only inside their
-declaring module. Public variants receive tags first in their relative source
-order; local variants follow in their relative source order. Adding or moving
-a local variant therefore does not renumber existing public variants.
+Each variant declares a fixed list of payload parts:
 
-Part names are unique within each variant and may be reserved words. The
-single unnamed form `write(string)` is shorthand for `write(value: string)`.
-A variant may use that single-type shorthand or a list of `name: Type` parts;
-it cannot mix the two. Payload lists have fixed arity: `...: Type` is not
-allowed. A variant supports at most 65,534 parts.
+- `quit()` declares an empty variant with no payload.
+- `write(string)` is shorthand for a single named part `write(value: string)`.
+- `move(x: float, y: float, note: string?)` declares explicit `name: Type` parts (up to 65,534 parts per variant).
 
-The union is a type. Its variants are metadata belonging to that type, not
-separate types. In particular, `Message.write` is a constructor function, not
-a type name, and is illegal in a type annotation, a type alias, or on the
-right-hand side of `as` or `is`. Use `Message` as the type and use `case` to
-distinguish its values.
+A variant cannot mix unnamed shorthand with named parts, cannot repeat a part name, and cannot use a variadic `...: T` tail. Variant names and part names accept any ASCII identifier (including reserved words such as `end`), while local `case` binders use ordinary non-reserved identifiers (see [Appendix C: Grammar Reference](grammar.md)).
 
-Union types are nominal. Two declarations with the same variants are still
-different types:
+Choose variant payload parts for data specific to that alternative; use a [record](records.md) when the data has its own methods, mutable shared state, or reusable identity across multiple contexts.
+
+### Nominal identity and visibility
+
+Unions are nominal types identified by their fully qualified declaration name (`module.UnionName`). Two separate declarations with identical variants are unrelated types, while a transparent `type` alias preserves the same union identity.
+
+A union is a type; its variants are not separate types. `Message.write` is a constructor function, not a type name, and cannot appear in a type annotation, a `type` alias, or after `as`/`is`.
+
+A `local union` or `local` variant is visible only inside its defining module (and explicit `.titan` source imports). Within a module, a union and all of its constructors, methods, and functions are visible regardless of source order.
+
+### Payload types
+
+Union payload parts accept the same types as record fields: all ordinary Titan types (scalars, strings, containers, records, unions, Interfaces, functions, options, and `value`), foreign scalars and pointers, and eligible fixed C structs, unions, and arrays. Embedded C structs and fixed arrays project borrowed interior pointers when matched in `case` (see [Calling C](ffi.md)).
+
+## Variant constructors
+
+Each variant generates a static constructor `Union.variant` whose parameters match its payload parts in declaration order. Direct calls accept both positional and named arguments ([Functions, Arguments, and Results](functions.md#named-calls)):
 
 ```titan
-union First
-    item(integer)
+union Message
+    quit()
+    write(string)
+    move(x: float, y: float, note: string?)
 end
 
-union Second
-    item(integer)
+function build_messages(): (Message, Message, Message, Message)
+    local stop = Message.quit()
+    local line = Message.write("hello")
+    local labeled = Message.write { value = "hello" }
+    local moved = Message.move { y = 20.0, x = 10.0 } -- note receives nil
+    return stop, line, labeled, moved
 end
-
--- First.item(1) is not a Second
 ```
 
-Transparent aliases preserve the original union identity:
+Constructor call rules:
 
-```titan
-type Event = Message
-```
+- Positional calls follow standard fixed-arity adjustment: omitted trailing arguments are filled with `nil` and type-checked, and surplus arguments are evaluated and discarded.
+- Named calls evaluate explicit expressions in written order. Any omitted part receives `nil` and must accept it (for example `T?`, `value`, or `boolean` converting to `false`); omitting a required `integer` or `string` is a compile-time error.
+- For a generic union, explicit owner type arguments attach to the union name: `Maybe<|integer|>.present(1)` and `Maybe<|integer|>.absent()`.
+- Variant constructors are first-class function values (`local make: function (string): (Message) = Message.write`). Once stored in a function variable, the constructor is called positionally.
+- Generated variant constructors (including empty variants) may be called in module-variable initializers, subject to the [initializer dependency rules](modules.md).
 
-## Constructors
-
-Each variant declaration synthesizes one static constructor named
-`Union.variant`, with one parameter per part in declaration order. An empty
-variant takes no parameters.
-
-```titan
-local stopped = Message.quit()
-local line = Message.write("hello")
-local moved = Message.move(10.0, 20.0)
-```
-
-For a generic union, explicit owner arguments attach to the union namespace:
-`Maybe<|integer|>.present(1)` and `Maybe<|integer|>.absent()`. The old spelling
-`Maybe.present<|integer|>(1)` is not an owner application. An inferred call may
-remain `Maybe.present(1)`, and a result-only binder with no evidence closes by
-the [generic final carrier rule](generics.md#instantiating-calls-and-constructors).
-
-Variant constructors are ordinary first-class function values:
-
-```titan
-local make_message: function (string): (Message) = Message.write
-local message = make_message("hello")
-```
-
-They use the normal fixed-call argument adjustment: omitted fixed arguments
-are nil-filled and surplus arguments are evaluated and discarded. The
-resulting value must still satisfy the declared payload type.
-
-Direct variant constructors also accept named arguments. Names select parts;
-explicit expressions evaluate in written order. Omitted parts receive nil and
-must accept it, either directly or through an ordinary implicit conversion.
-For example, `string?` and `value` accept nil, and `boolean` converts it to
-false; a required `integer` or `string` cannot be omitted.
-
-```titan
-local message = Message.write { value = "hello" }
-local moved = Message.move { y = 20.0, x = 10.0 }
-```
-
-These names also work through imported union namespaces and explicit generic
-owner applications. A constructor stored in an ordinary function variable is
-called positionally, following the usual [named-call rules](named-arguments.md).
-
-A record can still be one payload part. Keep parentheses to pass a record
-constructor positionally, or name the part in a named call:
+Because bare braces select named-call syntax, keep parentheses when passing a record constructor as a single positional payload part, or name the part explicitly:
 
 ```titan
 record Point
     x: float
     y: float
 end
+
 union Movement
-    move(Point)
+    step(Point)
 end
-local first = Movement.move({ x = 1.0, y = 2.0 })
-local second = Movement.move { value = { x = 1.0, y = 2.0 } }
+
+function make_steps(): (Movement, Movement)
+    local first = Movement.step({ x = 1.0, y = 2.0 })
+    local second = Movement.step { value = { x = 1.0, y = 2.0 } }
+    return first, second
+end
 ```
 
-User-declared union functions and methods use the same syntax and rules as
-record functions and methods:
+## Matching with `case`
+
+A `case` statement dispatches on a union value across zero or more `when` arms and an optional `else` arm:
+
+```text
+case expression
+when variant_name(a, b) then
+    block
+when other_variant { part, local_alias = other_part } then
+    block
+else
+    block
+end
+```
+
+### Positional and named bindings
+
+- **Positional (`when move(a, b)`):** Binds parts in declaration order. Any trailing parts may be omitted (including all parts, `when move()`), and binder names need not match the declared part names. Extra binders or any binder on an empty variant are compile-time errors.
+- **Named (`when move { vertical = y, x }`):** Selects parts by name in any order. Writing `x` binds part `x` to a local named `x`; writing `alias = part` puts the **local variable on the left** and the **declared part name on the right**. Commas and semicolons are optional separators (including a trailing separator). Any part may be omitted regardless of its type—unlike constructors, matching imposes no nil requirement on omitted parts. Referring to an unknown part or naming the same part twice is an error.
+
+When a variant part has a reserved-word name such as `end`, alias it to a regular identifier when matching:
 
 ```titan
-function Message.default(): Message
-    return Message.quit()
+union SpanEvent
+    closed(from: string, end: integer, reason: string)
 end
 
-function Message:length(): integer
+function format_event(event: SpanEvent): string
+    case event
+    when closed { finish = end, summary = reason } then
+        return summary .. " at " .. finish
+    end
+end
+```
+
+Repeating the same variant in two `when` arms of one `case` is a compile-time error.
+
+Binding follows ordinary local assignment semantics: scalar values are copied, while records, Arrays, Maps, unions, and functions share the underlying reference. Embedded C structs and fixed arrays bind borrowed pointers into the union value, which remain valid while the union stays live.
+
+### Arm blocks, `defer`, `catch`, and `break`
+
+Each `when` arm and the `else` clause is a full Titan block with its own lexical scope. Payload binders are visible throughout that arm's body and in an arm-local `catch` clause (locals declared inside the arm body are not visible in `catch`). `defer` inside an arm runs when that arm exits, and `break` targets the enclosing loop:
+
+```titan
+local io = import "io"
+
+union Job
+    run(string)
+    stop()
+end
+
+local function execute_job(name: string)
+    if name == "" then
+        raise "empty job name"
+    end
+end
+
+function dispatch(job: Job): string
+    case job
+    when run(name) then
+        defer io.print("finished " .. name)
+        execute_job(name)
+        return "ok: " .. name
+    catch
+        return "failed " .. name .. ": " .. (error as string)
+    when stop() then
+        return "stopped"
+    end
+end
+```
+
+### Option scrutinees
+
+A `case` scrutinee of option type `U?` is automatically unwrapped before dispatch, just like a field read or method call on an optional record:
+
+```titan
+union Signal
+    ping()
+    halt()
+end
+
+function classify(sig: Signal?): string
+    if not sig then
+        return "none"
+    end
+    case sig
+    when ping() then
+        return "ping"
+    when halt() then
+        return "halt"
+    end
+end
+```
+
+If a `nil` value reaches `case` without an earlier guard, the unwrap raises a runtime type error; `nil` is not an unlisted variant and never enters `else`.
+
+## Coverage and non-fallthrough proof
+
+`case` statements do not require exhaustive coverage. If no arm matches and there is no `else`, `case` simply does nothing and execution continues after `end`.
+
+When a function must return a value on every path, however, Titan's control-flow analysis uses the closed variant set of the scrutinee's union type. A `case` statement is proven **non-fallthrough** when every `when` arm terminates (via `return`, `raise`, or `break`) and either:
+
+1. the `when` arms cover **every variant** of the closed union; or
+2. an explicit `else` arm is present and also terminates.
+
+In the `describe` and `classify` functions above, listing every variant lets the function omit a dummy `else` clause cleanly. If complete coverage is followed by a redundant `else`, the compiler still type-checks the `else` block, though it cannot be reached at run time.
+
+An imported public union may contain `local` variants declared inside its defining module. Importers cannot name those private variants, so listing every public variant does not cover the closed union; an importer must supply a terminating `else` to prove non-fallthrough. When relying on exhaustive coverage over a separately loaded shared-library union, adding a private variant to that shared library later is detected at load time (see [Appendix B: Toolchain and Linking](toolchain.md)).
+
+## Methods, functions, equality, and Interfaces
+
+Unions support static union functions (`function Message.default(): Message`) and instance methods (`function Message:length(): integer`) under the same rules as [records](records.md):
+
+```titan
+union Packet
+    empty()
+    bytes(string)
+end
+
+function Packet.none(): Packet
+    return Packet.empty()
+end
+
+function Packet:size(): integer
     case self
-    when write(text) then
-        return #text
-    else
+    when bytes(data) then
+        return #data
+    when empty() then
         return 0
     end
 end
 ```
 
-A generated constructor reserves its variant name in the union's static
-function namespace. User-declared union functions may use named calls in the
-same declaration-based situations as record functions.
+Generated variant constructors reserve their variant names in the union's static function namespace.
 
-A genuine generated variant constructor, including one for an empty variant,
-may initialize a module variable: like a generated record constructor, it only
-stores its checked arguments, which follow the
-[initializer dependency rule](modules.md#initializer-dependencies). The checker
-recognizes the validated synthesized constructor metadata, not merely any
-static returning the owner: an own user-written union function that happens to
-return `Message` is an own-function dependency, while a union function imported
-from another module is an ordinary imported call.
+Union values compare by reference identity (`==`), not by variant tag or payload contents. Instances have no `.tag` or `.payload` fields; use `case` in typed Titan code (see [Reflection](standard-library-reflect.md) for dynamic inspection and [JSON](standard-library-json.md) for named-part JSON serialization). Titan unions are distinct from C `union` types and have no structural cast to or from C aggregates.
 
-## Payload types
+A union can satisfy a **method-only** [Interface](interfaces.md) through its visible methods (variant constructors and union functions do not count). Because a union's payload depends on its active variant, a union cannot satisfy an Interface that declares fields.
 
-Union parts have the same storage eligibility as record fields. Ordinary
-Titan values are supported, including primitive values, strings, Arrays, Maps,
-records, unions, functions, Options, and `value`. Foreign scalars and object or
-function pointers retain their native values; exact `TValue`/`Udata *` and
-`owned` forms remain traced.
+## Unions from Lua
 
-Eligible complete C structs, C unions, and fixed C arrays are stored by value.
-A case binder for one of these parts receives a borrowed interior pointer
-(an element pointer for an array). Direct C function types remain ineligible;
-a C function pointer is a separate supported type. By-value C aggregates and
-arrays are not Option bases and do not become generally boxable in `value`,
-Arrays, or Maps. See [Native storage in records and unions](nominal-storage.md)
-for the complete rules, including fresh trailing allocations.
-
-An empty variant has no hidden user payload. It is therefore an error to bind
-one in a `case` arm.
-
-## Case statements
-
-A case statement has one scrutinee, a sequence of `when` arms, and an optional
-`else`:
-
-```text
-case expression
-when variant_name([binding, ...]) then
-    block
-when another_variant{[part, alias = other_part, ...]} then
-    block
-else
-    block
-end
-```
-
-The scrutinee must have the union's type. Parenthesized binders select parts
-in declaration order. Any suffix may be omitted, including every part, and
-binder names need not match part names. Extra binders are a type error. An
-empty variant cannot have a binder.
-
-Curly braces select parts by name, in any order. `part` binds that part to a
-same-named local; `alias = part` binds it to the local on the **left**. A
-reserved-word part must use an ordinary nonreserved alias:
-
-```titan
-union Event
-    received(from: string, end: integer, text: string)
-end
-function describe_event(event: Event): string
-    case event
-    when received{body = text; finish = end} then
-        return body .. " through " .. finish
-    end
-end
-```
-
-Both forms may omit any unneeded values without a nil/type restriction; named
-binding can skip a middle part. Named binders may be separated by commas or
-semicolons, with optional separators and an optional trailing separator.
-Referencing a part twice is a syntax error, even with different aliases.
-Selecting an unknown part is a type error. Binder names follow ordinary local
-shadowing rules. Repeating the same variant in a case statement is also an error.
-
-Binding follows ordinary local-assignment value semantics. Scalar payloads
-are copied; identity- or reference-bearing payloads such as records, arrays,
-maps, unions, and functions keep the same underlying object. Mutating a
-mutable record or container through the binding is therefore visible through
-every other alias. Embedded C aggregate and fixed-array parts instead project
-borrowed pointers into the union. Their contents may be mutated through those
-pointers unless the declared C type is const-qualified; keep the union alive
-for the entire borrowed lifetime.
-
-The binding is scoped to that arm. Each arm and the `else` clause is a regular
-Titan block, not merely a list of simple statements. It can therefore contain
-nested declarations and control flow and can carry its own `catch` clause:
-
-```titan
-case message
-when write(text) then
-    defer log(text)
-    consume(text)
-catch
-    report(text)
-when quit() then
-    stop()
-else
-    ignore()
-end
-```
-
-The arm binding is visible in that arm's protected body and `catch`. Locals declared inside the protected body follow the ordinary
-error-handling scope rule and are not visible in the sibling `catch` clause.
-
-`defer` needs no case-specific behavior: it is transformed within the arm or
-`else` block that contains it, runs at that block's exit, and never extends
-into another arm.
-
-`break` in an arm targets the enclosing loop, just as it does from an
-`if`/`elseif`/`else` block. There is no implicit loop and no fallthrough
-between arms.
-
-## Non-exhaustiveness and control-flow analysis
-
-Case statements are intentionally non-exhaustive. The compiler does not
-require every variant to be listed, and it does not insert an implicit error.
-If no arm matches and there is no `else`, the case statement does nothing and
-execution continues after it.
-
-Control-flow analysis can nevertheless use the closed set of variants in the
-scrutinee's static union type. A case statement is considered non-fallthrough
-when every `when` arm is non-fallthrough and either:
-
-1. the arms cover every variant in that closed union; or
-2. an explicit `else` exists and is non-fallthrough.
-
-The first route does not make exhaustive coverage mandatory; it only proves
-that execution cannot reach the following statement when coverage happens to
-be complete. If complete coverage is followed by a redundant `else`, that
-block is unreachable, so its ability to fall through does not defeat the
-proof. The compiler still checks the block normally.
-
-An imported public union can have variants that are local to its defining
-module. Those hidden variants still count in the closed union's total but
-cannot be named by the importer, so listing every visible variant is not
-complete coverage there. Such a consumer needs a non-fallthrough `else` to
-prove that the case cannot fall through.
-
-For a separately loaded shared dependency, a consumer that relies on complete
-coverage records that closed-inventory assumption. Adding a private variant
-then rejects the unchanged consumer at load time, including when a redundant
-falling-through `else` had been ignored because coverage was complete. An
-independently terminating `else` needs no such assumption. Other consumers
-continue to accept compatible private-variant changes, with ordinary
-unmatched-case fallthrough preserved. See
-[Replacing shared-library dependencies](binary-compatibility.md#private-union-variants-and-control-flow).
-
-## Option scrutinees
-
-The ordinary option auto-unwrapping rule applies to case scrutinees. A
-`Message?` expression is automatically forced to `Message` before dispatch:
-
-```titan
-function inspect(message: Message?)
-    case message
-    when quit() then
-        stop()
-    else
-        continue()
-    end
-end
-```
-
-If the value is nil, the force raises the same run-time error as another
-automatic option unwrap. Nil is not an unlisted variant and does not select
-`else`.
-
-## Equality, conversions, and field access
-
-Union values are identity-bearing userdata, like records. Equality compares
-value identity, not variant and payload contents. A union has no public
-`.tag`, `.payload`, or variant fields; use `case` to inspect it.
-
-The union type participates in ordinary conversions to and from `value`, with
-the usual checked nominal conversion on the way back. An explicit cast to C
-`void *` exposes the identity pointer, as it does for a record.
-
-Titan unions are not C unions, just as Titan records are not C structs. There
-is no cast between a Titan union and a C `union`, C `struct`, or other
-structural aggregate. C code that needs a Titan identity may use only the
-documented `void *` identity cast.
-
-## Unions and Interfaces
-
-A union can satisfy a method-only [Interface](interfaces.md) through its visible
-public or module-local methods. It cannot satisfy an Interface that declares a
-field, because a variant-dependent payload is not a stable record slot. The
-union does not carry an `implements` annotation. At each statically known
-conversion site, every required method must be visible and satisfy the
-Interface signature under directional callable adjustment; variants,
-constructors, payloads, and union functions do not count.
-
-An accepted `U -> I` conversion constructs a fresh Interface wrapper retaining
-the union value. It is a direct coercion rather than subtyping or gradual
-consistency, and it does not lift through a container or function component.
-Interface equality compares wrapper identity, so the wrapper is incomparable
-with its concrete union and separately constructed wrappers are distinct.
-Inside Interface dispatch the concrete `self` is still the exact union value,
-including its variant tag and payload.
-
-## Visibility and declaration order
-
-Union declarations follow the current record visibility rules.
-
-Within one module, a union and its variants, generated constructors, methods,
-and union functions are available module-wide, regardless of written order.
-An imported union is likewise available to aliases, record fields, union
-payloads, callable signatures, and function bodies even when the relevant
-`import` appears later.
-
-Module-variable initializers retain their declaration frontier. A direct
-qualified use of an imported union constructor, or the same use nested in a
-lambda evaluated by that initializer, sees only earlier imports. A type alias
-may bridge to a later import because aliases use the placement-independent
-type declaration frontier.
-
-These rules are identical in flat and folder modules: contributor files add
-source order but do not introduce file-local namespaces.
-
-## Lua interoperability
-
-From Lua, an exported union name is a read-only namespace on its Titan module.
-It contains public variant constructors and public user-declared union
-functions. Exact constructor source identity is stable, so repeated reads
-compare equal. A later non-exact Titan target-typed use may conditionally
-realize a fresh [closure adjustment wrapper](closure-adjustment-wrappers.md)
-without changing that canonical source value.
-
-A union value is userdata. Public methods are available through ordinary
-method lookup. Variants, tags, and payloads are opaque; arbitrary reads and
-all writes fail. The protected metatable string is
-`"Titan union <qualified-name>"`.
+From Lua, an exported union appears on its module table as a read-only namespace holding its public variant constructors and public union functions. Each union instance is userdata (`type(v) == "userdata"`) with a protected metatable `"Titan union module.Name"`:
 
 ```lua
-local m = require "messages"
-local value = m.Message.write("hello")
-print(value:length())
-print(getmetatable(value)) -- Titan union messages.Message
+local packets = require "packets"
+local p = packets.Packet.bytes("hello")
+print(p:size())            --> 5
+print(getmetatable(p))     --> Titan union packets.Packet
 ```
 
-Lua arguments and results cross the same checked boundary as records. A value
-passed where a particular union is required must carry that exact nominal
-union identity.
-
-## Boundaries
-
-Unions retain these boundaries:
-
-* each variant has a fixed list of named payload parts;
-* variants are not first-class types;
-* direct constructors support positional and named calls;
-* case coverage is not required (complete coverage is only a control-flow
-  proof);
-* ordinary instance access keeps tags and parts opaque;
-  [reflection](standard-library-reflect.md) provides typed inspection;
-* there is no structural conversion to a C union; and
-* equality is identity equality rather than derived value equality.
-
-The compiled-module interface carries union and variant metadata so imported
-modules preserve constructor, method, visibility, and tag information. That
-interface and the corresponding run-time layout are part of the compiled-module
-ABI. Public variant tags keep their relative order independently of private
-variants. A separate shared provider may change private variants subject to
-the selective compatibility and control-flow rules above. Rebuild affected
-consumers when a required public shape or ABI changes; there is no layout
-adapter.
+Public methods are callable through colon syntax, equality compares identity, and variant tags and payloads remain opaque from Lua (arbitrary reads and all writes fail). Passing a union value across the Lua boundary checks its exact nominal union identity.

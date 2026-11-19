@@ -2,11 +2,15 @@
 [![CI](https://github.com/mascarenhas/titan/actions/workflows/ci.yml/badge.svg)](https://github.com/mascarenhas/titan/actions/workflows/ci.yml)
 [![Coverage Status](https://codecov.io/gh/titan-lang/titan/coverage.svg?branch=master)](https://codecov.io/gh/titan-lang/titan/branch/master)
 
-Titan is a statically typed programming language that is compiled ahead of time
-to native code. It is a sister language to [Lua](http://www.lua.org): the syntax
-is close to Lua's, every variable has a static type, and compiled modules run
-inside the Lua runtime. Lua programs `require` Titan modules like any other
-module, and the two languages share values and the garbage collector.
+Titan is a statically typed, ahead-of-time-compiled sister language to
+[Lua](https://www.lua.org). Its syntax and arithmetic stay close to Lua, every
+variable has a static type, and compiled modules run inside the Lua runtime so
+Lua programs `require` them directly while sharing values and the garbage
+collector.
+
+Titan compiles to native executables and libraries on Linux and macOS, with
+experimental support for Windows and a WebAssembly browser target through
+[Emscripten](https://emscripten.org).
 
 ```titan
 local io = import "io"
@@ -23,40 +27,34 @@ titanc -o out hello    # compiles hello.titan
 ./out/hello Titan      # Hello, Titan!
 ```
 
-Titan is an evolving language, so expect breaking changes. Linux and macOS are supported. The Windows port and WASM browser target are experimental.
-
 ## What is in it
 
-- **Language:** integers, floats, booleans, strings, option types (`T?`),
-  arrays and maps, nomimal records and unions, structural interfaces,
-  generics with type erasure and interface constraints, first-class functions
-  with multiple return values, a gradually-typed `value` type for dynamic Lua
-  data, and error handling with `raise`, `catch`, and `defer`.
-- **Modules:** one module per source file or folder, importable by name, and
-  compiled to shared and static libraries that carry their type information.
-- **C interface:** `foreign import` binds C headers directly. `foreign function`s
-  have a restricted Titan subset that does not depend on the Titan runtime
-  and has more C-like semantics.
-- **Standard library:** async tasks and timers on libuv, files, DNS and TCP,
-  verified TLS, an HTTP/1.1 client and server, WebSocket, child processes,
-  OS threads with channels, JSON, Protocol Buffers, SQLite, parsing
-  expressions grammars, byte strings and regular expressions, reflection, garbage
-  collector control, and a native test runner.
-- **WASM browser target**: compiled through
- [Emscripten](https://emscripten.org/index.html), supports a large subset of the standard library and includes a Titan<->JS bridge.
+- **Language:** 64-bit `integer`, IEEE-754 `float`, `boolean`, byte `string`,
+  option types (`T?`), dense Arrays (`{T}`, `const { T }`, `const? { T }`) and
+  Maps (`{K: V}`), nominal records and tagged unions with `case`, nominal
+  Interfaces with structural satisfaction, erased generics with Interface
+  constraints, first-class closures with multiple and flexible returns,
+  gradually typed `value`, and error handling with `raise`, `catch`, and
+  `defer`.
+- **Modules and toolchain:** flat and folder modules, target-specific source
+  variants, incremental compilation, shared `.so` and static `.a` providers
+  carrying their own type metadata, and native executable-line coverage.
+- **C interface:** `foreign import` binds C headers directly; `foreign function`
+  exports C-ABI functions and writes GC-free C callbacks in a restricted C-like
+  subset.
+- **Standard library:** 26 native modules—cooperative `async` Tasks and timers
+  on libuv, files, DNS/TCP, verified TLS, HTTP/1.1 client and server,
+  WebSocket, child processes, OS threads with bounded channels, JSON, Protocol
+  Buffers, SQLite, parsing expression grammars (`peg`), byte strings and
+  regexes, reflection, GC controls, Lua states, and a native test runner—plus
+  21 modules (including typed JavaScript bindings in `browser`) on the
+  WebAssembly browser target.
 
 ## Install
 
-The default installation puts three things under one prefix that you choose for
-the project:
-
-- Lua 5.5.1 from Titan's fork,
-  [release `v5.5.1-1` of mascarenhas/lua-5.5.1](https://github.com/mascarenhas/lua-5.5.1/releases/tag/v5.5.1-1).
-- Stock LuaRocks 3.13.0.
-- Titan, installed by that LuaRocks with `luarocks install titan`.
-
-You need a C compiler, `make`, CMake, `git`, `curl`, Readline and OpenSSL
-development packages, and `pkg-config`:
+The default Linux and macOS installation puts Lua 5.5.1 (from Titan's fork),
+stock LuaRocks 3.13.0, and Titan under one absolute `PREFIX`. Install the
+system prerequisites first:
 
 ```sh
 # Ubuntu/Debian
@@ -67,8 +65,8 @@ sudo dnf install gcc make cmake curl git readline-devel openssl-devel pkgconf-pk
 xcode-select --install && brew install cmake readline openssl@3 pkgconf
 ```
 
-Then build Lua and LuaRocks into your prefix and install the rock. On macOS, use
-`macosx` instead of `linux-readline`.
+Then build Lua and LuaRocks into your prefix and install Titan (use `macosx`
+instead of `linux-readline` on macOS):
 
 ```sh
 export PREFIX="$HOME/.local/titan/my-project"
@@ -87,86 +85,75 @@ tar zxf luarocks-3.13.0.tar.gz
 
 export PATH="$PREFIX/bin:$PATH"
 luarocks install titan
-titanc --print-root    # prints $PREFIX if the install worked
+titanc --print-root    # prints $PREFIX
 ```
 
-Keep `$PREFIX/bin` first on `PATH` so that `lua`, `luarocks`, and `titanc` all
-come from this installation. The build downloads and compiles libuv, llhttp,
-SQLite, and libbacktrace, and LuaRocks fetches four Lua dependencies, so it needs
-network access and takes a while.
+Keep `$PREFIX/bin` first on `PATH` so `lua`, `luarocks`, and `titanc` come from
+the same installation. The rock build downloads and compiles libuv, llhttp,
+SQLite, and libbacktrace alongside four Lua rocks.
 
-### Other ways to install
+### Other installation options
 
-[Installing Titan on Linux and macOS](doc/language/installation.md) explains each
-step above and covers the other cases:
-
-- [From a Git checkout](doc/language/installation.md#from-a-git-checkout), where
-  `make lua`, `make luarocks`, and `luarocks make` replace the manual steps.
-- [Bundled OpenSSL](doc/language/installation.md#bundled-openssl) instead of the
-  system library.
-- [Readline on macOS](doc/language/installation.md#readline-on-macos) and
-  [building Lua without Readline](doc/language/installation.md#without-readline).
-- [Your own compiler and flags](doc/language/installation.md#your-own-compiler-and-flags).
-- [A separate rocks tree](doc/language/installation.md#a-separate-rocks-tree),
-  [a binary rock](doc/language/installation.md#a-binary-rock), and
-  [a debug installation](doc/language/installation.md#a-debug-validation-installation).
-- [Rebuilding the standard library](doc/language/installation.md#building-the-standard-library-from-a-checkout)
-  while developing it, [uninstalling](doc/language/installation.md#uninstalling),
-  and [what gets installed](doc/language/installation.md#what-gets-installed).
-- [Upgrading from a pre-release build](doc/language/installation.md#upgrading-from-a-pre-release-build),
-  which generated Lua loader files that must be deleted.
-
-On Windows, follow
-[Installing and using Titan on Windows](doc/language/windows-build.md).
+- [Installing Titan on Linux and macOS](doc/language/installation.md):
+  [from a Git checkout](doc/language/installation.md#from-a-git-checkout),
+  [bundled OpenSSL](doc/language/installation.md#bundled-openssl),
+  [Readline on macOS](doc/language/installation.md#readline-on-macos),
+  [without Readline](doc/language/installation.md#without-readline),
+  [custom compilers and flags](doc/language/installation.md#your-own-compiler-and-flags),
+  [separate rocks tree](doc/language/installation.md#a-separate-rocks-tree),
+  [binary rocks](doc/language/installation.md#a-binary-rock),
+  [validation debug installs](doc/language/installation.md#a-debug-validation-installation),
+  [browser Lua and SDK](doc/language/installation.md#the-browser-lua-and-sdk),
+  [rebuilding the standard library](doc/language/installation.md#building-the-standard-library-from-a-checkout),
+  [what gets installed](doc/language/installation.md#what-gets-installed), and
+  [uninstalling](doc/language/installation.md#uninstalling).
+- [Installing and using Titan on Windows](doc/language/windows-build.md):
+  experimental MSYS2 CLANG64 build and deployment guide.
 
 ## Using `titanc`
 
-`titanc` takes dotted module names, not file paths, and looks for source
-in the current directory (change it with `--tree`). Pass `-o DIRECTORY` to keep
-all generated files in one place.
+`titanc` takes dotted module names (not file paths) resolved from `--tree`
+(default `.`). Pass `-o DIR` to keep all generated files in one directory:
 
 ```sh
-titanc -o out app.main              # a program, if app/main.titan defines main
-titanc -o out greeting              # a library: out/greeting.so and out/greeting.a
-titanc -o out --test calc_test      # a native test executable
+titanc -o out app.main              # executable (when app/main.titan defines main)
+titanc -o out greeting              # library pair: out/greeting.so and out/greeting.a
+titanc -o out --test calc_test      # native test executable
 ```
 
-- A module that defines `function main(args: {string}): integer` becomes an
-  executable. `args[1]` is the first command-line argument.
-- Any other module becomes a library. Titan code imports it with `import`, and
-  Lua code uses `require` after `require "titan"`, which installs Titan's
-  package searcher. The searcher finds providers along the Titan path:
+- A module defining `function main(args: {string}): integer` builds an
+  executable (`args[1]` is the first command-line argument).
+- Any other module builds a library. Titan code loads it with `import`; Lua
+  code installs Titan's package searcher with `require "titan"` and loads it
+  along `TITAN_PATH_0_6`:
 
   ```sh
   TITAN_PATH_0_6='out;;' \
     lua -e 'require "titan"; print(require("greeting").make("Lua"))'
   ```
 
-- Standard-library modules have short names in Titan (`import "fs"`) and
+- Standard-library modules use short names in Titan (`import "fs"`) and
   qualified names in Lua (`require "titan.fs"`).
 
-The [language reference](doc/language/modules.md#compiling-modules-titanc) lists
-every `titanc` option. See also
-[Output directories](doc/language/output-directory.md),
-[Incremental and separate compilation](doc/language/incremental-compilation.md),
-and [Testing Titan code](doc/language/standard-library-test.md).
+See [The `titanc` toolchain](doc/language/toolchain.md) for all compiler flags,
+incremental builds, linking, and native coverage, and
+[Testing Titan code](doc/language/standard-library-test.md) for the test runner.
 
 ## Documentation
 
-- [Titan quick tour](doc/quick-tour.md): short runnable programs that introduce
-  the language and standard library. Start here.
-- [Language reference](doc/language/index.md): the full description of the
-  language and every standard-library module.
-- [Style guide](doc/style-guide.md): conventions for Titan and
-  standard-library code.
-- [Implementation documentation](doc/implementation/index.md): the compiler,
-  generated C, runtime, ABI, and how Titan and Lua interoperate. Read it if you
-  want to change Titan itself.
+- [A Tour of Titan](doc/language/tour.md): runnable walkthrough of the language
+  and standard library. Start here.
+- [The Titan Programming Language](doc/language/index.md): complete language
+  guide, standard library reference, and appendices.
+- [Titan Style Guide](doc/style-guide.md): idiomatic patterns and conventions
+  for writing Titan code.
+- [Implementation Documentation](doc/implementation/index.md): compiler
+  pipeline, generated C, runtime, and contributor workflows.
 
 ## Working on Titan
 
-Work from a [Git checkout](doc/language/installation.md#from-a-git-checkout).
-Run the whole test suite in a throwaway installation:
+Clone with submodules and run the full mixed test suite in an isolated prefix
+(see [From a Git checkout](doc/language/installation.md#from-a-git-checkout)):
 
 ```sh
 export PREFIX="/tmp/titan-$USER-test"
@@ -174,21 +161,13 @@ export PATH="$PREFIX/bin:$PATH"
 make test
 ```
 
-`make test` builds Lua and LuaRocks into the prefix if they are missing,
-reinstalls the current checkout, and then runs the compiler specs (Busted) and the
-standard library's native tests. The
-[repository workflow](doc/implementation/repository-workflow.md) lists the
-commands for running one part, filtering tests, and using the checkout compiler
-without reinstalling. The
-[test runner](doc/implementation/test-runner.md) and
-[continuous integration](doc/implementation/continuous-integration.md) chapters
-cover how the suite is organized and what CI runs, including the required
-macOS check before merging.
-
-Use `make clean` to remove generated outputs and `make distclean` to also remove
-downloaded dependency sources. See
+`make test` prepares Lua and LuaRocks if absent, reinstalls Titan, and runs the
+Busted compiler specs and native standard-library tests. See
+[Repository workflow](doc/implementation/repository-workflow.md),
+[Test runner](doc/implementation/test-runner.md),
+[Continuous integration](doc/implementation/continuous-integration.md), and
 [Cleaning a checkout](doc/language/installation.md#cleaning-a-checkout).
 
 ## License
 
-Titan is available under the terms of the MIT license. See [LICENSE](LICENSE).
+Titan is available under the MIT license. See [LICENSE](LICENSE).

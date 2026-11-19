@@ -1,148 +1,160 @@
 # Iteration standard library
 
-The `titan.iteration` module provides generic Map and Array iterators:
+The `iteration` standard module provides generic iterators for Titan Maps
+(`pairs`, `next`) and Arrays (`ipairs`), preserving static key, value, and
+element types without widening to `value`. Titan imports it with
+`local iteration = import "iteration"` (parser sugar for
+`import "titan.iteration"`); Lua loads the same module with
+`require "titan.iteration"`.
+
+**Target availability:** Native & Browser (complete).
+
+## Example
+
+This module uses `next` to test for an empty Map in O(1), `pairs` to sum a
+typed Map, and `ipairs` to traverse an Array without stopping at interior `nil`
+holes:
 
 ```titan
 local iteration = import "iteration"
-```
+local strings = import "string"
 
-Lua code loads the same installed standard-provider module with
-`require "titan.iteration"`.
+function is_empty<|K, V|>(map: {K: V}): boolean
+  local first_key? = iteration.next(map, nil)
+  return first_key == nil
+end
+
+function total_score(scores: {string: integer}): integer
+  local sum = 0
+  for _, score in iteration.pairs(scores) do
+    sum = sum + score
+  end
+  return sum
+end
+
+function format_slots(slots: {string}): string
+  local out = strings.writer()
+  defer out:close()
+  for index, label? in iteration.ipairs(slots) do
+    out:write(strings.format("%d:%s ", index, label or "<empty>"))
+  end
+  return out:drain()
+end
+```
 
 ## Map iteration
 
-`next` is generic in the Map's key and value types:
-
 ```text
 function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
-```
-
-It has Lua's `next` semantics. A nil key starts the traversal. A successful call
-returns the next key and value; exhaustion returns two nil values. Both results
-are options because an ordinary call can observe exhaustion directly. The key
-type argument must still satisfy the ordinary [Map key
-rules](arrays-maps.md#maps); generics do not admit nil or an option as a stored
-key type.
-
-Titan normally infers `K` and `V` from the concrete Map argument. The call
-therefore preserves the Map's types instead of widening them to `value`:
-
-```titan
-local scores: {string: integer} = {
-  ["alice"] = 10,
-  ["bob"] = 20,
-}
-
-local name?, score? = iteration.next(scores, nil)
-```
-
-A call may also give the complete explicit application:
-
-```titan
-local name?, score? =
-  iteration.next<|string, integer|>(scores, nil)
-```
-
-A control key that is neither nil nor present in the Map raises Lua's
-`invalid key to 'next'` error. Traversal order is unspecified. As with Lua's
-primitive, adding new keys during a traversal is not supported.
-
-`pairs` returns the complete iterator tuple required by Titan's generic `for`:
-
-```text
 function pairs<|K, V|>(map: {K: V}):
     (function ({K: V}, K?): (K?, V?), {K: V}, nil, nil)
 ```
 
-The values are `(next, map, nil, nil)`: iterator, state, initial control, and no
-close function. `K` and `V` are inferred from `map` in the usual call, while
-`pairs<|string, integer|>(scores)` is the corresponding explicit application:
+`next(map, key?)` steps through a Map with Lua's `next` semantics:
+
+- Pass `nil` as `key` to obtain the first `(key, value)` pair, and pass each
+  returned key to advance. Exhaustion returns `(nil, nil)`.
+- Passing a non-`nil` key that is absent from `map` raises
+  `invalid key to 'next'`.
+- Traversal order is unspecified. Inserting new keys during traversal has
+  unspecified behavior; updating or deleting the current key is safe.
+- `K` must satisfy Titan's [Map key rules](arrays-maps.md#maps) (`nil` and
+  option types are not valid Map keys).
+
+`pairs(map)` returns the four-slot generic-`for` tuple `(next, map, nil, nil)`.
+Titan infers `K` and `V` from `map` automatically (or accepts explicit type
+arguments such as `iteration.pairs<|string, integer|>(scores)`). The loop stops
+only when the control key is `nil`, so a `false` boolean key is visited
+normally:
 
 ```titan
-for name, score in iteration.pairs(scores) do
-  use_score(name, score)
+local iteration = import "iteration"
+
+function count_boolean_keys(flags: {boolean: integer}): (integer, integer)
+  local count = 0
+  local total = 0
+  for key, amount in iteration.pairs(flags) do
+    count = count + 1
+    if key then total = total + amount end
+  end
+  return count, total
+end
+
+function first_entry(scores: {string: integer}): (string?, integer?)
+  return iteration.next<|string, integer|>(scores, nil)
 end
 ```
 
-The Map argument infers `K = string` and `V = integer`, so the loop needs no
-repeated control-variable annotations. It forces the nonnil first result into
-`name`; exhaustion is decided only by that result. A false key is an ordinary
-control value and does not stop the loop.
-
-## First-class instantiation
-
-A generic declaration is not itself a polymorphic run-time value. A complete
-monomorphic function context can instantiate `next`:
-
-```titan
-local string_next:
-    function ({string: integer}, string?): (string?, integer?) = iteration.next
-
-local name?, score? = string_next(scores, nil)
-```
-
-The resulting function is a normal first-class Titan callable. As with other
-generic function values, an adjustment may allocate a fresh wrapper; its
-identity is not promised to equal another instantiation.
-
-## Array iteration, including holes
-
-`ipairs` is generic in the Array element type:
+## Array iteration
 
 ```text
 function ipairs<|T|>(array: {T}):
     (function ({T}, integer): (integer?, T?), {T}, integer, nil)
 ```
 
-It returns a private step function, the original Array, control value `0`, and
-no close function. `T` is normally inferred from the Array, or it can be given
-explicitly as in `iteration.ipairs<|string|>(items)`.
-
-Iteration visits every integer from 1 through `#array`. Unlike Lua's `ipairs`,
-an inner nil element does not stop traversal because the nonnil index is the
-first iterator result:
+`ipairs(array)` returns `(step, array, 0, nil)` and visits every integer
+position from `1` through `#array`. Because the first yielded value is the
+non-`nil` integer index, interior `nil` holes do **not** terminate the loop
+(unlike Lua's `ipairs`). Bind the second loop variable with `?` when the Array
+may contain holes:
 
 ```titan
-local items: {string} = { "first", "middle", "third" }
-items[2] = nil
+local iteration = import "iteration"
 
-for index, item? in iteration.ipairs(items) do
-  -- Runs for indexes 1, 2, and 3; item is nil at index 2.
-  consume(index, item)
+function count_holes(items: {string}): integer
+  local holes = 0
+  for _, item? in iteration.ipairs(items) do
+    if item == nil then holes = holes + 1 end
+  end
+  return holes
 end
 ```
 
-Array length is Titan's deterministic highest-present index. Assigning nil to
-the trailing position removes it and can therefore shorten the iteration;
-there is no separate retained logical length.
+`#array` is Titan's deterministic highest present positive index, so deleting
+the trailing element (`items[#items] = nil`) shortens subsequent traversals.
+`ipairs` accepts mutable `{T}` Arrays; to traverse `const { T }` or
+`const? { T }` Arrays, use a numeric `for i = 1, #items do` loop.
 
-## Erasure and delayed projection errors
+## First-class instantiation
 
-The type arguments are compile-time information. `next`, `pairs`, and `ipairs`
-each have one erased implementation; Lua sees their ordinary all-`value`
-application. No run-time key or element type witness is attached to a Map or
-Array.
+A monomorphic function-type annotation instantiates `iteration.next` as a
+first-class callable:
 
-Consequently the usual [Transient/Shallow generic storage
-rule](generics.md#raw-writes-and-delayed-failure) applies. Lua or a generic
-function can put a raw carrier value into a dependent Map value or Array element.
-The write may return normally, but a later closed iterator result is checked:
+```titan
+local iteration = import "iteration"
+
+function first_score(scores: {string: integer}): (string?, integer?)
+  local string_next:
+      function ({string: integer}, string?): (string?, integer?) =
+    iteration.next
+  return string_next(scores, nil)
+end
+```
+
+Each generic instantiation may produce a fresh callable wrapper whose identity
+is not guaranteed to match another instantiation.
+
+## Type erasure and delayed checks
+
+`next`, `pairs`, and `ipairs` each compile to one erased implementation; Lua
+callers see their all-`value` specialization. Because a Map table—or an Array
+accessed through a `{value}` view or erased generic code—can hold arbitrary Lua
+values, [type erasure](generics.md#type-erasure-runtime-checks-and-lua) means
+Lua code or a generic helper can store an incompatible value into a container
+and succeed at the write site. The iterator then enforces the expected type
+when a typed call reads that slot back:
 
 ```text
-local function replace<|K, V|>(map: {K: V}, key: K,
-                             replacement: value)
-  local item: V = replacement
+local function put_raw<|K, V|>(map: {K: V}, key: K, raw: value)
+  local item: V = raw
   map[key] = item
 end
 
 local scores: {string: integer} = {}
-replace<|string, integer|>(scores, "alice", "not an integer")
+put_raw<|string, integer|>(scores, "alice", "not an integer")
 
--- The precise integer? result projection raises "expected integer".
-local name?, score? =
-  iteration.next<|string, integer|>(scores, nil)
+-- Raises "expected integer" when projecting the typed result:
+local name?, score? = iteration.next<|string, integer|>(scores, nil)
 ```
 
-The same rule applies to the `T?` item returned by `ipairs<|T|>`. A successful
-projection checks one use; it does not sanitize the aliased container, so a
-later precise read checks again.
+The same check runs on each `T?` element yielded by `ipairs<|T|>`.

@@ -2,8 +2,13 @@
 
 Const bindings, const record and Interface fields, and const-qualified Arrays
 cross the parser, semantic descriptors, checker, generated C, Lua boundary,
-and compiled-module metadata. The language contract is
-[Const values](../language/const-values.md). This chapter records the
+and compiled-module metadata. The language contract lives across
+[`const` locals](../language/statements.md#const-locals),
+[`const` module variables](../language/modules.md#const-module-variables),
+[`const` record fields](../language/records.md#const-fields),
+[Interface field snapshots](../language/interfaces.md#field-snapshots), and
+[read-only Arrays](../language/arrays-maps.md#read-only-and-maybe-const-arrays).
+This chapter records the
 cross-pass invariants that must stay aligned when the implementation changes.
 
 ## Frontend and AST contract

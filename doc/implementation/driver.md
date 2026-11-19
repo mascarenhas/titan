@@ -122,16 +122,16 @@ native support lacks _compiler_root; reinstall Titan`.
 
 A non-empty `TITAN_ROOT` selects installed mode even when `driver.lua` itself
 comes from a checkout; the checkout Busted profile relies on this. Without it,
-checkout detection by driver provenance is unchanged and checkout mode
-deliberately retains the repository paths for compiler/runtime development.
+checkout detection follows driver provenance and retains the repository paths
+for compiler/runtime development.
 The resulting root selects the matching `src/lua-5.5.1`, `include`,
 `lib/liblua.a`, `lib/titan/0.6/libtitan.a`, `lib/libbacktrace.a`, and every
 compiled Titan module, including `titan.test` for native test executables.
 Bundled libuv headers are staged under `include`, but its static archive
 remains a private source-build input rather than part of the installed SDK.
 The browser target resolves its separate Lua and SDK paths under the same root
-with `driver.installed_paths(root, "browser")`; the native table is unchanged
-for every host label ([Installed paths](browser-target.md#installed-paths)).
+with `driver.installed_paths(root, "browser")`, while every host label uses the
+native table ([Installed paths](browser-target.md#installed-paths)).
 On Windows the browser link uses emcc with a response file encoded by
 `platform.windows_response_contents` using GNU response-file quoting, for
 both the program and the trace link.
@@ -966,8 +966,8 @@ payloads; omitting it from a supplied adapter (or from project encode/decode
 options) retains the dependency-free Lua implementation. The callback
 must hash the supplied complete string, including embedded NUL/high bytes,
 without changing compiler state. Its output uses the same wire checksum as the
-fallback, so payloads remain readable in either mode and the graph wire
-format is unchanged. Invalid results and string errors are cache misses; non-string
+fallback, so payloads stay readable in either mode using the same graph wire
+format. Invalid results and string errors are cache misses; non-string
 exception objects propagate unchanged through the graph boundary. Required
 header content hashing also uses this callback when available; a broken string
 result/error falls back to the ordinary Lua digest, while cancellation propagates.
@@ -1878,7 +1878,7 @@ recorded signal still wins over another interval. Only `Slots:wait` sees
 `"timeout"`: a ledger opened with `jobs.open_slots(n, { idle = { interval =
 ms, tick = fn } })` passes `interval` on every wait and calls `tick()` once per
 expiry, then waits again, so the event never reaches a caller. Without
-`idle`, every wait blocks exactly as before. `open_slots` asserts a positive
+`idle`, every wait blocks indefinitely. `open_slots` asserts a positive
 integer interval and a `tick` function. The tick runs under `pcall`: the first
 error prints one `titanc: warning: the live progress frame failed: …` line,
 and the ledger drops the hook for the rest of its life. A broken frame
@@ -2327,8 +2327,9 @@ path with `.mjs` appended. The details are in the browser-target chapter:
 ```
 
 `titanc` (an `argparse` script at the repository root) takes dot-separated
-module names, `--test-dir` discovery directories, or `-c --c-source` files; the
-[flag table](#titanc-flags) lists every option and constraint. `--print-root`
+module names, `--test-dir` discovery directories, or `-c --c-source` files; see
+[Command-line options](../language/toolchain.md#command-line-options) and
+[`titanc` flags](#titanc-flags) for every option and constraint. `--print-root`
 prints the installation root and exits ([above](#module-names-and-the-search-paths)).
 `--tree` overrides `driver.TITAN_SOURCE_PATH`. `-T`/`--target` (also
 `--target=<label>`), or `TITAN_TARGET` when the option is absent, selects the
@@ -2477,8 +2478,8 @@ never create a reporter, and every hook in `build.lua`, `build_worker.lua`,
 (`progress.locale`: the first non-empty of `LC_ALL`, `LC_CTYPE`, and `LANG`) once,
 after the `--print-root` query. It probes the terminal with
 `uv.guess_handle(2)` only when neither `-q` nor `-v` is given. A null
-selection creates no reporter at all, so a `-q` invocation runs the same code
-path as before progress reporting existed. `progress.colour` requires a
+selection creates no reporter at all, so `-q` bypasses progress reporting
+entirely. `progress.colour` requires a
 terminal, a `TERM` other than `dumb`, and an unset or empty `NO_COLOR`.
 `progress.glyphs` picks Unicode only on Unix with a UTF-8 locale and ASCII
 otherwise.
@@ -3044,92 +3045,39 @@ the explicit public-header input for its native helper builds.
 
 ### `titanc` flags
 
-The complete `argparse` declaration is at the top of `titanc`; the checks are
-listed in [The `titanc` command line](#the-titanc-command-line).
-
-| Flag | Effect | Constraints |
-| --- | --- | --- |
-| `<module>...` | Logical modules to build; all become source-required roots. | At least one, unless `--print-root`, `--test-dir`, or `-c --c-source`. |
-| `--print-root` | Print the selected installation root and exit; ignores `-T`/`--target` and `TITAN_TARGET`. | No module names. |
-| `--print-ast` | Print each module's AST after checking. | Not with `--incremental`. |
-| `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
-| `-q`, `--quiet` | Create no progress reporter: standard error carries only diagnostics and native-tool output, exactly as before progress reporting. | Not with `-v`. |
-| `-v`, `--verbose` | Write native-tool/formatter commands, replayed worker output, and incremental object, native-C, and link hit/miss decisions to standard error, plus plain progress lines. | Not with `-q`. |
-| `-j`, `--jobs <n>` | Local cap on concurrent worker frontends and native compiler processes; overrides `TITAN_JOBS`, default 4. `1` keeps every C probe synchronous. | Positive integer. |
-| `--c-parts <n>` | Maximum generated C translation units per module whose generated code reaches 2 MiB; overrides `TITAN_C_PARTS` (default 4 on Linux, otherwise 1); `1` disables splitting; independent of `--jobs`. See [Translation-unit parts](codegen-overview.md#translation-unit-parts). | Positive integer. |
-| `--exe <path>` | Exact executable destination relative to CWD (`.exe` appended on Windows when absent; Windows provider DLL stays under `--output`). | Requires a standalone or test executable; not with `-c` or library-only builds. |
-| `--static` | Run the archive pass before the DSO pass. | Not on Windows. |
-| `--source-first` | Prefer source to compiled providers for every dependency. | |
-| `--incremental` | Certify and reuse source module objects (including explicit roots), `--c-source` objects, and final links. | Not with `--print-ast`. |
-| `-c`, `--compile-only` | Emit objects and headers only; without `--incremental` every module and `--c-source` file is rebuilt. | Not with `--exe`, `-l`, `-L`, `--ldflag`, `-X`, or `--no-uv-bootstrap`. |
-| `--test` | Build native tests (objects only with `-c`). | No requested module may be named `titan.test.runner`. |
-| `--test-dir <dir>` | Recursively discover source modules under `<dir>` whose final component is `test(s)`, `spec(s)`, `*_test(s)`, or `*_spec(s)` as roots; repeatable. | Requires `--test`; `<dir>` must lie inside a `--tree` root. |
-| `--test-exclude <module>` | Exclude an exact logical module name from automatic `--test-dir` discovery (explicit roots still win); repeatable. | Requires `--test` and `--test-dir`. |
-| `--coverage` | Instrument source modules without `test_` functions and report when the test executable runs. | Requires a test or standalone executable unless `-c`. |
-| `--coverage-backend <name>` | `gcc-gcov` (Unix default) or `llvm-gcov` (Windows default). | Every `--coverage-*` option requires `--coverage`. |
-| `--coverage-module <glob>` | Override automatic selection with a logical-module glob (`*`, `?`); repeat for a union. | |
-| `--coverage-root <dir>` | Source repository root for reports (default: current directory). | |
-| `--coverage-gcov <cmd>` | gcov reader (default: `GCOV`, `gcov`, or `llvm-cov gcov`). | |
-| `--coverage-format <format>` | Richer report via gcovr: `html`, `lcov`, or `cobertura`; repeatable. | |
-| `--coverage-output <dir>` | Report directory (default: `.coverage/report`). | |
-| `--coverage-gcovr <cmd>` | gcovr command (default: `GCOVR`, then `gcovr`). | |
-| `--no-uv-bootstrap` | Call `main` directly instead of the registered async bootstrap hook. | Requires a standalone or test main; not with `-c`. |
-| `--no-line-directives` | Omit generated Titan `#line` directives. | |
-| `-u`, `--lua <dir>` | Lua source tree (`driver.LUA_SOURCE_PATH`). | Source checkouts only. |
-| `-t`, `--tree <dir>` | Source root, or an ordered `;`-separated list of roots searched in order (`driver.TITAN_SOURCE_PATH`, default `.`). | |
-| `-T`, `--target <label>` | [Source-selection target](target-source-selection.md#the-titanc-option); overrides `TITAN_TARGET`, and an empty value means the host. The host's own OS label and, on Linux, macOS, and Windows hosts, `browser` ([browser target](browser-target.md)) are accepted; `native`, another OS label, and unknown values are errors. `--target=<label>` is also accepted. | Validated before any lookup; ignored by `--print-root`. `browser` requires `--output`. |
-| `-o`, `--output <dir>` | Folder for generated files, preserving the source hierarchy. | |
-| `-I`, `--include-dir <dir>` | Native include directory for C headers, probes, generated C, and `--c-source`; repeatable, order kept, searched before the SDK. | |
-| `-D`, `--define <def>` | Native preprocessor definition `NAME[=VALUE]`; repeatable, order kept. | |
-| `--cflag <arg>` | One native compile argument (for example `--cflag=-pthread`); repeatable, order kept. | |
-| `-L`, `--library-dir <dir>` | Native library search directory for final links; repeatable, order kept. | Not with `-c`. |
-| `-l`, `--link <libs>` | Comma-separated or repeated libraries passed as `-l` to the final link; order and repeats kept. | Not with `-c`. |
-| `--ldflag <arg>` | One native link argument (for example `--ldflag=-Wl,--as-needed`); repeatable, order kept. | Not with `-c`. |
-| `--c-source <file>` | Authored/generated C file compiled and certified under `<output>/.native/`, linked before `-X` payloads; repeatable. | Allowed without `<module>` when combined with `-c`. |
-| `--print-c-objects` | Print the absolute certified object path for each `--c-source` argument, one per line in argument order; nothing else is written to stdout. | Requires `-c` and at least one `--c-source`; not with `--print-root` or `--print-ast`. |
-| `-X`, `--extra-object <payload>...` | Native objects/archives carried into the linked outputs after `--c-source` objects. | Not with `-c`; library mode accepts only relocatable objects and regular archives. |
+The user-facing `titanc` option reference and incompatible-combination table
+live in [Command-line options](../language/toolchain.md#command-line-options)
+(and `titanc --help`); the authoritative `argparse` declaration is at the top
+of `titanc`, and its preflight ordering is documented in
+[The `titanc` command line](#the-titanc-command-line).
 
 ### Environment variables
 
-| Variable | Read by | Default | Meaning |
+User-facing environment variables (`TITAN_ROOT`, `TITAN_PATH_0_6`,
+`TITAN_PATH`, `TITANC`, `TITAN_TARGET`, `TITAN_BUILD_PROFILE`, `TITAN_JOBS`,
+`TITAN_C_PARTS`, `TITAN_EXTRA_*`, `TITAN_NO_LINE_DIRECTIVES`, `EMSDK`,
+`TITAN_NODE`, `TITAN_CHROME`, `TITAN_BROWSER_ROOT_NO_SANDBOX`, `CC`, `AR`,
+`RANLIB`, `CLANG_FORMAT`, `GCOV`, `GCOVR`, `NO_COLOR`, `TERM`, `COLUMNS`,
+`LC_ALL`/`LC_CTYPE`/`LANG`, `LUA_PATH*`/`LUA_CPATH*`) are documented in
+[Environment variables](../language/toolchain.md#environment-variables). The
+table below maps contributor-internal variables and compiler-side readers:
+
+| Variable | Read by | Default | Compiler-internal role |
 | --- | --- | --- | --- |
-| `CC` | `driver.lua`, `c-parser/cpp.lua`, `checker/c_types.lua` | `cc`; `clang.exe` on Windows | C compiler command, parsed as shell words and shared with foreign-import probing. |
-| `AR`, `RANLIB` | `driver.lua` | `ar`, `ranlib` | Archive tools for provider archives. |
-| `CLANG_FORMAT` | `driver.lua` | `clang-format` | Formatter command, parsed only when `--pretty-print` selects it. |
-| `RC` | `driver.lua` | `llvm-rc` | Windows launcher resource compiler. |
-| `MAKE` | `driver.lua` `check_runtime` | `make` | Make command for the checkout runtime archive. |
-| `TITAN_EXTRA_CPPFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Preprocessing words for foreign-import probes, C probes, generated modules, `--c-source` nodes, runtime, and entrypoints (followed by CLI `-I`/`-D`). |
-| `TITAN_EXTRA_CFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Compilation-only words after `TITAN_EXTRA_CPPFLAGS` (followed by CLI `--cflag`); never used by final links. |
-| `TITAN_EXTRA_LDFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Ordered linker inputs appended to final provider and program links (followed by CLI `-L`, `-l`/`--link`, and `--ldflag`). |
-| `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; for `--target browser` it also selects the browser object and link profile ([browser build profiles](browser-target.md#build-profiles)); any other value is a toolchain error. |
-| `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
-| `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
-| `TITAN_TARGET` | `titanc` | unset (empty means unset) | Source-selection target when `-T`/`--target` is absent; same vocabulary, with diagnostics naming `TITAN_TARGET=<value>`. Ignored by `--print-root`; never read by the driver library, build workers, or the language server. Make's native `titanc` recipes unset it. |
-| `EMSDK` | `browsertarget.lua` | unset (empty means unset) | Emscripten SDK root for the browser target: its `upstream/emscripten/{emcc,emar,emranlib}` are the only tools tried; otherwise `emcc` is found on `PATH`. |
-| `TITAN_NODE` | `titan-browser-run` (through the browser executing check and `make browser-sdk`) | unset | One JSPI-capable Node 26-or-newer executable path (a bare name is looked up on `PATH`) for the browser runner; otherwise `node` on `PATH`. See [The runner](browser-target.md#the-runner). |
-| `TITAN_CHROME` | `titan-browser-run` | unset | Chrome or Chromium executable for `--engine chromium` and `--probe`, overridden by `--chrome`; otherwise the runner tries `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`, and `chrome-headless-shell` on `PATH`. |
-| `TITAN_BROWSER_ROOT_NO_SANDBOX` | `titan-browser-run` | unset | Exact value `1` adds `--no-sandbox` to Chromium, and only when the runner runs as root (root containers). |
-| `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |
-| `TERM` | `titanc` (`progress.select`, `progress.colour`) | unset | `dumb` selects the plain progress form and disables colour. |
-| `NO_COLOR` | `titanc` (`progress.colour`) | unset | Non-empty disables progress colour only; the live region stays. |
-| `COLUMNS` | `titanc` (`progress.new` width) | unset | Positive integer width for the live region when no terminal can report one (no Windows console and no Unix `/dev/tty`); otherwise 80. |
-| `LC_ALL`, `LC_CTYPE`, `LANG` | `titanc` (`progress.locale`) | unset | The first non-empty value naming UTF-8 selects Unicode progress glyphs on Unix; Windows always uses ASCII. |
-| `TITAN_C_PARTS` | `titanc`, `driver.lua` (`driver.effective_c_parts`) | `4` on Linux; `1` on Windows, macOS, and other platforms (`driver.default_c_parts`) | Maximum generated C translation units per module when `--c-parts` is absent; `1` disables splitting. A changed value makes reused objects miss. |
-| `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua` (`titan_bin_path_entries`), `titan_path.c` | unset | [Titan path](#titan-path-syntax): `;`-separated directories, `;;` inserts the default, `!` is the executable directory, an empty value searches nothing; the versioned name wins. |
-| `TITAN_ROOT` | `driver.lua`, `titanc --print-root`, `titan_path.c` (`_compiler_root()` and the run-time SDK fallback), Make | unset (empty means unset) | Explicit Titan SDK/rocks-tree root; otherwise the compiler uses the parent of its interpreter directory and the run-time fallback asks `titanc --print-root`. |
-| `TITANC` | `titan_path.c` (run-time SDK fallback) | unset (empty means unset) | One program name or path, run as `<TITANC> --print-root` without a shell and without `LUA_INIT`/`LUA_INIT_5_5`, instead of `titanc` from `PATH`; not a command line with arguments, and it must terminate. On Windows a name without `\`, `/`, or `:` is looked up only in the `PATH` entries, with `.exe` appended when it contains no `.`. Make's stdlib compiler command is the distinct `STDLIB_TITANC`. |
-| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`, and of the browser cache `var/cache/titan-probes/browser-6.0.13/2`. |
+| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache (`var/cache/titan-probes/2` and `var/cache/titan-probes/browser-6.0.13/2`). |
 | `TITAN_PROBE_CACHE_DISABLE` | `driver.lua` | unset | Exact value `1` disables persistent C-probe reuse. |
 | `TITAN_RUNTIME_PREBUILT` | `driver.lua` `check_runtime` | unset | Exact value `1` skips the checkout `libtitan.a` rebuild. |
-| `GCOV`, `GCOVR` | `coverage.lua` | `gcov`/`llvm-cov gcov`, `gcovr` | Coverage readers when the matching `--coverage-*` flag is absent. |
+| `MAKE` | `driver.lua` `check_runtime` | `make` | Make command for checkout runtime archive rebuilds. |
+| `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | Parent GNU Make jobserver authorization (`--jobserver-auth`/`--jobserver-fds`, `-j1`); also selects plain progress output. |
+| `RC` | `driver.lua` | `llvm-rc` | Windows launcher resource compiler. |
 | `TEMP`, `TMP` | `io.lua` (Windows) | system default | Directory for `Sync:tmpname` reservations. |
-| `LUA_PATH_5_5`, `LUA_PATH`, `LUA_CPATH_5_5`, `LUA_CPATH` | Lua | unset | Lua's own module paths, including in generated executables, which do not rewrite them; `LUA_CPATH*` must keep the support module reachable when `TITAN_ROOT` is unset. |
 
-Make-level settings such as `PREFIX`, `ROCKS_TREE`, `OPENSSL_MODE`, and
-`STDLIB_USE_INSTALLED_RUNTIME` belong to the build; see [Build and installation
-responsibilities](build-script-audit.md). `PREFIX` owns Lua and LuaRocks and
-`ROCKS_TREE` owns the Titan rock, SDK, and standard library; the supported
-workflow sets them equal, but they are separate ownership concepts.
+Make-level settings (`PREFIX`, `ROCKS_TREE`, `OPENSSL_MODE`,
+`STDLIB_USE_INSTALLED_RUNTIME`) belong to the repository build; see [Build and
+installation responsibilities](build-script-audit.md). `PREFIX` owns Lua and
+LuaRocks and `ROCKS_TREE` owns the Titan rock, SDK, and standard library; the
+supported workflow sets them equal, though they remain separate ownership
+concepts.
 
 ### Paths and internal settings
 
@@ -3220,8 +3168,7 @@ failed execution and after a Lua error or interrupt during launch; a launch
 error is returned as a link failure so each caller's own temporary cleanup
 runs, and only a forced kill can leave the file behind. Verbose mode prints
 the expanded logical command followed by the actual short `@file` invocation;
-native diagnostics and exit codes retain their normal transport. POSIX links
-and ordinary compile/tool commands are unchanged.
+native diagnostics and exit codes keep their normal transport.
 
 Captured Windows commands, parallel generated-C workers and probe batches use
 the stock `luv` LuaRocks dependency. `uv.spawn` receives the parsed argument

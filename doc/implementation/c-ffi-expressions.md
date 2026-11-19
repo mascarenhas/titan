@@ -6,7 +6,7 @@ aggregates, exact C declarators, the target arithmetic profile, session-scoped
 compiler probes, contextual object-pointer conversions, target-directed C
 allocation and its recovery storage, typed object macros, macro-field
 projections, and C-mode operators. It is the implementation counterpart of the
-language chapter [C FFI declarations and expressions](../language/c-ffi-expressions.md).
+language chapter [Calling C: The Foreign Function Interface](../language/ffi.md#c-operators-constants-and-expressions).
 
 The central boundary is intentional:
 

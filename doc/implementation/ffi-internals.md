@@ -19,9 +19,8 @@ hidden binding slot with `__atomic_load_n(&slot, __ATOMIC_ACQUIRE)`; see
 [source collaboration](foreign-functions.md#source-collaboration-and-binary-isolation).
 
 For user-facing behavior see [the C FFI](../language/ffi.md),
-[C FFI declarations and expressions](../language/c-ffi-expressions.md),
 [Foreign functions](../language/foreign-functions.md), and
-[Named arguments](../language/named-arguments.md). The exact tag, declarator,
+[Named calls](../language/functions.md#named-calls). The exact tag, declarator,
 target-profile, probe, contextual-conversion, target-directed allocation,
 recovery-storage, and C-operator machinery is in
 [C FFI declarations and expressions](c-ffi-expressions.md); the restricted

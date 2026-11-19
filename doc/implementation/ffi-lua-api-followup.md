@@ -60,13 +60,11 @@ and `__call` objects (`titan-compiler/coder/calls.lua` `codevaluecall`; see
 ## Trusted standard-library discipline
 
 A raw operation is the last resort, not the default. Before adding one, or
-any authored runtime C, justify it against the style guide's six
-[rules for standard-library and runtime C](../style-guide.md#write-native-bindings-titan-first):
+any authored runtime C, justify it against the six
+[rules for standard-library and runtime C](standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do):
 layering, plain C off the Lua stack, protected work in Titan, pinning in module
 variables or owner fields, rooting by parameters and frame slots, and
-receiver-side checks of tagged values. [Standard-library
-maintenance](standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do)
-pairs each rule with a wrong and a right example. Every trusted site then
+receiver-side checks of tagged values. Every trusted site then
 follows these rules:
 
 - Current-state helpers use only the generated function's builtin `L`; they

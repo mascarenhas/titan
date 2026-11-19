@@ -1,300 +1,254 @@
-# Anonymous functions and closures
+# First-Class Functions and Closures
 
-Titan has anonymous function expressions — lambdas — that capture the
-local variables of the function around them. A lambda is an ordinary
-[function value](functions.md#functions-as-values): the same first-class
-machinery applies, so it can be stored, passed, returned, called through
-either path, and crossed to and from Lua. What this chapter adds on top of
-that is the *expression* form, the type **inference** that lets you leave
-its annotations off, and the **lexical capture** of enclosing variables.
+Functions are first-class values in Titan. Named functions, record and union
+constructors, anonymous function expressions (lambdas), and bound method
+references can all be stored in variables and containers, passed as arguments,
+returned, and exchanged with Lua.
 
-```titan
-function make_counter(): function (): (integer)
-    local n = 0
-    return function (): integer
-        n = n + 1
-        return n
-    end
-end
-```
+## Function types and functions as values
 
-```lua
--- Lua
-local m = require "counter"
-local c = m.make_counter()
-print(c(), c(), c())   --> 1   2   3
-```
-
-Each call to `make_counter` produces an independent counter: the returned
-lambda keeps a reference to that call's `n`, increments it on every call,
-and the value persists between calls because the lambda holds the variable
-alive after `make_counter` has returned.
-
-## Transferring a closure between Lua states
-
-[`TransferValue.from_value(callback)`](async-io.md#transfer-values) snapshots a
-Titan function immediately for an independent Lua state or cross-state Receiver.
-All immediate captures are projected before any capture's custom hook runs.
-Sending the resulting packet later does not observe subsequent origin changes.
-The destination loads the recorded owning module through its preload
-entry, validates the entry token, and creates a fresh closure over copied
-capture values. Module globals belong to the destination module instance.
-
-Mutable captures become fresh cells. An outer closure and nested captured
-closures receive independent cells even if they shared a source cell.
-Separate conversions and repeated `to_value` calls also form independent
-snapshots. Bound concrete methods copy their receiver under the same custom-hook
-or protobuf rules as other nominal captures. Callable adjustment preserves its
-source callable and target signature.
-
-Every capture must satisfy its selected policy. Cycles, including a closure
-that captures itself through a mutable variable, raise during `from_value`.
-Direct Arrays, Maps, Interfaces, owned C storage, and local nominal types are
-not transferable captures. A public record with private fields may supply
-[custom transfer hooks](async-io.md#custom-record-transfer); other records and
-unions follow public protobuf rules. A captured `TransferValue` remains its
-policy wrapper, including opaque custom-record or closure packet bytes. It is
-not implicitly unwrapped into its semantic value.
-
-The Interface restriction applies to bound Interface methods because their
-captured receiver is an Interface. Native pointers remain borrowed addresses
-with caller-managed lifetime. A pointer to Lua-managed `Udata` is rejected,
-including a present optional pointer; an absent optional transfers as `nil`.
-The packet retains no source-state closure, mutable box, string, or nominal
-heap object. See [transfer values](async-io.md#transfer-values).
-
-Nominal packets carry their actual defining module. Reconstruction queries the
-destination registry first, calls the preload loader on a miss, then
-retries. This applies to structural protobuf nominals and custom-record
-payloads; qualified nominal names are never split to infer their module.
-
-## Syntax
-
-A function expression is a top-level function declaration minus the name
-and `local`, and with **optional** parameter and return annotations:
-
-```
-function (p1[: T1], …, pn[: Tn]) [: rettype] <block> end
-```
-
-The parameter list may end in an input `...: T` (or a context-inferred bare
-`...`), and a parenthesized return annotation may end in a flexible result
-tail such as `: (...: R)` or `: (R1, ...: R)`. See
-[Variadic parameters](variadic-parameters.md) and
-[Flexible returns](flexible-returns.md).
-
-It is an expression, so it appears wherever an expression may: as a
-declaration or assignment right-hand side, a call argument, a `return`
-value, a record/union-constructor or array/map element, and so on.
-
-```titan
-local g = function (x: integer): integer return x + 1 end   -- in a local
-apply(function (x) return x * 3 end, 14)                     -- as an argument
-return function (): integer return 42 end                   -- as a return value
-```
-
-A lambda is a *simple* expression, not a prefix expression, so it cannot
-be **called directly**: `function () … end(x)` is a syntax error. Wrap it
-in parentheses to apply it immediately — `(function () … end)(x)` — exactly
-as Lua requires for an immediately-invoked function expression. Titan
-[optimizes this direct immediate call](#immediate-calls-as-expressions) into
-an inline block.
-
-The body block follows the same rules as any function body, including the
-*return-on-every-path* rule for a value-returning lambda (see
-[Functions](functions.md)).
-
-> **A note on nesting depth.** The parser caps deeply nested lambdas at
-> roughly seven levels (an LPeg sub-capture limit); going past that is a
-> parse error. Real code never approaches it.
-
-## Type inference for parameters and return
-
-Lambda annotations are optional. When you leave them off, Titan fills them
-in from the **expected function type** — the type of the slot the lambda
-flows into, whether that is an assignment target, an argument position, or a
-`return`. **Both the parameter types and the return type come from this same
-expected type**; neither is reverse-engineered from the lambda's body.
-
-**Input types.** An annotated parameter uses its annotation. An *unannotated*
-fixed parameter is filled in from the expected function type. A trailing bare
-`...` similarly inherits the expected input-tail element type; explicit
-`...: T` wins. See [Variadic parameters](variadic-parameters.md).
-
-```titan
-function f(): integer
-    -- g's parameter and return both come from the annotation on g
-    local g: function (integer): (integer) = function (x) return x + 1 end
-    return g(2)
-end
-
-function apply(g: function (integer): (integer), x: integer): integer
-    return g(x)
-end
-
-function use(): integer
-    -- y's type is inferred from apply's first parameter
-    return apply(function (y) return y + 1 end, 5)
-end
-```
-
-If an unannotated parameter has no usable context — there is no expected
-function type to read it from — it is a clean compile-time error:
-
-```titan
-function f(): integer
-    local g = function (x) return x end   -- compile-time error
-    return 1
-end
-```
-
-```
-test.titan:2:30: type error: cannot infer type of parameter 'x'
-```
-
-Annotate the parameter, or use the lambda where its type is known. A bare `...`
-without a variadic expected type receives the corresponding inference error.
-
-**Return shape.** Like the parameters, the fixed return list and any flexible
-result tail come only from the
-expected function type — it is *never* read off the body's `return`
-statements. An explicit return annotation is used as written; otherwise the
-complete return shape is taken from the expected function type when there is
-one. The body is then checked against those results, exactly as a top-level
-function body is checked against its declared returns:
-
-```titan
-function f(): integer
-    -- g's return (integer) comes from the annotation on g; the body's
-    -- `return x + 1` is checked against it
-    local g: function (integer): (integer) = function (x) return x + 1 end
-    -- h returns two values, again from h's annotation
-    local h: function (integer): (integer, integer) = function (x) return x, x + 1 end
-    local many: function (): (...: integer) = function () return 1, 2, 3 end
-    return g(2)
-end
-```
-
-An explicit annotation always wins. In particular, write `: ()` when the lambda
-deliberately produces no results even though its context has a result-bearing
-function type:
+A function type lists its parameter types in parentheses followed by its
+return type or parenthesized return list:
 
 ```text
+function (integer, string): boolean
+function (integer): (integer, integer)
+function (string): ()                       -- zero return values
+function (...: integer): (integer)          -- variadic input tail
+function (): (boolean, ...: string)         -- flexible return tail
+(function (integer): (integer))?            -- optional function type
+```
+
+Referencing any top-level function, `local` function, imported `mod.f`, record
+static (`Point.new`, `Point.origin`), or union-variant constructor
+(`Lookup.found`) yields a function value of its type:
+
+```titan
+local function double(x: integer): integer
+    return x * 2
+end
+
+function apply(transform: function (integer): (integer), item: integer): integer
+    return transform(item)
+end
+
+function apply_handler(handlers: {function (integer): (integer)},
+                       index: integer, item: integer): integer
+    return handlers[index](item) -- auto-unwraps optional function slot
+end
+
+function double_twenty_one(): integer
+    local fn: function (integer): (integer) = double
+    return apply(fn, 21)
+end
+```
+
+Key properties of function values:
+
+- **Positional-only calls:** Parameter names are not part of a function type.
+  Once a function is held as a value, it can only be called positionally, not
+  with named-call braces.
+- **Identity:** Equality compares function values by object identity. A named
+  function has a single canonical value per Lua state, so `mod.f == mod.f`.
+- **Dynamic `value` and Lua:** Function values convert implicitly to `value`,
+  and a `value` converts implicitly to any function type with callability
+  checked only when the value is called. Passing a Lua function to a Titan
+  function-typed parameter is the standard way for Titan to invoke Lua
+  callbacks (see [Interoperating with Lua](lua-interop.md)).
+- **Foreign C functions:** Imported C functions and `foreign function`
+  declarations are not Titan function values; use C function pointers for C
+  callbacks (see [Foreign Functions and C Callbacks](foreign-functions.md)).
+
+## Anonymous functions and type inference
+
+An anonymous function (lambda) has the same syntax as a function declaration
+without a name, with optional parameter and return annotations:
+
+```text
+function (p1[: T1], ..., pn[: Tn]) [: Ret] <block> end
+```
+
+When annotations are omitted, Titan infers parameter types, a trailing bare
+`...` element type, and the complete return shape from the **expected function
+type** at the assignment, argument, or `return` site. Titan never infers
+parameter or return types backwards from the lambda's body:
+
+```titan
+function apply_twice(fn: function (integer): (integer), x: integer): integer
+    return fn(fn(x))
+end
+
+function apply_variadic(fn: function (...: integer): (integer)): integer
+    return fn(10, 20, 30)
+end
+
+function lambda_examples(): (integer, integer, integer)
+    local inc: function (integer): (integer) = function (x) return x + 1 end
+    local doubled = apply_twice(function (x) return x * 2 end, 3)
+    local summed = apply_variadic(function (...)
+        local total = 0
+        for i = 1, #... do total = total + ...[i] end
+        return total
+    end)
+    return inc(5), doubled, summed
+end
+```
+
+When there is no expected function type:
+
+- Every parameter (and any `...: T` tail) must be explicitly annotated; an
+  unannotated parameter without usable context is a compile-time error:
+
+  ```text
+  -- compile error: cannot infer type of parameter 'x'
+  local id = function (x) return x end
+  ```
+
+- Omitting the return annotation defaults to **zero results** (`: ()`), even
+  if the body contains `return expression` (the expression evaluates for its
+  effects and its value is discarded). Write an explicit return annotation
+  (`function (x: integer): integer ...`) or place the lambda in a typed
+  context when it should return a value. Conversely, write `: ()` explicitly
+  when a lambda should return nothing despite a result-bearing context:
+
+```titan
+local events = 0
+
+local function record_event(): integer
+    events = events + 1
+    return events
+end
+
 function install(callback: function (): (value))
-    -- ...
+    callback()
 end
 
-install(function (): ()
-    record_event()
-end)
+function zero_return_lambdas()
+    install(function (): ()
+        record_event()
+    end)
+
+    -- No expected type and no return annotation: type is function (integer): ().
+    local bump = function (step: integer)
+        events = events + step
+    end
+    bump(2)
+end
 ```
 
-The explicit source shape here is `function (): ()`. Ordinary callable adjustment then
-decides whether it can flow to the target: `value` admits the missing nil result,
-while a non-nilable target such as `integer` does not. See
-[Callable adjustment wrappers](closure-adjustment-wrappers.md).
+A lambda is a simple expression, so calling one immediately requires
+parentheses: `(function () ... end)()`. Deeply nested lambdas are capped by
+the parser at roughly seven levels.
 
-When there is no return annotation and no expected function type, the return
-type defaults to the **zero-return** type `()` — exactly the default an
-unannotated top-level function gets:
+## Capturing enclosing locals
+
+A lambda automatically captures any enclosing local variables and parameters
+it references, following Lua's lexical scoping rules:
 
 ```titan
-function f(): integer
-    local g = function (x: integer) end   -- function (integer): ()
-    g(1)
-    return 1
+function make_counter(start: integer): function (): (integer)
+    local current = start
+    return function (): integer
+        current = current + 1
+        return current
+    end
+end
+
+function make_adders(): {function (integer): (integer)}
+    local adders: {function (integer): (integer)} = {}
+    for i = 1, 3 do
+        local offset = i * 10 -- fresh local per iteration
+        adders[i] = function (x: integer): integer
+            return offset + x
+        end
+    end
+    return adders
 end
 ```
 
-This default applies whether or not the body contains a `return`. Because
-the lambda has no expected type, `g`'s return type is `()`. Expressions in a
-`return` are still evaluated for their effects, but their values are discarded
-instead of becoming inferred results — consistent with an unannotated
-top-level function:
+Each call to `make_counter` creates an independent closure over its own
+`current` variable. Capture semantics follow five rules:
+
+- **Shared mutable cells:** Reassigning a captured local updates the shared
+  variable seen by the enclosing function and every closure that captured it.
+  A `const` local cannot be reassigned from inside a closure.
+- **Per-iteration isolation:** A fresh local declared inside a loop body
+  (`local offset = i * 10`) produces an independent capture for each
+  iteration.
+- **Transitive and GC-safe:** Nested lambdas can capture locals from any
+  enclosing function; module variables and top-level functions are accessed
+  directly without capture. Captured strings, containers, and nominal objects
+  stay rooted across garbage collection.
+- **Fresh identity:** Every evaluation of a `function ... end` expression
+  produces a distinct closure object (`f == f`, while two evaluations of the
+  same lambda text are unequal).
+- **No self-reference through `local`:** Because a `local` enters scope after
+  its initializer, a lambda cannot call itself through the local being
+  initialized:
+
+  ```text
+  -- compile error: variable 'countdown' not declared
+  local countdown: function (integer): (integer) = function (n: integer): integer
+      if n <= 0 then return 0 end
+      return countdown(n - 1)
+  end
+  ```
+
+  Write a named top-level `local function` for recursion.
+
+A lambda may also appear in a module-variable initializer to store a function
+value without executing its body during module startup, provided the
+initializer does not invoke or expose it to a call evaluated during
+initialization (see [Modules and Program Structure](modules.md)).
+
+## Bound method references
+
+Naming a method on a receiver without a call list (`obj:method`) produces a
+first-class function value with `self` bound to `obj` and removed from the
+parameter list:
 
 ```titan
-function f(): integer
-    -- no annotation, no expected type -> g is function (integer): ();
-    -- x + 1 is evaluated and its value is discarded
-    local g = function (x: integer) return x + 1 end
-    g(4)
-    return 1
+record Counter
+    count: integer
+end
+
+function Counter:bump(step: integer): integer
+    self.count = self.count + step
+    return self.count
+end
+
+function make_bumper(): function (integer): (integer)
+    local counter = Counter(0)
+    return counter:bump -- binds counter; type is function (integer): (integer)
 end
 ```
 
-To give such a lambda a return type, either annotate it (`function (x:
-integer): integer ...`) or place it where its function type is known (an
-annotated `local`, an argument slot, or a `return` position).
+The receiver expression evaluates once when the bound method is created.
+Because records are reference values, mutations through the bound method are
+visible through the original record.
+
+Bound methods work on records, unions, and Interfaces (capturing the Interface
+wrapper) and across compiled modules. Once bound, a method is positional-only.
+Explicit method type arguments (`obj:m<|T|>`) are only valid on a direct call,
+not on a detached bound method reference, and foreign C methods cannot be
+bound as Titan function values.
 
 ## Immediate calls as expressions
 
-An anonymous function called immediately is a useful way to put statements
-inside an expression:
-
-```titan
-function choose(flag: boolean): integer
-    local result = (function (): integer
-        if flag then return 10 end
-        return 20
-    end)()
-    return result + 1
-end
-```
-
-Titan generates an inline scoped block for this call, with result holders
-outside the block. It allocates no function closure for the immediately called
-literal. Parameters, variadic inputs, captures, multiple results, and flexible
-results work with the same source rules as ordinary anonymous functions.
-
-This optimization applies when the call's callee is the anonymous function
-literal itself, including parentheses around that literal. It does not follow
-stored function values, inline a function returned by another call, or look
-through a callable cast. Parentheses around the **completed call** still force
-one result: `((function (): () end)())` produces one nil, while the unadjusted
-call produces no results.
-
-The call's consumer does not supply an expected function type for the literal.
-Annotate its parameters and results as needed: omitting its return annotation
-still means zero results, even when the body writes `return expression`.
-Inlining changes neither type checking nor capture restrictions.
-
-The compiler uses the consumer's existing result demand at each return:
-
-* A call statement retains no results; a scalar use retains one.
-* A fixed declaration, assignment, argument list, return list, or iterator
-  tuple retains the required remaining positions. Requested flexible positions
-  keep their ordinary `T?` type and missing-value behavior.
-* An open variadic argument tail, flexible return tail, or final positional
-  Array/integer-Map constructor entry preserves the actual result count.
-
-Only the final expression expands. A flexible return also respects any finite
-budget inherited from its enclosing caller; the existing result-count limits
-continue to apply.
-
-Argument expressions are evaluated once in their usual order before the body
-runs, and surplus arguments still execute. A return exits only this anonymous
-function. Its return expressions and declared-result conversions run before
-its `defer` cleanup, and caller-side conversions run afterward, outside its
-`catch`. For example, returning an integer through a declared `float` result
-and then storing it in `value` preserves the float tag. Discarded fixed-result
-conversions can still raise; discarded implicit flexible-tail adjustments can
-be skipped, while written casts and other source effects still execute.
-
-Nested functions that are stored or returned remain ordinary closures. Their
-captures stay alive after the immediate call exits, and mutable captures keep
-their normal shared-cell behavior. Errors retain the source filename and line;
-the optimized call does not require a separate anonymous native stack frame.
-
-Immediate calls can initialize related values together without mutable
-placeholders. Annotate an optional receiving slot when nil is part of the
-result, so declaration inference does not force it before the caller can check:
+Calling an anonymous function literal directly—`(function (...) ... end)(...)`—
+lets you write local control flow and multi-statement initialization inside an
+expression with zero closure allocation. The compiler inlines the call as a
+scoped block:
 
 ```titan
 function find_first(items: {integer}, minimum: integer): (integer?, integer?)
-    local position: integer?, found: integer? =
-        (function (items: {integer}, minimum: integer): (integer?, integer?)
-            for index = 1, #items do
-                if items[index] >= minimum then return index, items[index] end
+    local position?, found? =
+        (function (values: {integer}, threshold: integer): (integer?, integer?)
+            for index = 1, #values do
+                local current? = values[index]
+                if current and current >= threshold then
+                    return index, current
+                end
             end
             return nil, nil
         end)(items, minimum)
@@ -302,225 +256,114 @@ function find_first(items: {integer}, minimum: integer): (integer?, integer?)
 end
 ```
 
-Use this shape for a computation that belongs at its expression site. Keep a
-useful named helper when the operation has its own meaning or callers. Passing
-inputs explicitly can avoid introducing shared capture cells. In either form,
-keep resource cleanup in the scope that owns the resource: a `defer` inside an
-immediate function runs before its caller uses the returned value.
+Because the surrounding expression does not supply an expected function type
+to the literal, annotate its parameters and return types explicitly. Arguments
+evaluate once before the body runs; `return` exits only the lambda (evaluating
+return values before any `defer` inside the lambda); and an outer pair of
+parentheses adjusts a zero-return immediate call to `nil`, as in
+`((function (): () end)())`.
 
-## Capturing enclosing locals
+## Callable shape adjustment
 
-A lambda may use the locals and parameters of the function(s) around it.
-This *just works* — no explicit capture list, no special syntax — and it
-follows the same lexical scoping as Lua:
+Two function types are identical only when their fixed parameters, fixed
+results, variadic input tail, and flexible return tail all match. At typed
+sinks (assignments, arguments, returns, `as B`, and Interface method
+matching), Titan also permits directional **callable shape adjustment** from
+an actual function type `A` to an expected function type `B`:
+
+- **Inputs (`B -> A`):** `A` may accept fewer parameters than `B` (ignoring
+  extra fixed arguments or an input tail from `B`). `A` may accept *more*
+  fixed parameters than `B` if every extra parameter accepts `nil` (and also
+  accepts `B`'s variadic element type when `B` is variadic).
+- **Results (`A -> B`):** `B` may expect fewer fixed results than `A` (hiding
+  the extras), project optional `T?` results from `A`'s flexible tail, or
+  collect `A`'s remaining fixed and flexible results into `B`'s flexible tail.
+- **Missing fixed results (`nil`-fill):** If `B` expects a fixed result beyond
+  everything `A` produces, Titan fills `nil` when `B`'s result type admits
+  missing `nil` (`nil`, `value`, `T?`, or a nullable pointer). Required
+  booleans, numbers, strings, containers, and nominal types are rejected.
+- **Aligned components:** Aligned parameter and result positions accept exact
+  identity, gradual consistency with `value`, or nested callable adjustment.
+  Scalar coercions (`integer` to `float`, fixed `T` to `T?`, or record `R` to
+  Interface `I`) do **not** lift through function types.
 
 ```titan
-function make_adder(k: integer): function (integer): (integer)
-    local base = k * 10                  -- a local of make_adder
-    return function (x: integer): integer
-        return base + x                  -- base is captured from make_adder
-    end
+local function first(n: integer): integer
+    return n
+end
+
+local function pair(): (integer, integer)
+    return 1, 2
+end
+
+local function numbers(): (...: integer)
+    return 1, 2, 3
+end
+
+local function notify()
+end
+
+function adjustment_examples(): (integer, integer, integer?, integer?)
+    local wider: function (integer, string): (integer) = first
+    local one: function (): (integer) = pair
+    local maybe_first: function (): (integer?) = numbers
+    local absent: function (): (integer?) = notify
+    return wider(7, "ignored"), one(), maybe_first(), absent()
 end
 ```
 
-A few details worth knowing:
+Incompatible shapes and lifted scalar coercions are compile-time errors:
 
-* **Mutating a captured variable is shared.** If the lambda *assigns* to a
-  captured variable, the change is visible to the enclosing function and to
-  every other lambda that captured the same variable — they all refer to
-  one mutable cell. The counter at the top of this chapter relies on this.
-* **A captured variable that is never reassigned** behaves like an
-  immutable snapshot. In a loop, each iteration's lambda captures *that
-  iteration's* value, so loop-created closures are independent:
+```text
+-- compile error: notify produces no result, and integer does not admit missing nil
+local required: function (): (integer) = notify
 
-  ```lua
-  function make_closures(): {function (integer): integer}
-      local fns: {function (integer): integer} = {}
-      local i = 1
-      while i <= 3 do
-          local captured = i                 -- a fresh local per iteration
-          fns[i] = function (x: integer): integer
-              return captured * 100 + x
-          end
-          i = i + 1
-      end
-      return fns
-  end
-  -- fns[1](7) == 107, fns[2](7) == 207, fns[3](7) == 307
-  ```
+-- compile error: integer -> float does not lift through function types
+local as_float: function (): (float) = one
 
-* **Shadowing works as expected.** A local declared *inside* the lambda
-  with the same name as an outer one shadows it and is not a capture.
-* **Module-level names are not captures.** Module variables, imported
-  modules' members, top-level functions, and record/union functions are reached
-  directly, exactly as they are from any function body; they are not part
-  of the lambda's capture.
-* **Capture is transitive.** A lambda nested two or three levels deep can
-  use a variable from an outer function it is not directly inside; the
-  variable is threaded down through the intervening lambdas. Mutable
-  captures stay shared all the way down; immutable ones are copied down.
-* **Captured strings, arrays, records, unions, Interfaces, and other heap values** are captured
-  and kept alive correctly across garbage collection, whether by value or
-  shared-and-mutable.
-
-## Each lambda evaluation is a fresh value
-
-Evaluating a `function … end` expression produces a **new** function value
-every time control reaches it — there is no caching and no stable
-identity. This is what makes the two counters above independent, and it
-defines what equality means for lambdas:
-
-* the *same* evaluated closure compares equal to itself (`f == f`);
-* two distinct evaluations of the same `function … end` text are distinct
-  objects, and so are **not** equal.
-
-Equality on function values is object identity (raw closure-pointer
-comparison), the same rule that applies to any function value
-([functions](functions.md#functions-as-values)).
-
-For a [direct immediate call](#immediate-calls-as-expressions), the function
-value never escapes or participates in an identity comparison, so the compiler
-can omit its allocation without changing these rules.
-
-This fresh lambda is the **source closure**. An exact target-typed use preserves
-it. Evaluating an admitted non-exact Function-to-Function edge may, when the
-run-time value is an eligible exact Titan closure, create another fresh
-[target-tagged adjustment wrapper](closure-adjustment-wrappers.md). That wrapper
-is unequal to the lambda and to a wrapper from another evaluation; an
-ineligible generic fallback preserves the lambda's identity. Wrapper allocation
-does not re-evaluate the lambda expression or its capture expressions.
-
-## Recursion: a lambda cannot name itself
-
-A lambda bound to a `local` cannot refer to itself by that name, because
-the name only comes into scope *after* its initializer is checked — just
-as `local x = x` reads an outer `x`, not the one being declared. A
-self-reference is therefore a clean "not declared" compile-time error, not
-a silent miscompile:
-
-```titan
-function g(): integer
-    local f: function (integer): (integer) = function (n: integer): integer
-        return f(n)     -- compile-time error: variable 'f' not declared
-    end
-    return 1
-end
+-- compile error: fixed integer -> integer? does not lift through function types
+local as_opt: function (): (integer?) = one
 ```
 
-For a recursive helper, write a named top-level function (recursion and
-mutual recursion among top-level functions work without forward
-declarations — see [Functions](functions.md#recursion-and-declaration-order)).
+An exact function-type assignment preserves the original closure identity. A
+non-exact adjustment may allocate a fresh wrapper closure, which compares
+unequal to the source function and to a second adjustment of the same
+function; store the adjusted function in a variable when stable identity
+matters. `fn is B` checks eligibility without allocating a wrapper. When Lua
+calls an adjusted Titan function, Lua observes the original function's dynamic
+Lua signature rather than a synthesized target signature.
 
-## Lambdas in module-variable initializers
+## Transferring a closure between Lua states
 
-A lambda may initialize a module variable, and a stored lambda may also appear
-inside an Array, Map, record or union construction, operator, or written cast
-in that initializer. Constructing the closure does not execute its body or read
-the values mentioned there, so the ordinary module-initialization frontier
-remains sound:
+[`TransferValue.from_value(callback)`](async-io.md#transfer-values) snapshots
+a Titan function or closure so it can be sent to another OS thread, an
+independent `lua.Lua` state, or a cross-state `async.Receiver`.
 
-```titan
-local transform = function (x: integer): integer return x + 1 end
+Conversion immediately snapshots all captured variables before any capture's
+custom transfer hook runs, so later mutations in the origin state do not
+affect the snapshot. In the destination state, `to_value` loads the owning
+module through its preload entry and constructs a fresh closure over copied
+captures; module-level variables inside the closure refer to the destination
+state's module instance.
 
-function apply(x: integer): integer
-    return transform(x)
-end
+Capture rules across states:
 
-function replace(f: function (integer): (integer))
-    transform = f
-end
-```
+- **Mutable captures become fresh cells:** Shared cell aliasing is not
+  preserved across states—an outer closure and a nested captured closure each
+  receive independent cells, and repeated conversions produce independent
+  snapshots.
+- **Allowed captures:** Primitive values, strings, nested Titan closures,
+  bound concrete methods (copying their receiver), public records and unions
+  eligible for protobuf serialization, public records defining
+  [custom transfer hooks](async-io.md#custom-record-transfer), retained
+  `TransferValue` wrappers (preserved as wrappers rather than unwrapped), and
+  raw C pointers (keeping caller-managed lifetimes). Callable adjustments
+  preserve both source and target signatures.
+- **Rejected captures:** Cycles (including a closure capturing itself through
+  a mutable variable), direct Arrays, Maps, Interfaces (including bound
+  Interface methods), `owned` C storage, `local` nominal types, and non-`nil`
+  Lua `Udata` pointers.
 
-This declares an ordinary function-typed module variable, not a named function.
-It is initialized once with a fresh closure, can be reassigned later, and calls
-through it use the first-class function path. The
-[initializer dependency rule](modules.md#initializer-dependencies) rejects
-references to the module's own variables and functions, and rejects a lambda
-that an explicit or implicit call evaluated by the initializer could invoke:
-one passed to that call, directly or nested in its arguments, used as a
-potential Map-metamethod operand, or called immediately. Storing one in a fresh
-ordinary Map does not itself call it. Putting the read of an **already
-name-visible** module variable in the lambda's body defers its value access
-until the closure is called; it does not make a later module variable or
-import visible.
-
-## Bound method references
-
-A method *named but not called* is a function value with the receiver
-bound in. Writing `obj:method` with **no argument list** yields a value
-whose type is the method's type with the implicit `self` removed, and
-calling that value runs the method on the nominal receiver `obj` was when the
-reference was taken.
-
-A bound-method initializer evaluates its receiver once and stores the method
-without calling it. The receiver must obey the initializer dependency rule:
-`Adder.new(100):add` is accepted, while a receiver that reads an own module
-variable is rejected. A bound own-module method may be stored, but it is
-rejected where an explicit or implicit call evaluated by the initializer could
-invoke it, including as a key passed to an imported Map's `__index`. Imported
-methods follow the same receiver rule.
-
-```titan
-record Adder
-    base: integer
-end
-
-function Adder:add(x: integer): integer
-    return self.base + x
-end
-
-function use(): integer
-    local a = Adder.new(100)
-    local f: function (integer): (integer) = a:add   -- bound: function (integer): integer
-    return f(5) + f(7)                       --> 105 + 107 == 212
-end
-```
-
-The receiver expression is evaluated **once**, when the bound source value is
-created. The result is an ordinary function value — store it, pass it, return
-it, call it through Titan or Lua — with no special handling at the use site. An
-exact static view preserves that bound closure; a non-exact callable edge has
-the same conditional fresh-wrapper/fallback behavior as any other
-[closure adjustment](closure-adjustment-wrappers.md). Because the captured
-receiver is a reference,
-calling a bound method that mutates record state is visible through the
-record:
-
-```titan
-record Counter
-    n: integer
-end
-
-function Counter:bump(): integer
-    self.n = self.n + 1
-    return self.n
-end
-
-function make(): function (): (integer)
-    local c = Counter.new(0)
-    return c:bump          -- the receiver c is captured
-end
--- the returned value bumps c on each call: 1, 2, 3, …
-```
-
-An Interface method can be bound in the same way. The function value captures
-the Interface wrapper, uses the Interface method's self-removed type, and
-dispatches through that wrapper when called. Like every bound method value, it
-is positional-only after binding even though a direct Interface method call can
-use the Interface declaration's parameter names.
-
-Restrictions are clean compile-time errors:
-
-* the receiver must be a record, union, or Interface — `n:bump` on another
-  type is a receiver-type error;
-* the method must exist on that nominal owner;
-* a **foreign (C) method** cannot be bound:
-  `a foreign (C) method cannot be used as a first[-class value]`.
-
-Bound method references work across modules, including against a dependency
-available only through a compiled `.so` or `.a` provider. See
-[Records](records.md#methods) for method declaration rules.
-Union methods use the same bound-reference path; unlike a record method they
-cannot access fields and must inspect `self` with `case`. See
-[Unions](unions.md). Interface dispatch and wrapper lifetime are described in
-[Interfaces](interfaces.md#calls-and-bound-methods).
+The snapshot retains no reference to the source state's closures, strings, or
+heap objects. See [Concurrency](concurrency.md) and
+[Transfer values](async-io.md#transfer-values) for cross-state patterns.

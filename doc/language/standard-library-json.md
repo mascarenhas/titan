@@ -1,13 +1,38 @@
 # JSON standard library
 
-`titan.json` converts Titan data to JSON strings and reads JSON as dynamic data
-or as an explicitly supplied [reflection schema](standard-library-reflect.md).
-It supports nested Arrays, Maps, public record fields, and tagged unions.
-Import it with `local json = import "json"`; Lua uses
-`require "titan.json"`. Both operations are synchronous and need no async
-Runtime.
+`titan.json` encodes Titan values to compact RFC 8259 JSON strings and decodes
+JSON into dynamic data or a caller-supplied
+[reflection schema](standard-library-reflect.md). All operations are synchronous
+and need no async Runtime.
 
-Save this example as `json_example.titan`:
+- **Import:** `local json = import "json"` (Titan) · `require "titan.json"` (Lua)
+- **Targets:** Native & Browser (complete)
+
+## Quick examples
+
+Decode JSON dynamically into scalars, `{value}` Arrays, and `{string: value}`
+Maps, then project values at typed sinks:
+
+```titan
+local json = import "json"
+local io = import "io"
+
+function main(_args: {string}): integer
+  local raw = '{"host":"localhost","port":8080,"tags":["api","v2"]}'
+  local config: {string: value} = json.decode(raw)
+  local host: string = config["host"]
+  local port: integer = config["port"]
+  local tags: {string} = config["tags"]
+  io.print(host, port, tags[1])
+
+  config["port"] = 8443
+  io.print(json.encode(config))
+  return 0
+end
+```
+
+Supply a nominal schema to reconstruct records and tagged unions directly. Save
+this program as `json_example.titan`:
 
 ```titan
 local json = import "json"
@@ -24,16 +49,17 @@ union Message
   idle()
 end
 
-function main(args: {string}): integer
+function main(_args: {string}): integer
   local original = Message.person(Person("Ada", 42))
   local text = json.encode(original)
-  io.print(text)
+  io.print(text) -- {"tag":"person","value":{"name":"Ada","score":42}}
+
   local schema = reflect.Type.is_named(
     reflect.NamedType("json_example.Message"))
   local restored: Message = json.decode(text, schema)
   case restored
-  when person(person) then
-    io.print(person.name, person.score)
+  when person(who) then
+    io.print(who.name, who.score)
   when idle() then
     io.print("idle")
   end
@@ -41,93 +67,85 @@ function main(args: {string}): integer
 end
 ```
 
-The encoded message is
-`{"tag":"person","value":{"name":"Ada","score":42}}`. Supplying the
-schema reconstructs the nominal `Message` and `Person` values, including their
-const fields. Without a schema, the same document decodes to ordinary Maps.
+Without a schema, the same JSON text decodes to ordinary `{string: value}` Maps.
 
-## Public API
+## Encoding and decoding
 
 ```text
-encode(subject: value, ...: EncodeOption): string
-decode(source: string, target: reflect.Type?, ...: DecodeOption): value
+function encode(subject: value, ...: EncodeOption): string
+function decode(source: string, target: reflect.Type?, ...: DecodeOption): value
 
-EncodeOption.tag_field(name: string)
-EncodeOption.null_value(value)
-EncodeOption.max_depth(integer)
-EncodeOption.max_bytes(integer)
-EncodeOption.max_nodes(integer)
+union EncodeOption
+  tag_field(name: string)
+  null_value(value: value)
+  max_depth(value: integer)
+  max_bytes(value: integer)
+  max_nodes(value: integer)
+end
 
-DecodeOption.tag_field(name: string)
-DecodeOption.null_value(value)
-DecodeOption.max_depth(integer)
-DecodeOption.max_bytes(integer)
-DecodeOption.max_nodes(integer)
-DecodeOption.ignore_unknown_fields(boolean)
-
-Error.code: string
-Error.message: string
-Error.position: integer?
-Error.line: integer?
-Error.column: integer?
-Error.path: string
+union DecodeOption
+  tag_field(name: string)
+  null_value(value: value)
+  max_depth(value: integer)
+  max_bytes(value: integer)
+  max_nodes(value: integer)
+  ignore_unknown_fields(value: boolean)
+end
 ```
 
-Every `Error` field is const. Errors are raised, so a successful decoding of
-`null` can return nil without being confused with failure. Options are union
-values; when an option occurs more than once, the last occurrence wins.
-Invalid option values raise before processing the input.
+Failures raise `json.Error`, so decoding `"null"` returns `nil` unambiguously.
+When the same option appears more than once, the last occurrence wins. Invalid
+option values raise `invalid_option` before the input is processed.
 
-Omit `target` for dynamic decoding. To supply decoding options without a target,
-pass nil explicitly: `json.decode(text, nil, json.DecodeOption.max_bytes(4096))`.
-An annotated local, parameter, or return can recover the concrete result of a
-schema-directed call; there is no `decode<|T|>` type-inference API.
+Omit `target` for dynamic decoding. To pass options without a schema, supply
+`nil` explicitly:
 
-## Values and containers
+```text
+local data = json.decode(text, nil, json.DecodeOption.max_bytes(4096))
+```
 
-| Titan value | JSON |
+Recover the concrete type of a schema-directed decode at an annotated local,
+parameter, or return sink.
+
+## Values, containers, and nulls
+
+| Titan value | JSON representation |
 | --- | --- |
-| nil | `null` |
-| boolean | `true` or `false` |
-| integer | Exact decimal integer |
-| finite float | Decimal number with round-trip precision |
-| string | UTF-8 string with JSON escaping |
-| mutable or const Array | Array, visiting every position from 1 through its length |
-| Map with string keys | Object |
+| `nil` | `null` |
+| `boolean` | `true` or `false` |
+| `integer` | Exact decimal integer |
+| finite `float` | Decimal number with round-trip precision |
+| `string` | Valid UTF-8 string with JSON escaping |
+| mutable or `const` Array | Array from index `1` through `#array` |
+| Map with `string` keys | Object |
 | record | Object containing its public fields |
-| union | Object with the variant discriminator and each named payload part |
-| Interface | Object containing its captured public fields; encoding only |
+| union | Object with variant discriminator and declared payload parts |
+| Interface | Object containing its captured public fields (encoding only) |
 
-Dynamic decoding returns scalars, Titan `{value}` Arrays, and
-`{string: value}` Maps. Empty Arrays encode as `[]`; empty Maps and records
-without public fields encode as `{}`. An integer-keyed Map is not an Array,
-and non-string Map keys raise `invalid_map_key`. A Map target schema must
-accept string keys (`is_string` or `is_value`), even for an empty object.
+Dynamic decoding produces scalars, `{value}` Arrays, and `{string: value}` Maps.
+Empty Arrays encode as `[]`; empty Maps and records with no public fields encode
+as `{}`. Non-string Map keys raise `invalid_map_key`, and a Map target schema
+must accept string keys (`is_string` or `is_value`) even for `{}`.
 
-Output is compact. Record fields follow declaration order. Map keys are sorted
-by their bytes, and union envelopes write the discriminator before payload
-parts in declaration order. This ordering
-is deterministic, but it is not a cryptographic JSON canonicalization format.
-Map enumeration uses existing entries; metatables do not manufacture members.
-Methods, statics, and source-private fields are not serialized.
+Encoded output is compact and deterministic: record fields appear in declaration
+order, Map keys are sorted bytewise, and union objects write the discriminator
+before payload parts in declaration order. Map encoding reads raw entries;
+metatables do not synthesize members. Methods, statics, and `local` fields are
+omitted.
 
-Functions, threads, pointers, owned foreign values, and opaque userdata have
-no default representation. A public field containing such a value raises at
-that field. Interface encoding reads its captured public fields rather than
-unwrapping the concrete receiver; decoding an Interface is unsupported because
-the fields do not identify a concrete implementation.
+Functions, threads, raw pointers, owned foreign storage, and opaque userdata
+cannot be encoded and raise when encountered. Interface encoding serializes
+captured public fields rather than unwrapping the concrete receiver; Interface
+decoding is unsupported. Cycles raise `cycle`, whereas shared acyclic references
+encode independently. Encoding and decoding never mutate their inputs.
 
-Cycles raise `cycle`. Repeated references to the same acyclic value are allowed
-and serialize separately; decoding does not preserve shared object identity.
-Encoding and decoding do not mutate their input values or expose a partial
-result after failure.
+### Nulls and holes
 
-## Nulls and holes
+By default, JSON `null` decodes to `nil`. Because Titan represents `nil` in
+containers as absence, trailing nulls in Arrays and null-valued Map members are
+dropped during dynamic decoding:
 
-By default, JSON null becomes nil. Titan stores nil as absence in containers,
-so this policy has observable consequences:
-
-| JSON input | Decode, then encode with default options |
+| JSON input | Decode, then encode (default) |
 | --- | --- |
 | `[1,null,3]` | `[1,null,3]` |
 | `[1,null,null]` | `[1]` |
@@ -135,14 +153,12 @@ so this policy has observable consequences:
 | `{"x":null}` | `{}` |
 | `null` | `null` |
 
-An internal Array hole remains visible because a later element retains the
-Array's length. Trailing nil positions shorten the Array, and a Map member
-whose value becomes nil disappears. Decoding still validates every source
-position/member before applying these rules, including duplicate null-valued
-members.
+Interior Array holes survive because a later non-nil element preserves `#array`.
+Duplicate object keys—including keys mapped to `null`—are always rejected before
+entries are discarded.
 
-Supply a nonnil token when nulls must survive in dynamic data. Save this example
-as `json_nulls.titan`:
+Pass a non-nil sentinel via `null_value` when dynamic data must distinguish
+explicit `null` from absence:
 
 ```titan
 local json = import "json"
@@ -151,44 +167,41 @@ local io = import "io"
 local record NullToken
 end
 
-function main(args: {string}): integer
+function main(_args: {string}): integer
   local token = NullToken()
-  local data: value = json.decode("[1,null,null]", nil,
+  local values: {value} = json.decode("[1,null,null]", nil,
     json.DecodeOption.null_value(token))
-  io.print(json.encode(data, json.EncodeOption.null_value(token)))
+  io.print(#values, json.encode(values, json.EncodeOption.null_value(token)))
   return 0
 end
 ```
 
-The token is compared using raw value equality before ordinary encoding
-dispatch. Reuse the same token for both calls. A dedicated record instance
-avoids confusing real application data with null. False, zero, and empty-string
-tokens also work, but encode every equal data value as null; numeric equality
-includes `0` versus `0.0`. A NaN token is rejected. Passing nil restores the
-default. Tokens apply to data values, never object keys or generated union tags.
+The encoder matches the sentinel with raw value equality before ordinary type
+dispatch; reuse the same token on both sides. A dedicated empty record avoids
+collisions with application data (`false`, `0`, or `""` work as tokens, but also
+replace equal real values, including `0` and `0.0`). Passing `NaN` raises
+`invalid_option`; passing `nil` restores the default. Sentinels never rewrite
+object keys or union discriminators.
 
-The sentinel is used for untyped decoding and `is_value` schema leaves,
-including container elements whose type is `value`. Typed decoding retains
-these distinctions:
+Sentinels apply only to dynamic decoding and `is_value` schema positions:
 
-- Explicit nil and Option targets decode null as nil, even with a token.
-- A concrete Array element or Map value can decode null as a hole/absent entry;
-  a token does not insert a foreign value into `{integer}` or another concrete
-  container.
-- A required scalar, record field, root record/union, or nonnullable union
-  payload rejects null. A `value` field or payload uses the sentinel policy.
-- A missing nil-admitting record field or union part becomes nil. Absence is not explicit
-  JSON null and never creates a sentinel.
+- Explicit `nil` and Option targets decode `null` as `nil`.
+- Concrete Array elements and Map values decode `null` as an absent entry rather
+  than storing a foreign sentinel.
+- Required scalars, record fields, root nominals, and non-optional union parts
+  reject `null`.
+- Missing nil-admitting record fields and union parts become `nil`, never the
+  sentinel.
 
-## Records and schemas
+## Typed schemas: records and containers
 
-Use `reflect.Type.is_named(reflect.NamedType("package.Record"))` for a
-nominal target, with the declaration's fully qualified module name. The module
-that defines it must already be initialized. JSON does not import modules, and
-an unknown nominal name raises `unknown_type` rather than becoming dynamic.
+Request a nominal target with
+`reflect.Type.is_named(reflect.NamedType("module.Type"))`. The defining module
+must already be initialized; `json.decode` does not import modules and raises
+`unknown_type` for unregistered names.
 
-Structural descriptors can request individual scalars, Options, Arrays, or
-Maps. For example, this complete module exposes a decoder for integer Arrays:
+Build structural schemas with `reflect.Type` constructors (`Type.is_array` takes
+constness before the element descriptor; `Type.is_map` takes key then value):
 
 ```titan
 local json = import "json"
@@ -201,153 +214,138 @@ function read_integers(text: string): {integer}
 end
 ```
 
-Automatic record decoding calls the public `new` constructor after validating
-every argument. It accepts the synthesized constructor and a custom override
-whose fixed result is exactly the requested record. Variadic parameters,
-flexible results, optional results, and any other result shape are unsupported
-and raise `constructor_unavailable` before the constructor runs.
+Automatic record decoding validates every member and calls the record's public
+`new` constructor once. Both the compiler-synthesized constructor and custom
+overrides work, provided `new` has fixed parameters, no flexible result tail,
+and a single result of the target record type; otherwise decoding raises
+`constructor_unavailable` before invoking `new`.
 
-JSON member names and value schemas come from the constructor's parameters.
-For a synthesized constructor these are the record's fields, including const
-fields. A custom constructor can use different parameter names and preserve
-its own validation or normalization. Encoding still uses public field names,
-so an overridden constructor need not accept the record's encoded object.
-Missing arguments are accepted only when the parameter descriptor admits nil:
-nil, Option, or `value`. Required booleans are required even though false is falsy.
-Unknown members normally raise `unknown_field`; pass
-`DecodeOption.ignore_unknown_fields(true)` to allow extra record members.
-Ignored members still undergo syntax and resource validation.
+JSON member names and schemas follow the constructor's parameters:
 
-A local record cannot publish a public constructor. A record with any local
-field has no public synthesized constructor, but can provide a compatible
-public custom constructor. Its public view can be encoded either way; automatic
-decoding without a compatible public constructor raises
-`constructor_unavailable`. Decode ordinary data and invoke an application
-factory when such a type must be reconstructed. JSON does not guess factories
-or expose private fields.
+- Missing members are allowed only for parameters whose type admits `nil`
+  (`nil`, Option, or `value`). A required `boolean` cannot be omitted.
+- Extra members raise `unknown_field` unless
+  `DecodeOption.ignore_unknown_fields(true)` is set. Ignored members undergo
+  syntax and resource validation.
+- A record with `local` fields has no public synthesized constructor; it can be
+  decoded automatically only if it defines a compatible public `new`. Encoding
+  its public fields works either way.
 
-Recursive nominal schemas are resolved as their values are visited. They do not
-need eager expansion. Reflection erases generic arguments: `Box<|Person|>` and
-`Box<|string|>` have the same runtime nominal schema, and an erased `T` may look
-exactly like a declared `value`. Such a leaf decodes dynamically; projecting
-the outer result does not prove a generic specialization. Use an explicit
-application decoding function when specialization-specific reconstruction is
-needed.
+Recursive nominal schemas resolve lazily as values are traversed. Generic type
+arguments are erased at runtime: `Box<|Person|>` and `Box<|string|>` share the
+same nominal schema, and erased type parameters decode dynamically as `value`.
 
-Decoded mutable Arrays are built through `{value}` storage. Schema validation
-checks their initial contents, but a later typed view retains that storage's
-Lua-writer policy. Every later typed Titan read still checks the element.
-Const Array targets produce const Arrays and reject writes. Maybe-const Array
-targets produce mutable Arrays. See [Arrays and Maps](arrays-maps.md).
+Decoded mutable Arrays allocate `{value}` storage; typed reads check elements on
+access. Const Array targets return `const {T}` Arrays, and maybe-const targets
+return mutable Arrays. See [Arrays, Maps, and Iteration](arrays-maps.md).
 
 ## Tagged unions
 
-Union envelopes use the variant's name as a discriminator and each payload
-part's declared name as an object key. The discriminator key defaults to `tag`.
-The old single-type declaration, such as `count(integer)`, is shorthand for
-`count(value: integer)`, so its JSON shape stays the same:
+Union values encode as JSON objects carrying the public variant name under a
+discriminator key (default `"tag"`) and each payload part under its declared
+name. A single unnamed payload such as `count(integer)` uses the key `"value"`:
 
-| Declaration and value | JSON |
+| Variant declaration and value | JSON |
 | --- | --- |
-| `idle()`; `Message.idle()` | `{"tag":"idle"}` |
-| `count(integer)`; `Message.count(3)` | `{"tag":"count","value":3}` |
-| `optional(string?)`; `Message.optional(nil)` | `{"tag":"optional","value":null}` |
-| `text(message: string)`; `Message.text("hi")` | `{"tag":"text","message":"hi"}` |
-| `point(x: integer, y: integer)`; `Message.point(2, 3)` | `{"tag":"point","x":2,"y":3}` |
+| `idle()` · `Message.idle()` | `{"tag":"idle"}` |
+| `count(integer)` · `Message.count(3)` | `{"tag":"count","value":3}` |
+| `optional(string?)` · `Message.optional(nil)` | `{"tag":"optional","value":null}` |
+| `text(message: string)` · `Message.text("hi")` | `{"tag":"text","message":"hi"}` |
+| `point(x: integer, y: integer)` · `Message.point(2, 3)` | `{"tag":"point","x":2,"y":3}` |
 
-The discriminator is the public variant arm name, not its numeric runtime tag
-or the union's type name. Each part retains its own JSON representation; a
-record or Map part remains an object under that part's name.
+Each payload part keeps its own JSON representation; a nested record or Map
+stays an object under that part's key.
 
-Typed decoding maps object keys to the selected variant's part names in any
-order. Missing nil-admitting parts become nil; other missing parts raise
-`missing_field`. An empty variant has no payload keys. Unknown envelope
-members are rejected, including with `ignore_unknown_fields(true)`.
-Encoding an active private arm raises `private_variant`; decoding an unknown
-public arm raises `unknown_variant`.
+Typed union decoding accepts keys in any order. Missing nil-admitting parts
+become `nil`; other missing parts raise `missing_field`. Unknown keys in a union
+object are always rejected, even with `ignore_unknown_fields(true)`. Encoding an
+active `local` variant raises `private_variant`; decoding an unrecognized arm
+raises `unknown_variant`.
 
-Use matching `EncodeOption.tag_field("kind")` and
-`DecodeOption.tag_field("kind")` options to change the discriminator key.
-For example, `tagged(tag: string, count: integer)` can encode as
-`{"kind":"tagged","tag":"data","count":2}`. A discriminator that conflicts
-with any part name in the selected variant raises `invalid_union` in either
-direction; choose another key. The option applies to every nested union in
-that call. Discriminator keys are JSON strings and receive normal escaping.
-
-Without an explicit union schema, an object containing `tag` is an ordinary
-Map. JSON never chooses a nominal type from untrusted text.
+Select an alternate discriminator with matching `EncodeOption.tag_field` and
+`DecodeOption.tag_field` options, which apply to every nested union in that
+call. If the discriminator collides with a declared part name of the active
+variant, both encoding and decoding raise `invalid_union`. Without a union
+schema, an object containing `"tag"` decodes as an ordinary Map.
 
 ## Strings and numbers
 
-The accepted syntax follows [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259.html).
-Every JSON root kind is accepted, with space, tab, CR, and LF as whitespace.
-The document must be complete. Comments, trailing commas or other trailing
-data, malformed numbers/literals/escapes, raw control bytes, and a leading BOM
-are rejected. Duplicate decoded object keys are rejected, including `"a"`
-versus `"\u0061"`.
+Decoding enforces strict [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259.html)
+syntax for one complete document (whitespace is space, tab, CR, or LF).
+Comments, trailing commas, trailing data, malformed numbers or escapes, raw
+control bytes, a leading UTF-8 BOM, and duplicate object keys (including after
+`\u` decoding, such as `"a"` and `"\u0061"`) are rejected.
 
-Strings must be valid UTF-8. Escaped surrogate pairs combine into their Unicode
-scalar; lone surrogates and invalid UTF-8 are rejected. Embedded NUL round-trips
-through `\u0000`. Unicode is not normalized. Encoding a Titan byte string that
-is not UTF-8 raises `invalid_utf8`.
+Strings must be valid UTF-8. Escaped surrogate pairs decode to their Unicode
+scalar value, lone surrogates and invalid UTF-8 raise `invalid_utf8`, and
+embedded NUL bytes round-trip as `\u0000`. Encoding also rejects invalid UTF-8
+byte strings.
 
-Dynamic decoding preserves integer-form tokens as exact Titan integers, raising
-on integer overflow. Tokens with a fraction or exponent become finite floats.
-An integer schema accepts exactly integral, in-range decimal tokens such as
-`1.0` and `1e3`. The check uses the decimal value, so
-`9007199254740993.0` does not silently round to a different integer.
+Numeric conversion preserves Titan's integer/float distinction without modifying
+the process locale:
 
-A float schema allows normal floating-point rounding, including integer-form
-tokens outside the integer range. Overflow and nonzero values that underflow to
-zero are rejected. Float negative zero is preserved. Integral floats encode
-with a fraction or exponent marker so dynamic decoding retains their numeric
-kind; integer-form `-0` may normalize to integer zero. Nonfinite input floats
-cannot be encoded. Conversion does not change the process-global numeric
-locale.
-
-Full-range Titan integers are emitted as numbers. Other JSON consumers may
-round integers beyond their own exact numeric range; JSON does not provide an
-arbitrary-precision number type or silently convert these values to strings.
+- Dynamic decoding turns integer-form tokens into exact 64-bit integers (raising
+  on overflow) and tokens with a fraction or exponent into finite floats.
+- An integer schema accepts exact, in-range decimal values such as `1.0` or
+  `1e3`, checked directly in decimal so integers above 2^53 do not round.
+- A float schema allows normal floating-point rounding, rejects overflow and
+  nonzero underflow to zero, and preserves `-0.0`.
+- Integral floats encode with a decimal point or exponent so dynamic decoding
+  recovers them as floats. Non-finite floats (`NaN`, `±inf`) cannot be encoded.
+- Full-range 64-bit integers emit as JSON numbers.
 
 ## Diagnostics and limits
 
-Catch `json.Error` to inspect a structured failure. Its `code` is stable;
-`message` explains the failure. `position` is a one-based source byte offset,
-and `line` and `column` use the same byte-oriented convention as
-`peg.line_column`. CRLF counts as one line ending; CR and LF also work. An EOF
-position is one past the last byte. These fields are nil for failures without
-a source location, such as encoding errors or invalid options.
+```text
+record Error
+  const code: string
+  const message: string
+  const position: integer?
+  const line: integer?
+  const column: integer?
+  const path: string
+end
+```
 
-`path` starts at `$`, uses quoted object members such as `$["address"]`, and
-one-based Array indices such as `$["people"][2]`. Syntax errors use `$` when
-there is no semantic path yet. For example, `[1 2]` reports
-`expected_array_separator` at byte 4, and `true false` reports
-`trailing_input` at byte 6. Unexpected runtime failures retain their original
-error and traceback instead of being reported as malformed JSON.
+Catch `json.Error` to handle malformed input, schema mismatches, or budget
+exhaustion while letting unrelated runtime errors propagate:
 
-The default limits are 16 MiB of input/output text, 1,000,000 visited JSON
-values, and a nesting depth of 32. `max_depth`, `max_bytes`, and `max_nodes`
-require positive integers. Depth counts JSON
-containers: a root object or Array has depth 1, and a union envelope is an
-object. The node count includes the root, nulls, and ignored record members'
-values. Decode's byte limit applies to the complete input; encode's limit
-applies to emitted text. Exceeding a limit raises `limit_exceeded`.
+```titan
+local json = import "json"
+local reflect = import "reflect"
+local io = import "io"
 
-Every target uses the configured positive `max_depth`, with no additional
-browser writer cap. Its largest possible setting is the const
-[`math.maxinteger`](standard-library-math.md#typed-numeric-surface). The
-default remains 32, and decoding keeps its own configured limits.
+function try_parse_port(text: string): integer?
+  local n: integer = json.decode(text, reflect.Type.is_integer())
+  return n
+catch
+  if not (error is json.Error) then raise end
+  local err: json.Error = error
+  io.print(err.code, err.path, err.message)
+  return nil
+end
+```
 
-The configured depth is a container budget, not a guarantee that every document
-within it fits the available execution resources. Parsing also consumes PEG
-matching-stack and delayed-capture recursion space; decoding and encoding use
-their own traversal space. JSON does not modify PEG's shared stack limit or
-convert independent engine/runtime failures into JSON limit errors. Applications
-can choose `peg.set_max_stack` for their workloads; documents with nested sibling
-lists can need more matching-stack space than equally deep single-child chains.
-Streaming,
-pretty printing, field renaming, custom codec registries,
-reference preservation, and automatic generic type tokens are outside this API.
+`code` is a stable error label (such as `expected_value`,
+`expected_array_separator`, `trailing_input`, `duplicate_key`, `invalid_utf8`,
+`unknown_field`, `limit_exceeded`). `position` is a 1-based byte offset (`#source + 1`
+at EOF), and `line`/`column` follow `peg.line_column` (CRLF counts as one line
+ending; CR and LF also work). These three fields are `nil` for encoding and
+option errors. `path` starts at `$`, with quoted keys and 1-based Array indices
+(for example `$["people"][2]["name"]`); syntax errors report `$`.
 
-See [JSON implementation](../implementation/json-library.md) for the parser,
-reflection, and allocation design.
+Default resource budgets are **16 MiB** of input or output text, **1,000,000**
+visited JSON values, and a container nesting depth of **32**. `max_depth`,
+`max_bytes`, and `max_nodes` accept positive integers up to
+[`math.maxinteger`](standard-library-math.md). Depth counts nested JSON
+containers (a root Array, object, or union envelope has depth 1). Node counts
+include the root, nulls, generated union tags, and ignored record members.
+Exceeding any budget raises `limit_exceeded`.
+
+The depth budget bounds JSON container nesting, not underlying engine stack.
+Decoding parses with [`titan.peg`](standard-library-peg.md) and does not alter
+the shared PEG matching stack; call `peg.set_max_stack` when processing deeply
+nested sibling structures.
+
+See [JSON implementation](../implementation/json-library.md) for parser and
+allocation internals.

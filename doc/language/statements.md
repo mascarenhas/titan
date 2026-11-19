@@ -1,693 +1,457 @@
-# Statements
+# Statements, Scope, and Control Flow
 
-Titan's statements are a subset of Lua's, with the same surface syntax,
-plus static checking. This chapter covers blocks and scoping, local
-declarations, assignment (including multiple assignment), the control-flow
-statements (`if`, union `case`, `while`, `repeat`, numeric `for`, and generic
-`for ... in`), function calls in statement position, `defer`, `raise`, and
-`return`. For the expressions that appear inside statements see
-[Expressions](expressions.md); for the typing rules they trigger see
-[The type system](types.md); for the full statement grammar see
-[Grammar](grammar.md).
+Titan's statements follow Lua's syntax and block structure while adding static
+type checking, `const` bindings, and lexical cleanup. For expressions that
+appear inside statements, see [Chapter 2](expressions.md); for union matching,
+see [Chapter 8](unions.md); for `defer`, `raise`, and `catch`, see
+[Chapter 12](error-handling.md).
 
-## Blocks, scope, and semicolons
+## Blocks and lexical scope
 
-A *block* is a sequence of statements optionally ended by a single
-`return` statement. Function bodies are blocks, as are the bodies of
-`while`, `repeat`, `for`, and each arm of an `if` or `case`. A free-standing block
-can be written with `do ... end`:
+A *block* is a sequence of statements optionally ended by a `return`
+statement. Function and lambda bodies, loop bodies, each arm of an `if` or
+`case`, and explicit `do ... end` constructs are all blocks.
 
-```titan
-function f(): integer
-    local x = 10
-    do
-        local x = 20   -- shadows the outer x until 'end'
-    end
-    return x           -- 10
-end
-```
-
-Scoping is lexical, as in Lua: every block opens a new scope, and a local
-declaration is visible from the statement *after* its declaration to the
-end of the enclosing block. Shadowing an outer variable (or even an
-earlier variable in the same block) is allowed and not diagnosed. As in
-Lua, a lone semicolon is an empty statement, and statements need no other
+Scoping is lexical: each block introduces a new scope, and a local binding is
+visible from the statement after its declaration to the end of its enclosing
+block. Shadowing an outer local or an earlier local in the same block is
+allowed. A lone `;` is an empty statement; statements require no other
 separator.
 
-Any block may have a `catch` trailer. This is Titan's
-error-handling construct; there is no `try` keyword. The body and
-catch are sibling scopes, and the catch has implicit `error: value` and
-`traceback: string` locals. Those catch locals are read-only snapshots.
-See [Error handling](error-handling.md).
-
-Unused variables are not an error or a warning. The compiler notices
-variables that are never read and may omit storage for them; the
-initializer is still evaluated for its effects. Reading a variable is not
-what keeps its value alive: the value that a local holds stays reachable
-until the local's block ends or the local is assigned another value. A
-local declared only to own a buffer therefore keeps that buffer alive for a
-raw C pointer into it (see [Owned C objects](ffi.md#owned-c-objects)). The
-name `_` has no special meaning in Titan; it is an ordinary identifier that
-is conventionally used for values you want to discard:
-
-```lua
-local x, _ = f()   -- keep the first result, ignore the second
-```
-
-## Local declarations
-
-A mutable local variable is declared with `local`, an optional type
-annotation, and an optional initializer expression list:
-
 ```titan
-local x: integer = 10
-local s = "hello"        -- type inferred: string
-```
-
-When the expression list is omitted, every name must have an explicit type
-that admits a missing nil representation (`nil`, `value`, an Option, or an
-existing nullable pointer domain). The compiler supplies one typed nil per
-slot. General assignment conversion is deliberately not consulted, so
-truthiness does not make `local ready: boolean` valid and a declaration with
-no annotation has no type to infer. For example:
-
-```titan
-local found: string?
-local dynamic: value
-```
-
-Writing `= nil` explicitly has the same run-time value. Direct C aggregates
-and fixed arrays do not admit nil and still require `.new()` or
-`.new_array(...)` at their direct initialized local sink; see
-[target-directed C allocation](c-ffi-expressions.md#target-directed-c-allocation).
-
-Const locals use `const` or `local const` and always require an initializer:
-
-```titan
-const limit: integer = 10
-local const low, high = bounds()
-```
-
-Constness applies to the complete declaration list, and none of the declared
-names can be assigned afterward, including from a capturing lambda. See
-[Const values](const-values.md#const-locals).
-
-When an initialized declaration omits its annotation, the type is inferred
-from the initializer.
-Inference never produces an option type: if the initializer is an option
-(for example an array read, which has type `T?`), it is implicitly
-unwrapped, with a run-time check, and the variable gets the base type. Ask
-for an option explicitly by writing `?` after the name:
-
-```titan
-local xs: {integer} = {1, 2, 3}
-local a = xs[1]    -- a: integer  (run-time error if xs[1] is nil)
-local b? = xs[1]   -- b: integer? (nil is fine)
-```
-
-`local b?: integer = e` is also accepted and means the same as
-`local b: integer? = e`. The full inference and assignment-adjustment rules
-are in [The type system](types.md); the initializer receives the admitted
-identity, direct coercion, gradual view, or callable adjustment for the
-annotated type (so
-`local n: float = 1` works), and otherwise the declaration is a
-compile-time error of the shape
-`test.titan:1:1: type error: types in declaration of local variable n do
-not match, expected float but found string`.
-
-A single `local` can declare several variables at once:
-
-```lua
-local x, y = 10, 20
-local q, r = divmod(17, 5)   -- a multi-return call in last position
-```
-
-A call in the *last* right-hand-side position may expand to fill the remaining
-names; any earlier call is scalar. Producer surplus is ignored, while a
-fixed-only deficit is rejected at compile time with `left-hand side expects N
-value(s) but the expression list produces M`. A declared flexible result tail
-can fill finite positions with projected option values instead. Wrapping a call
-in parentheses requests one value (see [Functions](functions.md)); a
-parenthesized call that leaves a multi-name declaration short
-(`local a, b = (f())`) gets the same clean deficit error.
-
-The declared names only enter scope after the whole statement, so the
-initializers see the *outer* bindings:
-
-```titan
-function f(x: integer): integer
-    local x = x + 1   -- the x on the right is the parameter
-    return x
+function scoped_sum(): integer
+    local total = 10
+    do
+        local total = 20 -- shadows outer total until end
+        total = total + 5
+    end
+    return total -- 10
 end
 ```
 
-The bare-`?` option-inference marker is honored for every name in a
-multi-declaration, including names filled from the extra results of a
-trailing multi-return call (`local a, b? = f()` gives `b` an option type).
+Any block may carry a `catch` trailer before its closing `end` (Titan has no
+`try` keyword). The protected body and its `catch` clause are sibling scopes,
+and the `catch` clause provides read-only `error: value` and
+`traceback: string` locals (see [Errors and Resource Cleanup](error-handling.md)).
+
+Unused locals are permitted; their initializers run for their side effects. A
+local keeps the value it holds reachable for garbage collection until its
+block exits or the local is reassigned, so a local declared solely to hold an
+owned C buffer keeps that buffer alive for the block. `_` is an ordinary
+identifier conventionally used for ignored values, and may be repeated within
+a single multi-local or generic-`for` declaration list.
+
+## Local and `const` declarations
+
+### Mutable locals and type inference
+
+A mutable local variable uses `local`, an optional type annotation, and an
+optional initializer expression list:
+
+```titan
+function declaration_examples(values: {integer}, input: string?): (integer, string)
+    local count = 0                   -- inferred integer
+    local ratio: float = 1            -- integer coerced to float
+    local pending: string?            -- initialized to nil
+    local dynamic: value              -- initialized to nil
+
+    local first = values[1]           -- integer; raises if values[1] is nil
+    local second? = values[2]         -- integer?; preserves absence
+
+    const limit = 10
+    local const lower: integer, upper: integer = 1, limit
+
+    local name? = input
+    const name = name                 -- reads outer name?, forces to string, binds const
+
+    count = first + (second or 0) + lower + upper
+    return count, name
+end
+```
+
+When a declaration has an initializer and omits its type annotation, Titan
+infers the type from the initializer—and **drops an outer option**, inserting
+a runtime nil check so unexpected `nil` fails immediately (`local first =
+values[1]` has type `integer`). Append `?` to the variable name
+(`local second? = values[2]`) to preserve an option type without repeating its
+base type. `local b?: integer = e` is equivalent to `local b: integer? = e`.
+
+A mutable `local` may omit its initializer only when every declared name has
+an explicit type that admits a missing `nil` representation: `nil`, `value`,
+an Option `T?`, or a nullable C pointer. The compiler initializes each slot to
+typed `nil`. Truthiness does not make `boolean` nil-admitting, and numeric,
+string, container, and nominal types require an initializer:
+
+```text
+-- compile error: boolean does not admit missing nil
+local ready: boolean
+
+-- compile error: integer requires an initializer
+local count: integer
+
+-- compile error: no initializer to infer type from
+local inferred
+```
+
+### `const` locals
+
+Read-only block locals are declared with `const` or `local const` (the two
+spellings have identical block-local semantics). `const` applies to every name
+in the declaration list and always requires an initializer expression list:
+
+```text
+-- compile error: const local requires an initializer
+const missing: string?
+```
+
+A `const` local cannot be reassigned afterward, including from a capturing
+closure. Constness is shallow: it prevents rebinding the variable, not
+mutating the contents of a referenced Map, mutable Array, or record. (For
+`const` module variables, record fields, Interface fields, and `const { T }`
+Arrays, see [Chapters 6, 7, 9, and 13](arrays-maps.md); C pointee `const`
+qualifiers are governed by [Calling C](ffi.md).)
+
+Because newly declared names enter scope only after the whole declaration,
+shadowing with `const` can force and lock an earlier optional local, as
+`const name = name` does above.
+
+### Multiple declarations
+
+One `local` or `const` statement may declare several names at once. Only the
+last expression on the right-hand side expands (whether a multi-return call,
+flexible return, `...`, or spread); earlier calls contribute one value.
+Surplus values are discarded, while a fixed-only deficit is a compile-time
+error. Each name in the list may carry its own `?` marker, and initializers
+evaluate in the outer scope before any of the new names become visible:
+
+```titan
+local function divmod(a: integer, b: integer): (integer, integer)
+    return a // b, a % b
+end
+
+function split_and_step(step: integer): (integer, integer, integer)
+    local quotient, remainder = divmod(17, 5)
+    local step = step + 1             -- right-hand side reads the parameter
+    return quotient, remainder, step
+end
+```
 
 ## Assignment
 
-An assignment target (lvalue) is a variable name, an array or map element
-`t[k]`, a record field `r.f`, or an exported module variable `mod.x`.
-Parentheses are not allowed around a target — `(x) = 42` is a syntax
-error.
+An assignment target must be a variable name, an Array or Map element `t[k]`,
+a record field `r.f`, or an exported module variable `mod.x`. Parentheses
+around a target (`(x) = 1`) are a syntax error.
 
-```lua
-x = x + 1
-xs[i] = v
-p.x = 2.0
-```
+Titan has no ambient global variables: assigning to an undeclared name is a
+compile-time error. Assignment also rejects functions, modules, `const`
+locals, `const` module variables outside their owning root initializer,
+`const` record or Interface fields, and elements of `const { T }` or
+`const? { T }` Arrays.
 
-Assignments are type-checked: the right-hand side must have an
-[assignment adjustment](types.md#relations-and-boundaries-no-subtyping) to the
-target type. That adjustment may be identity, one direct coercion, a gradual
-view/projection, or a callable adjustment; otherwise the assignment is a
-compile-time error (`types in assignment do not match, expected T but found
-U`). Assigning to an undeclared name is a
-compile-time error (`variable 'y' not declared`) — Titan has no global
-variables; module-level variables must be declared at the top level (see
-[Modules](modules.md)). Functions and modules are not assignable: `f = 2`
-where `f` is a function is the compile-time error `trying to assign to a
-function`.
-
-Assignment also rejects const locals, const module variables outside their
-owner initialization region, const record or Interface fields, and const
-Array indices. These are shallow storage rules; see
-[Const values](const-values.md).
-
-## Multiple assignment
-
-Several targets can be assigned in one statement:
-
-```lua
-x, y = y, x                  -- swap
-arr[1], arr[2] = 4, 2        -- element targets
-x, foo.a = 2, 5              -- 'foo' is an imported module
-q, r = divmod(17, 5)         -- multi-return call expands
-```
-
-The semantics have three ordered phases:
-
-1. Every effectful target component is evaluated exactly once in lexical
-   left-hand order and frozen. For `t[k]`, this means the container and then
-   the key; for `r.f`, it means the receiver. Simple variable and module-slot
-   targets have nothing to evaluate.
-2. All right-hand-side values are evaluated left to right into temporaries.
-3. The stores, including each final target's store validation, happen left to
-   right.
-
-This preserves the original targets even if right-hand expressions have side
-effects, and the right-hand temporaries make the swap idiom work. If a later
-store raises — for example, because an Array index is not positive — every
-earlier store has already committed, while no later store runs.
-
-Single assignment follows the same ordering for its one target: effectful
-receiver, container, index, or key expressions are evaluated and frozen first;
-the right-hand side follows; then final-store validation and mutation occur.
-An error needed to evaluate or safely traverse an intermediate target
-component still occurs during target preparation. See
-[Arrays and maps](arrays-maps.md#positive-indices) for Array indexing and
-[The C FFI](ffi.md#c-assignment-receivers-and-order) for C fields and indices.
-Multiple assignment extends that rule by preparing *all* targets before any
-right-hand expression.
-
-The same finite-demand rules as multi-declarations apply: a trailing call may
-fill the remaining targets, earlier calls are scalar, and `(f())` requests one
-value. Producer surplus is ignored; an ordinary fixed-only deficit remains an
-error. The conventional `_` name is useful when code wants to document a
-discarded position explicitly, but it is not required merely to hide trailing
-results. A flexible producer projects `T?` into positions reached beyond its
-fixed prefix; see [Flexible returns](flexible-returns.md).
-
-## `if`
-
-`if` has the same shape as in Lua, with any number of `elseif` arms and an
-optional `else`:
+Multiple targets may be assigned in one statement:
 
 ```titan
-function sign(x: integer): integer
-    if x > 0 then
+record Point
+    x: float
+    y: float
+end
+
+function swap_and_move(items: {integer}, point: Point)
+    local left, right = 1, 2
+    left, right = right, left
+    items[left], items[right] = 20, 10
+    point.x, point.y = point.y, point.x
+end
+```
+
+Every assignment—single or multiple—executes in three ordered phases:
+
+1. Evaluate and freeze all effectful target components left to right (for
+   `t[k]`, container then key; for `r.f`, the receiver).
+2. Evaluate all right-hand-side expressions left to right into temporaries.
+3. Validate and commit each store left to right.
+
+Because all targets and right-hand values are evaluated before any store runs,
+swaps such as `left, right = right, left` work without temporary variables and
+side effects in right-hand expressions do not alter frozen targets. If a store
+raises (for example, an invalid Array index), earlier stores remain committed
+and later stores do not execute.
+
+Multiple assignment uses the same expression-list rules as multiple
+declarations: only the final right-hand expression expands, surplus values are
+ignored, fixed-only deficits are compile-time errors, and flexible producers
+fill finite targets with `T?`.
+
+## Conditional branching: `if`
+
+`if` follows Lua's syntax with any number of `elseif` clauses and an optional
+`else`, each forming its own lexical block:
+
+```titan
+record User
+    name: string
+end
+
+function sign(n: integer): integer
+    if n > 0 then
         return 1
-    elseif x < 0 then
+    elseif n < 0 then
         return -1
     else
         return 0
     end
 end
-```
 
-The condition may be an expression of any type, with Lua's truthiness
-rules: `false` and `nil` are false, everything else is true. In
-particular, an option-typed condition tests whether the value is `nil` —
-the idiomatic way to check an array read:
-
-```titan
-function get(xs: {integer}, i: integer): integer
-    if xs[i] then
-        return xs[i]
-    else
-        return 0
+function display_name(users: {User}, index: integer): string
+    local user? = users[index]
+    if not user then
+        return "guest"
     end
+    return user.name -- automatic option unwrap; no cast needed
+end
+
+function enabled_by_default(flag: boolean?): boolean
+    if flag == nil then return true end
+    return flag
 end
 ```
 
-Note that a condition whose type can never be `nil` or `false` (an
-`integer`, a `string`, an array...) is statically always true; the
-compiler accepts it without complaint. How conditions influence the typing
-of `and`/`or` inside them is described in [Expressions](expressions.md).
+Conditions accept an expression of any type using Lua truthiness: `nil` and
+`false` are falsy, and everything else—including `0`, `0.0`, and `""`—is
+truthy. Conditions do **not** narrow the static type of a variable inside the
+branch. Instead, field reads, method calls, and typed sinks unwrap options
+automatically, so after guarding against `nil` you use the variable directly
+(`user.name`) without a cast. Use `== nil` or `~= nil` whenever a present
+value can itself be falsy, as with `boolean?`.
 
-Each arm's block is its own scope. The same any-type, Lua-truthiness rule
-applies to `while` and `repeat`/`until` conditions.
+For multi-way dispatch on a tagged union, Titan provides `case ... when ...
+else ... end` (see [Tagged Unions and Pattern Matching](unions.md)). Each
+`when` and `else` arm is an independent block with its own scope, `defer`, and
+`catch`; `case` does not fall through and is not a loop.
 
-## `case`
+## `while` and `repeat`
 
-`case` dispatches on the variant tag of a [union](unions.md):
+`while` tests its condition before each iteration and creates a fresh body
+scope on each pass. `repeat ... until` executes its body at least once and
+stops when the `until` condition is truthy. Both conditions accept any type
+under Lua truthiness—remember that `0` is truthy, so `while n do` does not
+stop when `n` reaches `0`.
 
-```titan
-case message
-when write(text) then
-    consume(text)
-when quit() then
-    stop()
-else
-    ignore()
-end
-```
-
-At least one `when` arm is required; `else` is optional. There is no
-fallthrough and coverage is not required. A payload arm may bind its one
-payload after `:`; binding an empty variant and repeating a variant are
-errors. A `Union?` scrutinee uses the normal automatic option unwrap, so nil
-raises before dispatch rather than selecting `else`.
-
-Every arm and the else clause is a complete block with its own scope and may
-have its own `catch`. `defer` therefore transforms and runs
-inside its containing arm exactly as it does in any other block. The payload
-binding is visible in that arm's protected body and catch.
-
-## `while`
+As in Lua, the `until` expression is evaluated inside the scope of the loop
+body, so it can read locals declared in the body:
 
 ```titan
-function first_set(t: {integer}): integer
-    local i = 1
-    while not t[i] do   -- loop while t[i] is nil
-        i = i + 1
+function first_present(items: {integer}): integer?
+    local index = 1
+    while index <= #items and not items[index] do
+        index = index + 1
     end
-    return i
+    if index <= #items then return index end
+    return nil
 end
-```
 
-The condition is evaluated before each iteration. The body is a new scope,
-re-entered on each iteration. The condition may be of any type, with Lua's
-truthiness rules — an option-typed condition (`while t[i] do`) tests
-whether the value is `nil`, and a numeric condition is always truthy
-(`while n do` does not exit when `n` reaches `0`, since `0` is truthy in
-Lua). Comparing an option against `nil` with `==`/`~=` is also valid and is
-the exact presence test when a present base value may itself be falsy, as with
-`boolean?`.
-
-## `repeat` / `until`
-
-```titan
-function count_down(n: integer): integer
+function count_down(start: integer): integer
     local steps = 0
+    local remaining = start
     repeat
-        n = n - 1
+        remaining = remaining - 1
         steps = steps + 1
-    until n <= 0
+        local finished = remaining <= 0
+    until finished -- until sees locals declared inside the loop body
     return steps
 end
 ```
 
-The body runs at least once, and the loop exits when the `until` condition
-is true. As in Lua, the condition is scoped as part of the loop body, so
-the condition may refer to locals declared inside the body — for example,
-the loop above could end with `local done = n <= 0` followed by
-`until done`.
+## Numeric `for`
 
-## The numeric `for`
-
-Titan has Lua's numeric `for`:
+The numeric `for` loop steps a read-only `integer` or `float` control variable
+over a closed range: `for v [: type] = start, limit [, step] do ... end`. The
+step defaults to `1` for `integer` and `1.0` for `float`.
 
 ```titan
-function sum_list(xs: {integer}): integer
-    local sum: integer = 0
-    for i = 1, #xs do
-        sum = sum + xs[i]
+function sum_elements(values: {integer}): integer
+    local total = 0
+    for i = 1, #values do
+        total = total + (values[i] or 0)
     end
-    return sum
+    return total
+end
+
+function half_step_total(): float
+    local total = 0.0
+    for x: float = 1.0, 10.0, 0.5 do
+        total = total + x
+    end
+    return total
 end
 ```
 
-The full form is `for v = start, limit, step do ... end`; the step is
-optional and defaults to `1` (or `1.0` for a float loop). The control
-variable may carry a type annotation (`for i: integer = 1, 10 do`), and
-must be of type `integer` or `float` — anything else is the compile-time
-error `type of for control variable v must be integer or float`. Without
-an annotation its type is inferred from the `start` expression. Float
-loops work the same way with float bounds:
+Key rules for numeric `for`:
 
-```lua
-local n = 0.0
-for i = 1.0, 10.0, 0.5 do
-    n = n + i
-end
-```
+- Without a type annotation, the control variable's type is inferred from
+  `start` and must be `integer` or `float`.
+- Bounds are checked **strictly** against the control variable's type: Titan
+  does not implicitly convert `integer` bounds to `float` here. Option bounds
+  unwrap automatically with a runtime nil check.
+- `start`, `limit`, and `step` evaluate once before the loop in the enclosing
+  scope, so `for i = 1, #i do` reads an outer `i`.
+- The control variable is scoped to the loop body and read-only; assigning to
+  it is a compile-time error.
+- A step of `0` raises a runtime error. Integer loops bound their iteration
+  count so `for i = 1, math.maxinteger` terminates without wrapping.
 
-The bound expressions are checked *strictly* against the control
-variable's type: this is one of the few places where Titan applies no
-implicit numeric coercion, so an integer `start` with a `float` control
-variable (or vice versa) is a compile-time error (`types in 'for' start
-expression do not match, expected float but found integer`). Option-typed
-bounds are implicitly unwrapped with a run-time nil check. The bound
-expressions are evaluated once, before the loop, and they see the
-enclosing scope — the control variable does not shadow them
-(`for i = 1, #i do` is legal when an outer `i` exists).
+## Generic `for`
 
-The control variable is scoped to the loop body and is read-only, as in
-Lua 5.4+: assigning to it inside the body is a compile-time error
-(`cannot assign to 'for' control variable`).
-
-A step of zero is a run-time error (`'for' step is zero`), as in Lua.
-Integer loops are Lua-faithful at the integer limits: the number of
-iterations is bounded so that `for i = 1, math.maxinteger` terminates
-rather than wrapping the counter past the maximum integer.
-
-## The generic `for ... in`
-
-Titan's generic `for` iterates with an explicit iterator tuple:
-
-```titan
-function step(limit: integer, n: integer): integer?
-    if n >= limit then
-        return nil
-    else
-        return n + 1
-    end
-end
-
-function sum_to(limit: integer): integer
-    local sum = 0
-    for n in step, limit, 0 do
-        sum = sum + n
-    end
-    return sum
-end
-```
-
-The syntax is `for decllist in explist do ... end`. The expression list is
-evaluated once before the loop and adjusted to a four-slot iterator tuple:
+Generic `for` (`for decllist in explist do ... end`) iterates using an
+explicit four-slot iterator tuple. The expression list after `in` evaluates
+once and adjusts to four positions:
 
 | Slot | Meaning |
 | --- | --- |
-| 1 | iterator function, required |
-| 2 | state/context value |
-| 3 | initial control value |
-| 4 | close function |
+| 1 | Iterator function (required) |
+| 2 | Invariant state value |
+| 3 | Initial control value |
+| 4 | Optional close function |
 
-Missing slots are filled with `nil`; values beyond the four tuple slots are
-evaluated and ignored. A trailing multi-return expression, flexible result
-run, trailing `...` in a variadic function, or
-[spread expression](spread-expressions.md) can fill the tuple, so a helper may
-return `(next, state, init, close)` directly. A spread carrier is evaluated
-once and all of its finite positions have type `T?`. A trailing bare `...`
-retains its existing tuple-slot rule: projections through the control slot
-nil-fill, while the close-slot projection is a direct raising read. The
-required iterator slot is forced before it is resolved as callable.
-
-The iterator slot may be a function, a `value` accepted through a gradual
-projection to a synthesized function type, or an admissible C function
-pointer/foreign function. The iterator cannot be variadic and may take zero, one, or two
-fixed parameters. A two-parameter iterator is called as
-`next(state, control)`: first with the initial control value, then after
-each body execution with the previous first result. A one-parameter
-iterator is called as `next(state)`, and a zero-parameter iterator as
-`next()`.
-
-When the iterator slot has type `value`, Titan synthesizes the function type
-from the tuple and declaration list. The parameter types come from the
-non-`nil` state and initial-control slots. Return types come from the
-visible declarations: an annotated declaration contributes its annotation,
-and an unannotated one contributes `value`. The first synthesized return is
-made nil-capable so it can stop the loop.
-
-The iterator must return at least one value. Its first return value is the
-loop control value and must be an option type, `value`, or a nullable C
-pointer. A plain `nil` return type and non-nil-capable return types such as
-`integer` are rejected. The loop stops only when that first returned value is
-`nil` (or `NULL` for C pointers). False values do **not** stop the loop:
+Missing slots receive `nil`, and surplus values are evaluated and ignored. A
+trailing multi-return call, flexible return, `...`, or spread can supply the
+tuple directly.
 
 ```titan
-function flags(_: nil): boolean?
-    -- returning false here still runs the loop body
+local fs = import "fs"
+local iteration = import "iteration"
+
+local function step(limit: integer, current: integer): integer?
+    if current >= limit then return nil end
+    return current + 1
 end
-```
 
-On each iteration, Titan initializes the visible declaration list from the
-iterator returns. The first declaration is initialized from the forced
-control value; later declarations use later iterator returns. If the
-iterator returns fewer values than the declaration list needs, the missing
-values are `nil`, but only annotated declarations can receive them:
-`for x: integer, y: string? in step do` is legal when `step` returns only
-the first value, while `for x, y in step do` cannot infer `y`'s type.
-Generic `for` variables are scoped to the body, fresh per iteration, and
-read-only, like numeric `for` variables.
+function sum_to(limit: integer): integer
+    local total = 0
+    for n in step, limit, 0 do
+        total = total + n
+    end
+    return total
+end
 
-The close slot is `nil`, a function, a `value` accepted through a gradual
-projection to a synthesized close function type, or an admissible C function pointer/foreign
-function. A close function may accept zero or one fixed parameter; when it
-accepts one, the state value must have an assignment adjustment to that
-parameter type. Close
-return values are discarded. When a `value` supplies the close slot, a run-time
-`nil` means that the optional close function is absent and no call is made.
-Every non-`nil` value follows the ordinary callable rules: callable values,
-including values with `__call`, run, while a non-callable value raises. This
-also means that a call through `value` may return only the iterator, state, and
-initial control; Lua's missing-result `nil` padding leaves the close slot
-absent.
-
-When present, the close function runs after normal exhaustion, `break`,
-`return`, and errors from the initial iterator call, body, or update iterator
-call. If close itself raises, that new error replaces the pending action.
-
-This helper returns the whole tuple, including a close function that receives
-the file state:
-
-```text
-function numbered_lines(filename: string):
-        (function (File, integer): (integer?, string?), File, integer, function (File): ())
-    local file: File = File.open(filename)
-    local next = function (f: File, line_no: integer): (integer?, string?)
-        local line? = f:read_line()
-        if line == nil then
-            return nil, nil
-        else
-            return line_no + 1, line
+function count_nonempty(items: {string}): integer
+    local present = 0
+    for _, item? in iteration.ipairs(items) do
+        if item and #item > 0 then
+            present = present + 1
         end
     end
-    local close = function (f: File): ()
-        f:close()
+    return present
+end
+
+local function next_line(file: fs.File): string?
+    return file:read_until("\n", true)
+end
+
+local function close_file(file: fs.File)
+    file:close()
+end
+
+function file_lines(path: string):
+        (function (fs.File): (string?), fs.File, nil, function (fs.File): ())
+    local file = fs.open(path, "r")
+    return next_line, file, nil, close_file
+end
+
+function count_lines(path: string): integer
+    local count = 0
+    for _ in file_lines(path) do
+        count = count + 1
     end
-    return next, file, 0, close
-end
-
-for line_no, line in numbered_lines("input.txt") do
-    process(line_no, line)
+    return count
 end
 ```
 
-If the iterator and closer are method closures that already capture the file,
-no state value is needed:
+The iterator protocol follows four rules:
 
-```text
-function lines(filename: string): (function (): (string?), nil, nil, function (): ())
-    local file: File = File.open(filename)
-    return file:read_lines, nil, nil, file:close
-end
+- **Iterator calls.** The iterator must be a non-variadic function (or a
+  `value` or eligible C function pointer) taking zero, one, or two fixed
+  parameters, called as `next()`, `next(state)`, or `next(state, control)`.
+  For a `value` iterator, Titan synthesizes its parameter types from non-`nil`
+  state and control slots and its return types from the loop variables (with
+  the first return nil-capable).
+- **Stopping condition.** The iterator's first return value is the control
+  value and must have a nil-capable type (`T?`, `value`, or nullable C
+  pointer; plain `nil` and non-nilable types such as `integer` are rejected).
+  The loop stops **only** when that first result is `nil` (or `NULL`). A
+  `false` control value runs the loop body normally.
+- **Loop variables.** Loop variables are scoped to the body, fresh on each
+  iteration, and read-only. The first variable receives the forced non-`nil`
+  control value; later variables follow ordinary local inference (use a
+  trailing `?` to preserve an option, as in `item?` above). Any loop variable
+  beyond the iterator's declared returns must be explicitly annotated with a
+  nil-admitting type.
+- **Guaranteed close.** Slot 4 may be `nil`, a zero- or one-parameter close
+  function (receiving `state` when it takes one parameter; any return values
+  are discarded), a `value` (runtime `nil` skips closing; non-`nil` must be
+  callable), or an eligible C function. Once the tuple is produced, the close
+  function runs when the loop finishes normally, exits via `break` or
+  `return`, or unwinds from an error in the iterator or body. If the close
+  function raises, its error replaces the pending exit or error. Errors raised
+  while evaluating the factory expression before the tuple is returned occur
+  outside the loop's close region.
 
-for line in lines("input.txt") do
-    process_line(line)
-end
-```
+Bound nil-terminated methods work directly as zero-argument iterators—for
+example, `for chunk in reader:read do ... end` reads until `read` returns
+`nil`.
 
-## Function calls as statements
+## Call statements, `return`, and `break`
 
-A function or method call may stand alone as a statement; all of its fixed and
-flexible results are discarded:
+Only function and method calls are valid as expression statements; all fixed
+and flexible results of a call statement are discarded.
 
-```lua
-xs_push(xs, 10)
-p:move(2.0, 3.0)
-```
+`return` exits the enclosing function and must appear as the **last**
+statement of its block (optionally followed by `;`).
 
-Only calls are valid as expression statements. The parser admits prefix
-candidates such as `(f)` or `(1 + 1)`, then semantic checking rejects them
-because they are not calls. Assignment candidates similarly receive semantic
-lvalue validation before code generation.
+- In a zero-return function (one with no return annotation or `: ()`), bare
+  `return` exits with no values, and falling off the end is allowed. Writing
+  expressions after `return` evaluates them for their side effects and
+  discards their values.
+- In an explicit `: nil` function, bare `return` or falling off the end
+  returns one `nil`.
+- In every other fixed-result function, every declared return position must be
+  supplied (surplus expressions evaluate and are discarded), and every
+  reachable control path must end in `return`, `raise`, or a non-fallthrough
+  construct. Non-fallthrough analysis recognizes complete `if`/`elseif`/`else`
+  chains, exhaustive `case` statements over a closed union (or with a
+  terminating `else`), and literal `while true` loops with no reachable
+  `break` and no falling-through enclosing `catch`.
+- A function returning only a flexible tail `(...: T)` may fall off the end or
+  use bare `return` to return zero values.
 
-## `raise`
-
-`raise <exp>` raises a new run-time error with the expression coerced to
-`value`:
-
-```lua
-raise "bad input"
-raise { "structured", "error" }
-```
-
-A bare `raise` is a re-raise and is legal only inside a `catch` block; it
-preserves the original caught error value and traceback. Outside a catch,
-bare `raise` is a compile-time error. `raise <exp>, <trace>` raises the value
-with a `string` trace that was saved earlier, in place of the stack of the
-statement itself. `raise` always terminates the current control-flow path,
-like `return` for the purpose of checking that a function with return values
-cannot fall off the end. Full propagation semantics are in
-[Error handling](error-handling.md).
-
-## `defer`
-
-`defer <statement>` schedules a statement to run when leaving the current block (whether by reaching the end of the block, or by break, return, or an exception).
+`break` exits the innermost enclosing loop (`while`, `repeat`, numeric `for`,
+or generic `for`). Using `break` outside a loop is a compile-time error. A
+`case` statement is not a loop, so a `break` inside a `when` arm exits the
+enclosing loop.
 
 ```titan
-function read_one(path: string): string
-    local f = open_file(path)
-    defer f:close()
-    return f:read()
-end
-```
+local total_calls = 0
 
-The deferred statement runs on normal fallthrough, `return`, `break`, or
-a propagating error. If the deferred statement raises, that new error
-overrides the pending action. Fixed return
-values and any run-time flexible tail are evaluated and saved before the
-deferred statement runs, so cleanup side effects do not change them.
-
-Multiple defers in the same block run in last-in-first-out order:
-
-```titan
-defer first()
-defer second()
-work()
--- execution order on exit: work, second, first
-```
-
-The deferred statement is checked in the scope where the `defer` appears.
-It can read and assign locals that are already in scope, but it cannot see
-locals declared later in the rest of the block. A `defer` inside a loop
-body is installed for that iteration's body and runs before the iteration
-leaves the body.
-
-The statement after `defer` may not itself be another `defer` statement.
-Write two separate defers for LIFO cleanup, or use `defer do ... end` to
-defer multiple statements:
-
-```titan
-defer do
-    flush()
-    close()
-end
-```
-
-A deferred statement cannot contain `return`, and a `break` inside it may only target a loop written inside that deferred statement. See the full [Defer](defer.md) chapter for details.
-
-## `return`
-
-`return` ends the function, supplying its return values:
-
-```titan
-function divmod(a: integer, b: integer): (integer, string)
-    return a // b, "ok"
-end
-```
-
-Like in Lua, `return` may only appear as the **last** statement of a
-block — of the function body, or of any inner block such as an `if` arm or
-a loop body. A statement after a `return` in the same block is a syntax
-error. An optional `;` may follow the statement.
-
-Every fixed declared return position must be filled, or the checker reports
-`returned N value(s) but function expected M`. Each delivered value is
-accepted through the ordinary assignment adjustment to the corresponding
-declared type; mismatches are reported per position (`types in return do not match,
-expected integer but found string`). Surplus expressions are still evaluated
-but their values are discarded. A trailing call expands only as far as the
-finite return prefix requires, unless the function declares a flexible tail,
-which consumes the complete checker-adjusted run. `return (f())` always
-requests one value. See [Functions](functions.md) and
-[Flexible returns](flexible-returns.md).
-
-A function declared without a return annotation returns **zero** values
-(its type is `function (): ()`), matching Lua — not one `nil`. Such functions need
-no `return` at all, and falling off the end is allowed.
-
-In a zero-return function a completely bare `return` is the clearest spelling,
-but expressions are also permitted: they are evaluated for their effects and
-their values are discarded. The function still exposes zero results:
-
-```titan
-local count: integer = 0
-
-function bump(n: integer)    -- no annotation: returns zero values
-    if n <= 0 then
-        return               -- bare return: no values
+function record_call(delta: integer)
+    if delta <= 0 then
+        return
     end
-    count = count + n
+    total_calls = total_calls + delta
 end
-```
 
-`return` and `return nil` still describe different expression lists, but a
-zero-return function discards the latter's `nil` and exposes no values. In an
-explicit `: nil` function, either spelling supplies the one `nil` return
-through ordinary return adjustment. This missing-result adjustment applies
-only when the complete fixed prefix is that one `nil`; a multi-result function
-must supply every fixed position explicitly. In option- or `value`-returning
-functions, write `return nil` explicitly. The explicit `: nil` annotation is
-how you ask for a function that returns a single `nil`.
-
-A function with fixed returns must provably avoid falling off the end on every
-control path unless its complete fixed prefix is exactly one `nil`; otherwise
-the compiler rejects it. In particular, a multi-result signature cannot fall
-through merely because its first result is `nil`. An exactly-one-`nil`
-function, a zero-return function, and a function with only a flexible tail may
-instead fall off the end; the last case produces an empty run. The analysis
-understands `if`/`elseif`/`else` chains and `case` statements.
-A case is non-fallthrough when every `when` arm is non-fallthrough and either
-the arms cover every variant of the statically known closed union or an
-explicit `else` is non-fallthrough. A redundant `else` after complete coverage
-is unreachable and need not terminate. Imported hidden variants still count
-in the union total, so an importer cannot prove complete coverage merely by
-listing every visible arm. Coverage is never required: an unmatched case with
-no `else` simply continues. A literal `while true` also counts as
-non-fallthrough when no reachable `break` targets that loop; a `break` in a
-nested loop targets only the nested loop. An enclosing `catch` that can
-intercept an error from the loop must itself be non-fallthrough, because a
-falling-through catch creates a path past the protected loop. `while false`
-and a `while` with any non-literal condition receive no such credit. `repeat`,
-numeric `for`, and generic `for` loops remain fallthrough.
-
-## `break` (no `goto`)
-
-`break` exits the innermost enclosing loop — a `while`, `repeat`,
-numeric `for`, or generic `for` — exactly as in Lua:
-
-```titan
-function first_positive(xs: {integer}): integer
-    local r = 0
-    for i = 1, #xs do
-        if xs[i] > 0 then
-            r = xs[i]
+function first_positive(values: {integer}): integer
+    local found = 0
+    for i = 1, #values do
+        local current? = values[i]
+        if current and current > 0 then
+            found = current
             break
         end
     end
-    return r
+    return found
 end
 ```
 
-A `break` that is not inside any loop is the compile-time error
-`'break' outside a loop`.
-
-A `case` statement is not a loop and does not capture `break`; a break in an
-arm targets the same enclosing loop as a break in an `if` arm.
-
-`goto` and `::label::` syntax are recognized by the lexer but have no
-statement form, so using them is a syntax error.
+Resource cleanup and error propagation use `defer` and `raise` (see
+[Errors and Resource Cleanup](error-handling.md)). The keywords `goto` and
+`finally` are reserved by the lexer and have no statement forms in Titan.

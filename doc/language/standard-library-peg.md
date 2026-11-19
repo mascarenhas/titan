@@ -1,60 +1,265 @@
 # PEG standard library
 
-The `peg` standard module provides typed parsing-expression grammars, labeled
-failure and recovery, captures, and a source notation derived from LPegLabel's
-`relabel` module.
+The `peg` standard module provides typed parsing-expression grammars (PEGs)
+with Relabel source notation, labeled failure and recovery, captures, and named
+combinators. Titan imports it with `local peg = import "peg"` (parser sugar for
+`import "titan.peg"`); Lua loads the same module with `require "titan.peg"`.
 
-Titan imports it with `import "peg"`, which is parser sugar for
-`import "titan.peg"`. Lua uses `require "titan.peg"`.
+**Target availability:** Native & Browser (complete). The module embeds a
+private LPegLabel engine independent of any external Lua `lpeglabel` library.
+
+## Example
+
+Relabel source notation (`peg.compile`) is the primary way to write grammars.
+This module compiles a labeled assignment grammar once and converts match
+failures into structured line/column errors:
 
 ```titan
 local peg = import "peg"
 
-function identifier(): peg.Pattern
-  local first = peg.ranges("az", "AZ", "__")
-  local rest = peg.ranges("az", "AZ", "__", "09")
-  return peg.sequence(first, peg.zero_or_more(rest))
+record Assignment
+  name: string
+  contents: string
+end
+
+record ParseError
+  label: string
+  line: integer
+  column: integer
+end
+
+local ASSIGNMENT_GRAMMAR = peg.compile([[
+  Assignment <- {|
+    %s*
+    {:name: {Ident / %{expected_name}} :}
+    %s* ('=' / %{expected_equals}) %s*
+    {:contents: {[^%s]+ / %{expected_value}} :}
+    %s* (!. / %{trailing_input})
+  |}
+  Ident <- [A-Za-z_] [A-Za-z0-9_]*
+]])
+
+function parse_assignment(subject: string): (Assignment?, ParseError?)
+  local captured, label, pos = ASSIGNMENT_GRAMMAR:match(subject)
+  if captured == nil then
+    local line, col = peg.line_column(subject, pos as integer)
+    return nil, ParseError(label as string, line, col)
+  end
+  local fields = captured as {value: value}
+  return Assignment(fields["name"] as string,
+                    fields["contents"] as string), nil
 end
 ```
 
-Patterns operate on bytes. `literal`, `set`, `ranges`, captures, positions,
-and failure positions do not imply UTF-8 or Unicode semantics. The explicit
-`utf_range` constructor is the only operation that interprets UTF-8
-encodings.
+## Byte orientation, ordered choice, and labels
 
-The module embeds a private LPegLabel engine. It does not load or modify the
-Lua module named `lpeglabel`, and patterns from an external LPegLabel
-installation cannot be mixed with `peg.Pattern` values.
+Four rules govern all PEG matching in Titan:
 
-## Public types
+1. **Patterns operate on bytes.** Literals, sets, ranges, classes, captures,
+   and positions count bytes rather than Unicode characters. Only
+   `peg.utf_range` interprets UTF-8 encodings.
+2. **Choice is ordered and repetition is possessive.** `p / q` commits to `p`
+   once `p` succeeds, and `p*` or `p+` never gives back characters to help a
+   later pattern match (for backtracking regular expressions, use
+   [`titan.string`](standard-library-string.md#compiled-regular-expressions)).
+3. **`Pattern:match` is anchored at `init`; `peg.match` searches.** Neither
+   requires end of input unless you write `!.` (or `peg.negative(peg.any())`).
+4. **Labels commit.** Ordinary failure lets ordered choice try the next branch,
+   ends a repetition, or advances a search. A thrown label (`%{label}` or
+   `peg.throw(label)`) escapes choices and repetitions immediately, unless
+   caught by a grammar recovery rule with the same name. The label `"fail"` is
+   reserved for ordinary failure.
+
+## Relabel source notation
 
 ```text
 record Pattern
-record Rule
 record Definition
+record Match
+  first: integer
+  last: integer
+end
 
-record Locale
-  alnum: Pattern
-  alpha: Pattern
-  cntrl: Pattern
-  digit: Pattern
-  graph: Pattern
-  lower: Pattern
-  print: Pattern
-  punct: Pattern
-  space: Pattern
-  upper: Pattern
-  xdigit: Pattern
+function compile(candidate: value, definitions: {Definition}?): Pattern
+function define(name: string, pattern: Pattern): Definition
+function define_value(name: string, candidate: value): Definition
+function match(subject: string, candidate: value, init: integer?): Match?
+function Match:values(): (...: value)
+function gsub(subject: string,
+              candidate: value,
+              replacement: function (string): (string)): string
+function update_locale()
+function line_column(subject: string, position: integer): (integer, integer)
+```
+
+- `compile(candidate, definitions?)` parses a Relabel source string into a
+  `Pattern`, or returns an existing `Pattern` unchanged (ignoring
+  `definitions`). `definitions`, when supplied, is a dense Titan Array
+  `{Definition}` with unique names (ordinary Lua tables are rejected).
+  `define(name, pattern)` binds a `Pattern` for `%name`;
+  `define_value(name, value)` binds a table, template, selector, or callback
+  for `->`, `=>`, or `~>` (rejecting `nil` and `false`). Definition-free source
+  strings share a private weak compilation cache cleared by `update_locale()`.
+- `match(subject, candidate, init?)` performs a leftmost search for a source
+  string or `Pattern` starting at normalized `init`. On success it returns a
+  `Match` with one-based inclusive bounds (`last == first - 1` for an empty
+  match); `Match:values()` yields the pattern's captures (preserving `nil` and
+  trailing `nil` slots, or returning zero values when capture-free). An
+  uncaught thrown label stops the search and returns `nil`.
+- `gsub(subject, candidate, replacement)` replaces every match with the literal
+  string returned by `replacement(whole_match)` and returns only the resulting
+  string.
+- `update_locale()` rebuilds predefined character classes from the process's
+  current C locale and clears the definition-free compilation cache.
+- `line_column(subject, position)` maps a one-based byte position in
+  `1..#subject + 1` to `(line, column)`, treating CR, LF, and CRLF as single
+  line endings.
+
+### Relabel expression language
+
+| Syntax | Meaning |
+| --- | --- |
+| `'text'`, `"text"` | Exact byte literal (no backslash escapes; switch quotes to embed the other quote) |
+| `.` | Any single byte (including LF) |
+| `[a-z]`, `[^0-9]` | Byte class with literal bytes, ranges, or `%name` definitions; leading `^` complements |
+| `(p)`, `p q`, `p / q` | Grouping, sequence, ordered choice |
+| `&p`, `!p` | Non-consuming positive and negative predicates |
+| `p?`, `p*`, `p+` | Optional, zero-or-more, one-or-more (possessive) |
+| `p^n`, `p^+n`, `p^-n` | Exactly `n`, at least `n`, at most `n` (no space between `^` and `n`) |
+| `%name` | Predefined locale class or supplied `Definition` |
+| `name <- p`, `name`, `<name>` | Grammar rule (first rule is the start rule) and nonterminal reference |
+| `%{label}`, `p^label` | Throw `label`, or `p / %{label}` (no space between `^` and `label`) |
+| `{}`, `{ p }` | Position capture; whole-substring capture |
+| `{: p :}`, `{:name: p :}` | Anonymous group capture; named group capture |
+| `=name` | Match bytes equal to the latest named group's capture |
+| `{| p |}`, `{~ p ~}` | Table capture; substitution capture |
+| `p -> 0`, `p -> n`, `p -> 'tpl'`, `p -> {}`, `p -> name` | Discard, select (`1..32767`), `%0..%9` template, table, or defined query/callback capture |
+| `p => name`, `p ~> name` | Match-time callback; fold capture callback |
+| `-- ...` | Lua-style line comment |
+
+Predefined C-locale classes are `alnum`, `alpha`, `cntrl`, `digit`, `graph`,
+`lower`, `print`, `punct`, `space`, `upper`, and `xdigit`, with short aliases
+`a c d g l p s u w x` (uppercase short forms are complements) and `nl` for LF.
+Decimal labels such as `%{01}` produce the exact string `"01"`.
+
+Invalid Relabel source raises a formatted error string with a label, byte
+offset, line/column, source line, and caret:
+
+```text
+PEG syntax error [ExpPatt1] at L2:C7 (byte 19): expected a pattern after '/'
+'a' /
+      ^
+```
+
+When passing local Titan functions via `define_value`, compile the grammar in
+the module's `do ... end` initializer:
+
+```titan
+local math = import "math"
+local peg = import "peg"
+
+local function parse_int(text: value): integer
+  local n? = math.tointeger(text)
+  return n or 0
+end
+
+local function add_total(acc: value, ...: value): value
+  local sum = acc as integer
+  for i = 1, #... do
+    sum = sum + (...[i] as integer)
+  end
+  return sum
+end
+
+local SUM_PATTERN: peg.Pattern? = nil
+
+function sum_numbers(input: string): integer?
+  local result = SUM_PATTERN:match(input)
+  if result == nil then return nil end
+  return result as integer
+end
+
+do
+  SUM_PATTERN = peg.compile([[
+    Sum <- (Number (%s+ Number)*) ~> add !.
+    Number <- {%d+} -> to_int
+  ]], {
+    peg.define_value("to_int", parse_int),
+    peg.define_value("add", add_total),
+  })
 end
 ```
 
-`Pattern`, `Rule`, and `Definition` are opaque. Their native patterns,
-grammar entries, definition values, and construction-size accounting cannot
-be inspected or changed by callers.
-
-## Constructors
+## Anchored matching and labeled-error recovery
 
 ```text
+function Pattern:match(subject: string,
+                       init: integer?,
+                       ...: value): (value, ...: value)
+```
+
+`Pattern:match` attempts one anchored match at the normalized `init` position:
+
+| Supplied `init` | Normalized start |
+| --- | --- |
+| `nil` or omitted | `1` |
+| Positive `1..#subject + 1` | Supplied position |
+| Positive `> #subject + 1` | `#subject + 1` |
+| `0` | `#subject + 1` |
+| Negative in range | `#subject + init + 1` |
+| Negative overshoot | `1` |
+
+`-1` selects the last byte, while `0` selects the position after the last byte
+(unlike `titan.string` regexes, where `0` clamps to byte `1`). Extra arguments
+after `init` are accessible through `peg.argument(n)`.
+
+- **Success:** Returns the pattern's captures (preserving `nil` slots and exact
+  arity), or the one-based position immediately after the match when the
+  pattern has no captures. Because a pattern can legally capture `nil`, wrap
+  arbitrary results in a non-`nil` envelope such as `{| ... |}` if you test
+  `first_result == nil` for failure.
+- **Ordinary failure:** Returns `nil, "fail", absolute_farthest_position`.
+- **Uncaught label:** Returns `nil, label, absolute_throw_position`.
+
+Inside a grammar, a rule whose name matches a thrown label acts as a **recovery
+rule**: execution jumps to that rule at the throw position, and if the recovery
+rule succeeds, matching resumes after the throwing expression. Throws inside
+`&p` or `!p` become ordinary predicate failures instead of escaping. The
+reserved label `"fail"` always triggers ordinary failure and never enters a
+recovery rule.
+
+```titan
+local peg = import "peg"
+
+local LIST_WITH_RECOVERY = peg.compile([[
+  List    <- {| Item (';' Item)* ';'? !. |}
+  Item    <- %s* (Word / %{bad_item}) %s*
+  Word    <- {[A-Za-z]+}
+  bad_item <- [^;]*
+]])
+
+function collect_valid_words(input: string): {string}
+  local captured = LIST_WITH_RECOVERY:match(input)
+  local result: {string} = {}
+  if captured == nil then return result end
+  local raw = captured as {integer: string}
+  for i = 1, #raw do
+    result[i] = raw[i]
+  end
+  return result
+end
+```
+
+## Named combinator API
+
+Use the named combinator functions when grammars must be constructed
+dynamically at run time or need arbitrary binary rule/label names.
+
+### Pattern constructors and grammars
+
+```text
+record Rule
+
 function literal(text: string): Pattern
 function any(count: integer?): Pattern
 function succeed(): Pattern
@@ -62,11 +267,9 @@ function fail(): Pattern
 function runtime(
   callback: function (string, integer, string): (...: value)
 ): Pattern
-
 function set(bytes: string): Pattern
 function ranges(...: string): Pattern
 function utf_range(first: integer, last: integer): Pattern
-
 function variable(name: string): Pattern
 function rule(name: string, pattern: Pattern): Rule
 function grammar(start: string, rules: {Rule}): Pattern
@@ -74,62 +277,33 @@ function behind(pattern: Pattern): Pattern
 function throw(label: string): Pattern
 ```
 
-The basic constructors have these meanings:
-
 | Function | Meaning |
 | --- | --- |
-| `literal(text)` | Match the exact binary string. An empty string succeeds without consuming input. |
-| `any(n)` | For `n >= 0`, match exactly `n` bytes. For negative `n`, succeed without consuming input only when fewer than `-n` bytes remain. Omitted or nil `n` means 1. |
+| `literal(text)` | Match exact bytes; `""` succeeds without consuming input. |
+| `any(count?)` | Default `1`. For `count >= 0`, consume `count` bytes; for `count < 0`, succeed without consuming if fewer than `-count` bytes remain. |
 | `succeed()` | Succeed without consuming input. |
-| `fail()` | Fail normally. |
-| `runtime(callback)` | Run an immediate matching callback at the current position. |
-| `set(bytes)` | Match one byte present in `bytes`. |
-| `ranges(parts...)` | Match one byte in any inclusive range. Every part must contain exactly two bytes; no parts means failure. |
-| `utf_range(first, last)` | Match a UTF-8 encoding for a code point in the inclusive range. Bounds must satisfy `0 <= first <= last <= 0x10ffff`. |
-| `variable(name)` | Construct an open grammar reference. |
-| `rule(name, pattern)` | Construct one named or recovery rule. |
-| `grammar(start, rules)` | Close an Array of rules into a grammar with the named start rule. |
-| `behind(pattern)` | Match `pattern` immediately behind the current position without consuming input. The pattern must be capture-free and have fixed length at most 255 bytes. |
-| `throw(label)` | Commit an uncaught labeled failure at the current position. |
+| `fail()` | Ordinary failure. |
+| `runtime(callback)` | Run an immediate callback `(subject, pos, "")` at the current position. |
+| `set(bytes)` | Match any single byte present in `bytes`. |
+| `ranges(...: string)` | Match one byte in any inclusive 2-byte range (`"az"`, `"09"`); no arguments fails. |
+| `utf_range(first, last)` | Match a UTF-8 encoding for a code point in `0 <= first <= last <= 0x10ffff` (including surrogate code-point encodings). |
+| `variable(name)` | Reference a grammar rule by name (must be closed inside `grammar`). |
+| `rule(name, pattern)` | Create a named or recovery grammar rule. |
+| `grammar(start, rules)` | Close a dense `{Rule}` Array (unique names, `start` present, at most 1000 rules). |
+| `behind(pattern)` | Non-consuming look-behind; `pattern` must be capture-free and fixed-length (at most 255 bytes). |
+| `throw(label)` | Commit labeled failure `label` at the current position (`"fail"` equals `fail()`). |
 
-`utf_range` follows the pinned engine exactly: it includes UTF-8 encodings of
-surrogate code points. It validates code-point range encodings, not Unicode
-scalar values, and does not put other patterns into a Unicode mode.
+Rule names and throw labels are exact binary strings (`""`, `"1"`, `"01"`, and
+NUL-bearing strings are distinct).
 
-Grammar names and throw labels are strings. Their bytes are significant:
-`""`, `"1"`, `"01"`, and strings containing NUL are all distinct. Integer
-names and labels are rejected at the Titan/Lua boundary.
-
-The `rules` value is a Titan Array, not a Map. Every position from 1 through
-its length must hold a `Rule`; names must be unique, there may be no more than
-1000 rules, and one rule must have a name equal to `start`. An ordinary Lua
-table does not implicitly become an Array. Lua code that constructs grammars
-must receive the canonical Array proxy from Titan code, for example from an
-application-specific exported helper that returns `{Rule}`.
-
-`runtime` receives the subject, the current absolute one-based position, and
-the empty whole-match string `""`. Its first result controls the match:
-
-* nil, false, or no result means failure;
-* true means success at the current position;
-* an integer means success at that new absolute position;
-* every later result becomes a capture.
-
-An integer result must be between the current position and one past the
-subject's end.
-
-## Composition and repetition
-
-Titan uses named functions in place of LPeg's overloaded operators:
+### Composition and repetition
 
 ```text
 function sequence(...: Pattern): Pattern
 function choice(...: Pattern): Pattern
 function difference(first: Pattern, ...: Pattern): Pattern
-
 function lookahead(pattern: Pattern): Pattern
 function negative(pattern: Pattern): Pattern
-
 function at_least(pattern: Pattern, count: integer): Pattern
 function at_most(pattern: Pattern, count: integer): Pattern
 function zero_or_more(pattern: Pattern): Pattern
@@ -137,37 +311,30 @@ function one_or_more(pattern: Pattern): Pattern
 function optional(pattern: Pattern): Pattern
 ```
 
-`sequence` and `choice` are left folds. Empty `sequence()` is `succeed()`;
-empty `choice()` is `fail()`. With one operand they return that operand.
+`sequence()` returns `succeed()`; `choice()` returns `fail()`; both left-fold
+their arguments. `difference(a, b, c)` computes `(a - b) - c`. `lookahead` and
+`negative` are non-consuming predicates. `at_least` and `at_most` require
+nonnegative `count`; `zero_or_more(p)` is `at_least(p, 0)`, `one_or_more(p)` is
+`at_least(p, 1)`, and `optional(p)` is `at_most(p, 1)`.
 
-`difference(first, rest...)` is the left fold
-`((first - rest[1]) - rest[2])...`; with no tail it returns `first`.
-`lookahead` and `negative` are non-consuming positive and negative
-predicates.
+```titan
+local peg = import "peg"
 
-`at_least(p, n)` is the possessive LPeg repetition `p ^ n`;
-`at_most(p, n)` is `p ^ -n`. Counts must be nonnegative.
-`at_most(p, 0)` is an empty success. The convenience functions are:
-
-```text
-zero_or_more(p) == at_least(p, 0)
-one_or_more(p)  == at_least(p, 1)
-optional(p)     == at_most(p, 1)
+function balanced_parens(): peg.Pattern
+  local text = peg.one_or_more(peg.difference(peg.any(), peg.set("()")))
+  local rules: {peg.Rule} = {
+    peg.rule("Start", peg.sequence(
+      peg.variable("Balanced"), peg.negative(peg.any()))),
+    peg.rule("Balanced", peg.sequence(
+      peg.literal("("),
+      peg.zero_or_more(peg.choice(text, peg.variable("Balanced"))),
+      peg.literal(")"))),
+  }
+  return peg.grammar("Start", rules)
+end
 ```
 
-Ordered choice catches ordinary failure only. An uncaught `throw` commits
-past remaining choices and repetitions. Inside a positive or negative
-predicate, a throw becomes predicate failure instead of escaping. A grammar
-rule whose name equals the label is a recovery rule: it starts at the throw
-position, and a successful recovery resumes the original match.
-
-The string `"fail"` is reserved for ordinary failure:
-`throw("fail")` is exactly equivalent to `fail()`. It therefore falls through
-ordered choice, terminates a repetition normally, cannot enter a grammar
-recovery rule named `"fail"`, and reports the ordinary
-`nil, "fail", position` triple.
-
-## Captures
+### Captures and callbacks
 
 ```text
 function capture(pattern: Pattern): Pattern
@@ -186,357 +353,100 @@ function fold_capture(
   callback: function (value, ...: value): (value)
 ): Pattern
 function group(pattern: Pattern, key: value): Pattern
-
 function select_capture(pattern: Pattern, index: integer): Pattern
 function template_capture(pattern: Pattern, template: string): Pattern
-function query_capture(
-  pattern: Pattern,
-  lookup: {value: value}
-): Pattern
+function query_capture(pattern: Pattern, lookup: {value: value}): Pattern
 function function_capture(
   pattern: Pattern,
   callback: function (value, ...: value): (...: value)
 ): Pattern
 ```
 
-The capture operations correspond to LPeg's `C`, `Cc`, `Cmt`, `Cb`, `Carg`,
-`Cp`, `Cs`, `Ct`, `Cf`, `Cg`, and the four `/` forms:
+- `capture(p)` yields the whole matched substring followed by any nested
+  captures.
+- `constant(...)` yields constant values without consuming input; `position()`
+  yields the current one-based byte position; `argument(n)` (`1..32767`) yields
+  the `n`-th extra match argument (raising if absent).
+- `group(p, nil)` (or `group(p)`) creates an anonymous group yielding nested
+  captures (or the whole substring if none). A non-`nil` `key` creates a named
+  group with no direct output; `back_capture(key)` yields the latest matching
+  named group's captures (raising if missing).
+- `table_capture(p)` collects anonymous captures at consecutive integer keys
+  and the first value of each named group at its key.
+- `substitution(p)` replaces captured spans and copies unmatched bytes.
+- `select_capture(p, index)` discards nested captures when `index == 0` or
+  selects capture `index` (`1..32767`).
+- `template_capture(p, template)` expands `%0` (whole substring) through `%9`
+  (nested captures).
+- `query_capture(p, lookup)` looks up the first nested capture (or whole
+  substring) in `lookup`, honoring `__index`.
+- `function_capture(p, callback)` calls `callback` with nested captures (or
+  whole substring); every returned value becomes a capture.
+- `fold_capture(p, callback)` uses the first nested capture as the accumulator
+  and calls `callback(acc, next...)` for each remaining capture operation,
+  returning the single updated accumulator (raises if `p` produces no initial
+  capture).
 
-* `capture(p)` returns the whole matched substring first, followed by values
-  from captures nested in `p`.
-* `constant(values...)` captures the values without consuming input.
-* `position()` captures the current absolute one-based position.
-* `argument(n)` captures match argument `n`. Its range is `1..32767`; an
-  absent argument raises while matching.
-* `group(p, nil)` is an anonymous group and returns its nested capture
-  values. Any non-nil key makes a named group, which returns no value
-  directly.
-* `back_capture(key)` returns every value from the latest matching named
-  group. Its key must be non-nil; a missing group raises while matching.
-* `table_capture(p)` puts anonymous values at consecutive integer keys and
-  puts the first value of each named group at that group's key.
-* `fold_capture(p, callback)` uses the first nested capture value as its
-  accumulator, then calls `callback(accumulator, next...)` for every later
-  capture. The variadic `next` tail may be empty. The callback returns the
-  one new accumulator. A pattern without an initial capture raises.
-* `substitution(p)` replaces captured spans and copies bytes outside those
-  spans.
-* `select_capture(p, 0)` discards nested captures. An index in `1..32767`
-  selects that nested capture.
-* `template_capture(p, template)` applies the native `%0..%9` template.
-* `query_capture(p, lookup)` indexes the table by the first nested capture
-  and honors its ordinary `__index` behavior.
-* `function_capture(p, callback)` calls the function with the nested capture
-  values, and all callback results become captures.
+When `p` produces no nested capture, implicit defaults apply:
 
-When an operation needs a nested capture but `p` has none, LPeg applies
-operation-specific implicit rules:
-
-| Operation | Result with no nested capture |
+| Operation | Behavior without nested captures |
 | --- | --- |
-| anonymous `group(p)` | The whole substring |
-| named `group(p, key)` followed by `back_capture(key)` | The group has no direct value; the back capture returns the whole substring |
-| `query_capture(p, lookup)` | Lookup by the whole substring |
-| `function_capture(p, callback)` | Call with the whole substring |
-| `select_capture(p, 1)` | The whole substring |
+| Anonymous `group(p)` | Yields whole substring |
+| Named `group(p, key)` + `back_capture(key)` | Group yields nothing; `back_capture` yields whole substring |
+| `query_capture`, `function_capture`, `select_capture(p, 1)` | Uses whole substring |
 | `select_capture(p, 0)` | No capture |
-| `template_capture(p, "%0")` | The whole substring |
-| `template_capture(p, "%1")` | Error |
-| `table_capture(p)` | An empty table |
-| `fold_capture(p, callback)` | Error because there is no accumulator |
+| `template_capture(p, "%0")` / `template_capture(p, "%1")` | Whole substring / raises error |
+| `table_capture(p)` | Empty table |
+| `fold_capture(p, callback)` | Raises error (no initial accumulator) |
 
-### Immediate and delayed callbacks
+**Callback timing and rules:**
 
-Capture timing is part of the contract:
-
-* runtime patterns and `match_time` callbacks run immediately while the
-  engine is deciding whether a path matches;
-* `function_capture` and `fold_capture` callbacks are delayed until capture
-  results are evaluated;
-* a delayed capture on an abandoned alternative does not run;
-* ordinary capture evaluation may happen zero, one, or multiple times, so
-  callbacks attached to captures must not assume exactly-once side effects.
-
-A `match_time` callback receives the subject, the absolute position after its
-nested match, and at least one capture-side value. It receives all nested
-capture values, or the whole matched substring when there are none. Its first
-result follows the same false/true/integer protocol as `runtime`; later
-results become captures.
-
-A `function_capture` callback likewise receives all nested captures or the
-whole matched substring, but all of its results are delayed capture values.
-A fold callback receives the accumulator followed by all values from the next
-capture operation and returns exactly one accumulator.
-
-These APIs use their declared function types; callbacks are not hidden behind
-an unqualified `value`. Supplying a callback follows Titan's ordinary
-function-value rules: an exact Titan function can use the exact call path; an
-eligible statically adjusted Titan source may use a fresh target wrapper's
-native adapter; an unchanged branded mismatch uses its strict entry; and Lua
-functions, C functions, and values with `__call` use the ordinary Lua call path
-with dynamic result coercion. Construction does not eagerly reject
-a value merely because it is not a raw Lua function. A genuinely noncallable
-value raises only if matching or capture evaluation actually invokes it.
-Query tables remain tables even if they also have `__call`, because
-`query_capture` has the distinct `{value: value}` parameter type. Callback
-execution is non-yieldable; attempting to yield raises an ordinary Lua
-boundary error.
-
-The pinned engine does not implement LPeg 1.1 accumulator `%` captures.
-Upstream calls the delayed `/ function` form a function capture. Its C
-internals use “dynamic capture” for the immediate runtime mechanism; Titan
-therefore uses `function_capture` for the delayed public operation and
-`match_time` for `Cmt`.
-
-## Matching
-
-```text
-function Pattern:match(
-  subject: string,
-  init: integer?,
-  ...: value
-): (value, ...: value)
-```
-
-Matching is anchored at the normalized initial position; it does not search
-forward automatically.
-
-| Supplied `init` | Normalized start |
-| --- | --- |
-| nil or omitted | 1 |
-| positive `1..#subject+1` | The supplied position |
-| positive `>#subject+1` | `#subject+1` |
-| `0` | `#subject+1` |
-| negative within range | `#subject + init + 1` |
-| negative overshoot | 1 |
-
-Thus `-1` selects the last byte, while zero selects the position after the
-last byte.
-
-On success, `match` returns capture values when the pattern has captures.
-Without captures it returns the absolute one-based position after the match.
-Nil capture slots and their exact arity are preserved. The fixed `value`
-prefix records that matching always produces at least one result.
-
-Ordinary failure returns:
-
-```text
-nil, "fail", absolute_farthest_position
-```
-
-An uncaught labeled failure returns:
-
-```text
-nil, label, absolute_throw_position
-```
-
-Failure positions remain absolute when matching begins after byte 1. Labeled
-failures preserve the exact label string, including empty, numeric-looking,
-and binary strings. The values after `init` are available to `argument(n)`.
-
-Extra match arguments follow Titan's 200-element variadic limit. The PEG
-adapter caps the complete public result list at 200 values; its fixed first
-result therefore leaves room for at most 199 values in the flexible tail.
-This is a Titan API boundary, not a smaller native capture limit.
-
-## Call adjustment
-
-All declarations use Titan's ordinary call adjustment. A missing fixed
-argument is nil-filled, and surplus arguments to a fixed parameter list are
-evaluated left to right and then discarded.
-
-That is why `any()` selects its documented nil default, `group(p)` creates an
-anonymous group, and `p:match(subject)` starts at 1 without making those
-functions variadic. Only a declared variadic tail collects surplus values:
-for example, `sequence`, `constant`, and the extra arguments to
-`Pattern:match`.
-
-The same rule applies to relabel's optional definition and initial-position
-parameters below. Omission is modeled by nil-accepting types, not by
-source-level default-argument syntax.
+- `runtime` and `match_time` execute immediately while matching (and may run on
+  alternatives that later fail). `match_time` receives
+  `(subject, pos_after_p, nested_captures_or_whole...)`. Their first return
+  value controls the match: `nil`, `false`, or no result fails; `true` succeeds
+  at the current position; an integer in `current_pos..#subject + 1` succeeds
+  at that position; remaining return values become captures.
+- `function_capture` and `fold_capture` are delayed until capture evaluation
+  and do not run on abandoned branches. Do not rely on exactly-once side
+  effects in capture callbacks.
+- All callbacks are non-yieldable and propagate errors directly. Titan
+  functions, Lua functions, C functions, and `__call` values are accepted; a
+  non-callable value raises only if invoked.
 
 ## Locale, version, and engine limits
 
 ```text
+record Locale
+  alnum: Pattern
+  alpha: Pattern
+  cntrl: Pattern
+  digit: Pattern
+  graph: Pattern
+  lower: Pattern
+  print: Pattern
+  punct: Pattern
+  space: Pattern
+  upper: Pattern
+  xdigit: Pattern
+end
+
 function locale(): Locale
 function set_max_stack(maximum: integer)
 function version(): string
 ```
 
-`locale()` snapshots the character classes of the process's current C locale.
-Changing the process locale later does not mutate an existing `Locale`
-record.
+`locale()` snapshots the current C-locale character classes into a `Locale`
+record (subsequent `os.setlocale` calls do not mutate existing snapshots).
+`set_max_stack(maximum)` configures the match execution stack for the current
+Lua state (`1..21474836`). `version()` returns `"LPegLabel 1.6.1"`.
 
-`set_max_stack` changes only Titan's private engine in the current Lua state.
-Its accepted range is `1..21474836`. It does not change an external
-`lpeglabel` module's setting.
-
-The native engine's dynamic `type` probe and `ptree`/`pcode` debug printers
-are not exported. Titan's `Pattern` type supplies the public distinction
-without exposing raw native userdata.
-
-`version()` returns the embedded native version string:
-
-```text
-LPegLabel 1.6.1
-```
-
-The engine is vendored from LPegLabel release `v1.6.2-1`, commit
-`912b0b9e8641074408ffc2259e069b188e0c717b`. The release retained the older
-native `VERSION` macro, so the public runtime string and the pinned source
-revision intentionally differ.
-
-Titan applies a conservative maximum constructed pattern size of 32757 tree
-slots. It validates that limit before entering native constructors, including
-literal/byte counts, folds, predicates, captures, grammars, and repetitions.
-Other fixed native limits include:
-
-| Feature | Limit |
+| Limit | Value |
 | --- | --- |
-| look-behind width | 255 bytes |
-| grammar rules | 1000 |
-| `argument` index | `1..32767` |
-| `select_capture` index | `0..32767` |
-| private match stack | `1..21474836` |
-
-## Relabel source notation
-
-The relabel API compiles a textual pattern notation into the same opaque
-`Pattern` type:
-
-```text
-function define(name: string, pattern: Pattern): Definition
-function define_value(name: string, candidate: value): Definition
-
-record Match
-  first: integer
-  last: integer
-end
-
-function compile(
-  candidate: value,
-  definitions: {Definition}?
-): Pattern
-function match(
-  subject: string,
-  candidate: value,
-  init: integer?
-): Match?
-function Match:values(): (...: value)
-function gsub(
-  subject: string,
-  candidate: value,
-  replacement: function (string): (string)
-): string
-function update_locale()
-function line_column(
-  subject: string,
-  position: integer
-): (integer, integer)
-```
-
-A pattern `candidate` must be a source string or a `Pattern` from this module.
-`compile(pattern, definitions)` returns the same pattern and ignores
-`definitions`. Definitions are used only while parsing a source string.
-
-`definitions`, when present, is a Titan Array whose positions all hold
-`Definition` values. An ordinary Lua table is not accepted; a Lua caller must
-obtain an Array proxy from Titan code. Definition names must be unique, but
-are otherwise arbitrary strings. A name that cannot be written by the source
-notation (including an empty, punctuated, numeric-only, or binary name) is
-accepted and simply remains unreachable from that source. `define` stores a
-pattern definition; `define_value` retains any other supplied value for use
-by a capture suffix. Nil and false definition values are rejected because the
-pinned notation treats them as absent; a particular suffix may impose a
-narrower native requirement when it consumes the value.
-
-Module-level `match` performs a leftmost search at or after the same normalized
-initial position used by `Pattern:match`. It returns nil on no match, or a
-`Match` containing the one-based inclusive range. An empty match has
-`last == first - 1`. `Match:values()` returns exactly the candidate pattern's
-captures, preserving nil and trailing-nil slots; it returns zero values when
-the candidate has no captures. Thus the match record is a strict superset of
-the old position-only search result. Use `Pattern:match` when matching must be
-anchored at the initial position or when the native failure label and position
-are required. Search bookkeeping consumes no capture slots, so `values()` can
-project the complete 200-value Titan capture limit.
-
-`match` is the module's sole search operation. PEG matching has no useful
-literal-versus-pattern distinction analogous to `string.find`, so the module
-does not export `find`.
-
-`gsub` returns only the transformed string, unlike Lua's `string.gsub`, which
-also returns a count. Its replacement is always a `function (string): (string)` function.
-The function receives the whole matched byte string exactly once for each
-accepted replacement, independent of captures inside the candidate, and its
-string result is inserted literally. Template, capture-index, and table
-replacement forms remain available inside the relabel expression language;
-they are not overloaded onto the public `gsub` parameter.
-
-Definition-free source strings are held in one private weak compilation cache
-shared by `compile`, `match`, and `gsub`. `update_locale()` rebuilds the
-predefined classes from the current C locale and clears the cache.
-
-### Expression language
-
-Relabel accepts:
-
-* grouping with `(p)`, concatenation by juxtaposition, and ordered choice
-  `p / q`;
-* positive `&p` and negative `!p` predicates;
-* suffix repetitions `p?`, `p*`, `p+`, exact `p^n`, at least `p^+n`, and at
-  most `p^-n`;
-* single- and double-quoted literal strings, byte classes such as `[a-z]`,
-  and `.` for any byte;
-* predefined or external definitions written `%name`;
-* recursive grammars with `name <- expression`, bare nonterminal names, and
-  `<name>`;
-* position `{}`, substring `{ p }`, anonymous group `{: p :}`, named group
-  `{:name: p :}`, substitution `{~ p ~}`, and table `{| p |}` captures;
-* named back captures `=name`;
-* `-> string`, `-> number`, `-> {}`, and `-> name` capture suffixes;
-* match-time `=> name` and fold `~> name` suffixes;
-* `%{label}` throws, where an identifier or decimal token supplies its exact
-  string bytes as the label;
-* whitespace and Lua-style `--` line comments.
-
-A quoted literal ends at the next matching quote; this notation has no
-backslash escape layer inside the literal. Use the other quote delimiter when
-the text contains one quote kind. Character classes may contain literal
-bytes, inclusive `a-z` ranges, and `%name` definitions; a leading `^`
-complements the class.
-
-After `^`, an identifier with no intervening space is a failure label:
-`p^label` means `choice(p, throw("label"))`. A decimal operand is repetition.
-The reserved label `fail`, whether written `%{fail}` or as `p^fail`, is
-ordinary failure. A decimal throw such as `%{01}` has the string label
-`"01"`; it is not converted to an integer.
-
-The predefined locale names are `alnum`, `alpha`, `cntrl`, `digit`, `graph`,
-`lower`, `print`, `punct`, `space`, `upper`, and `xdigit`, plus short names
-`a,c,d,g,l,p,s,u,w,x`. Uppercase short names are their complements, and `nl`
-matches LF.
-
-### Syntax diagnostics and positions
-
-Invalid source notation raises an ordinary string with a stable label,
-one-based byte position, line and column, source line, and caret:
-
-```text
-PEG syntax error [ExpPatt1] at L2:C7 (byte 19): expected a pattern after '/'
-<source line>
-      ^
-```
-
-CRLF counts as one line ending. At end of input, the caret may point one byte
-past the source line.
-
-`line_column(subject, position)` applies the same convention and accepts
-positions in `1..#subject+1`. It intentionally corrects the pinned Lua
-`relabel` helper's inconsistent newline and end-of-input offsets.
-
-The embedding and rooting rules behind this module are documented in
-[LPegLabel embedding and `titan.peg`](../implementation/lpeglabel-embedding.md).
-The [`url` standard module](standard-library-url.md) is a shipped Relabel
-dogfood example: it compiles its labeled RFC 3986-derived grammar once and
-turns match labels into a nonthrowing structured error value.
+| Constructed pattern tree slots | 32,757 |
+| Look-behind fixed width (`behind`) | 255 bytes |
+| Grammar rules | 1,000 |
+| `argument` index | `1..32,767` |
+| `select_capture` index | `0..32,767` |
+| Match stack (`set_max_stack`) | `1..21,474,836` |
+| Variadic match arguments / public results | 200 |

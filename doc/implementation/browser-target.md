@@ -176,15 +176,14 @@ the toolchain labels Wasm longjmp experimental. Lua, the runtime, generated
 Titan C, authored C helpers, and providers all use the same settings. A link
 flag alone cannot change old objects that contain JavaScript SJLJ calls.
 
-The existing record carries `sjlj=wasm`, the explicit encoding in `cflags`,
-and `+exception-handling` in `wasm_features`. No record, metadata, or cache
-schema version changes: these facts and the descriptor's compile flags already
-participate in identities, so prior JavaScript-SJLJ records and objects cannot
-qualify as this target. `make lua-browser` rebuilds a stale installation.
-JSPI is the sole browser coroutine backend; protected calls never cross a JavaScript SJLJ trampoline.
-Wasm EH catches language longjmp transfers, not engine traps, engine stack
-overflow, or arbitrary JavaScript exceptions. Native builds and
-`LUAI_MAXCCALLS=100` on the browser are unchanged.
+The browser Lua record carries `sjlj=wasm`, the explicit encoding in `cflags`,
+and `+exception-handling` in `wasm_features`. Because these facts and the
+descriptor's compile flags participate in target identity, objects or records
+built under JavaScript SJLJ cannot qualify, and `make lua-browser` rebuilds any
+stale installation. JSPI is the sole browser coroutine backend, so protected
+calls never cross a JavaScript SJLJ trampoline. Wasm EH catches language
+longjmp transfers, not engine traps, engine stack overflow, or arbitrary
+JavaScript exceptions.
 
 
 ### `make lua-browser`
@@ -1053,11 +1052,7 @@ All twenty-three owners are compiled into `images/stdlib.mjs`, with its `.wasm`,
 `.wasm.trace`, and `.wasm.map` siblings. `TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK`
 rejects an empty or duplicate root inventory before build setup. The compiler's
 [general image bounds](#build-time-image-bounds) apply; the suite has no
-separate image-size budget or partition policy. The fifteen-owner image
-measured below, including the unsplit transfer regression, ran under Node and
-sandboxed Chromium on Linux and macOS ([measurements](#build-time-image-bounds));
-the earlier four-image, 32,000,000-byte split was measured under Asyncify and
-is not a JSPI limit.
+separate image-size budget or partition policy.
 
 `make titan-stdlib-browser-test` (a test goal, so it defaults to the
 `validation` profile) needs the installed native provider, the browser SDK,
@@ -1124,8 +1119,7 @@ from a cold and then a warm directory and checks this layout. The
 [`browser-stdlib` matrix's `sdk` shard](continuous-integration.md#browser-stdlib-job)
 runs the target unfiltered after the SDK is built and uploads everything but
 `objects/` when that shard fails. It uses Chrome for Testing with the normal
-sandbox and no `HigherRendererMemoryLimit` wrapper. The older Asyncify
-protobuf-startup footprint is not a requirement of current JSPI images.
+sandbox and no `HigherRendererMemoryLimit` wrapper.
 
 ### Initialization and fidelity gate
 
@@ -2012,8 +2006,8 @@ profile from `profile_data` and activates the identity. A browser label
 without a valid descriptor, or a descriptor with a host label, fails with
 `incompatible build worker configuration`. Workers never select files, run
 `emcc --version`, reread or rehash the record, archive, or headers, or read
-`TITAN_TARGET`; they still verify the compiler inventory. Coordinator and
-workers come from one installation, so `BUILD_WORKER_PROTOCOL` is unchanged.
+`TITAN_TARGET`; they verify only the compiler inventory. Coordinator and
+workers come from one installation.
 
 ## Provider lookup
 
@@ -2033,10 +2027,10 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
   <field mismatch>`.
 * Browser inspection never accepts the coordinator's metadata-only view of a
   planned archive; it always rescans the bytes.
-* The existing binary-first, `--source-first`/`--test`, and explicit-source
-  policies are unchanged. Binding is always `direct`: `handle` and `global`
-  bindings cannot arise without dynamic providers. The logical `<path>.so`
-  filename inside `Type.Module` remains an identity string only.
+* Binary-first, `--source-first`/`--test`, and explicit-source selection
+  policies apply identically. Binding is always `direct`: `handle` and `global`
+  bindings cannot arise without dynamic providers, and the logical `<path>.so`
+  filename inside `Type.Module` is an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
 twenty-one [browser stdlib](#the-browser-standard-library) modules resolve from it,
@@ -2179,30 +2173,16 @@ Titan writes `long double` text with `%La` in
 `titan_reflect_format_long_double` (`titan-runtime/titan.h`), which the
 generated native-field projections (`titan-compiler/coder/reflection.lua`)
 call for `reflect` projections and the `protobuf` and `transfer` codecs; under
-the default, a projected value no longer reads back equal to the original. The
+the default, a projected value does not read back equal to the original. The
 setting is profile-owned: `-sPRINTF_LONG_DOUBLE=0`, the split `-s` form,
 `NO_PRINTF_LONG_DOUBLE`, and the `-D`/`-U` spellings are rejected like the
-other owned settings. Because the link flags are part of `identity_inputs`,
-the setting relinks every certified image without a cache or certificate
-schema change; object flags and the descriptor are unchanged.
-
-Its cost, measured with the validation profile on Linux (three warm serial
-samples per image and mode, timing only the certified final `emcc` link; sizes
-were identical across samples):
-
-| Image | `.wasm` | `.mjs` | `.wasm.map` | Median final link |
-| --- | ---: | ---: | ---: | --- |
-| `spec/fixtures/browser_images/long_double.titan` program | +1,719 B (+0.167%) | +8 B | +1,159 B | 0.623 s → 0.666 s |
-| a test image of the ten browser owners from `coroutine.tests` through `path.tests` | +1,720 B (+0.006%) | +8 B | +1,175 B | 14.03 s → 15.72 s |
-
-The link times are observed warm medians, not a controlled estimate.
-`spec/coder/browser_images_spec.lua` checks the flag for every profile,
-purpose, and entry, rejects every override spelling, and formats
-`0x1.000000000000001p0` (1 + 2^-60) on Node and Chromium: the browser text
-must be `1.00000000000000000087`, and it must equal the native program's text
-when the native `long double` is wider than `double`. A host whose
-`long double` is as wide as `double`, such as macOS on Arm, has no extended
-native reference, so the test checks only the browser text there.
+other owned settings. Link flags participate in `identity_inputs`, so changing
+the setting automatically invalidates certified links. Enabling it adds ~1.7 KB
+to `.wasm` and ~1.2 KB to `.wasm.map`. `spec/coder/browser_images_spec.lua`
+checks the flag across profiles, rejects override spellings, and verifies that
+`0x1.000000000000001p0` formats as `1.00000000000000000087` on Node and
+Chromium (matching native output on hosts where `long double` is wider than
+`double`).
 
 **`HEAPU8`.** `HEAPU8` is a runtime export so that the loader can write
 arguments into heap memory and the completion import can copy its payload.
@@ -2241,15 +2221,14 @@ checking the purpose of an explicit `options.profile`.
 `TITAN_BUILD_PROFILE` (`driver.BUILD_PROFILE`, `production` by default)
 selects the browser object and link profile as well as the native one. Target
 initialization passes it to `browsertarget.build` as `inputs.build_profile`,
-and the descriptor records it as `build_profile` (D26). Probes, generated
-objects, `--c-source` objects, entrypoint compiles, and imported worker
-descriptors therefore certify one configuration, and the descriptor identity
-changes with the profile even where flags would agree, so the two profiles
-never share objects or link records. `make browser-sdk` builds the SDK's
-runtime and standard library under the profile in its environment (Make's
-default for that goal is `production`), and images link the installed SDK
-archives as they are, as native images link the installed standard provider
-(D25). The user contract is in [build
+and the descriptor records it as `build_profile`. Probes, generated objects,
+`--c-source` objects, entrypoint compiles, and imported worker descriptors
+therefore certify one configuration, and the descriptor identity changes with
+the profile even where flags agree so the two profiles never share objects or
+link records. `make browser-sdk` builds the SDK's runtime and standard library
+under the profile in its environment (defaulting to `production`), and images
+link the installed SDK archives as built, matching native provider linking.
+The user contract is in [build
 profiles](../language/browser-target.md#build-profiles).
 
 ### Object flags
@@ -2262,12 +2241,11 @@ object prefix:
 | `validation` | `--std=c99 -O1 -fno-inline -fno-optimize-sibling-calls -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` |
 | `production` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` |
 
-`validation` retains #330's physical-frame settings with the coordinated
-Wasm-EH longjmp change. The production level is the one constant
-`PRODUCTION_LEVEL = "-O3"`, the native production level,
-chosen over `-O2` by [measurement](#measurements) (D34). Both profiles keep
+`validation` preserves physical stack frames for exact diagnostics, while
+`production` compiles at `PRODUCTION_LEVEL = "-O3"` (matching native
+production; see [Measurements](#measurements)). Both profiles include
 `-gline-tables-only` ([why not `-g2`](#compile-prefix-and-target-defines)),
-the warnings, and the longjmp mode; the record's `lua_defines` and the target
+the warning flags, and Wasm-EH longjmp; the record's `lua_defines` and target
 defines follow.
 
 The validator, shared by `build` and `import`, requires `compile_flags` to
@@ -2303,17 +2281,14 @@ names `test` for its test image and `program` for its uncaught image.
 
 ### Binaryen pass order
 
-JSPI does not run a Wasm stack-rewriting pass. Production test images still
-skip Binaryen's inlining and duplicate-function elimination because physical
-trace identity is part of their contract. The old post-instrumentation
-`simplify-locals,reorder-locals` workaround is removed rather than carried
-into this backend.
-
+JSPI does not run a Wasm stack-rewriting pass. Production test images skip
+Binaryen's `inlining-optimizing` and `duplicate-function-elimination` passes
+because physical trace identity is part of their contract.
 
 ### Test images
 
 A production `--test` image keeps the exact frames that the trace gate
-asserts, as native `--test` keeps its own (D25):
+asserts, matching native `--test`:
 
 * **Test owners.** `driver.test_owner_flags(test_build, test_functions,
   context)` puts `-fno-inline` before `test_runner.TEST_COMPILE_FLAGS`
@@ -2325,195 +2300,72 @@ asserts, as native `--test` keeps its own (D25):
   archives keep the profile's flags.
 * **No Binaryen inlining.** The `test` purpose adds
   `--skip-pass=inlining-optimizing` to `BINARYEN_EXTRA_PASSES`. `--skip-pass`
-  is a `wasm-opt` option, not a pass: it disables the named pass wherever it
-  runs in the selected optimization pipeline; its position relative to other
-  pass arguments does not matter. The pipeline's pass is named
-  `inlining-optimizing`; `--skip-pass=inlining` disables nothing. An earlier
-  pass-timing control measured 3.7e-07 s with the skip against 0.010 s without
-  it, and the output differed.
-* **No duplicate-function folding (D31).** With only inlining skipped, four
-  production test-image rows lost frames: `test_selected_contributor_locations`
-  and `test_locations_before_after_yield` (`locations.browser.titan`), and
-  `test_static_entry` and `test_lambda_entry` (`wrappers.titan`). Binaryen's
-  `duplicate-function-elimination` had folded byte-identical bodies
-  (`selected_leaf` into `original_leaf`, `selected_outer` into
-  `direct_middle`). Adding `-fno-inline -fno-optimize-sibling-calls` to every
-  object did not restore them; `--skip-pass=duplicate-function-elimination`
-  did, and no gate assertion changed.
+  is a `wasm-opt` option that disables the named pass wherever it runs in the
+  pipeline; the pass name must be `inlining-optimizing` (`--skip-pass=inlining`
+  is a no-op).
+* **No duplicate-function folding.** Skipping inlining alone lets Binaryen's
+  `duplicate-function-elimination` fold byte-identical test helper bodies into
+  a single function, losing distinct frame names (even when every object has
+  `-fno-inline -fno-optimize-sibling-calls`). Adding
+  `--skip-pass=duplicate-function-elimination` preserves distinct trace frames.
 * **Validation needs neither.** Its objects already carry the frame flags,
-  and its `-O1` link never runs the Binaryen optimizer.
+  and its `-O1` link does not run the Binaryen optimizer.
 
 A production *program* image accepts inlining, as native production does. The
 trace gate's production program rows require the shown Titan frames to be an
-ordered subsequence of the row's exact frames, with the exact file and
-execution line (file only on WebKit), and each name to be the matched frame's
-or that of a later expected frame, the enclosing caller it was inlined into
-(D28, D32). The program's own Titan frames come first, at least one of them
-must appear, and the outermost must be the entry: `trace_uncaught.main` is
-called from C, and `trace_async.main`, which runs as the async bootstrap Task
-(titan#334), through a function value, so neither can be inlined away. The
-uncaught row shows no other Titan frame. In the async row only the async
-runtime's frames may follow the entry: the bootstrap and Task-root closures,
-`coro_entry` and its trampoline, and the driver's `resume_root`,
-`advance_task`, `drain_ready`, `loop` and `bootstrap`. Their lines are the
-runtime's own, so they are matched by file (`async.titan`, `coroutine.titan`,
-`runtime.browser.titan`) and name. A production image inlines minicoro's C
-`titan_coroutine_enter` into the trampoline. The adapter locates a frame only
-from `.titan` segments (titan#382), so a PC in that C gives the trampoline's
-frame the no-line form with its declaring basename. A production program row
-accepts exactly that frame without a line,
-`coroutine.titan: in titan.coroutine.coro_entry_trampoline`, on every engine;
-outside WebKit every other Titan frame must carry a line, and no row accepts
-a `.c` location. Every other line must be a `[C]` frame, a Lua frame, or a
-documented marker, so an unparsed line fails the row. Lua frames, markers,
-fallbacks, and merge order stay exact, and no `titanentry` symbol or mangled
-C name may appear. Test-image rows stay byte-exact, and a validation program
-row shows every one of its own frames exactly and in order, followed only by
-the frames its row allows. Each program row also checks that its oracle
-rejects the same trace without its entry frame, with an unrelated trailing
-Titan frame, and, outside WebKit, with a runtime frame other than the
-trampoline that lacks its line. The gate
-takes the installation profile from `manifest.json` and fails without a valid
-one, so a missing profile cannot weaken a production program row.
+ordered subsequence of the row's exact frames, with exact file and line (file
+only on WebKit), and each name matching either the frame itself or an enclosing
+caller it was inlined into. The program's own Titan frames come first, at least
+one must appear, and the outermost must be the entry (`trace_uncaught.main` is
+called from C, and `trace_async.main` runs as the async bootstrap Task through
+a function value, so neither inlines away). In the async row only runtime
+frames (`async.titan`, `coroutine.titan`, `runtime.browser.titan`) may follow
+the entry. Because a production image inlines minicoro's C
+`titan_coroutine_enter` into `coro_entry_trampoline` and the trace adapter
+locates frames only from `.titan` segments, a PC in that C renders as the
+no-line frame `coroutine.titan: in titan.coroutine.coro_entry_trampoline`;
+outside WebKit every other Titan frame must carry a line, and no row accepts a
+`.c` location. Lua frames, markers, fallbacks, and merge order stay exact, and
+no `titanentry` symbol or mangled C name may appear. Test-image rows stay
+byte-exact, and validation program rows show every own frame in exact order.
+The gate reads the installation profile from `manifest.json` and fails if it
+is missing or invalid.
 
 ### Historical instrumentation measurements
 
-The #330/#343 instrumentation-local and engine-stack measurements used
-JavaScript SJLJ and Asyncify, before the Wasm-EH and JSPI cutovers. Their
-transformation-dependent local counts and recursion ceilings do not describe
-current images or justify a current pass list. The surviving production-test
-skips preserve trace identity independently of the coroutine backend.
-
+Pre-Wasm-EH / pre-JSPI measurements of Asyncify instrumentation locals and
+JavaScript-SJLJ engine recursion ceilings do not describe current JSPI images
+or justify the current pass list; the two surviving production-test skips
+(`inlining-optimizing`, `duplicate-function-elimination`) preserve trace
+identity independently of the coroutine backend. The retired tables survive at
+the permalink in [retired evidence
+records](benchmark-archives.md#retired-evidence-records).
 
 ### The harness level hook
 
 When `driver.browser_link_options.purpose` is `baseline`, `minicoro`, or
 `budget`, target initialization builds the descriptor with `trace_control =
-true` (D27 addendum). Only such a descriptor may carry an owned option after
-the profile prefix: exactly one trailing level flag, `-O0` to `-O3` or `-Os`,
-which comes from the `optimization` override (`-O1` or `-O2`) or from a
-harness `--cflag` (`validate_extras` admits level flags for these three
-purposes). One rule, `check_owned_tail`, applies in both `browsertarget.build`
-(on the extras, before tool discovery) and the validator (after the profile
-prefix): every other owned option, including a second level or any
-`BINARYEN_EXTRA_PASSES` spelling, is refused with `browser <profile> profile
-owns compile option "<flag>"`. `trace_control` is descriptor data and enters
-the identity. The hook is reachable only through the Lua API, and its options
-must name a purpose ([internal selection](#the-link-profile)); without it,
-`--cflag`, `--ldflag`, and the `TITAN_EXTRA_*` variables are refused as above,
-naming the profile. Its users are CI's baseline cell,
-`scripts/browser_baseline.lua`, and
-the measurement and budget specs. Production builds stay at
-`PRODUCTION_LEVEL`.
+true`. Only such a descriptor may carry an owned option after the profile
+prefix: a single trailing level flag (`-O0`–`-O3` or `-Os`) from the
+`optimization` override or a harness `--cflag`. One rule (`check_owned_tail`)
+applies in both `browsertarget.build` and the validator, rejecting any other
+owned option or `BINARYEN_EXTRA_PASSES` spelling with `browser <profile>
+profile owns compile option "<flag>"`. `trace_control` enters the descriptor
+identity. The hook is reachable only through the Lua API for CI's baseline
+cell, `scripts/browser_baseline.lua`, and the measurement/budget specs;
+ordinary production builds stay at `PRODUCTION_LEVEL`.
 
 ### Measurements
 
-Measured for #343 before the Wasm-EH cutover, using JavaScript SJLJ with
-Emscripten 6.0.13, Node 24.19.0, host Chrome 156.0.8078.79, and
-Playwright 1.56.1's Firefox 142.0.1 and WebKit 26.0, one
-cold process per depth, on the retained trace fixture
-(`spec/fixtures/browser_trace`) and its session-only measurement copy. `-O2`
-is the same tree with `PRODUCTION_LEVEL` patched for the comparison; it does
-not ship. Engine ceilings are the deepest passing level with Lua's limit out of
-the way (a session-only `-DLUAI_MAXCCALLS=60000` install); `a2` and `a0` are
-assertions 2 and 0.
-
-Ceilings at assertions 2 / 0 (`—` where a cell was not measured; the WebKit
-`-O3` assertions-2 mixed sweep found no failure up to its 4,096 maximum). The
-Firefox mixed cells are the fixture's own boundary, not the engine's: one
-level deeper, the native case fails its own assertions (it returns status 1)
-before the engine raises. In production those failing rows record a failed
-capture, `(native Titan frames unavailable: capture failed)` followed by the
-truncation marker; the validation rows record only the failed case. The
-engine's own `InternalError: too
-much recursion` came later. Under validation it appeared at 576 at assertions
-2, and at assertions 0 it was first observed at 640. Under production it was
-first observed at 1,792 (assertions 2) and 1,776 (assertions 0). The sweeps did
-not sample the depths in between.
-
-| Construct, engine | `-O2` | `-O3` (production) | Validation |
-| --- | ---: | ---: | ---: |
-| Mixed Lua/Titan, Node | 1,208 / 1,210 | 1,220 / 1,222 | 318 / 319 |
-| Mixed Lua/Titan, Chromium | 1,226 / — | 1,239 / 1,242 | 320 / 321 |
-| Mixed Lua/Titan, Firefox (fixture boundary) | — | 1,757 / 1,763 | 572 / 574 |
-| Mixed Lua/Titan, WebKit | — | > 4,096 / 4,095 | 479 (contiguous) / 1,074 |
-| Nested `pcall`, Node | 364 / 419 | 362 / 416 | 201 / 204 |
-| Nested `pcall`, Chromium | 372 / — | 367 / 421 | 201 / — |
-| Nested `pcall`, Firefox | — | 775 / 947 | 385 / — |
-| Nested `pcall`, WebKit | — | 2,121 / 2,401 | 639 / — |
-| Nested `coroutine.resume`, Node | 369 / 425 | 366 / 421 | 201 / 204 |
-| Nested `coroutine.resume`, Chromium | 376 / — | 373 / 434 | 201 / — |
-| Nested `coroutine.resume`, Firefox | — | 799 / 994 | 393 / — |
-| Nested `coroutine.resume`, WebKit | — | 2,216 / 2,528 | 831 / — |
-
-Production raises the ceilings on every engine. At assertions 2, nested
-`pcall` and `coroutine.resume` gain about 1.8× on V8 (362/201, 366/201 on
-Node), 2.0× on Firefox (775/385, 799/393), and 3.3× and 2.7× on WebKit
-(2,121/639, 2,216/831). Mixed recursion, where inlining removes frames from
-each level, gains about 3.8× on V8 (1,220/318 on Node, 1,239/320 on
-Chromium), 3.1× on Firefox (1,757/572, both fixture boundaries), and at
-least 8.5× on WebKit (more than 4,096/479; 3.8× at assertions 0,
-4,095/1,074). The order never changes. Validation binds in every measured
-cell, `pcall` and `coroutine.resume` bind on every engine in both profiles,
-and V8 binds in both profiles: production `pcall` reaches 362 levels on Node,
-against 775 on Firefox and 2,121 on WebKit. Over the measured cells the
-minimum was therefore 204 counts, under validation at assertions 2 on
-Node and Chromium. Validation `pcall` and `coroutine.resume` were measured at
-assertions 0 only on Node, where they reach 204 levels against 201 at
-assertions 2.
-
-| Measurement | `-O2` | `-O3` (production) | Validation |
-| --- | ---: | ---: | ---: |
-| `getCcalls` counts per level, every construct | 1 | 1 | 1 |
-| Test image `.wasm` / `.wasm.map` bytes, a2 | 3,182,978 / 871,991 | 3,140,922 / 868,617 | 5,128,240 / 1,227,298 |
-| Test image `.wasm` / `.wasm.map` bytes, a0 | 3,171,020 / 869,947 | 3,109,537 / 867,001 | 5,115,589 / 1,221,997 |
-| Program image of the same fixture, `.wasm` / `.wasm.map` bytes, a2 | 3,122,463 / 870,683 | 3,142,564 / 913,532 | (links like the test image) |
-| Final link, test / program image, a2 | 8.686 s / 9.287 s | 10.951 s / 11.612 s | 9.065 s |
-| Maximum function locals, test a2 / test a0 / program a2 | 100 / 67 / 100 | 100 / 68 / 100 | 1,993 / 1,993 / — |
-
-The `-O3` test image is 1.3% smaller than the `-O2` one (3,140,922 against
-3,182,978 bytes), while the `-O3` program image is 0.6% larger (3,142,564
-against 3,122,463) with a 4.9% larger map; `-O3` links about 2.3 s slower. No
-image comes near V8's 50,000-locals limit.
-
-The #329 micro-benchmark program, built as an ordinary program at each level
-(median of three runs, in milliseconds), next to the #329 harness re-run on the
-same host at the base (`scripts/browser_baseline.lua`, `-O1` with Asyncify):
-
-| Benchmark | Node `-O2` | Node `-O3` (production) | Node, #329 harness | Chromium `-O3` (production) | Chromium, #329 harness |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 200 000 calls | 3.8 | 3.3 | 3.7 | 14.1 | 5.8 |
-| 50 000 closures | 6.8 | 5.7 | 8.1 | 23.0 | 7.9 |
-| 100 000-element Array | 1.4 | 1.2 | 2.1 | 3.6 | 2.4 |
-| 5 000-step string build | 1.5 | 1.5 | 2.2 | 5.1 | 2.5 |
-| 20 000 coroutine switches | 94.5 | 72.1 | 162.5 | 149.4 | 181.4 |
-| 200 suspensions, total | 216 | 216 | 215.4 | 814.2 | 805.8 |
-
-The benchmark images were 1,369,778 (`-O3`) and 1,372,292 (`-O2`) bytes, with
-295,199 and 285,073-byte maps; the Chromium `-O3` image was 1,369,468 bytes
-with a 295,187-byte map. Between the two production levels on Node, `-O3`
-cuts the coroutine-switch time by about 23% and is equal or faster on the
-other benchmarks; the suspension round trip is Asyncify-bound and does not
-change. The #329
-harness columns are a reference, not a like-for-like comparison: that harness
-links with the `baseline` purpose, without the trace libraries and the map,
-while the production columns are ordinary installed-profile programs. The
-Chromium numbers are therefore recorded as measured, with no regression or
-speedup claimed against the harness.
-
-The trace gate's own images, as the gate built them with its 36 native cases
-before titan#334 added the post-suspension cases (maximum locals count
-parameters and declared locals):
-
-| Image | Production `.wasm` / `.wasm.map` bytes, maximum locals | Validation |
-| --- | ---: | ---: |
-| Test image, a2 | 3,231,911 / 904,919, 104 | 5,261,947 / 1,279,867, 2,164 |
-| Test image, a0 | 3,199,994 / 903,404, 68 | 5,249,175 / 1,274,520, 2,164 |
-| `trace_uncaught` program, a2 | 659,474 / 118,115, 38 | 1,052,334 / 150,948, 482 |
-| `trace_uncaught` program, a0 | 650,671 / 117,374, 38 | 1,043,126 / 147,764, 482 |
-
-Every one of these images instantiates and passes the gate on Node, Chromium,
-Firefox, and WebKit.
+The `-O3` production choice over `-O2` was backed by pre-cutover sweeps across
+Node, Chromium, Firefox, and WebKit: `-O3` roughly matched `-O2` in image size
+(within ~1%), matched or beat `-O2` across compute micro-benchmarks (cutting
+coroutine-switch time by ~23% on Node), raised recursion ceilings 1.8×–8.5×
+over validation across all engines, and kept max function locals well under
+V8's 50,000-local limit (at most ~100 in production vs ~2,164 in validation).
+Those pre-Wasm-EH / pre-JSPI tables are archived in [retired evidence
+records](benchmark-archives.md#retired-evidence-records); current JSPI
+production measurements live under [Records](#records).
 
 ## Program and test images
 
@@ -2655,34 +2507,14 @@ Absent, empty, invalid or wholly unmapped source metadata produces an explicit
 All program, generated-test and provider-protocol images share this check
 before map rewriting, `before_commit`, protocol execution or four-file
 publication. Guard rejection leaves predecessor bytes untouched; the failed
-link certificate remains invalidated and the staged candidate is retired.
-The existing compiler inventory hashes both guard and source-map Lua owners,
-and its digest participates in the final-link recipe, so changing either owner
-invalidates older certificates without a version or schema bump.
-Unchanged final-link hits return before linking or parsing an image again.
+link certificate stays invalidated and the staged candidate is retired.
+The compiler inventory hashes both guard and source-map Lua owners into the
+final-link recipe, so changing either owner invalidates certified links.
+Hit links return before linking or parsing an image again.
 
-The original 168-line transfer recovery lambda is retained unsplit in the
-portable regression. Validation-profile qualification with Emscripten 6.0.13,
-Node 26.13.0 and sandboxed CfT 156.0.8078.80 produced these complete
-fifteen-owner images and separate fresh-process, zero-case startup samples:
-
-| Host | Wasm bytes | Original lambda body bytes | Node startup maxRSS KiB | Chromium sampled renderer RSS KiB | Chromium virtual-memory sample KiB |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Linux x64 | 30,463,536 | 667,879 | 224,596 | 297,000 | VmData 1,056,252 |
-| macOS arm64 | 30,275,426 | 667,706 | 243,664 | 290,912 | VSZ 2,002,559,040 |
-
-The lambda has 4,869 declared locals plus four parameters on both hosts.
-The complete image selected 759 cases per engine, passing 757 with two
-existing locale-capability skips; the recovered regression selected and
-passed seven. The zero-case runs measure initialization only, not functional
-success. Node maxRSS is a process high-water mark, while Chromium RSS and
-VmData/VSZ are renderer samples at a requested 10-ms interval; VmData and VSZ
-are different virtual-memory measures, not resident RAM. Linear memory grew
-from 16,777,216 to 20,185,088 bytes during combined-image initialization,
-under the former fixed 16 MiB initial memory.
-Default tiering and sandboxing were unchanged, with no memory feature or
-forced optimizing-only compiler. These are individual measurements, not
-maximum startup-memory guarantees.
+The 168-line transfer recovery lambda stays unsplit in the portable regression
+(~668 KB validation Wasm body, ~4,869 locals), well inside the image bounds on
+Linux x64 and macOS arm64 under Node and sandboxed Chromium.
 
 ### The module check
 
@@ -2939,10 +2771,10 @@ that require unavailable host services:
 | `ltitanlib.c` `SIGPIPE` guard, its restore, and the POSIX-only support functions | compiled out |
 | the libbacktrace and `execinfo` trace backends | replaced by the [browser trace backend](error-handling.md#trace-backends) |
 
-`titan.h` selects `_setjmp`/`_longjmp` under `LUA_USE_POSIX`, as the linked
-`liblua.a` does, and declares both for the Wasm build. The common header also
-defines `TITAN_COROUTINE_STACK_SIZE` as `(2 * 1024 * 1024)` unless the target
-defines it. Native builds change only by these guard lines.
+`titan.h` selects `_setjmp`/`_longjmp` under `LUA_USE_POSIX`, matching
+`liblua.a`, and declares both for the Wasm build. It also defaults
+`TITAN_COROUTINE_STACK_SIZE` to `(2 * 1024 * 1024)` unless overridden by the
+target.
 
 ## Source-map extensions, eager loader, and stack survey
 
@@ -2988,7 +2820,7 @@ After `emcc` finishes linking and optimization,
 `browsertrace.rewrite(wasm, bytes, identity, origin)` calls
 `staticmetadata.browser_trace_image(wasm, origin)` (which reuses the bounded
 section and LEB128 reader primitives in `staticmetadata.lua`, accepting valid
-bounded padded LEB128 encodings as #328 specifies, and rejecting duplicate or
+bounded padded LEB128 encodings and rejecting duplicate or
 out-of-order sections, duplicate `name` sections/subsections, overrunning
 lengths, invalid UTF-8, or mismatched function/code counts) and validates the
 emitted standard version 3 `.wasm.map` (rejecting invalid JSON, wrong `version`
@@ -3163,77 +2995,42 @@ owns another lifecycle or admits a gap between initialization and main.
 
 ### WebAssembly stack survey
 
-Before finalizing the stack parser and WebKit renderer, a synthetic C/JS survey
-(324 raw stack captures across nine call topologies, named and `name`-stripped
-binaries, and default versus raised `Error.stackTraceLimit`) was recorded with
-Emscripten 6.0.13 and `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map
--g2` (the validation frame flags), with the historical JavaScript-SJLJ
-Asyncify profile across six engines:
+The stack parser and WebKit renderer follow the engine-specific Wasm stack
+formats verified across V8 (Node and Chromium), SpiderMonkey (Firefox), and
+JavaScriptCore (WebKit and Safari). The [capture contract](error-handling.md)
+follows the JSPI runtime and current-engine tests:
 
-| Engine | Version | Platform |
-| --- | --- | --- |
-| Node / V8 | Node 24.19.0 (V8 13.6.233.17-node.51) | Linux x64 (bundled in emsdk 6.0.13) |
-| Playwright Chromium | 141.0.7390.37 | Linux x64 (`mcr.microsoft.com/playwright:v1.56.1-noble`) |
-| Playwright Firefox | 142.0.1 | Linux x64 (`mcr.microsoft.com/playwright:v1.56.1-noble`) |
-| Playwright WebKit | 26.0 | Linux x64 (`mcr.microsoft.com/playwright:v1.56.1-noble`) |
-| Host Chrome / V8 | 156.0.8078.79 (V8 15.6.75.27) | Linux x64 |
-| Safari / JSC | 27.0.1 (macOS 27.0.1, build 26A434) | macOS arm64 (Apple M1) |
-
-The survey recorded the following behavior on those versions and binaries.
-Its historical depth and descriptor observations are not universal engine
-rules; the current [capture contract](error-handling.md) follows the JSPI
-runtime and its current-engine tests.
-
-1. **V8 (Node, Chromium, host Chrome)** formats frames as
+1. **V8 (Node, Chromium, Chrome)** formats frames as
    `    at <module>.<func> (<url>:wasm-function[<N>]:0x<PC>)` when the `name`
    section is present and `    at <url>:wasm-function[<N>]:0x<PC>` when
    stripped (`wasm://wasm/...` in Node, `http://...` in Chromium/Chrome),
    preceded by an `Error: ...` title line. Both carry the decimal function
-   index `N` and the module-relative hexadecimal byte offset `0xPC`.
+   index `N` and module-relative hexadecimal byte offset `0xPC`.
 2. **SpiderMonkey (Firefox)** formats frames as
    `<name>@<url>:wasm-function[<N>]:0x<PC>` (with an empty `<name>` when
-   stripped) and no `Error` title line. After an outer or fiber
-   `emscripten_sleep`, the surveyed Firefox appended saved asynchronous
-   ancestry starting at a frame line prefixed with `async*` (such as
-   `async*handleSleep@...`), repeating earlier suspended Wasm activations
-   (`fiber_entry`, `survey_run`). Current JSPI captures also expose
-   `VoidFunction*`, `promise callback*`, and `setTimeout handler*` causes.
-   The parser stops before any saved-JavaScript-parent cause boundary, rather
-   than merely skipping JS-shaped lines and retaining their saved Wasm callers.
-3. **JavaScriptCore (Playwright WebKit and Safari)** formats named frames as
+   stripped) and no `Error` title line. After suspension, Firefox appends saved
+   asynchronous ancestry starting at cause markers (`async*`, `VoidFunction*`,
+   `promise callback*`, `setTimeout handler*`). The parser stops before any
+   saved-JavaScript-parent cause boundary rather than retaining saved Wasm
+   callers past it.
+3. **JavaScriptCore (WebKit and Safari)** formats named frames as
    `<func>@<image>.wasm:wasm-function[<N>]` and stripped or cold frames as
    `<N>@wasm-function[<N>]`, with no `Error` title line and no bytecode offset
-   `0xPC` in any tested configuration. Cold named runs in Playwright WebKit
-   also mix numeric-only and named forms within a single stack. Both forms
-   always carry the bracketed decimal function index `[<N>]`, which resolves
-   through the trace table's function names and `TITAN_NAMES_KEY` to the Titan display
-   name and declaring `.titan` basename for no-line rendering.
-4. **Active-chain order and fibers.** Across all six engines, the active Wasm
-   call chain is ordered youngest-first without reordering or duplication
-   across `setjmp`/`longjmp` (`invoke_*`/`dynCall_*` JS wrappers interleave
-   between Wasm runs), outer `emscripten_sleep` rewinds, and tagged minicoro
-   fibers before yield, after resume, and after sleep inside a fiber. Inside a
-   fiber, the physical stack ends at `fiber_entry`, `_mco_main`,
-   `_mco_wrap_main`, and `dynCall_vi`; the resumer's native frames are absent
-   and are supplied by the coroutine trace handoff.
-5. **Observed depth limits (`Object.defineProperty` versus assignment).** In
-   the surveyed versions, default `Error.stackTraceLimit` was 10 on V8
-   (leaving 9 Wasm frames), 100 on JSC, and absent on Firefox. Raising the
-   property through `Object.defineProperty` raised V8's capture depth as
-   requested (615 frames for a 600-edge recursion at limit 1000). On the
-   surveyed JSC builds it changed the visible property but not the hidden
-   100-frame limit, while direct assignment updated that hidden state.
-   Deleting the property made `.stack` return `undefined` even after descriptor
-   restoration. These observations motivated the original JSC 100-frame
-   inference and isolated-realm test. Current WebKit 27.2 honors the temporary
-   descriptor and captures normally after the property was absent; neither
-   historical workaround remains. Firefox's surveyed 128-frame synchronous
-   ceiling is still observed in current JSPI captures and still marks
-   truncation.
-6. **JS wrapper headroom.** In the 48-recursion survey cases, up to 12 non-Wasm
-   frames interleaved with 54 Wasm frames on V8. Requesting 640 frames (512
-   Wasm capacity + 128 headroom) covers normal wrapper overhead, and the
-   adapter conservatively marks any capture that reaches the effective limit as
+   `0xPC` (cold runs may mix both forms in one trace). The bracketed decimal
+   function index `[<N>]` resolves through the trace table and `TITAN_NAMES_KEY`
+   to the Titan display name and declaring `.titan` basename for no-line
+   rendering.
+4. **Active-chain order and fibers.** Across all engines, the active Wasm call
+   chain is ordered youngest-first. Inside a minicoro fiber, the physical stack
+   ends at `fiber_entry`, `_mco_main`, `_mco_wrap_main`, and `dynCall_vi`; the
+   resumer's native frames are supplied by the coroutine trace handoff.
+5. **Depth limits.** Default `Error.stackTraceLimit` is 10 on V8, 100 on JSC,
+   and absent on Firefox; temporarily raising the descriptor captures deeper
+   stacks on V8 and WebKit 27.2+, while Firefox's 128-frame synchronous ceiling
+   marks truncation.
+6. **JS wrapper headroom.** Requesting 640 frames (512 Wasm capacity + 128
+   headroom for interleaved JS wrappers) covers normal overhead, and the
+   adapter conservatively marks any capture reaching the effective limit as
    truncated.
 
 ## Budgets
@@ -3247,24 +3044,12 @@ Linear stack and heap sizes are explicit image/SDK identity inputs:
 | Linear memory | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648` | initial memory is static data, the main stack and a 15 MiB heap; freed blocks can be reused but the grown Wasm heap never shrinks |
 | Engine continuation stacks | JSPI engine-managed | not bounded by the linear C-stack sizes |
 
-Initial memory is the image's memory-section minimum: wasm-ld places static
-data and then the 1 MiB stack, and adds the 15 MiB heap to that heap base,
-rounded up to a 64-KiB page. Measured on validation-profile images (the same
-at assertions 2 and 0), against the former fixed `-sINITIAL_MEMORY=16777216`:
-
-| Image | Heap base (static data and stack) | Fixed 16 MiB | `INITIAL_HEAP=15728640` |
-| --- | ---: | ---: | ---: |
-| `hello` program | 1,131,776 | 16,777,216 | 16,908,288 |
-| Browser stdlib suite, 15 owners | 15,147,968 | 16,777,216 | 30,932,992 |
-| Browser stdlib suite with `async.tests`, 16 owners | 18,991,888 | link fails | 34,734,080 |
-| Browser stdlib suite with `timer.tests`, 17 owners | 19,905,472 | link fails | 35,651,584 |
-
-Under the fixed size, the 16-owner suite fails with `wasm-ld: error: initial
-memory too small, 18203136 bytes needed`, measured when it first exceeded the
-fixed size. The 16-owner row is the suite at the merged browser `async`
-(`87c15623`), and the 17-owner row adds `timer.tests` and the browser
-`timer`. The 15-owner suite had 1,629,248 bytes of initial heap under the
-fixed size and now has 15 MiB like every image.
+Initial memory is the image's memory-section minimum: `wasm-ld` places static
+data and the 1 MiB main stack, then adds the 15 MiB `INITIAL_HEAP` to that
+heap base, rounded up to a 64-KiB page. Using `INITIAL_HEAP` rather than a
+fixed 16 MiB `INITIAL_MEMORY` ensures large images (such as the full browser
+stdlib test suite, whose static data plus stack exceeds 18 MiB) always link
+and start with a full 15 MiB heap.
 
 `STACK_OVERFLOW_CHECK=2` stays enabled. Each switch saves SP and the current
 stack base/end, restores the destination limits and SP before its Wasm
@@ -3344,108 +3129,30 @@ another commit.
 
 ### Choosing 100
 
-The measurements in this subsection and [Engine stack per
-construct](#engine-stack-per-construct) used the previous JavaScript-SJLJ
-lowering. They record why 100 was chosen, not the current Wasm-EH engine
-ceilings; 100 is retained until the recursive Lua/C shapes are requalified
-across engines and build profiles.
-
-The value had to be greater than 10 (otherwise `LUAI_MAXCCALLS / 10 * 11` is 0
+`LUAI_MAXCCALLS` must be above 10 (otherwise `LUAI_MAXCCALLS / 10 * 11` is 0
 and every overflow escalates to error-in-error-handling), at least 20 in
 practice so overflow handling and the two reserved finalizer slots stay
-usable, within 16 bits, and at most half the lowest engine ceiling measured in
-counts on any engine and either profile (both profiles were measured on all
-four engines; see [Measurements](#measurements) and the table below): the
-margin rule #330 used for its headroom row. Each construct costs exactly one
-count per level wherever it was
-measured (mixed recursion on all four engines in both assertion modes, every
-construct on Node, and `pcall`, `coroutine.resume`, and mixed recursion in both
-profiles), so levels and counts differ only by the starting count (2 in the
-mixed fixture, 3 in the construct probe).
+usable, within 16 bits, and at most half the lowest measured engine ceiling.
 
-The lowest historical ceiling was 204 counts (201 levels): nested `pcall` and
-nested `coroutine.resume` on V8 (Node and Chromium), validation, assertions 2.
-Half of it is 102, and the maintainer chose 100 (D33). Against that measured
-ceiling, a limit of 100 gave a 2.04× margin, or 2.08× against the 98 counts at
-which the mixed fixture tripped. At
-Lua's default 200, the same `pcall` chain tripped at 195 levels (198 counts),
-a 1.03× margin, and mixed recursion passed 195 levels and tripped at 196 on
-all four engines in both assertion modes, as a catchable error.
-
-Historical JavaScript-SJLJ validation ceilings with Lua's limit out of the way
-(deepest passing level; `-DLUAI_MAXCCALLS=60000`):
-
-| Engine | Assertions | Mixed Lua/Titan | Nested `pcall` | Nested `coroutine.resume` |
-| --- | ---: | ---: | ---: | ---: |
-| Node 24.19.0 | 2 | 318 | 201 | 201 |
-| Node 24.19.0 | 0 | 319 | 204 | 204 |
-| Chromium 156.0.8078.79 | 2 | 320 | 201 | 201 |
-| Chromium 156.0.8078.79 | 0 | 321 | — | — |
-| Firefox 142.0.1 | 2 | 572 | 385 | 393 |
-| Firefox 142.0.1 | 0 | 574 | — | — |
-| WebKit 26.0 | 2 | 479 (contiguous; 480 fails, 1,024 passed once) | 639 | 831 |
-| WebKit 26.0 | 0 | 1,074 | — | — |
-
-V8 fails with `RangeError: Maximum call stack size exceeded`, Firefox with
-`InternalError: too much recursion`, and WebKit with `RangeError`. On Firefox
-the mixed fixture fails its own assertions first: at 573 and 574 levels at
-assertions 2 and at 575 and 576 at assertions 0, each recorded only as a
-failed case, before the engine's `InternalError` at 576 (assertions 2) and 640
-(assertions 0). The production ceilings, higher
-on every engine, are in [Measurements](#measurements).
+Under the pre-Wasm-EH JavaScript-SJLJ lowering, the lowest measured ceiling
+was 204 counts (201 levels) for nested `pcall` and `coroutine.resume` on V8
+(Node and Chromium) in validation mode, giving a chosen limit of 100 (~2.04×
+headroom, whereas Lua's default 200 left ~1.03× margin). That limit is
+retained until recursive Lua/C shapes are requalified across engines and
+profiles under Wasm EH and JSPI. The historical per-engine ceiling table is
+archived in [retired evidence
+records](benchmark-archives.md#retired-evidence-records).
 
 ### Engine stack per construct
 
-Node, validation, assertions 2. The slope between the default stack (984 KB)
-and `--stack-size=256` gives the bytes per level, which is also the bytes per
-count; for mixed recursion it comes from the 256 KB and 512 KB points:
-
-| Construct | Ceiling at 984 KB | Ceiling at 256 KB | Bytes per count |
-| --- | ---: | ---: | ---: |
-| Parser: nested parenthesized expressions | 1,784 | 433 | 552 |
-| Parser: nested table constructors | 254 | 254 | — (a parser limit binds first: depth 255 is a syntax error) |
-| Parser: nested function bodies | 431 | 104 | 2,280 |
-| Nested `pcall` | 201 | 49 | 4,904 |
-| `__index` function chain | 405 | 98 | 2,428 |
-| `string.gsub` with a recursing replacement | 331 | 80 | 2,970 |
-| Nested `coroutine.resume` | 201 | 49 | 4,904 |
-| `table.sort` with a recursing comparator | 295 | 71 | 3,328 |
-| `tostring` with a recursing `__tostring` | 328 | 79 | 2,994 |
-| Mixed Lua/Titan recursion | 318 | 63 | 2,913 |
-
-For mixed recursion the 256 KB, 512 KB, and 984 KB points pass 63, 153, and 318
-levels: 2,913 bytes per level below 512 KB and 2,929 above it, with an
-intercept of about 78.6 KB.
-
-**Why a protected call costs more.** One mixed level, captured from
-JavaScript at depth 1 (youngest first), is `luaD_callnoyield`,
-`luaV_execute`, `luaD_precall`, the Titan entry wrapper
-(`..._titanentry_lua`), two Titan closures around `mixed_recurse`, and
-`dynCall_viii` in WebAssembly, then `__asyncify_wrapper_2521`, `outer`, the
-Asyncify instrumentation at `runtime.mjs:541`, `invoke_viii`, and the import
-thunk in JavaScript. One `pcall` level, captured at depth 6, is `luaD_pcall`,
-`lua_pcallk`, `luaB_pcall`, `luaD_pretailcall`, `luaV_execute`,
-`luaD_callnoyield`, `f_call`, `dynCall_vii`, `__asyncify_wrapper_2538`,
-`outer`, `runtime.mjs:541`, `invoke_vii`, the import thunk, and
-`luaD_rawrunprotected`. Both levels leave WebAssembly through an `invoke_*`
-import and re-enter it through `dynCall_*` under Asyncify's wrapper; for
-`pcall` and `coroutine.resume` that trampoline is Emscripten's SjLj lowering
-of the protected call in `luaD_rawrunprotected`, which runs Lua's `setjmp`.
-The two levels differ in their WebAssembly frames, and the protected-call
-level's frames cost 4,904 − 2,913 ≈ 2 KB more per count. The trampoline's
-JavaScript half was a consequence of that historical SJLJ lowering. Wasm EH
-removes it without using the unsound `ASYNCIFY_IGNORE_INDIRECT` shortcut.
-
-Two validation levers were measured and not adopted: adding `--coalesce-locals`
-after `--asyncify` raised the Node mixed ceiling from 318 to 334, removing
-`luaD_callnoyield` from Asyncify (`-sASYNCIFY_REMOVE`) to 324, and both to 339
-(+6.6%), at no extra link time; `--simplify-locals-nonesting` and
-`--merge-locals` changed nothing. These levers were measured only in
-validation. The only post-Asyncify measurement in production removed D18's
-pair: without it the `-O3` mixed ceiling stays at or above 1,200 levels, the
-`.wasm` is 14 KB smaller, the map 33 KB larger, and the maximum 102 locals
-instead of 100 (D34; see the [historical instrumentation
-measurements](#historical-instrumentation-measurements)).
+Each recursive Lua/C construct consumes one `getCcalls` count per level, but
+protected calls (`pcall`, `coroutine.resume`) consume roughly 1.7× as much
+engine stack per level as plain mixed Lua/Titan recursion because of their
+extra `luaD_rawrunprotected` and error-handling frames. Wasm EH eliminates
+the JavaScript `invoke_*`/`dynCall_*` SJLJ trampoline that previously drove
+per-level stack cost up to ~4.9 KB on Node validation builds. Full historical
+per-construct byte slopes and pre-cutover pass experiments are archived in
+[retired evidence records](benchmark-archives.md#retired-evidence-records).
 
 ### The regression
 
@@ -3456,17 +3163,11 @@ measurements](#historical-instrumentation-measurements)).
   must keep at most 91 `mixed_recurse` frames with at most one truncation
   marker.
 * `test_mixed_recursion_overflow` and `test_pcall_recursion_overflow` recurse
-  toward a bound of 150, above Lua's limit and below the historical engine ceilings,
-  through `@trace-shape.lua` and through `@trace-pcall.lua`, a Lua chain whose
-  only C boundary is `pcall`, so it costs one count per level (it passed 96
-  levels and tripped at 97 on the historical Node fixture). Each must catch
-  exactly `C stack overflow`
-  with a real capture and return normally. A missing limit reaches the base
-  case's `expected C stack overflow` and fails the assertion instead of
-  crashing the engine, which a `-DLUAI_MAXCCALLS=60000` install confirmed.
+  toward a bound of 150 (above Lua's limit of 100 and below engine ceilings)
+  through `@trace-shape.lua` and `@trace-pcall.lua`. Each must catch
+  `C stack overflow` with a real capture and return normally.
 
-All three passed on Node, Chromium, Firefox, and WebKit, at assertions 2 and 0,
-under both profiles before the Wasm-EH cutover. The loader still reports a real
+The loader still reports a real
 engine failure with its `cause` ([Settlement](#the-loader)); the C-call limit only keeps Lua's
 recursion from reaching one.
 
@@ -4323,71 +4024,19 @@ backend lifetime boundary without adding a repeatable public bridge API.
 
 `scripts/browser_baseline.lua` is a measurement harness, not a performance
 gate. It builds the Titan program and a plain fork-interpreter image through
-the shared `baseline` profile, at O1 and O2, with one JSPI backend and separate
-output trees. Coroutine and external-suspension rows always run; there is no
-backend-off control. A cell's one option record feeds planning, child build,
-identity and receipt. The format identifier stays unchanged.
+the shared `baseline` profile, at `-O1` and `-O2`, with the JSPI backend and
+separate output trees. Coroutine and external-suspension rows always run, and
+a cell's single option record drives planning, child build, identity, and
+receipt.
 
-The historical tables below belong to #329's pre-JSPI images and are not
-current JSPI size, memory, startup or latency guarantees; the release
-profile's current measurements are the [records](#records).
-
-
-| Titan cell | `.wasm` bytes | `.mjs` bytes | Node instantiate / run (ms) | Chromium instantiate / run (ms) | Suspension, Node / Chromium (ms) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| O1, Asyncify | 4082312 | 218265 | 18.6 / 650 | 22.3 / 1371 | 1.08 / 3.99 |
-| O1, no Asyncify | 2095004 | 188462 | 12.9 / 15 | 18.3 / 25 | — |
-| O2, Asyncify | 2328050 | 218265 | 17.2 / 435 | 20.7 / 1133 | 1.08 / 4.47 |
-| O2, no Asyncify | 1893502 | 188462 | 15.1 / 16 | 18.5 / 21 | — |
-
-The Asyncify Titan runs include a 200-suspension loop and the coroutine
-benchmark, which the controls omit. Titan micro-benchmark medians under Node,
-in milliseconds, with the native build and the fork's standalone interpreter
-(`lua.js`) for scale:
-
-| Benchmark | O1 Asyncify | O1 no Asyncify | O2 Asyncify | O2 no Asyncify | native | `lua.js` |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 200 000 calls | 7.63 | 2.32 | 5.11 | 2.42 | 3.97 | 11.62 |
-| 50 000 closures | 10.38 | 5.04 | 8.89 | 4.82 | 3.63 | 11.48 |
-| 100 000-element Array | 2.22 | 0.99 | 1.82 | 1.28 | 1.23 | 4.46 |
-| 5 000-step string build | 2.56 | 1.36 | 2.75 | 1.53 | 1.46 | 1.82 |
-| 20 000 coroutine switches | 327.05 | — | 189.07 | — | 9.94 | 41.47 |
-
-Lua interpreter cells (`entry = "lua-main"`, running `bench.lua` with an
-explicit heap-marshalled `argv` in both engines), median of three repeats:
-
-| Lua cell | `.wasm` bytes | `.mjs` bytes | Node instantiate / run (ms) | Chromium instantiate / run (ms) |
-| --- | ---: | ---: | ---: | ---: |
-| O1, Asyncify | 1101816 | 199701 | 11.0 / 242 | 14.2 / 390 |
-| O1, no Asyncify | 328025 | 181337 | 11.8 / 80 | 14.2 / 77 |
-| O2, Asyncify | 529190 | 105285 | 9.7 / 65 | 15.3 / 96 |
-| O2, no Asyncify | 297192 | 95960 | 5.3 / 27 | 12.4 / 39 |
-
-Lua interpreter micro-benchmark medians under Node, in milliseconds (the
-coroutine row runs only in the Asyncify cells and in the fork `lua.js` lane
-above):
-
-| Benchmark | O1 Asyncify | O1 no Asyncify | O2 Asyncify | O2 no Asyncify |
-| --- | ---: | ---: | ---: | ---: |
-| 200 000 calls | 32.19 | 35.85 | 9.79 | 10.69 |
-| 50 000 closures | 22.16 | 22.36 | 9.79 | 6.64 |
-| 100 000-element Array | 9.02 | 9.46 | 3.12 | 2.32 |
-| 5 000-step string build | 2.10 | 2.30 | 1.40 | 0.90 |
-| 20 000 coroutine switches | 43.90 | — | 33.22 | — |
-
-Asyncify roughly doubles the Titan image at `-O1` and costs about a quarter at
-`-O2`, and instrumented coroutine switches are an order of magnitude slower
-than native ones. Per-suspension cost does not depend on the optimization
-level. In the Titan images, the `.titan.source` and `.titan.meta` payloads
-survive as ordinary data segments named by the linker's data-segment name
-table (`.titan.source` is 339 808 B in the Asyncify cells and 339 814 B in the
-Asyncify-off controls; `.titan.meta` is 5 672 B in every cell; ordinary
-`.rodata` is 104 368 B at `-O1` and 69 B at `-O2`, and `.data` is 460 B and 8
-B, inside a 448 986 to 450 348 B data section), while `.titan.cprobe` is
-absent; because the payloads are data segments, custom-section stripping alone
-cannot remove them. Every Titan image imports 50 symbols (every Lua
-interpreter image 27), none of them `dlopen`, `dlsym`, `dlerror`, or a
-backtrace function.
+Durable structural observations from the baseline images: compiled
+`.titan.source` and `.titan.meta` payloads survive in linked `.wasm` binaries
+as ordinary data segments (so custom-section stripping alone does not remove
+them), `.titan.cprobe` is absent, and linked Titan images never import
+`dlopen`, `dlsym`, `dlerror`, or native backtrace symbols. The retired
+pre-JSPI Asyncify benchmark tables live at the permalink in [retired evidence
+records](benchmark-archives.md#retired-evidence-records); current JSPI
+release-profile measurements are collected under [Records](#records).
 
 ## Records
 
@@ -4765,7 +4414,7 @@ same texts.
   collection, plus the
   unhandled-rejection (74) and poisoned-retirement (70) diagnostics, and, on
   Chromium, the html5 click counter of synchronous C callbacks and the async
-  driver's responsiveness page test (`responsive.mjs`, titan#334)
+  driver's responsiveness page test (`responsive.mjs`)
   ([browser bridge runtime](browser-bridge.md#test-layers)).
   `browser_bridge_spec.lua` also runs `environment.mjs` with the libc
   environment fixture in both assertion modes under Node and Chromium,
@@ -4846,7 +4495,7 @@ same texts.
   raise versus bare rethrow, coroutine append across yield/resume, adjacent
   unmapped helpers, immediate literal calls, held-storage nested capture, merge
   `LUA_ERRMEM` recovery, post-suspension traces in `async` Tasks
-  (`tasks.browser.titan`, titan#334: after turn and wait relinquishes, in a
+  (`tasks.browser.titan`: after turn and wait relinquishes, in a
   delivered handler, through an `async.Error` handoff, rethrow and fresh raise
   across an await, coroutine append in a Task, and a cleanup during
   cancellation), entry traces (the `task_entries` row's failed Task-form call,

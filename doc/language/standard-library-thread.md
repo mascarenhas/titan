@@ -1,49 +1,66 @@
 # Thread standard library
 
-The `thread` module (`import "thread"` from Titan, `require "titan.thread"` from
-Lua) provides Go-inspired cross-thread concurrency over isolated Lua/Titan
-states:
+The `thread` module provides shared-nothing OS worker threads (`Thread<|R|>`), bounded multi-producer multi-consumer channels (`Sender<|T|>` / `Receiver<|T|>`), and structured worker pools (`Group`). Import it in Titan with `local thread = import "thread"` or load it in Lua with `require "titan.thread"`.
 
-1. **Bounded, closeable cross-thread FIFO channels** (`Sender<|T|>` and
-   `Receiver<|T|>`) whose endpoints can be cloned and transferred across OS
-   threads, closures, records, and unions.
-2. **Standalone OS worker threads** (`Thread<|R|>`) that run an isolated Lua
-   state and asynchronous `titan.async` Runtime, with nonblocking status
-   inspection, Task-suspending `join`, cooperative cancellation, and an
-   `async.Task` proxy for combinator composition.
-3. **Bounded thread groups** (`Group`) modeled on Go's `errgroup.Group` for
-   running multiple worker threads with an optional concurrency limit and
-   optional first-error cancellation propagation.
+**Target availability:** Native only (unavailable on the browser target).
 
-For single-thread cooperative Tasks, timers, and combinators within one state,
-see [Asynchronous I/O and tasks](async-io.md). For manual independent-state
-management, see [Lua states and loading](standard-library-lua.md).
+For a walkthrough of Tasks, channels, threads, and coroutines together, see [Concurrency: Tasks, Channels, and Threads](concurrency.md). For single-state cooperative Tasks, see [Asynchronous I/O and tasks](async-io.md); for manual independent-state control, see [Lua states and loading](standard-library-lua.md).
 
-## Public signatures
+## Example
+
+This program fans six jobs across a bounded two-worker `thread.Group`, embedding a reply `Sender<|integer|>` inside each `Job` record:
+
+```titan
+local io = import "io"
+local thread = import "thread"
+
+record Job
+  const input: integer
+  const reply: thread.Sender<|integer|>
+end
+
+function main(args: {string}): integer
+  local jobs_tx, jobs_rx = thread.channel<|Job|>(4)
+  local results_tx, results_rx = thread.channel<|integer|>(6)
+
+  local pool = thread.group(2, true)
+  for _ = 1, 2 do
+    pool:spawn_one(function (rx: thread.Receiver<|Job|>)
+      for _, job in rx:incoming() do
+        job.reply:send(job.input * 10)
+      end
+    end, jobs_rx)
+  end
+
+  for i = 1, 6 do
+    jobs_tx:send(Job(i, results_tx))
+  end
+  jobs_tx:close()
+
+  local errs = pool:wait()
+  if #errs > 0 then errs[1]:raise() end
+
+  results_tx:close()
+  local total = 0
+  for _, scaled in results_rx:incoming() do
+    total = total + scaled
+  end
+  io.print("total = " .. total)
+  return 0
+end
+```
+
+## Core concepts
+
+Each spawned `Thread` runs a dedicated OS thread with its own isolated Lua/Titan state, garbage collector, and `async` event loop. Threads never share mutable GC objects: arguments, closure captures, channel messages, and return values are serialized into native message packets using the [`TransferValue`](standard-library-transfer.md) policy and reconstructed in the destination state.
+
+Blocking channel operations (`send`, `receive`, `receive_result`, `incoming`), `Thread:join()`, `Group:spawn*` admission waits, and `Group:wait()` suspend only the calling `async.Task` via the Runtime's shared external wake bridge so other Tasks on the same loop keep running.
+
+## Cross-thread channels
 
 ```text
-record Error
-  const error: value
-  const traceback: string
-end
-function Error:raise()
-
-union ThreadStatus<|R|>
-  running()
-  succeeded(R)
-  failed(Error)
-  cancelled(async.CancellationReason<|value|>)
-end
-
-function ThreadStatus:as_string(): string
-function ThreadStatus:has_finished(): boolean
-function ThreadStatus:has_succeeded(): (boolean, R?)
-function ThreadStatus:has_failed(): (boolean, Error?)
-function ThreadStatus:has_cancelled():
-    (boolean, async.CancellationReason<|value|>?)
-
 union ReceiveResult<|T|>
-  message(T)
+  message(value: T)
   closed()
 end
 
@@ -75,6 +92,68 @@ foreign function channel_retain_sender_native(raw: *void): void
 foreign function channel_retain_receiver_native(raw: *void): void
 foreign function channel_release_sender_native(raw: *void): void
 foreign function channel_release_receiver_native(raw: *void): void
+```
+
+`thread.channel<|T|>(capacity?)` allocates a thread-safe, bounded FIFO channel and returns its initial `(Sender<|T|>, Receiver<|T|>)` pair.
+
+- `capacity` defaults to `1` when omitted or `nil`; `capacity <= 0` raises `"channel capacity must be positive"`.
+- Any value accepted by [transfer values](async-io.md#transfer-values) may cross a channel, including primitives, strings, public records and unions, Titan closures with transferable captures, custom-hook records, and `Sender<|T|>` / `Receiver<|T|>` endpoints (at top level or nested in records, unions, and their Array fields). Top-level Arrays and Maps are not directly transferable; wrap an Array in a public `record` or `union`.
+
+### Sending and receiving
+
+- **`Sender:send(message)`** serializes `message` first (raising before touching the channel if it is not transferable). If the channel is closed, it raises `"channel is closed"`. If space is available, it enqueues immediately and wakes one waiting receiver; otherwise it suspends the calling `async.Task` in a FIFO send-waiter queue until space opens or the channel closes. Waking does not pre-reserve a slot: the resumed Task retries admission and may contend with other senders.
+- **`Sender:try_send(message)`** serializes `message` first, raises `"channel is closed"` if closed, enqueues and returns `true` if space is immediately available, or discards the packet and returns `false` without suspending if full.
+- **`Receiver:receive()`** dequeues the oldest message immediately if buffered (waking one blocked sender if present), or suspends the calling `async.Task` until a message arrives or the channel closes and drains. Once closed and drained, it raises `"channel is closed"`.
+- **`Receiver:receive_result()`** behaves like `receive()`, returning `ReceiveResult.message(msg)` on delivery and `ReceiveResult.closed()` once closed and drained instead of raising.
+- **`Receiver:try_receive()`** never suspends, returning `(true, msg)` if a buffered item is ready or `(false, nil)` if the buffer is empty (open or closed).
+- **`Receiver:incoming()`** returns a generic-`for` iterator triple yielding `(true, message)` in FIFO order and `(nil, nil)` once closed and drained. Because the first result controls iteration separately from the message, `nil` and `false` remain valid payloads. Discard the control flag with `_`, and append `?` to preserve optional `nil` messages (or omit `?` to force non-nil):
+
+```text
+for _, msg? in rx:incoming() do
+  handle(msg)
+end
+```
+
+A Task blocked in `send`, `receive`, `receive_result`, or `incoming` suspends through the Runtime's [external wake bridge](async-io.md#external-waits). Cancelling the Task withdraws its waiter before `Task:cancel` returns.
+
+If the Lua state closes while a Task is blocked on a channel, the state withdraws that waiter before releasing the Task's stack, keeping the channel intact for clones held by other threads. The blocked Task unwinds its `defer` blocks inside a finalizer where awaits cannot run; drain Tasks before closing the state when cleanup must await ([closing a Lua state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)).
+
+### Closing, cloning, and transferring endpoints
+
+- **`Sender:close()`** marks the shared channel closed (`is_closed() == true`) for all clones while **preserving buffered messages** so receivers can drain them. Blocked senders wake with `"channel is closed"`, and blocked receivers wake once the buffer empties.
+- **`Receiver:close()`** marks the shared channel closed for all clones, **discards all unread buffered messages immediately**, and wakes all blocked senders and receivers.
+- **`Sender:clone()` / `Receiver:clone()`** create a new local endpoint handle sharing the channel and increment its active sender or receiver count.
+- **Garbage collection:** Collecting one clone releases only that handle's reference. When the last active `Sender` across all threads is collected, the channel closes from the sender side (preserving buffered messages). When the last active `Receiver` is collected, the channel closes from the receiver side and discards unread messages via [`transfer.discard_message`](standard-library-transfer.md#native-message-packets) in C without entering Lua or requiring a Runtime.
+- **Native reference cycles:** Unread packet attachments count as live native endpoints outside Lua GC (for instance, sending a channel's own `Receiver` into itself keeps its receiver count nonzero). Retain a reachable receiver and call `Receiver:close()` to flush unread packets and break cycles before dropping the final handle.
+- **Packet-scoped endpoint transfer:** Every endpoint reference is owned by either a live wrapper or an undelivered packet. Passing an endpoint at packet root, inside a public record/union/Array field, or captured in a closure retains a fresh reference per occurrence and encodes a four-byte little-endian packet-local slot index (leaving the sender's handle valid). Custom hooks for records holding private endpoints can call `Sender:to_transfer_payload()` / `from_transfer_payload(payload)` and `Receiver:to_transfer_payload()` / `from_transfer_payload(payload)` (which use `channel_retain_{sender,receiver}_native` and `channel_release_{sender,receiver}_native` with `transfer.attach_resource` / `claim_resource`).
+  - Endpoint conversion requires an active top-level encode or decode scope opened by `transfer.encode_message` or `transfer.decode_message` (`Sender:send`, `try_send`, `thread.spawn*`, `Group:spawn*`, `Thread:cancel`, thread outcomes, and [`async.Receiver`](async-io.md#cross-state-receivers)). Standalone `TransferValue.from_value`, `TransferValue:to_value`, `protobuf.serialize`, and `lua.Lua:run*` open no packet scope and reject endpoints outside one.
+  - Claiming checks width, bounds, endpoint kind (`Sender` vs `Receiver`), and unclaimed state; decoding allocates the destination wrapper and registers its finalizer before claiming the slot.
+  - A channel created in a worker and returned via `Thread:join()` or `Thread:task()` survives the worker's state close while the undelivered result packet holds its reference.
+  - **Manual-handoff resources are not auto-disposed on channel discard:** `transfer.discard_message` releases only packet-table attachments (`Sender` and `Receiver`) and never invokes `from_transfer_payload`. Recover or explicitly dispose rejected or unread manual-handoff resources (`http.Exchange`, `ssl.Connection`, `net.Connection`, `websocket.Connection`, etc.) under the [manual-handoff rules](standard-library-transfer.md#manual-handoff-api-inventory).
+
+## Standalone OS threads
+
+```text
+record Error
+  const error: value
+  const traceback: string
+end
+function Error.new(error: value, traceback: string): Error
+function Error:raise()
+
+union ThreadStatus<|R|>
+  running()
+  succeeded(value: R)
+  failed(value: Error)
+  cancelled(value: async.CancellationReason<|value|>)
+end
+
+function ThreadStatus:as_string(): string
+function ThreadStatus:has_finished(): boolean
+function ThreadStatus:has_succeeded(): (boolean, R?)
+function ThreadStatus:has_failed(): (boolean, Error?)
+function ThreadStatus:has_cancelled():
+    (boolean, async.CancellationReason<|value|>?)
 
 record Thread<|R|>
 
@@ -95,7 +174,34 @@ function Thread:status(): ThreadStatus<|R|>
 function Thread:join(): ThreadStatus<|R|>
 function Thread:cancel(reason: async.CancellationReason<|value|>?)
 function Thread:task(): async.Task<|R, value|>
+```
 
+`spawn` through `spawn_five` snapshot `entry` and all arguments synchronously on the caller thread, then start a dedicated OS worker thread. Any non-transferable capture or argument raises immediately before the OS thread is created.
+
+Inside the worker thread (which preserves the main thread's `long double` precision on every platform, including restoring x87 precision on Windows — see [long double on worker threads](windows-build.md#long-double-on-worker-threads)):
+
+1. `titan.thread` is loaded into the child state.
+2. An `async` Runtime starts with the reconstructed `entry` as its root `Task` and runs `async.loop()` to completion.
+3. The worker can use `timer`, `fs`, `net`, `ssl`, `http`, `websocket`, `sqlite3`, `thread.channel`, and nested `thread.spawn*` / `thread.group` on its own loop.
+4. When the root `Task` returns `val`, `val` is serialized as `ThreadStatus.succeeded(val)`. Any sibling Tasks or active handles started inside the worker continue running until `async.loop()` finishes.
+5. If the root `Task` raises an uncaught error or returns a non-transferable value, the worker records `ThreadStatus.failed(Error(err, traceback))` (degrading a non-transferable error object to its string rendering while keeping `traceback`) and calls `async.request_exit(0)` to drain the child loop cleanly.
+6. If cancellation is accepted before the root `Task` enters its body, the worker records `ThreadStatus.cancelled(reason)` with the accepted reason rather than a generic failure.
+
+### Observing, joining, and cancelling a Thread
+
+- **`Thread:status()`** returns a nonblocking snapshot (`running()`, `succeeded(val)`, `failed(err)`, or `cancelled(reason)`). It never waits or joins; a terminal snapshot may appear before the OS thread has finished exiting, so `status()` is not evidence that the OS thread has retired.
+- **`Thread:join()`** requires a running Task. It checks pending cancellation and Runtime shutdown, suspends until the worker finishes, performs the real OS thread join, and returns the terminal `ThreadStatus<|R|>` without raising on `failed` or `cancelled`. Later `join()` calls return the cached outcome without joining again. If the OS join fails, `join()` raises `async.OperationError` with operation `"thread.join"` and leaves the thread joinable for retry. If the Lua state closes while a Task waits in `join()`, the wait is withdrawn without cancelling the worker thread.
+- **`Thread:cancel(reason?)`** cooperatively cancels the worker's root `Task` and wakes its event loop so its `defer` and cleanup blocks run (child Tasks started inside the worker must be cancelled explicitly by the root Task). The first host request wins; omitting `reason` or passing `nil` sends `CancellationReason.simple("cancelled")`. Reasons transfer as native packets; a non-transferable host or child reason degrades to `CancellationReason.simple("cancelled")`. A child root's own first sticky cancellation reason takes precedence over a later host request.
+- **`Thread:task()`** creates a memoized `async.Task<|R, value|>` proxy on first use, marking the `Thread` observed. It resolves with `R` on success, re-raises via `err:raise()` on failure, and reflects cancellation, allowing threads to compose directly with `async.all_*`, `async.any_*`, `async.race_*`, and `async.join*`:
+  - **Terminal timing:** The proxy publishes terminal status and invokes terminal listeners only after the child finishes cleanup **and** its OS thread is joined (even if cancelled while `ready` or unwinding). Release shared native state only after `join()` returns or the proxy becomes terminal.
+  - **Proxy cancellation:** Cancelling the proxy forwards its first cancellation reason (or `simple("cancelled")` if the proxy body failed without cancellation) to `Thread:cancel` and waits for the OS join. A first explicit `cancel` on an unfinished proxy—even after the child's body returned while waiting for the OS join—takes normal Task cancellation precedence over pending success or failure.
+  - **OS join failure:** If the OS join fails during proxy retirement, `async.loop()` raises `async.OperationError` with operation `"async.native_retirement.retire"`, keeping the proxy nonterminal and ownership intact; calling `async.loop()` again retries the join. If proxy creation itself fails (including a failed immediate join of an already-finished child), no Task is exposed and `Thread` keeps ownership of the worker and unjoined handle.
+  - **State close:** Closing the owning Lua state unwinds unfinished proxies and forwards their cancellation reason (or `simple("async Runtime abandoned at Lua state close")`) to `Thread:cancel`, cancelling running proxy workers and `Group` members without blocking for their OS joins.
+- **Finalized or unobserved handles:** Calling `join()` or `cancel()` on a finalized `Thread` handle raises `"thread handle was finalized"` (`status()` returns a cached status if available or raises the same error). If a standalone `Thread` fails with an uncaught error and is never observed (`status()` after completion, `join()`, `task()`, or `Group`), its formatted error and traceback are written to `stderr` when collected. Dropping an unjoined handle detaches its OS thread as best-effort reclamation, not as retirement evidence.
+
+## Thread groups
+
+```text
 record Group
 
 function group(limit: integer?, propagate_errors: boolean?): Group
@@ -109,424 +215,19 @@ function Group:cancel(reason: async.CancellationReason<|value|>?)
 function Group:wait(): {Error}
 ```
 
-## Cross-thread channels
+`thread.group(limit?, propagate_errors?)` creates a `Group` that coordinates a set of worker threads:
 
-`thread.channel<|T|>(capacity?)` allocates a thread-safe bounded FIFO channel
-and returns its initial `(Sender<|T|>, Receiver<|T|>)` endpoint pair.
-
-- `capacity` defaults to `1` when omitted or `nil`. Passing `capacity <= 0`
-  raises `"channel capacity must be positive"`.
-- Every message is serialized at `send` / `try_send` time into a native packet
-  and reconstructed in the receiving state without sharing GC objects. Any
-  value accepted by [transfer values](async-io.md#transfer-values) may be sent,
-  including primitives, strings, public records and unions of transferable
-  fields, closures with transferable captures, and records implementing
-  `to_transfer_payload` / `from_transfer_payload` (including `Sender<|T|>` and
-  `Receiver<|T|>` themselves, either at the top level or nested inside public
-  records and unions). Top-level `Array` and `Map` values are not directly
-  transferable; wrap an `Array` in a public `record` or `union` to send it across
-  threads.
-
-### Sending and receiving
-
-- `Sender:send(message)` serializes `message` first (raising before touching the
-  channel if `message` is not transferable). If the channel is closed, it raises
-  `"channel is closed"`. If the buffer has space, it enqueues immediately and
-  wakes one waiting receiver if present. If the buffer is full, it suspends the
-  calling `async.Task` in the channel's FIFO send-waiter queue until a receiver
-  frees a slot or the channel closes. A wakeup does not pre-reserve a buffer
-  slot or message for the woken Task: the resumed Task retries admission and may
-  race other senders or receivers on the shared channel.
-- `Sender:try_send(message)` serializes `message` first, raises
-  `"channel is closed"` if the channel is closed, returns `true` if space was
-  available immediately, and returns `false` without suspending (and disposes the
-  serialized packet) if the buffer is full.
-- `Receiver:receive()` dequeues the oldest message immediately if the buffer is
-  non-empty (waking one blocked sender if present), or suspends the calling
-  `async.Task` until a message arrives or the channel closes and drains. Once
-  closed and drained, `Receiver:receive()` raises `"channel is closed"`.
-- `Receiver:receive_result()` behaves like `receive()`, but returns
-  `ReceiveResult.message(msg)` on delivery and `ReceiveResult.closed()` instead
-  of raising when the channel is closed and drained.
-- `Receiver:try_receive()` never suspends: it returns `(true, msg)` if a
-  buffered item was available immediately, or `(false, nil)` if the buffer is
-  empty (whether open or closed).
-- `Receiver:incoming()` returns a generic-`for` iterator triple that yields
-  `(true, message)` in FIFO order, then `(nil, nil)` once the channel is closed
-  and drained. The first result controls iteration independently of the
-  message, so nil and false remain ordinary payloads. Discard that continuation
-  with `_` and mark the payload binding `?` to preserve a delivered nil:
-
-```text
-for _, msg? in rx:incoming() do
-  process(msg)
-end
-```
-
-For a nonnullable message type, an ordinary payload binding such as
-`for _, job in rx:incoming() do` forces the optional iterator result to that
-required message type.
-
-A Task blocked in `send`, `receive`, `receive_result`, or `incoming` suspends
-through the Runtime's shared
-[external wake bridge](async-io.md#external-waits); other Tasks in its state
-keep running. Cancelling the Task removes its waiter from the channel before
-`Task:cancel` returns.
-
-The channel links a waiter that lives on the blocked Task's coroutine stack. If
-the Lua state closes while the Task is still blocked, the state withdraws that
-waiter before it releases the stack, and the channel stays alive until then
-even if every endpoint of the closing state is already gone. Clones held by
-other states or threads keep working: the blocked Task never receives or sends,
-and the channel closes as usual once its last sender or receiver is released.
-The blocked Task does not finish, but it is unwound: its `defer` blocks run
-inside a finalizer, where they cannot await. Cancel and join such Tasks and
-drain their Runtime before closing the state when their cleanup needs to wait
-([closing a state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)).
-
-### Closing, cloning, and transferring endpoints
-
-- `Sender:close()` marks the shared channel closed (`is_closed() == true`) for
-  all `Sender` and `Receiver` clones while retaining any already-buffered
-  messages so receivers can drain them. All currently blocked senders are woken
-  and raise `"channel is closed"`, and all blocked receivers are woken once the
-  buffer is empty.
-- `Receiver:close()` marks the shared channel closed (`is_closed() == true`) for
-  all `Sender` and `Receiver` clones, immediately discards all unread messages
-  in the ring buffer, and wakes all blocked senders and receivers.
-- Both `Sender:clone()` and `Receiver:clone()` create a new local endpoint
-  handle sharing the same underlying channel and increment the channel's active
-  sender or receiver count.
-- Dropping and garbage-collecting a single `Sender` or `Receiver` clone releases
-  only that handle's reference. Only when **all** active `Sender` handles across
-  all threads have been garbage-collected does the channel automatically close
-  from the sender side (preserving buffered messages for receivers). Likewise,
-  only when **all** active `Receiver` handles have been garbage-collected does
-  the channel automatically close from the receiver side and flush unread
-  buffered messages. Unread messages flushed by `Receiver:close()` or finalizer
-  cleanup release any retained nested `Sender` or `Receiver` endpoints through
-  [`transfer.discard_message`](standard-library-transfer.md#native-message-packets)
-  in C without entering Lua, loading modules, invoking user decoders, or
-  requiring an active Runtime, including after the originating `lua_State` has
-  closed.
-- Packet attachments count as live native endpoints even while unread in a
-  channel or `async.Receiver` slot. Native reference cycles are not collected by
-  Lua GC: for example, enqueueing a channel's own `Receiver` can keep its
-  receiver count nonzero after every public wrapper is dropped. Retain a
-  reachable receiver and call `Receiver:close()` to drain and break such cycles
-  before dropping the last application handle. `Sender:close()` alone preserves
-  the unread packets.
-- Every endpoint reference has exactly one owner: a live `Sender` or `Receiver`
-  wrapper, or an undelivered packet that carries it. Decoding the packet moves
-  the reference to a new wrapper, and disposing of the packet releases it.
-  `Sender:close()` and `Receiver:close()` change the channel's state but release
-  no reference; a wrapper's reference is released when the wrapper is
-  collected.
-- Endpoints transfer as
-  [packet-scoped resource attachments](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes):
-  - An endpoint can be sent at the packet root, nested in public records,
-    unions, or their Array fields, captured by a closure, or converted with
-    `TransferValue.from_value` and `to_value` inside a packet operation. Each
-    occurrence retains its own reference and is encoded as a four-byte
-    little-endian packet-local slot index; the sender's handle stays valid.
-    `titan.transfer` encodes and claims endpoints directly, without calling
-    their hook methods.
-  - `Sender:to_transfer_payload()` and `Receiver:to_transfer_payload()` attach
-    the endpoint with `transfer.attach_resource`, using the public C-ABI
-    `channel_retain_{sender,receiver}_native` and
-    `channel_release_{sender,receiver}_native` callbacks, and return the
-    slot-index bytes. A custom hook of a record that keeps an endpoint in a
-    private field can call them to embed the endpoint in its own payload.
-  - Decoding an endpoint, directly or through
-    `Sender.from_transfer_payload(payload)` or
-    `Receiver.from_transfer_payload(payload)`, creates the destination wrapper
-    and registers its finalizer before claiming the slot. Once the claim
-    succeeds, the wrapper owns the endpoint even if decoding a later field of
-    the same packet fails.
-  - A channel created inside a worker thread and returned through
-    `Thread:join()` or `Thread:task()` survives the close of the worker's state:
-    the undelivered result packet owns the endpoint references until the parent
-    reconstructs the result.
-  - Only the current execution's exact top encode or decode scope, opened by
-    `transfer.encode_message` or `transfer.decode_message`, authorizes
-    attachment and claim. Endpoints can therefore cross `Sender:send`,
-    `Sender:try_send`, `thread.spawn*`, `Group:spawn*`, and
-    [`async.Receiver`](async-io.md#cross-state-receivers) (`async.send` /
-    `Receiver:wait()`), as well as public records, unions, Array fields inside
-    transferable roots, custom hooks, and closure captures within a packet.
-  - `protobuf.serialize`, `transfer.TransferValue.from_value`, and
-    `transfer.TransferValue:to_value()` do not create packet scopes. Outside the
-    current execution's matching top scope, endpoint conversion raises
-    `"transfer: resource attachment requires an encode scope"` or
-    `"transfer: resource claim requires a decode scope"`. Opaque hooks and
-    closure-policy conversion within such a scope reuse its packet, but the
-    index bytes and policies they produce own no attachments. Independent
-    `lua.Lua:run` and `run_async` copy those bytes over a separate carrier
-    without the packet's resource table, so they cannot move endpoints. Other
-    Tasks and separately resumed child Coroutines do not inherit a caller's
-    packet authority. Custom hooks remain synchronous and nonyielding.
-  - Duplicate occurrences of the same `Sender` or `Receiver` in one packet attach
-    and claim separate slot entries. Claiming with a wrong byte width, an
-    out-of-bounds or `0xffffffff` index, a mismatched endpoint kind (`Sender` vs
-    `Receiver`), or an already-claimed slot raises before touching any native
-    pointer.
-    These are current-packet checks, not global anti-replay tokens: the same
-    index bytes may select a different valid slot in another packet.
-  - An in-flight packet keeps its retained channel references alive even if the
-    sender drops its local handle before the receiver decodes the message.
-    Encoding failures after earlier attachments, failed or cancelled sends,
-    unread messages flushed by `Receiver:close()` or last-`Receiver`
-    finalization, overwritten or closed `async.Receiver` slots, and unconsumed
-    results, entry closures, or cancellation reasons of abandoned `Thread`
-    handles automatically release their unclaimed retains via
-    `transfer.discard_message`. If a composite decode fails after some endpoints
-    were already claimed into finalized wrappers, `decode_message` releases only
-    the remaining unclaimed entries while the adopted wrappers stay owned by the
-    destination collector.
-  - **Manual-handoff resources are not auto-disposed by channel discard**:
-    native packet discard releases only resources registered in the packet's
-    resource table (in the standard library, only `Sender` and `Receiver`
-    endpoints) and never runs `from_transfer_payload` decoders. Sending an
-    `http.Exchange`, `ssl.Connection`, `net.Connection`, `websocket.Connection`,
-    or custom manual resource over a channel still requires the caller to
-    recover or explicitly dispose rejected payloads through that type's actual
-    API and to drain and dispose unread payloads before `Receiver:close()`.
-    See the
-    [manual-handoff inventory](standard-library-transfer.md#manual-handoff-api-inventory);
-    not every native-backed type exports `discard_transfer_payload`.
-
-## Standalone OS threads
-
-`thread.spawn` and its fixed-arity companions `spawn_one` through `spawn_five`
-create an isolated Lua/Titan state, snapshot the entry closure and its arguments
-synchronously on the caller thread, and launch a dedicated OS worker thread. Any
-non-transferable capture or argument raises immediately in the caller before the
-OS thread starts.
-
-Inside the worker OS thread, whose `long double` arithmetic has the main
-thread's precision (on Windows the thread first restores x87 precision; other
-targets need no reset; see [worker threads](windows-build.md#long-double-on-worker-threads)):
-
-1. `titan.thread` is loaded into the child state.
-2. An asynchronous `titan.async` Runtime is started with the reconstructed
-   entry closure as its root `Task`, and driven to completion with
-   `async.loop()`.
-3. The worker can freely use `timer`, `fs`, `net`, `ssl`, `http`, `sqlite3`,
-   `thread.channel`, or nested `thread.spawn` / `thread.group` calls on its own
-   event loop.
-4. When the root `Task` returns `val`, its return value is serialized and
-   recorded as `ThreadStatus.succeeded(val)`. If the root `Task` returns
-   normally while other child tasks or active event-loop handles remain
-   scheduled on the worker's Runtime, `async.loop()` continues running until all
-   active work completes before the OS thread exits.
-5. If the root `Task` raises an uncaught error or returns a non-transferable
-   value, the failure and child traceback are recorded as
-   `ThreadStatus.failed(Error(err, traceback))` (degrading a non-transferable
-   error value to its rendered string representation while preserving
-   `Error.traceback`) and `async.request_exit(0)` stops the child event loop
-   cleanly.
-6. A root `Task` that never entered its body is still reported from its actual
-   outcome: when cancellation is accepted before the first statement, the worker
-   records `ThreadStatus.cancelled(reason)` with the accepted reason, and a
-   checked entry failure is recorded as the original failure. A pre-start
-   cancellation is not reported as a generic failed thread.
-
-### Observing, joining, and cancelling a `Thread`
-
-- `Thread:status()` returns a nonblocking snapshot of the thread's logical
-  outcome: `running()`, `succeeded(val)`, `failed(err)`, or `cancelled(reason)`.
-  It never joins and never waits. A terminal snapshot can appear before the
-  worker's OS thread has finished exiting (its final cleanup and thread-local
-  destructors may still be running), so it is not evidence that the OS thread
-  has retired.
-- `Thread:join()` requires a running Task. It suspends that Task until the worker
-  has finished and its OS thread has actually been joined, then returns the
-  terminal `ThreadStatus<|R|>` without raising on `failed` or `cancelled`.
-  Every return path performs the real join: an already-finished worker, an
-  outcome that `status()` cached earlier, and a fresh suspension all end in it.
-  A later `join()` of the same handle returns the same outcome without joining
-  again. `join()` first checks for pending cancellation or Runtime shutdown, so
-  a cancelled joiner observes its own cancellation. The OS join itself does not
-  yield, and the owning cooperative Runtime serializes joins of one handle.
-  A worker publishes its outcome before its OS thread finishes exiting. A
-  `join()` that starts at that point blocks until the thread actually exits;
-  no bound on that final tail is promised.
-  If the OS join fails, `join()` raises `async.OperationError` with operation
-  `"thread.join"` instead of returning a status. The thread stays joinable, so
-  a later `join()` can retry. A terminal `status()` is never a substitute for
-  joining. If the Lua state closes while a Task is suspended in `join()`, the
-  state withdraws that join before it releases the Task's stack, so a worker
-  that finishes later finds nothing to wake; the suspended `join()` never
-  returns. Withdrawing the join does not cancel the thread.
-- `Thread:cancel(reason?)` asks the worker's root `Task` to cancel cooperatively
-  and wakes the child's event loop; the root's `defer` and cleanup handlers run
-  normally. Child Tasks started inside the worker are not cancelled
-  automatically: the root `Task` must cancel them in its own `defer` or cleanup
-  handlers if they should stop. The first request from the host wins. Later
-  calls, and calls on an already-finished thread, do nothing. Omitting `reason`
-  or passing `nil` requests `CancellationReason.simple("cancelled")`.
-  - The reason is transferred like any other thread message: `simple(text)`
-    carries the text and `complex(value)` carries the value, so empty text,
-    `nil`, `false`, and packet-scoped endpoint payloads arrive unchanged.
-  - If the reason cannot be transferred, the child receives
-    `CancellationReason.simple("cancelled")` instead. No rendered text is
-    promised to reach it. The host-side `Thread:task()` proxy still retains the
-    exact first reason.
-  - The child's own cancellation outcome degrades the same way. If the child's
-    reason cannot be transferred, `status()`, `join()`, and the `Thread:task()`
-    proxy all report `CancellationReason.simple("cancelled")` rather than the
-    child's real payload or any rendered text.
-  - The child root's own first cancellation reason decides its terminal status.
-    A host reason that arrives later, even while an earlier self-cancellation is
-    still unwinding, does not replace it. The host Task's original reason or
-    error is preserved separately.
-- `Thread:task()` creates the thread's `async.Task<|R, value|>` proxy on first
-  use and returns the same proxy afterwards. The proxy runs in the calling state
-  and marks the `Thread` observed. It resolves with `R` when the thread
-  succeeds, raises the child's error through `err:raise()` when the thread
-  fails, and is cancelled with `reason` when the thread was cancelled. Compose
-  it with the `async` combinators like any other Task.
-  - **Terminal timing.** The proxy publishes its terminal status, runs its
-    terminal listeners, and delivers its result only after the child has
-    finished its own cleanup and its OS thread has been joined. This holds when
-    the proxy is cancelled while still `ready`, when it is cancelled while the
-    child unwinds, and when the proxy fails before its body or cleanup starts.
-    A terminal proxy therefore means the OS thread has been joined; release
-    state shared with the thread only after that, or after `join()` returns.
-  - **Cancelling the proxy.** Cancelling the proxy cancels the thread. The
-    proxy passes its first cancellation reason to `Thread:cancel`, or the
-    default `CancellationReason.simple("cancelled")` when the proxy body failed
-    without any cancellation, and then waits for the child to finish and be
-    joined. A cancellation request is not by itself evidence that the child has
-    retired: until the proxy is terminal or `join()` returns, keep every
-    resource the thread may still use.
-  - **Which reason wins.** The proxy keeps the first cancellation reason it
-    accepts, and the child keeps a cancellation reason it already accepted. A
-    later cancel request replaces neither, and cancelling never substitutes for
-    the OS join.
-    A first explicit `cancel` on the proxy that arrives before the
-    proxy is terminal takes precedence over a pending success or error, as for
-    any unfinished Task. That includes the interval after the child's body has
-    finished and only the OS join remains. The terminal status still follows the
-    OS join.
-  - **Fallback cancellation.** If forwarding the reason was missed or failed,
-    the thread library may ask the child to cancel without supplying a reason.
-    It does so only when no cancellation was already accepted by the child and
-    the child has no recorded outcome, and never merely because the proxy body
-    is still running normally.
-  - **OS join failure.** If the OS join fails while the proxy waits for the
-    child, `async.loop()` raises an `async.OperationError` with operation
-    `"async.native_retirement.retire"`. That error is not a Task outcome: the
-    proxy stays nonterminal and keeps ownership of the thread, and calling
-    `async.loop()` again retries the join without any further setup.
-  - **Proxy creation failure.** If the proxy cannot be created, no Task is
-    exposed and the `Thread` keeps ownership of its worker and its unjoined
-    OS-thread handle. The worker is not necessarily still running: when the
-    child had already finished but the immediate attempt to join it did not
-    complete, the failure leaves a finished worker whose OS thread is still
-    unjoined.
-  - **State close.** If the owning Lua state closes while the proxy is
-    unfinished, the proxy is [unwound](async-io.md#closing-a-lua-state-with-an-active-runtime)
-    and its cleanup forwards its first cancellation reason, or
-    `CancellationReason.simple("async Runtime abandoned at Lua state close")`,
-    to `Thread:cancel`. Closing a state therefore cancels the threads of its
-    unfinished proxies, including every running member of a `thread.Group`.
-    The cleanup cannot wait for the join during the close, so the proxy stays
-    nonterminal.
-
-  See the
-  [implementation wiring](../implementation/thread-library.md#join-proxy-retirement-and-the-native-terminal-barrier)
-  for the mechanism.
-- A `Thread` handle can be reached after its finalizer has run, by cleanup that
-  runs at state close or by a finalizer that resurrects it. On such a handle,
-  `join()` and `cancel()` raise `thread handle was finalized`, and `status()`
-  returns a status it cached earlier or otherwise raises the same error.
-- If a standalone `Thread` fails with an uncaught error and nobody observes it
-  (through `status()` after completion, `join()`, or `task()`) before its handle
-  is garbage-collected, the formatted error and traceback are written to
-  `stderr`.
-- Dropping a `Thread` handle is not retirement. When the last reference to the
-  thread's native state goes away without a recorded join, whether or not the
-  outcome was observed, any OS-thread handle still owned is detached (POSIX
-  self-detach; Windows closes the real handle). Detaching is best-effort
-  reclamation: it never counts as a join or as evidence that the child retired,
-  and no status or join outcome is reported for it. The `stderr` diagnostic
-  above still happens at that same moment for an unobserved failure.
-
-## Thread groups
-
-`thread.group(limit?, propagate_errors?)` creates a `Group` that coordinates a
-dynamic set of worker threads:
-
-- `limit`: optional maximum number of concurrently running OS threads in the
-  group. When omitted or `nil`, concurrency is unbounded. Passing `limit <= 0`
-  raises `"group limit must be positive"`.
-- `propagate_errors`: when `true`, the first uncaught error from any thread in
-  the group automatically cancels the group with
-  `CancellationReason.simple("group thread failed")`, cancelling all currently
-  running sibling threads and waking any suspended `spawn*` callers. Defaults to
-  `false`.
-- `Group:spawn`, `spawn_one`, `spawn_two`, and `spawn_three` start a worker
-  closure in the group. When `limit` is set and that many workers are already
-  running, the call suspends the calling `async.Task` in a first-in, first-out
-  admission queue until a running worker finishes and releases its slot or the
-  group is cancelled. Once `Group:cancel` has been called, directly or through
-  `propagate_errors`, queued and later `spawn*` calls return immediately without
-  starting a thread. Cancelling a Task while its `spawn*` call waits in the
-  queue withdraws the call, which starts no thread. A slot already granted to
-  it passes to the next queued call, or is released.
-- A worker keeps its slot until it has fully retired. The slot is released when
-  the member's `Thread:task()` proxy becomes terminal, which includes the
-  actual OS join. A group member is exactly one memoized `Thread:task()` proxy
-  plus one terminal listener; there is no extra observer Task. Retiring a member
-  removes it from the group and arranges the release of its slot before
-  projecting its status or error, so an error raised by a listener cannot strand
-  admission or completion accounting.
-- Threads started in a `Group` count as observed: `Group:wait()` collects their
-  uncaught `Error` instead of leaving it to the `stderr` report. Because the
-  group uses the standard proxy, that proxy's usual uncaught-Task failure
-  diagnostic for a failing member still appears on `stderr`. It is intentionally
-  not suppressed.
-- `Group:cancel(reason?)` marks the group cancelled, wakes every Task waiting
-  for an admission slot, and cancels all currently active threads in the group.
-  Omitting `reason` or passing `nil` selects
-  `CancellationReason.simple("cancelled")`. The first group reason wins.
-- `Group:wait()` makes one observation pass over the admitted members, then
-  suspends until every active thread and admitted spawn has finished. It
-  returns the uncaught `Error` values in completion order; cancelled threads add
-  nothing to the Array. If the child itself did not fail but its host-side proxy
-  failed during ordinary startup or cleanup, the proxy's error and traceback are
-  collected instead, with no duplicate record.
+- **`limit`:** Optional maximum number of concurrently active threads. Omitting it or passing `nil` leaves concurrency unbounded; `limit <= 0` raises `"group limit must be positive"`.
+- **`propagate_errors`:** When `true`, the first uncaught worker error cancels the group with `CancellationReason.simple("group thread failed")`, cancelling running siblings and waking suspended `spawn*` calls. Defaults to `false`.
+- **`Group:spawn` .. `Group:spawn_three`:** Start a worker in the group. When `limit` active threads are running, the call suspends the calling `async.Task` in a FIFO admission queue until a worker retires (including its OS join) or the group is cancelled. After `Group:cancel` (direct or via `propagate_errors`), queued and subsequent `spawn*` calls return immediately without starting threads. Cancelling a Task waiting in the admission queue withdraws that call and passes any granted slot to the next waiter.
+- **`Group:cancel(reason?)`:** Marks the group cancelled (first reason wins; omitted or `nil` uses `CancellationReason.simple("cancelled")`), wakes queued `spawn*` waiters, and cancels all active threads.
+- **`Group:wait()`:** Makes one observation pass over admitted members and suspends until every active thread and admitted spawn finishes, returning all uncaught `Error` records in completion order (cancelled threads add nothing). Group members count as observed (`Group:wait()` collects their errors, while the underlying `Thread:task()` proxy's ordinary uncaught-Task diagnostic still writes to `stderr`).
 
 ### Group failure and retry boundaries
 
-Failures while starting or retiring a member fall into four cases:
+- **Failure before the worker starts:** Preparation or OS-thread creation errors raise from `Group:spawn*`, returning the reserved slot with no worker retained.
+- **Setup failure after the worker starts:** If creating the member's proxy or installing its terminal listener (or allocating the listener remover) fails, the admitted `Thread` and its slot remain owned by the group without respawning; calling `Group:wait()` retries setup or retires an already-terminal proxy idempotently.
+- **OS join failure for a running member:** Escapes `async.loop()` as `async.OperationError` (`"async.native_retirement.retire"`), keeping the member, `Thread`, and slot in place so calling `async.loop()` again retries the join.
+- **Immediate join failure for an already-finished child:** `Group:spawn*` raises that error while keeping the `Thread` and slot admitted; a subsequent `Group:wait()` retries setup once.
 
-- **Failure before the worker exists.** A preparation or thread-creation failure
-  raises from `Group:spawn*`. No worker was started, the reserved slot is
-  returned, and nothing is retained.
-- **Failure setting up the member after the worker exists.** If creating the
-  proxy or installing its listener fails, the same admitted child and slot stay
-  in the group and an explicit `Group:wait()` retries the setup. The group never
-  respawns an admitted child. When `Group:wait()` finds the member's proxy
-  already terminal, it retires the member immediately, because a terminal Task
-  does not invoke new listeners. The same recovery applies if the listener was
-  installed but allocating its returned remover failed: the member and its proxy
-  stay owned, and the next `Group:wait()` either retires the member or installs
-  another listener. Retirement is idempotent, so an earlier listener and a later
-  one cannot release the same member twice.
-- **OS join failure for a running member.** The failure escapes `async.loop()` as
-  the same `async.OperationError` described for
-  [`Thread:task()`](#observing-joining-and-cancelling-a-thread). The member,
-  its `Thread`, and its slot stay in place, and calling `async.loop()` again
-  retries the join.
-- **Child already finished before its proxy is created.** The immediate attempt
-  to join it can fail before any Task exists. `Group:spawn*` then raises that
-  original error while the `Thread` and its slot stay admitted, and an explicit
-  later `Group:wait()` makes one observation pass and retries the setup once.
-
-None of these cases spins, replaces the proxy, or grants the slot early.
-
-On Runtime shutdown, each member's proxy is cancelled like any other Task. That
-cancellation is forwarded to the worker, and the member is retired and its slot
-released only after the actual OS join.
+On Runtime shutdown, every active member proxy is cancelled like any other Task, forwarding cancellation to the worker and releasing its slot only after the OS join completes.

@@ -12,7 +12,7 @@ bindings. Plain `-c` without `--incremental` forces a fresh compile of every
 selected source module.
 
 The user-facing contract, `-v` diagnostics, and build-tool examples are in
-[Incremental and separate compilation](../language/incremental-compilation.md).
+[Incremental and separate compilation](../language/toolchain.md#incremental-and-separate-compilation).
 Whole-graph planning, parallel worker scheduling, `.titan-build.lock`
 coordination, `--c-source` nodes, final-link certificates, and `--test-dir`
 discovery live in [Compiler-owned build coordinator](build-coordinator.md).
@@ -557,8 +557,7 @@ reports the exact component:
    to the hashed details as `target_identity`, not only to its memo key, so
    every browser object certificate depends on the complete descriptor
    (tools, record, flags, include roots, profile, and policies). A host
-   toolchain descriptor has no `target_identity`, and its details keep their
-   original fields, so native certificates are unchanged.
+   toolchain descriptor omits `target_identity` from the hashed details.
 
    Executable admission follows the operating system's own choice. On POSIX,
    a name containing `/` is an explicit path and is checked directly, while

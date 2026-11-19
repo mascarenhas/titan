@@ -21,8 +21,8 @@ publication protocol. Archive metadata/resolution, flattening, paired
 transaction, and three-way validation are in [Static compiled
 modules](static-compiled-modules.md). Folder-source assembly remains a
 property of one logical module; see [Folder modules](folder-modules.md). The
-language-level packaging rules are in [Multi-module
-libraries](../language/multi-module-libraries.md).
+language-level packaging rules are in [Shared, static, and multi-module
+providers](../language/toolchain.md#shared-static-and-multi-module-providers).
 
 ## Provider selection for a library invocation
 

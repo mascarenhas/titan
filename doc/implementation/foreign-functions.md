@@ -164,7 +164,7 @@ former check on casts between Titan and C values therefore has no case left
 and is gone, together with the tables of forbidden statement and expression
 tags.
 
-The allowed body is intentionally unsafe C (see [The C FFI](../language/ffi.md#the-c-ffi)). Pointer dereference, indexing,
+The allowed body is intentionally unsafe C (see [The C FFI](../language/ffi.md)). Pointer dereference, indexing,
 function-pointer calls, arithmetic, and casts do not gain the NULL, bounds,
 range, ownership, or Lua-error checks used by ordinary Titan-to-C lowering. A
 literal zero step is rejected, but a dynamic zero step is the trusted
@@ -567,8 +567,8 @@ terminal-callback ownership are in the
 its own parser-owner protocol. High-level fs/net/os/timer modules use ordinary
 Titan callbacks through the compiled UV interface and public async
 registration APIs, never this raw bridge. This trampoline is the model for
-rules 1 and 3 of the style guide's
-[native-binding rules](../style-guide.md#write-native-bindings-titan-first),
+rules 1 and 3 of the
+[standard-library native-binding rules](standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do),
 which every new standard-library or runtime C callback into Titan follows.
 
 ## Native names and ABI

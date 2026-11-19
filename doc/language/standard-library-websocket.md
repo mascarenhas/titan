@@ -1,11 +1,12 @@
-# WebSocket messages
+# WebSocket standard library
 
-Import `websocket` for RFC 6455 WebSocket version 13 over HTTP/1.1. Calls look
-blocking and suspend their current Task. Both `ws` and verified `wss` clients
-are supported. On native targets the server accepts inside an ordinary
-`http.Handler`, including handlers passed to `http.listen_tls`. On the browser
-target the client runs over the host's `WebSocket` and the server is absent
-(see [on the browser](#on-the-browser)).
+The `websocket` module provides message-oriented RFC 6455 (version 13) WebSocket clients over `ws`/`wss` and HTTP/1.1 server upgrades natively, and a host-`WebSocket` client on the browser target. Import it in Titan with `local websocket = import "websocket"` or load it in Lua with `require "titan.websocket"`.
+
+**Target availability:** Native & Browser (client API on both targets; `accept`, `AcceptOptions`, `Connection:ping`, and connection transfer are native-only — see [On the browser](#on-the-browser)).
+
+## Examples
+
+### HTTP upgrade echo server
 
 ```titan
 local http = import "http"
@@ -16,339 +17,156 @@ local function handler(request: http.Request, response: http.Response)
     response:set_status(404)
     return
   end
-  local connection = websocket.accept(request, response)
-  defer connection:close()
+  local conn = websocket.accept(request, response)
+  defer conn:close()
   while true do
-    local kind?, message? = connection:read()
+    local kind?, message? = conn:read()
     if kind == nil then break end
-    connection:write(kind, message)
+    conn:write(kind, message)
   end
 end
 
-function main(_args: {string}): integer
-  local server = http.listen("127.0.0.1", handler, 8080, nil, 10000)
+function serve_echo(host: string, port: integer)
+  local server = http.listen(host, handler, port, nil, 10000)
   defer server:close()
   server:serve()
-  return 0
 end
 ```
 
-Authenticate and authorize the route before acceptance. On success HTTP
-transfers the stream and prefetched bytes to the WebSocket connection. The
-handler must immediately defer close or establish another owned Task. The
-handler may then return; HTTP does not close the transferred stream. Closing
-the HTTP listener stops accepts and does not close transferred sessions.
-
-For a TLS server, use the same handler with
-`http.listen_tls(host, certificate_file, handler, private_key_file, port,
-backlog, idle_timeout)`. Use a certificate for the client-visible identity.
-Server TLS and request-header acquisition have HTTP's existing timeout policy;
-`accept` has its own response-output budget after HTTP supplies headers.
+### Verified client exchange
 
 ```titan
 local websocket = import "websocket"
 
-function main(args: {string}): integer
-  local connection = websocket.connect("wss://localhost:8443/echo",
-    websocket.DialOptions { ca_file = args[1] })
-  defer connection:close()
-  connection:write(websocket.TEXT, "hello")
-  local kind?, message? = connection:read()
-  if kind == nil or message ~= "hello" then return 1 end
-  connection:shutdown()
-  return 0
+function echo_once(target_url: string, ca_file: string?,
+                   payload: string): string?
+  local conn = websocket.connect(target_url,
+    websocket.DialOptions { ca_file = ca_file })
+  defer conn:close()
+  conn:write(websocket.TEXT, payload)
+  local kind?, reply? = conn:read()
+  if kind == nil then return nil end
+  conn:shutdown()
+  return reply
 end
 ```
 
-An explicit CA file replaces default OpenSSL trust paths, following `ssl`.
-Verification always includes the original URL hostname, even when dialing a
-resolved numeric address. There is no insecure mode or automatic redirect.
+## Core concepts
+
+All WebSocket operations run inside [`async.Task`](async-io.md#scheduling-and-driving-tasks)s and suspend only the current Task.
+
+- Authenticate and authorize routes in your `http.Handler` before calling `websocket.accept` (which works identically under `http.listen` and `http.listen_tls`). Once accepted, HTTP transfers stream ownership to the WebSocket session: immediately `defer conn:close()` (or transfer ownership to another Task). Closing the HTTP `Server` stops new accepts without closing upgraded WebSocket sessions.
+- `connect` always verifies TLS certificates against the original URL hostname (even when dialing a resolved IP); `ca_file` replaces OpenSSL's default trust roots, matching [`ssl`](standard-library-ssl.md#verified-client-connections). There is no insecure TLS mode or automatic HTTP redirect.
+- One application reader and one application writer may progress concurrently on both `ws` and `wss`. Duplicate concurrent readers, writers, `ping` calls, or `shutdown` calls raise immediately.
 
 ## Public interface
 
 ```text
-union MessageType: text(), binary()
-const TEXT, BINARY: MessageType
-record Connection -- opaque; construct with connect or accept
+union MessageType
+  text() | binary()
+end
+const TEXT: MessageType
+const BINARY: MessageType
 
-DialOptions(headers: http.Headers?, ca_file: string?,
-            subprotocols: ({string})?, read_limit: integer?,
-            handshake_timeout: integer?)
-AcceptOptions(subprotocols: ({string})?, allowed_origins: ({string})?,
-              read_limit: integer?, handshake_timeout: integer?)
+record Connection
 
-connect(source_url: string, options: DialOptions?): Connection
-accept(request: http.Request, response: http.Response,
-       options: AcceptOptions?): Connection
-Connection:read(): (MessageType?, string?)
-Connection:write(kind: MessageType, data: string)
-Connection:ping(timeout_ms: integer?)
-Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
-Connection:close()
-Connection:to_transfer_payload(): string
-Connection.from_transfer_payload(payload: string): Connection
-Connection.discard_transfer_payload(payload: string): integer
-Connection:subprotocol(): string?
-Connection:close_status(): (integer?, string?)
+record DialOptions
+function DialOptions.new(headers: http.Headers?, ca_file: string?,
+                         subprotocols: ({string})?, read_limit: integer?,
+                         handshake_timeout: integer?): DialOptions
+
+record AcceptOptions -- native only
+function AcceptOptions.new(subprotocols: ({string})?,
+                           allowed_origins: ({string})?,
+                           read_limit: integer?,
+                           handshake_timeout: integer?): AcceptOptions
+
+function connect(source_url: string, options: DialOptions?): Connection
+function accept(request: http.Request, response: http.Response,
+                options: AcceptOptions?): Connection -- native only
+
+function Connection:read(): (MessageType?, string?)
+function Connection:write(kind: MessageType, data: string)
+function Connection:ping(timeout_ms: integer?) -- native only
+function Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
+function Connection:close()
+function Connection:subprotocol(): string?
+function Connection:close_status(): (integer?, string?)
 ```
 
-On the browser target, `accept`, `AcceptOptions`, `Connection:ping`, and the
-three transfer hooks have no declarations.
-
-Option constructors validate positive limits/deadlines and copy headers and
-arrays. The incoming message limit defaults to **1 MiB**; choose a larger
-finite positive limit for a known workload. Opening defaults to **10 seconds**.
-Ping, shutdown and automatic control output default to **5 seconds**. Deadlines
-initiate abort and safe ownership retirement. Native DNS/connect/write callback
-retirement can extend return latency beyond the nominal deadline.
-
-`read` returns one complete text or binary message. Empty strings are messages.
-`(nil, nil)` means a valid peer Close was received and reciprocal closing
-completed. TCP EOF or TLS loss before a valid WebSocket Close is an abnormal
-error. `close_status` preserves the peer's actual code and reason. An empty
-Close has no code/reason; a code with no reason has an empty reason. Local
-abnormal closure never invents an on-wire 1006.
-
-One application reader and one application data writer can progress together,
-on plain or TLS streams. Duplicate readers, data writers, Ping waiters or
-shutdown operations fail clearly. Outgoing messages use data fragments of at
-most 16 KiB. Controls can be sent between frames; two data messages never
-interleave. Text is validated before emission; binary strings preserve all
-bytes, including NUL. Received UTF-8 is validated across chunks and fragments.
-
-## Transferring connections
-
-An idle open `Connection` implements
-`to_transfer_payload(): string` and
-`Connection.from_transfer_payload(payload: string): Connection`.
-Use `async.TransferValue.from_value(connection)` and decode its custom record
-policy with `packet:to_value()` in a state with an active async Runtime. The
-same-process handoff preserves the client/server role, selected subprotocol,
-read limit and unread WebSocket, HTTP upgrade and TCP/TLS bytes. If serializing
-the enclosing value fails after the child transport detached, the hook closes
-the detached transport and leaves the source terminal.
-
-Transfer rejects pending reader, writer, Ping, Pong, Close, shutdown or
-retirement work, and rejects a closing or terminal session. An operation remains
-pending until its public call finishes, including cancellation and deadline
-cleanup after internal work completes. Its transport must
-also satisfy the [TCP](standard-library-net.md#transferring-connections) and,
-for `wss`, [TLS](standard-library-ssl.md#transferring-connections) idle rules.
-The persistent Windows overlapped read normally makes an established session
-ineligible even between application operations; rejection leaves it usable.
-A server session inherits demand-driven reading when its HTTP listener selected
-`read_ahead(false)` before accepting it. Yield after its last completed I/O
-before encoding; all WebSocket and native operation guards still apply.
-
-Successful encoding closes the source facade before delivery without sending
-a WebSocket Close frame. The destination continues the existing protocol
-session. The payload is a manually owned, same-process capability: follow the
-[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules),
-adopting it exactly once or recovering it locally after rejected delivery. It is
-not suitable for storage or another process, and dropping it leaks the detached
-transport.
-
-`Connection.discard_transfer_payload(payload: string): integer` consumes an
-unadopted session payload without a Runtime by discarding its HTTP child
-transport. It returns the native close status. A close attempt consumes the
-payload even on an error; never adopt or discard the bytes again.
+- **Option defaults and validation:** `DialOptions` and `AcceptOptions` validate positive limits/deadlines and copy supplied headers and arrays. Defaults: **1 MiB** incoming `read_limit`, **10 seconds** `handshake_timeout`, and **5 seconds** for `ping`, `shutdown`, and automatic control output. Deadlines trigger abort and safe cleanup (native DNS/connect/write callback retirement may extend return latency slightly beyond the nominal deadline).
+- **Messages:** `read()` delivers one complete text or binary message (`""` is a valid message; binary preserves NUL bytes). `(nil, nil)` signals a valid peer Close after reciprocal handling completed; TCP EOF or TLS loss before a valid Close raises an abnormal error instead of returning `(nil, nil)`. `close_status()` returns the peer's Close `(code?, reason?)` (`(nil, nil)` for an empty Close; `(code, "")` for a code with no reason; local abnormal closure never synthesizes wire code `1006`).
+- **Writing & framing:** Outgoing messages fragment at up to 16 KiB per frame so control frames can interleave between data frames without interleaving two data messages. Text messages validate UTF-8 on both send and receive (across chunks and fragments).
 
 ## Reader duty, closing and cancellation
 
-`read` services Ping, matching Pong and Close while assembling data. Ping
-payloads are echoed exactly. Unsolicited Pong is ignored. There is no background
-reader Task or decoded-message queue.
-
-**`ping` requires a concurrent application reader.** It sends a fresh token and
-waits for the matching Pong. A write-only application must deliberately keep
-reading to service controls. A Ping deadline still applies if reading stops;
-expiry closes the session and raises a catchable timeout without cancelling
-the calling Task.
-
-`shutdown` defaults to code 1000 and empty reason. It stops new data writes,
-sends Close, and waits for peer Close until its deadline. An active reader
-keeps receive ownership until it returns one message or Close; on its release
-shutdown takes receive progress and discards subsequent data while servicing
-controls. New reads cannot steal that reservation. A partially completed
-writer stops at the next frame boundary and reports closing. Reasons must be
-valid UTF-8 and at most 123 bytes. Valid sent codes are 1000–1003, 1007–1014,
-and 3000–4999; servers cannot originate 1010. A server replying to a client
-1010 sends 1000. Reserved codes are rejected.
-
-`close` is immediate, idempotent resource retirement: it needs no peer
-cooperation, works with pending cancellation, and waits for accepted native
-ownership to retire. It sends no promised WebSocket/TLS graceful handshake.
-Use it in `defer`, even when also calling `shutdown`.
-
-Cancellation while waiting only for an admission/frame reservation detaches
-that reservation. Once transport I/O has been admitted or protocol bytes have
-been consumed/emitted, cancellation terminalizes the session. An idle admitted
-read follows this rule on both ws and wss. Shutdown cancellation is terminal
-once closing is committed. Cleanup aborts before draining accepted work and
-waits for operation scopes, never unrelated application Tasks.
+- **`read()` services control frames:** There is no background reader Task or decoded-message queue. `read()` echoes incoming Ping payloads, matches incoming Pong replies, and handles incoming Close frames while assembling data messages (unsolicited Pong is ignored).
+- **`ping(timeout_ms?)` requires a concurrent reader:** `ping` sends a fresh token and waits for `read()` to observe the matching Pong. A write-only application must keep a reader Task calling `read()`. If `timeout_ms` expires, `ping` closes the session and raises a catchable timeout `Error` without cancelling the calling Task.
+- **`shutdown(code?, reason?, timeout_ms?)`:** Defaults to code `1000` and reason `""`. It stops new data writes, sends a Close frame, and waits for the peer's Close up to `timeout_ms`. An active `read()` keeps receive ownership until it returns one message or Close, then hands receive progress to `shutdown` (which discards further data while servicing controls). Reasons must be valid UTF-8 and at most 123 bytes. Valid native codes are `1000..1003`, `1007..1014`, and `3000..4999` (servers cannot initiate `1010` and reply to a client `1010` with `1000`; reserved codes are rejected).
+- **`close()`:** Immediate, idempotent, cancellation-insensitive resource retirement without waiting for peer Close or TLS `close_notify`. Always use `defer conn:close()` even when also calling `shutdown()`.
+- **Cancellation:** Cancelling while waiting solely for admission detaches the reservation; once transport I/O has been admitted (including an idle `read()` on `ws` or `wss`) or protocol bytes have been consumed/emitted, cancellation aborts and terminalizes the session.
 
 ## Opening policy and errors
 
-Absent Origin is accepted for native clients. A browser Origin must be a single
-valid HTTP(S) origin matching the normalized request scheme, host and effective
-port, or an exact entry in `allowed_origins`. Literal `null`, malformed and
-multiple origins are denied. No wildcard or forwarded-header trust is
-implicit. Behind a proxy, configure the allowed public origins explicitly.
-Origin policy protects browser callers from cross-site access; it does not
-authenticate native clients.
-
-Subprotocol tokens are case-sensitive. The first server-preferred offered token
-wins; no intersection means no protocol. Header names and HTTP Upgrade/
-Connection tokens remain case-insensitive. Empty HTTP list elements in Upgrade
-and Connection are ignored within the opening header bound. Invalid or duplicate subprotocol tokens
-fail, and a client rejects a protocol it did not offer. Dial headers cannot
-override handshake/framing fields. Server response headers configured before
-acceptance are copied and checked for those reserved fields.
-
-For requests that reach `accept`, malformed openings receive 400, denied
-origins 403, and unsupported versions
-426 with `Sec-WebSocket-Version: 13`. Acceptance then raises `HandshakeError`.
-A rejection commits one response and prevents a default 200 or body drain.
-Invalid API options or already committed responses fail before protocol
-output. A failed rejection write preserves its transport error. HTTP applies its own
-validation before invoking the handler: upgrade-indicated requests with any
-`Expect` field receive 400 without interim output or a handler call; missing or
-duplicate or invalid Host, invalid request URLs, or unsupported HTTP versions on a completely parsed upgrade
-attempt receive 400 before the handler. Invalid HTTP syntax fails during
-request parsing. These paths
-do not call `accept` or raise a server-side `HandshakeError`.
-
 ```text
 record Error
-  const kind: string       -- protocol, utf8, limit, state, timeout, abnormal
+  const kind: string       -- "protocol", "utf8", "limit", "state", "timeout", "abnormal"
   const operation: string
   const message: string
   const close_code: integer?
 end
+function Error.new(kind: string, operation: string,
+                   message: string, close_code: integer?): Error
+
 record HandshakeError
   const message: string
   const status: integer?
   const headers: http.Headers?
 end
+function HandshakeError.new(message: string, status: integer?,
+                            headers: http.Headers?): HandshakeError
 ```
 
-Lower-level `ssl.Error`, `async.OperationError`, URL errors and cancellation
-retain their identities. The first terminal failure's exact value and captured
-origin traceback survive cleanup and later valid operations. Incoming protocol, UTF-8 and size failures attempt bounded
-Close codes 1002, 1007 and 1009 respectively, then retire the transport.
+- **Origin policy (`AcceptOptions.allowed_origins`):** Native clients sending no `Origin` are accepted. A browser `Origin` must be a single valid HTTP(S) origin matching the normalized request scheme, host, and effective port, or an exact entry in `allowed_origins` (`"null"`, malformed, and multiple origins are rejected; behind a reverse proxy, list public origins explicitly without wildcards).
+- **Subprotocols & headers:** Subprotocol tokens are **case-sensitive** (first server-preferred match wins; invalid or duplicate tokens fail; clients reject unselected/unoffered protocols). Dial headers and pre-accept response headers cannot override reserved handshake/framing fields.
+- **Rejection responses:** Inside `accept`, malformed openings send `400`, denied origins `403`, and unsupported versions `426` (`Sec-WebSocket-Version: 13`), then raise `HandshakeError` without running a default `200` or body drain. Pre-handler HTTP errors (upgrade with `Expect`, bad/missing/duplicate `Host`, bad URL, or non-1.1 version) emit `400` before the handler runs and do not raise `HandshakeError`.
+- **Error preservation & native scope:** Underlying `ssl.Error`, `async.OperationError`, `url.Error`, and `async.CancellationReason` keep their exact identities and original tracebacks through cleanup. Incoming protocol, UTF-8, and size violations attempt bounded Close codes `1002`, `1007`, and `1009` before retiring the transport. Native connections negotiate no extensions or compression (rejecting unsolicited extensions and nonzero RSV bits), generate client masks via synchronous `uv.random`, and do not cap the underlying `net` receive buffer independently of `read_limit`.
 
-A native connection negotiates no extensions or compression. Valid extension
-offers are ignored by servers; malformed syntax fails. Clients offer none and
-reject an unsolicited extension response. Nonzero RSV bits fail. HTTP/2/3,
-proxies, redirects, reconnect, automatic heartbeat and streaming message
-readers/writers are outside this interface.
+## Transferring connections
 
-The message limit bounds decoded-message accumulation. The existing net read
-watcher can buffer immutable chunks without a high-water mark; this module's
-message/scratch limits do not bound that transport queue. Nonces and each
-client frame mask use synchronous public `uv.random`; entropy acquisition can
-block. See [implementation and validation](../implementation/websocket-library.md),
-[HTTP](standard-library-http.md), [TLS](standard-library-ssl.md), and
-[async ownership](async-io.md).
+*(Native only.)*
+
+```text
+function Connection:to_transfer_payload(): string
+function Connection.from_transfer_payload(payload: string): Connection
+function Connection.discard_transfer_payload(payload: string): integer
+```
+
+An idle open `Connection` moves between independent Lua states in the same process via `async.TransferValue.from_value(conn)` and `packet:to_value()`, preserving client/server role, selected subprotocol, `read_limit`, and unread WebSocket/HTTP/TCP/TLS bytes.
+
+- Transfer rejects active readers, writers, Ping/Pong/Close/shutdown work, closing/terminal sessions, and any [TCP](standard-library-net.md#transferring-connections) or [TLS](standard-library-ssl.md#transferring-connections) transfer restriction (configure `server:read_ahead(false)` on the HTTP listener before serving and call `async.yield()` after the last I/O before encoding on Windows). Rejected transfer leaves the session usable.
+- Encoding closes the source facade without sending a WebSocket Close frame; if enclosing serialization fails after transport detachment, the hook closes the detached transport. Follow the [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules). `Connection.discard_transfer_payload(payload)` closes an unadopted payload without a Runtime, returning native close status and consuming ownership even on error.
 
 ## On the browser
 
-On `--target browser`, `websocket` provides the client over the host's
-`WebSocket`: `MessageType`, `TEXT`, `BINARY`, `Error`, `HandshakeError`,
-`DialOptions`, `connect`, and the `Connection` methods `read`, `write`,
-`shutdown`, `close`, `subprotocol`, and `close_status`, each with its native
-signature. The server (`accept` and `AcceptOptions`), `Connection:ping`, and
-the transfer hooks are native-only. The browser engine owns the TCP and TLS
-connection, certificate trust, cookies, the `Origin` it sends, wire
-fragmentation, and the Pong replies to the server's Pings.
+On `--target browser`, `websocket` provides the client over the host's `WebSocket`: `MessageType`, `TEXT`, `BINARY`, `Error`, `HandshakeError`, `DialOptions`, `connect`, and `Connection`'s `read`, `write`, `shutdown`, `close`, `subprotocol`, and `close_status`. `accept`, `AcceptOptions`, `Connection:ping`, and transfer hooks are absent at compile time. The browser owns TCP/TLS, certificates, cookies, `Origin`, wire fragmentation, Pong replies, and `permessage-deflate`.
 
-**Opening.** `connect` needs the instance's active async Runtime. In a state
-created by `lua.new()` it raises `"async Runtime is not active"`, while
-`DialOptions` works there. It raises `url.Error` for a malformed URL, and a
-string for a scheme other than `ws` or `wss` and for options that carry any
-headers or a `ca_file`: a browser `WebSocket` sends no application headers and
-trusts the browser's certificates. The browser offers the `subprotocols`,
-sends its cookies and HTTP authentication with the opening request, and
-negotiates `permessage-deflate` compression itself. A response that selects
-a subprotocol that was not offered fails the opening on both targets. When
-subprotocols were offered and the response selects none, the browser opening
-fails as well, on every engine: Chromium refuses it itself, and Titan checks
-the selection where Firefox and WebKit open anyway. A native client instead
-returns a connection whose `subprotocol()` is nil. Every failure
-before the connection opens, whether an HTTP rejection, an invalid response,
-a DNS failure, a refused connection, or a TLS failure, raises `HandshakeError`
-with nil `status` and `headers`, because the browser reports them alike; a
-rejected opening's message is `"WebSocket opening handshake failed"`.
-`handshake_timeout` raises `Error("timeout", "websocket.open", ...)` as
-natively. A connection closes when its Runtime closes.
-
-**Messages.** `read` returns complete messages in arrival order. The
-`read_limit` applies to each message's length after decompression. Messages
-that arrived earlier are delivered first; the message over the limit raises
-`Error` with kind `"limit"`, operation `"websocket.read"`, and close code 1009,
-ends the connection, and is never copied into Titan memory. The browser
-applies no backpressure to messages that are not yet read, so a flood of
-small messages still accumulates in memory.
-
-`write` checks text for valid UTF-8 before sending, as natively, and yields
-once so that other Tasks run between writes. It then hands the message to the
-browser and, while more than 256 KiB is queued, waits until 64 KiB or less
-remains. A return means that the browser accepted the message while the
-connection was open and that its queue drained to that mark; it does not mean
-the server received it. If the connection is closing, closed, or failed when
-`write` starts, after its yield, or while it waits, `write` raises the first
-failure or `Error("state", "websocket.write", ...)` instead of letting the
-browser drop the message silently.
-The host can report loss after its output queue drains, so a write may still
-return successfully while the host reports OPEN. Node can keep a paused,
-half-closed peer OPEN until that peer resumes reading; WebKit can drain queued
-data before reporting a remote Close or reset. A later write raises once the
-host reports the loss.
-
-**Closing.** `shutdown(code, reason, timeout_ms)` accepts code 1000, the
-default, and 3000 through 4999; any other code (the browser refuses 1001
-through 1014) or a reason over 123 bytes raises
-`Error("state", "websocket.shutdown", ...)`, and a reason that
-is not valid UTF-8 raises `Error("utf8", "websocket.shutdown", ...)`. An
-active reader still receives one message before shutdown discards later data,
-as natively, and shutdown waits up to `timeout_ms` for the server's Close.
-
-`close()` retires the connection locally, synchronously and idempotently, and
-wakes waiting operations with `Error("state", ...)` or the connection's first
-failure. A native close aborts the transport at once; the browser instead
-sends an empty Close frame after the messages it has already queued and
-finishes the closing handshake itself. Cancelling an admitted `read` ends the
-connection, as does cancelling a `write` after the browser accepted its
-message.
-
-Two engines keep a socket's TCP connection after Titan has let go of it.
-Firefox keeps the connection of an opening that was cancelled or timed out
-until the server answers the handshake or the browser closes, and Node keeps
-the connection of an opening it rejected (an unselected subprotocol or an
-invalid response) until the server closes it. Titan has already removed its
-listeners and closed the socket in both cases.
-
-**Close status and transport loss.** A valid Close frame from the server
-makes `read` return `(nil, nil)` and lets `shutdown` complete, even when the
-server resets the connection immediately after it. `close_status()` then
-returns the server's code and reason; an empty Close leaves both nil. A
-transport loss without a Close raises `Error("abnormal", operation,
-"transport ended before WebSocket Close", nil)` from the waiting operation,
-later operations raise the same error, and `close_status()` stays
-`(nil, nil)`. The browser reports a protocol or UTF-8 violation by the server
-the same way.
+- **Opening:** `connect` requires the instance's owner `async` Runtime (`"async Runtime is not active"` in a `lua.new()` state), raises `url.Error` for malformed URLs, and raises a string for non-`ws`/`wss` schemes or `DialOptions` carrying `headers` or `ca_file`. When `subprotocols` are offered and the server selects none (or selects an unoffered token), opening fails on every engine (unlike native clients, which allow `subprotocol() == nil` when none is selected). Every pre-open failure (HTTP rejection, DNS, refusal, TLS) raises `HandshakeError(message, nil, nil)` (`"WebSocket opening handshake failed"` for HTTP rejection); `handshake_timeout` raises `Error("timeout", "websocket.open", ..., nil)`. Connections close automatically with their Runtime.
+- **Messages:** `read_limit` applies to decompressed message length; an oversized message raises `Error("limit", "websocket.read", ..., 1009)` without copying it into Titan memory (unread small messages are not backpressured by the browser). `write` validates UTF-8, yields once, hands the message to the browser, and pauses while more than 256 KiB is queued until 64 KiB or less remains. Returning means the browser accepted the message while open, not server delivery; loss notification can lag queue drainage on Node and WebKit, so a subsequent write raises once loss is reported.
+- **Closing:** `shutdown(code?, reason?, timeout_ms?)` accepts only `1000` and `3000..4999` (codes `1001..1014` or reasons >123 bytes raise `Error("state", "websocket.shutdown", ...)`; invalid UTF-8 raises `"utf8"`). `close()` retires the connection locally and synchronously, waking waiters with `Error("state", ...)` or the first failure, while the browser sends an empty Close after queued writes. Cancelling an admitted `read` or post-send `write` ends the connection. (Firefox may retain a cancelled/timed-out opening's TCP socket until handshake completion or browser close, and Node may retain a rejected opening's TCP socket until the peer closes.)
+- **Close status and transport loss:** A valid server Close makes `read()` return `(nil, nil)` and populates `close_status()` even if followed immediately by a TCP reset. Transport loss or server protocol/UTF-8 violations without Close raise `Error("abnormal", operation, "transport ended before WebSocket Close", nil)` and leave `close_status()` at `(nil, nil)`.
 
 | Failure | Native targets | Browser target |
 | --- | --- | --- |
 | Malformed URL | `url.Error` | `url.Error` |
-| Scheme other than `ws` or `wss`; invalid `DialOptions`; browser `headers` or `ca_file`; no active Runtime | string | string |
-| Opening deadline | `Error("timeout", "websocket.open", ..., nil)` | the same |
-| HTTP rejection, invalid opening response, selected subprotocol that was not offered | `HandshakeError` with the status and headers when known | `HandshakeError(message, nil, nil)` |
-| Subprotocols offered, none selected | a connection whose `subprotocol()` is nil | `HandshakeError(message, nil, nil)` |
-| DNS, connection, or TLS failure before opening | `async.OperationError` or `ssl.Error` | `HandshakeError(message, nil, nil)` |
-| Outgoing invalid UTF-8 in `write` or `shutdown` | `Error("utf8", operation, ..., nil)` | the same |
-| Closed or closing connection, duplicate operation, invalid Close code, reason over 123 bytes | `Error("state", operation, ..., nil)` | the same, with the browser's code range |
-| Incoming message over `read_limit` | `Error("limit", "websocket.read", ..., 1009)` | the same |
-| Transport loss or peer violation after opening | `Error("abnormal", ...)`, `Error("protocol", ...)`, or `Error("utf8", ...)` | `Error("abnormal", operation, "transport ended before WebSocket Close", nil)` |
-| `shutdown` deadline | `Error("timeout", "websocket.shutdown", ..., nil)` | the same |
-| Task cancellation | `async.CancellationReason` | the same |
+| Non-`ws`/`wss` scheme; invalid `DialOptions`; browser `headers`/`ca_file`; no active Runtime | `string` | `string` |
+| Opening timeout | `Error("timeout", "websocket.open", ..., nil)` | Same |
+| HTTP rejection, invalid response, unoffered subprotocol | `HandshakeError` with status/headers when known | `HandshakeError(message, nil, nil)` |
+| Subprotocols offered, none selected | Connection with `subprotocol() == nil` | `HandshakeError(message, nil, nil)` |
+| Pre-open DNS, connect, or TLS failure | `async.OperationError` or `ssl.Error` | `HandshakeError(message, nil, nil)` |
+| Outgoing invalid UTF-8 in `write`/`shutdown` | `Error("utf8", operation, ..., nil)` | Same |
+| Closed/closing, duplicate op, invalid Close code, reason >123 bytes | `Error("state", operation, ..., nil)` | Same (codes `1000`, `3000..4999`) |
+| Incoming message over `read_limit` | `Error("limit", "websocket.read", ..., 1009)` | Same |
+| Post-open transport loss or peer violation | `Error("abnormal" \| "protocol" \| "utf8", ...)` | `Error("abnormal", operation, "transport ended before WebSocket Close", nil)` |
+| `shutdown` deadline | `Error("timeout", "websocket.shutdown", ..., nil)` | Same |
+| Task cancellation | `async.CancellationReason` | Same |

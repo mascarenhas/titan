@@ -34,8 +34,8 @@ it because it has no native interface.
 
 ### JavaScript files
 
-JavaScript does only what the host alone can do ([Write native bindings
-Titan-first](../style-guide.md#write-native-bindings-titan-first)). Each
+JavaScript does only what the host alone can do ([Keep C and the Lua C API to
+what Titan cannot do](standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do)). Each
 shipped file is justified by the capability in its last column.
 
 | File | Owns | Host capability |
@@ -72,7 +72,7 @@ check](browser-target.md#the-module-check): host tooling outside the image.
 
 `browserentry.lua` and `driver.browser_entrypoint_contents` generate the image
 launcher next to native `main`, following the [Titan-first native-binding
-rules](../style-guide.md#write-native-bindings-titan-first):
+rules](standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do):
 
 1. **Shared launcher and error conversion (`browserentry.lua`):** Initialization
    creates the owner `lua_State *`, opens the Lua libraries, installs the Titan
@@ -425,7 +425,7 @@ learn about the callback only through `titan_no_switch`.
   thread selection for a standard library's hand-written trampoline and
   returns the thread in `frame->L`; `callback_leave(frame)` restores the depth
   and the next thread and ends the admission. The trampoline then follows
-  the raw Lua C API rules of the [guard-rails](../style-guide.md#write-native-bindings-titan-first).
+  the raw Lua C API rules of the [standard-library maintenance guard-rails](standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do).
   It is not an application API.
 - **No-switch mode.** `titan/ffi.h` defines `titan_no_switch(L)` for wasm
   builds as the import `titan_browser_in_callback()`, true while

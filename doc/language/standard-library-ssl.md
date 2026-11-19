@@ -1,43 +1,53 @@
 # TLS standard library
 
-The `ssl` standard module provides verified TLS clients and TLS servers over
-the public [TCP networking](standard-library-net.md) API. Titan source uses
-its short import:
+The `ssl` module provides verified TLS 1.2+ client and server streams layered over [`net`](standard-library-net.md) using OpenSSL. Import it in Titan with `local ssl = import "ssl"` or load it in Lua with `require "titan.ssl"`.
+
+**Target availability:** Native only (unavailable on the browser target).
+
+## Example
+
+This module opens a verified HTTPS connection, sends a `HEAD` request, and reads the response header block:
 
 ```titan
 local ssl = import "ssl"
+
+function fetch_head(host: string, port: integer, ca_file: string?): string?
+  local conn = ssl.connect(host, port, ca_file)
+  defer conn:close()
+  conn:write(
+    "HEAD / HTTP/1.1\r\nHost: " .. host .. "\r\nConnection: close\r\n\r\n")
+  return conn:read_until("\r\n\r\n", false)
+end
 ```
 
-The parser resolves that spelling to the canonical `titan.ssl` module
-identity. Lua loads that identity directly with:
+## Core concepts
 
-```lua
-local ssl = require "titan.ssl"
-```
+All TLS operations call `net.Connection` methods and must execute inside an [`async.Task`](async-io.md#scheduling-and-driving-tasks). `Connection` and `Server` are opaque nominal records: `Connection` satisfies all seven [`io` Interfaces](standard-library-io.md) and `Server` satisfies `io.Closer`.
 
-TLS is an ordinary high-level standard-library layer, not an addition to
-Titan's low-level libuv binding. Its operations call `net.Connection` methods
-and therefore must run inside an async Task, under the same loop-driving rules
-as `net`.
+TLS 1.2 or newer and strict peer certificate-chain and hostname/IP verification are always enabled for clients; there is no insecure client mode. Hostnames and filesystem paths are NUL-free text strings, while payloads and delimiters are arbitrary binary strings.
 
-## API
+## Verified client connections
 
 ```text
-record Error
-    code: integer
-    name: string
-    message: string
-    operation: string
-end
-
 record Connection
-record Server
 
 function client(transport: net.Connection, host: string,
                 ca_file: string?): Connection
-
 function connect(host: string, port: integer,
                  ca_file: string?): Connection
+```
+
+- **`client(transport, host, ca_file?)`** adopts an already connected `net.Connection` and configures verified TLS without running the handshake yet (call `handshake()` explicitly or let the first read/write run it). `host` sets SNI and certificate identity even if TCP dialed a numeric IP. Empty hosts or invalid text arguments fail before ownership transfers; once accepted, `ssl` owns closing `transport` on any subsequent failure (use `Connection:abort()` afterward).
+- **`connect(host, port, ca_file?)`** loads trust, dials via `net.connect(host, port)` (inheriting DNS, address fallback, and port `1..65535` rules), and completes the verified TLS handshake before returning.
+- **Identity verification:** DNS names are sent as SNI and matched against the certificate's DNS identity with partial wildcards disabled. IPv4 and IPv6 literals are matched as IP identities without SNI (for scoped IPv6 addresses like `fe80::1%eth0`, the full spelling dials TCP while `%zone` is stripped for X.509 IP matching). Verification failures abort the connection.
+- **Trust roots:**
+  - Passing **`ca_file`** reads that PEM bundle asynchronously via `fs` and **replaces** the default trust roots for that connection (empty or invalid PEM raises).
+  - Omitting **`ca_file`** (`nil`) shares a module-level default OpenSSL client context initialized once when `ssl` loads from OpenSSL's compiled default paths and `SSL_CERT_FILE` / `SSL_CERT_DIR` (set those variables before process startup). OpenSSL's default paths are filesystem-based rather than OS-native trust stores; on Windows the SDK ships no default CA bundle and does not query the Windows ROOT store, so pass `ca_file` or configure `SSL_CERT_FILE` / `SSL_CERT_DIR` explicitly for portable trust.
+
+## Server connections and handshakes
+
+```text
+record Server
 
 function listen(host: string, port: integer,
                 certificate_file: string,
@@ -45,337 +55,87 @@ function listen(host: string, port: integer,
                 backlog: integer?, reuse_port: boolean?): Server
 
 function Connection:handshake()
-function Connection:read_ahead(enabled: boolean?): boolean
-function Connection:read(): string?
-function Connection:has_pending_input(): boolean
-function Connection:add_input_listener(listener: function (): ()): function (): ()
-function Connection:read_until(delimiter: string,
-                               chop: boolean?): string?
-function Connection:write(data: string)
-function Connection:shutdown()
-function Connection:close()
-function Connection:to_transfer_payload(): string
-function Connection.from_transfer_payload(payload: string): Connection
-function Connection:abort()
-
 function Server:accept(): Connection
 function Server:close()
 ```
 
-`Connection` and `Server` are opaque nominal records. A `Connection` has the
-exact method shapes required by all seven [`io` Interfaces](standard-library-io.md).
-`Server` satisfies `io.Closer` through its exact `close()` method. These are
-ordinary structural conversions at a statically known conversion site; the
-records do not share a base class with their `net` counterparts.
-
-The optional trailing arguments may be omitted. In `listen`, an omitted
-`private_key_file` uses `certificate_file` as a combined PEM certificate/key
-bundle, while an omitted `backlog` defaults to 128. `reuse_port` defaults to
-false and is forwarded to [`net.listen`](standard-library-net.md#connecting-and-listening),
-including its platform support and native errors. Each TLS listener retains
-its own certificate context even when the address and port are shared.
-A listener port must be in
-`0..65535`, where 0 requests an ephemeral port, and a supplied backlog must be
-in `1..2147483647`. Strings used as hostnames, certificate paths, or trust
-paths are text and may not contain an embedded NUL. Application payloads and
-read delimiters are binary strings.
-
-## Verified client connections
-
-`client(transport, host, ca_file)` adopts an already connected TCP transport,
-selects trust, and configures verified TLS without performing a network
-handshake. Call `handshake()` explicitly or let the first read/write drive it.
-The original `host` controls SNI and certificate identity even when TCP dialed
-a numeric resolved address. Empty hosts and invalid text arguments fail before ownership
-transfers. After validation, the TLS call owns cleanup on any failure, including
-trust-file loading, which may suspend. The caller performs no further raw I/O.
-An opening supervisor may retain TCP solely as abort authority until adoption
-returns; after that use the TLS owner's `abort()`.
-
-`connect` selects trust, establishes a `net.Connection`, configures a client
-TLS state machine, and completes its handshake before returning. It requires
-TLS 1.2 or newer and verifies the peer certificate by default. There is no
-insecure client mode.
-
-The requested `host` is also the certificate identity. A DNS name is checked
-against the certificate's DNS identity with partial wildcards disabled and is
-sent as Server Name Indication (SNI). A textual IPv4 or IPv6 address is checked
-as an IP address and is not sent as SNI. Successful cryptographic negotiation
-does not override a failed chain or identity check: verification failure aborts
-the connection.
-
-For a scoped IPv6 address such as `fe80::1%eth0`, the complete spelling remains
-the TCP destination so the zone selects the local interface. The `%zone` suffix
-is not part of an X.509 IP identity, so it is removed only for certificate
-matching. The connection still follows the IP-address branch and sends no SNI.
-
-The optional trust argument selects one of two modes:
-
-- without `ca_file`, connections share the module's default client context,
-  initialized once from OpenSSL's compiled default verify paths and the
-  environment overrides OpenSSL recognizes; its native context is held by a
-  private owner record and released during Lua-state shutdown by a finalizer
-  whose parameter is that exact owner type, not a dynamically cast `value`; or
-- `ca_file` selects an explicit PEM certificate bundle for that connection.
-
-An explicit file replaces the default roots; it is not added after them. Titan
-reads that path through the high-level asynchronous `fs` module, then parses
-and installs every certificate from the in-memory PEM data before opening the
-TCP connection. An empty file, a file with no certificate, or malformed PEM is
-rejected. This API has no explicit CA-directory argument.
-
-The no-file case is **not** a portable abstraction over every operating
-system's native trust store. A bundled OpenSSL build still uses OpenSSL's
-compiled filesystem defaults. Default hashed certificate directories are
-looked up lazily by OpenSSL. Module initialization may synchronously load the
-default CA file once, and the first verification that needs a hashed-directory
-entry may perform another synchronous filesystem read. Reusing the one default
-context caches and amortizes those default-path costs across later connections.
-Programs that need deployment-independent trust selection should pass an
-explicit CA file.
-
-To override default trust with `SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR`
-(an OpenSSL subject-hash certificate directory), set the environment before
-starting the program. Default-context initialization happens when `titan.ssl`
-first loads; later environment changes do not reinitialize it. Start a fresh
-process when testing another default trust configuration. Successful module or
-TLS-context initialization alone does not prove any usable CA roots were loaded:
-OpenSSL can accept missing default locations and report the trust failure during
-peer verification instead.
-
-The experimental Windows SDK ships no CA bundle or other usable default roots
-and does not automatically use the Windows ROOT store. Its compiled filesystem
-CA paths retain the original build prefix after SDK relocation. Use the existing
-`ca_file` argument or explicitly configured environment overrides as described
-above; certificate-chain and hostname/IP verification remain enabled.
-
-The underlying `net.connect` contract supplies DNS resolution, address-order
-fallback, port validation, cancellation, and TCP errors.
-
-## Server connections and handshakes
-
-`listen` reads one PEM certificate chain and matching PEM private key through
-the high-level asynchronous `fs` module, parses them from memory, then creates
-a `net.Server`. The first certificate is the server leaf and later
-certificates form its transmitted chain. The private key may occupy the same
-PEM file or a separate file, but must be unencrypted because this API has no
-password input. The listener requires TLS 1.2 or newer. This version does not
-request or verify client certificates, so mutual TLS is unsupported.
-
-`Server:accept()` returns after accepting TCP; it does **not** wait for a
-ClientHello. The accepted connection's server handshake is lazy and runs on
-an explicit `handshake()` or its first `read`, `read_until`, or `write`.
-Keeping the handshake out of the accept loop prevents one slow TLS peer from
-serializing acceptance of later TCP connections.
-
-`Connection:handshake()` is safe to call on an already negotiated connection.
-Applications may use it when they want handshake failure to occur at an
-explicit point before their first application read or write.
-
-`Server:close()` stops the wrapped TCP listener and releases the Server's
-context reference. It is idempotent. Connections already returned by
-`accept()` retain their own TLS state and remain usable; a close does not reach
-back into them.
-
-## Transferring connections
-
-An idle TLS `Connection` implements
-`to_transfer_payload(): string` and
-`Connection.from_transfer_payload(payload: string): Connection`.
-`async.TransferValue.from_value(connection)` detaches the live TLS engine and
-its TCP transport into a same-process custom record policy. Decode with
-`packet:to_value()` in a state with an active async Runtime. The destination
-retains the verified peer identity, negotiated engine state, unread plaintext
-and encrypted BIO buffers. No second handshake or TLS serialization occurs.
-A lazy client or accepted connection may move before its first handshake.
-
-Transfer rejects pending read, write, handshake, shutdown, retry, cleanup or
-retirement ownership. It also follows every
-[TCP transfer restriction](standard-library-net.md#transferring-connections),
-including registered input observers and native overlapped reads on Windows.
-`Connection:read_ahead(enabled?)` forwards the TCP read-ahead policy and returns
-its previous setting. Configure false before the first TLS handshake or I/O to
-permit demand-driven native reads, then yield after completed I/O before handoff.
-The setting is inherited by transferred TLS connections.
-An admission failure leaves the original connection usable. The source becomes
-closed after the transport detaches, before any receiver accepts the payload. If
-serializing the enclosing value fails after the transport detached, the hook
-frees the engine and closes the detached transport.
-
-The payload is a manually owned, same-process capability: follow the
-[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules),
-reconstructing it exactly once, including local recovery when delivery fails,
-and then close or abort the reconstructed connection normally. The native TLS
-engine it carries is valid only in the same process, and dropping the payload
-leaks the detached engine and endpoint.
-
-`Connection.discard_transfer_payload(payload: string): integer` consumes a known
-unadopted payload without an active Runtime: it frees the engine and closes the
-endpoint, returning the native close status. The close attempt consumes ownership
-even on an error; never adopt or discard the bytes again.
+- **`listen(host, port, certificate_file, private_key_file?, backlog?, reuse_port?)`** reads the PEM certificate chain (leaf first) and unencrypted PEM private key asynchronously via `fs`, then opens a `net.Server`. Omitting `private_key_file` reads the private key from `certificate_file`. `port` accepts `0..65535` (`0` for ephemeral), `backlog` defaults to `128` (`1..2147483647`), and `reuse_port` forwards to [`net.listen`](standard-library-net.md#connecting-and-listening) (each TLS listener keeps its own certificate context). Listeners require TLS 1.2+ and do not perform mutual TLS client-certificate verification.
+- **`Server:accept()`** accepts TCP immediately without waiting for `ClientHello`; the server TLS handshake runs lazily on `handshake()` or the first `read`, `read_until`, or `write`, preventing slow peers from blocking the accept loop.
+- **`Connection:handshake()`** explicitly drives a pending handshake and is a safe no-op on an already negotiated connection.
+- **`Server:close()`** idempotently stops the listener and releases its certificate context without affecting connections already returned by `accept()`.
 
 ## Reading and writing
 
-`read()` returns the next nonempty plaintext chunk, or `nil` after an
-authenticated TLS end-of-stream. TLS record and underlying TCP chunk
-boundaries are not preserved as application message boundaries.
+```text
+function Connection:read(): string?
+function Connection:read_until(delimiter: string, chop: boolean?): string?
+function Connection:write(data: string)
+function Connection:read_ahead(enabled: boolean?): boolean
+function Connection:has_pending_input(): boolean
+function Connection:add_input_listener(listener: function (): ()): function (): ()
+```
 
-`read_until(delimiter, chop)` has the same byte-stream contract as the `net`
-method: the delimiter must be nonempty, may span encrypted or plaintext chunk
-boundaries, and bytes after the first match are retained for the next read.
-The result includes the delimiter unless `chop` is true. A nonempty final tail
-is returned once before EOF.
-
-`write(data)` accepts an arbitrary binary string and returns after all of its
-plaintext has been accepted by the TLS state machine and the resulting
-encrypted output has been written through `net.Connection`. Large inputs may
-be split into TLS-sized pieces internally, but one call remains one ordered
-high-level operation. OpenSSL retry conditions never change the bytes or
-length of the piece being retried.
-
-A `Connection` permits one reader (`read` or `read_until`) and one writer at
-once. A quiet reader does not prevent an unsolicited write. A second reader
-or writer raises before admission without disturbing the admitted operation.
-Explicit `handshake`, `shutdown`, and graceful `close` require a quiescent
-connection and exclude application I/O until they finish. When first I/O
-starts a lazy handshake, one direction drives it and the other waits for the
-same verified result.
-
-An admitted operation owns one internal I/O Task. Its public caller remains
-runnable on cancellation, closes the transport before draining that child,
-and releases the direction after cleanup. Cancellation after admission is
-terminal for the TLS connection; it is not a detachable reusable read.
-
-`has_pending_input()` is a synchronous, nonconsuming snapshot. It is true for
-retained plaintext, OpenSSL-buffered records or input-BIO bytes, pending input or
-terminal state in the TCP transport, and any TLS state other than open. Buffered
-TLS records may be partial or control records, so true does not promise a
-nonblocking plaintext read. False does not poll the socket or guarantee future
-liveness. The query never drives the handshake, consumes records, reserves an
-operation, or checks Task cancellation.
-
-`add_input_listener(listener)` delegates receive observation to the owned TCP
-transport and requires an open TLS connection in a Task. It has the same
-nonyielding callback and idempotent-removal contract as the TCP method. It does
-not perform a handshake, decrypt records, or report previously buffered TLS
-input. An event can contain a partial or control record with no application
-plaintext. HTTP pools use this conservative signal to retire idle connections
-without leaving a waiting Task alive.
+- **`read()`** returns the next nonempty plaintext chunk, or `nil` after an authenticated TLS `close_notify` EOF. Record and TCP chunk boundaries are not preserved.
+- **`read_until(delimiter, chop?)`** matches a nonempty literal delimiter across record/chunk boundaries, retains trailing bytes, omits the delimiter when `chop` is `true`, and returns an unterminated final tail before authenticated EOF.
+- **`write(data)`** encrypts and writes all bytes of `data` as one ordered operation (splitting large inputs into TLS records internally).
+- **Concurrency and cancellation:** A `Connection` allows **one concurrent reader (`read`/`read_until`) and one concurrent writer (`write`)**. A second concurrent call in the same direction raises without disturbing the active operation. Explicit `handshake`, `shutdown`, and `close` require an idle connection and exclude I/O until they complete. When first I/O triggers a lazy handshake, one direction drives it while the other waits for the same result. Cancelling an admitted operation closes the transport and terminalizes the TLS connection (unlike `net`, a cancelled TLS read cannot be resumed on the same connection).
+- **`read_ahead(enabled?)`** forwards to the underlying `net.Connection:read_ahead` (configure `false` before the first handshake or I/O for portable connection handoff).
+- **`has_pending_input()`** synchronously checks retained plaintext, OpenSSL buffered/BIO bytes, underlying TCP input, or non-open TLS state without driving handshakes or consuming records (buffered bytes may be partial or control records).
+- **`add_input_listener(listener)`** delegates receive observation to the underlying TCP connection (non-yielding, idempotent remover; events may be partial or control records without application plaintext).
 
 ## TLS shutdown and EOF
 
-`shutdown()` sends TLS `close_notify`, drains its encrypted bytes through the
-network connection, and shuts down the TCP write side. It is idempotent. The
-read side remains available so the peer's authenticated shutdown can still be
-observed; output after shutdown is rejected.
+```text
+function Connection:shutdown()
+function Connection:close()
+function Connection:abort()
+```
 
-A received `close_notify` closes new write admission. An already admitted
-writer may finish its exact pending pieces; the reader waits for that engine
-scope to retire before sending the reciprocal alert. A writer that still needs
-new protected input after the peer alert fails rather than waiting indefinitely.
-If the local side has already shut down, no second alert is sent.
-
-A received `close_notify` is normal EOF, so `read` and `read_until` eventually
-return `nil`. A bare transport EOF without `close_notify` is instead a
-`TLS_TRUNCATED_EOF` error. A TCP reset observed while TLS is waiting for more
-protected input is normalized to the same error: FIN and RST are different
-transport presentations of the same unauthenticated TLS truncation. The
-distinction from clean TLS EOF prevents either form from silently truncating a
-protected byte stream.
-
-`close()` best-effort sends shutdown when the negotiated state permits it,
-frees the TLS engine, and closes the wrapped `net.Connection`. It is
-idempotent after reaching the closed state. If the alert bytes were written
-but the peer closes before the redundant TCP half-close, `close` treats the
-resulting `ENOTCONN` as completed cleanup; an explicit `shutdown()` still
-reports that error. A TLS, transport, or cancellation failure terminalizes
-the TLS connection and best-effort closes its transport; later I/O cannot
-resume the failed state machine.
-
-`abort()` stops admission, interrupts both directions and skips `close_notify`.
-It closes TCP before waiting for internal engine scopes, frees the engine once,
-and waits for the captured internal I/O Tasks to retire. It needs no peer
-cooperation and remains usable with pending Task cancellation. Concurrent abort
-callers share the same cleanup completion; subsequent aborts are no-ops. Native
-writes and their immutable bytes remain owned through their callbacks. A sibling
-operation interrupted by abort raises `ssl.Error` named `TLS_INTERRUPTED`.
+- **`shutdown()`** idempotently sends TLS `close_notify`, flushes encrypted bytes, and half-closes TCP write while leaving reads open to observe the peer's `close_notify`.
+- **Clean EOF vs truncation:** Receiving `close_notify` closes new write admission (letting an in-flight writer finish its pieces), sends a reciprocal alert if not yet sent, and ends `read`/`read_until` with `nil`. A bare TCP EOF or `ECONNRESET` while waiting for protected input without `close_notify` raises `ssl.Error` named `TLS_TRUNCATED_EOF` so unauthenticated truncation is never mistaken for EOF.
+- **`close()`** idempotently attempts a best-effort `close_notify` when negotiated, frees the TLS engine, and closes the wrapped `net.Connection` (treating peer `ENOTCONN` after writing the alert as completed cleanup). Any TLS, transport, or cancellation error terminalizes the connection and best-effort closes its transport.
+- **`abort()`** stops admission immediately without sending `close_notify`, closes TCP, frees the TLS engine once, and waits for internal I/O Tasks to retire (idempotent and safe under pending cancellation). Interrupted sibling operations raise `ssl.Error` named `TLS_INTERRUPTED`.
 
 ### Closing the Lua state
 
-Closing the Lua state frees the TLS engine of every Connection that is still
-open and the certificate context of every Server that was never closed. The
-state close also closes their TCP sockets, through the
-[Runtime it abandons](async-io.md#closing-a-lua-state-with-an-active-runtime).
-No `close_notify` is sent, and nothing waits for the peer: during the close,
-`close()` and `abort()` both behave like an abort that completes at once, so a
-suspended Task's `defer connection:close()` releases the engine instead of
-raising. `Server:close()` likewise frees its context and leaves the listener to
-the state close. A graceful TLS shutdown that the application needs belongs
-[before the state closes](coroutines.md#cleanup-that-needs-asynchronous-io).
-The TLS engines under HTTP connections and WebSocket sessions are released by
-the same finalizers, and their sockets by the abandoned loop. Their own close
-methods still need a Task, though: `websocket.Connection:close` starts a
-retirement Task, so a `defer ws:close()` in an unwinding Task raises
-`cannot start a Task during Lua state close`, which the unwind reports as a
-cleanup warning.
+Closing the Lua state frees the OpenSSL engine of every open `Connection` and the context of every open `Server`, while the [abandoned Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime) closes their TCP sockets without sending `close_notify`. During state close, `close()` and `abort()` complete synchronously so `defer conn:close()` releases resources cleanly without raising. Applications needing graceful `close_notify` must perform it [before state close](coroutines.md#cleanup-that-needs-asynchronous-io). (Note that while underlying TLS engines under HTTP and WebSocket sessions are freed by finalizers at state close, `websocket.Connection:close()` still requires a Task and emits a cleanup warning if called during an abandoned unwind.)
 
 ## Errors
 
-TLS and certificate failures raise `ssl.Error`, whose `operation` names the
-failed layer and whose `name` distinguishes such outcomes as
-`CERTIFICATE_VERIFY_FAILED`, `TLS_TRUNCATED_EOF`, and OpenSSL's `SSL_ERROR_*`
-conditions. `code` is the corresponding OpenSSL error or verification code
-when one exists. Argument/state errors may remain strings. Errors while reading
-explicit CA, certificate, or key paths and errors from the wrapped TCP
-connection retain the [`async.OperationError`](async-io.md) value supplied by
-`fs` or `net`, except that `ECONNRESET` from a TLS input read is normalized to
-`TLS_TRUNCATED_EOF` as described above.
-Operations and client adoption preserve that error value and its original
-failing operation traceback through resource cleanup.
-
-## Example
-
-```titan
-local async = import "async"
-local ssl = import "ssl"
-
-function fetch_head(): value
-  local connection = ssl.connect("example.com", 443, nil)
-  defer connection:close()
-  connection:write(
-    "HEAD / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
-  return connection:read_until("\r\n\r\n", false)
+```text
+record Error
+  code: integer
+  name: string
+  message: string
+  operation: string
 end
-
-function main(args: {string}): integer
-  async.run<|value, value|>(fetch_head)
-  return 0
-end
+function Error.new(code: integer, name: string,
+                   message: string, operation: string): Error
 ```
 
-## Availability and limits
+TLS and certificate failures raise `ssl.Error` (`CERTIFICATE_VERIFY_FAILED`, `TLS_TRUNCATED_EOF`, `TLS_INTERRUPTED`, OpenSSL `SSL_ERROR_*`, etc.), with `code` carrying the OpenSSL or verification code when applicable. Argument and state errors may raise strings. Filesystem and TCP failures preserve their `async.OperationError` identity and original traceback through cleanup (except TCP `ECONNRESET` during TLS reads, which normalizes to `TLS_TRUNCATED_EOF`).
 
-Linux and macOS are supported. The default build uses system OpenSSL 3.0 or
-newer; see the repository build instructions for its development package and
-`pkg-config` setup. `OPENSSL_MODE=bundled` instead downloads, verifies, and
-statically carries the pinned OpenSSL 3.5.7 release in the coordinated
-standard-library provider.
+## Transferring connections
 
-When linking an executable with `--static` against a system-OpenSSL provider,
-repeat the system library inputs at final link:
+```text
+function Connection:to_transfer_payload(): string
+function Connection.from_transfer_payload(payload: string): Connection
+function Connection.discard_transfer_payload(payload: string): integer
+```
+
+An idle `ssl.Connection` (including a lazy client or accepted connection before its first handshake) moves between independent Lua states in the same process via `async.TransferValue.from_value(conn)` and `packet:to_value()`, preserving verified peer identity, negotiated engine state, unread plaintext, encrypted BIO buffers, and `read_ahead`.
+
+- Transfer rejects active read, write, handshake, shutdown, retry, or cleanup operations, as well as all [TCP transfer restrictions](standard-library-net.md#transferring-connections) (configure `read_ahead(false)` before first handshake/I/O and call `async.yield()` before encoding on Windows). Rejected transfer leaves the source usable.
+- Encoding detaches the source before delivery; if enclosing serialization fails after detachment, the hook frees the engine and closes the transport. Follow the [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules). `Connection.discard_transfer_payload(payload)` frees the engine and closes the transport without a Runtime, returning the native close status and consuming ownership even on error.
+
+## Linking and scope
+
+When linking a standalone executable with `--static` against a system-OpenSSL Titan provider, pass the system OpenSSL flags at final link (bundled OpenSSL providers include OpenSSL objects in `titan.a` automatically):
 
 ```sh
 TITAN_EXTRA_CPPFLAGS="$(pkg-config --cflags openssl)" \
 TITAN_EXTRA_LDFLAGS="$(pkg-config --libs openssl)" \
-  titanc --static app.main
+  titanc --static -o out app.main
 ```
 
-`--static` selects Titan archives; it does not make system OpenSSL static or
-infer foreign-library inputs from its headers. The same inputs are required
-when an application calls OpenSSL directly through the FFI, such as `SHA256`.
-Bundled providers carry the matching OpenSSL objects in `titan.a`.
-
-This initial module has no mTLS, ALPN selection API, certificate callbacks,
-session-cache controls, cipher configuration, key logging, or access to the
-underlying `net.Connection`. TLS composes over public `net` operations; it
-does not expose the lower-level UV owner.
+`ssl` does not expose mutual TLS, ALPN selection, certificate callbacks, session-cache or cipher configuration, key logging, or direct access to the wrapped `net.Connection`.

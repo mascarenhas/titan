@@ -24,8 +24,8 @@ Per-module `.titan.source` record layouts, `incremental.certify_local`, and
 `incremental.verdict` are covered in [Object-backed source
 modules](incremental-compilation.md). User-facing CLI workflows and Make
 patterns are in [Incremental and separate
-compilation](../language/incremental-compilation.md) and [Output
-directories](../language/output-directory.md).
+compilation](../language/toolchain.md#incremental-and-separate-compilation) and
+[Output directories](../language/toolchain.md#output-directories).
 
 ## End-to-end invocation sequence
 
@@ -1230,7 +1230,7 @@ keeps the raw `{ "dsymutil" }` argv and marks only the final-link request
 `uncacheable`; compiler and native-C certificates are unaffected. That raw
 command runs from the original working directory with the full output
 pathname and never enters the staging directory before its unresolved
-lookup. Missing tools, I/O errors, and cancellation still fail as before.
+lookup. Missing tools, I/O errors, and cancellation fail immediately.
 For a certified toolchain the request also carries `compiler_tools`, the
 identity records (with realpath `path`) that the toolchain identity already
 observed for the compiler, any wrapper delegate, and its `cc1`/`as` stages;

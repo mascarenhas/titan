@@ -1,24 +1,56 @@
 # TCP networking
 
-The `net` standard module provides asynchronous DNS and TCP with direct-style
-Titan methods. Titan source imports it as:
+The `net` module provides asynchronous DNS resolution and direct-style TCP client and server streams over libuv. Import it in Titan with `local net = import "net"` or load it in Lua with `require "titan.net"`.
+
+**Target availability:** Native only (unavailable on the browser target).
+
+## Example
+
+This module implements a concurrent line-oriented TCP echo server and matching client:
 
 ```titan
+local async = import "async"
 local net = import "net"
+
+local function handle_client(conn: net.Connection)
+  defer conn:close()
+  while true do
+    local line? = conn:read_until("\n")
+    if line == nil then break end
+    conn:write(line)
+  end
+end
+
+function run_echo_server(host: string, port: integer)
+  local server = net.listen(host, port)
+  defer server:close()
+  while true do
+    local client = server:accept()
+    async.run(function (): nil
+      handle_client(client)
+      return nil
+    end)
+  end
+end
+
+function send_echo(host: string, port: integer, message: string): string?
+  local conn = net.connect(host, port)
+  defer conn:close()
+  conn:write(message .. "\n")
+  conn:shutdown()
+  return conn:read_until("\n", true)
+end
 ```
 
-Lua loads the same canonical module identity with:
+## Core concepts
 
-```lua
-local net = require "titan.net"
-```
+All network calls must execute inside an [`async.Task`](async-io.md#scheduling-and-driving-tasks) (or a standalone program whose imports install the automatic async bootstrap). Operations suspend only the current Task while other Tasks on the event loop keep running.
 
-Network operations must run inside a Task started by `async.run`, or inside a
-standalone program whose imports installed the automatic async bootstrap. They
-suspend only the current Task. Callbacks and continuations run serially on the
-loop thread; CPU-bound code still blocks other I/O until it yields.
+`Connection` and `Server` are opaque nominal records: `Connection` satisfies all seven [`io` Interfaces](standard-library-io.md) (`Reader`, `Writer`, `Closer`, `ReaderWriter`, `ReaderCloser`, `WriterCloser`, `ReaderWriterCloser`), and `Server` satisfies `io.Closer`. Pair acquisition immediately with `defer conn:close()` or `defer server:close()`.
 
-## API
+Hosts are text strings that may not contain embedded NUL bytes; socket payloads and delimiters are arbitrary binary strings. A connected socket supplied by an inetd-style launcher on descriptors 0–2 is accessed through `os.stdin`/`os.stdout`/`os.stderr` rather than `net.Connection` (see [TCP-backed parent streams](standard-library-os.md#tcp-backed-parent-streams)).
+
+## Connecting and listening
 
 ```text
 record Connection
@@ -30,291 +62,68 @@ function Connection:connect_address(address: uv.sockaddr_t)
 function connect(host: string, port: integer): Connection
 function listen(host: string, port: integer,
                 backlog: integer?, reuse_port: boolean?): Server
+```
 
+- **`resolve(host, port)`** resolves `host` (nonempty, no NUL) and `port` (`1..65535`) asynchronously and returns copied, owned IPv4/IPv6 TCP `uv.sockaddr_t` values in resolver order. Cancelling a pending resolve requests native cancellation and still waits for its callback to complete.
+- **`Connection()` / `Connection:connect_address(address)`** splits socket creation from dialing so a supervisor holds an abortable `Connection` before dialing. Create `local conn = net.Connection()`, immediately `defer conn:close()`, and call `conn:connect_address(addr)` with a complete IPv4/IPv6 address and nonzero port (performing no second DNS query). Before connect succeeds, only `connect_address`, `close`, and `has_pending_input` are valid; a failed dial leaves the endpoint unusable until closed.
+- **`connect(host, port)`** resolves `host` (`port` in `1..65535`) and dials IPv4/IPv6 candidates in resolver order, closing failed candidates asynchronously before trying the next.
+- **`listen(host, port, backlog?, reuse_port?)`** binds and starts a TCP listener (`Server` has no public constructor). `port` may be `0` for an ephemeral OS port (note that `Server` does not expose the bound address or port). `backlog` defaults to `128` (range `1..2147483647`). `reuse_port` defaults to `false`; when `true`, it sets `UV_TCP_REUSEPORT` so independent listeners (such as across separate processes or Lua states) can share a local address and port. Linux supports `reuse_port`; macOS and Windows raise `async.OperationError` with `name == "ENOTSUP"`.
+
+## Reading
+
+```text
 function Connection:read(): string?
+function Connection:read_until(delimiter: string, chop: boolean?): string?
 function Connection:read_ahead(enabled: boolean?): boolean
 function Connection:has_pending_input(): boolean
 function Connection:add_input_listener(listener: function (): ()): function (): ()
-function Connection:read_until(delimiter: string,
-                               chop: boolean?): string?
+```
+
+A `Connection` starts its libuv read watcher lazily on the first `read` or `read_until`.
+
+- **`read_ahead(enabled?)`** returns the previous setting (default `true`; omit the argument to query). It may be changed only before the first native read starts. With `true`, the watcher keeps reading and queuing immutable chunks even when no Task is reading (with no application-level queue cap). With `false`, each positive or terminal callback stops the watcher before delivering its chunk and rearms it only when buffered input runs out, without changing kernel buffering or message boundaries.
+- **`read()`** returns retained delimiter excess first, then the oldest queued chunk, or suspends until the next nonempty binary chunk arrives. Each returned string is an immutable copy. At EOF or after explicit `close()`, `read()` returns sticky `nil`. A read error (such as connection reset) stops the watcher and is raised on subsequent reads after earlier buffered chunks drain, until `close()`.
+- **`read_until(delimiter, chop?)`** requires a nonempty delimiter, matches across chunk boundaries, and saves trailing bytes for later reads. When `chop` is `true`, the delimiter is omitted (`""` is a valid empty match distinct from EOF `nil`). A nonempty unterminated final tail before EOF is returned once, followed by sticky `nil`. Errors and cancellation propagate without rolling consumed bytes back into the stream.
+- **Single reader:** At most one Task may wait in `read` or `read_until` at a time; a second concurrent reader raises. Cancelling a waiting reader detaches only that waiter and leaves the `Connection` usable by another Task.
+- **`has_pending_input()`** synchronously reports whether retained delimiter bytes, queued chunks, EOF/error/close, or an unconnected state are already observed (without starting reads, polling the socket, reserving a reader, or checking cancellation).
+- **`add_input_listener(listener)`** registers a non-consuming observer from a Task on a connected endpoint and returns an idempotent remover. It does not start the lazy read watcher or replay already buffered data. Listeners run outside Task execution in registration order when new input, EOF, or error is buffered and must not yield or block. Removing a later listener during notification skips it; explicit `close()` clears listeners without firing them.
+
+## Writing, shutdown, and close
+
+```text
 function Connection:write(data: string)
 function Connection:shutdown()
 function Connection:close()
-function Connection:to_transfer_payload(): string
-function Connection.from_transfer_payload(payload: string): Connection
+```
 
+- **`write(data)`** submits an ordered native write for `data` and suspends until its callback completes, retaining the immutable string for the full duration of the write (even if the calling Task is cancelled). Overlapping writes keep independent requests and payloads; an empty write validates that the write side is open.
+- **`shutdown()`** half-closes the write direction after earlier writes complete, leaving the read side open until peer EOF, error, or `close()`. Repeated calls are idempotent.
+- **`close()`** idempotently closes both directions, stops reading, discards buffered input, wakes any waiting reader with `nil`, and rejects subsequent output. Runtime shutdown closes any `Connection` or `Server` left open.
+
+## Accepting
+
+```text
 function Server:accept(): Connection
 function Server:close()
 ```
 
-`Connection` and `Server` are opaque nominal records. Applications cannot inspect their native handles. `Connection.new()` creates
-an initialized, unconnected endpoint in the current Runtime; `Server` has no
-public constructor.
-
-`Connection`'s `read`, `read_until`, `write`, and `close` shapes exactly
-satisfy all seven [`io` Interfaces](standard-library-io.md). `Server`
-incidentally satisfies `io.Closer` through its exact `close()` method.
-
-## Connecting and listening
-
-`resolve(host, port)` returns copied, owned public `uv.sockaddr_t` values in
-resolver order, restricted to IPv4/IPv6 TCP addresses. It accepts a nonempty
-host without NUL and ports `1..65535`. Address values retain their bytes after
-the native DNS result has been freed. DNS cancellation requests native request
-cancellation and still waits for its actual callback; cancellation of already
-running resolver work can fail, so safe retirement may extend a deadline.
-
-For a protocol that needs to own a socket before dialing, create
-`net.Connection()`, immediately defer its `close()`, then call
-`connect_address(address)` with one complete IPv4/IPv6 address and a nonzero
-port. This does no second DNS query. Only connect, close, and the synchronous input-state query are valid before a
-successful dial. Repeat or concurrent connect attempts fail; a failed attempt
-leaves the endpoint unusable until close. A supervisor can close the known
-endpoint while its connect is pending, then drain the connecting Task. The
-native request and selected address remain retained through its callback.
-
-
-`connect` resolves `host` asynchronously and considers IPv4 and IPv6 TCP
-addresses in resolver order. A failed candidate has its ordinary asynchronous
-close initiated before the next address is tried; connection fallback does not
-wait for that close callback. It accepts ports `1..65535`.
-
-`listen` resolves and binds `host`, then starts a TCP listener. Its port may be
-`0` to request an ephemeral operating-system port, although this initial API
-does not expose the selected address or port. `backlog` must be in
-`1..2147483647` and is passed directly to libuv's listener; when omitted, it
-defaults to 128.
-
-`reuse_port` defaults to false. When true, the bind uses libuv's
-`UV_TCP_REUSEPORT`, allowing independent listeners to share one local address
-and port. Every participating listener must enable it. The operating system
-distributes incoming connections; no round-robin ordering or fairness is
-promised. Each listener belongs to the Runtime that created it and closes
-independently, making the option useful for servers in separate processes or
-independent Lua states.
-
-Support follows [libuv's TCP bind contract](https://docs.libuv.org/en/v1.x/tcp.html#c.uv_tcp_bind).
-Linux supports this option; macOS and Windows currently raise
-`async.OperationError` with name `"ENOTSUP"`. Titan preserves the native error
-rather than silently binding without reuse. Omitted or false keeps the
-ordinary exclusive listener behavior.
-
-Hosts are text and cannot contain an embedded NUL. Socket payloads are binary
-and may contain any byte, including NUL.
-
-## Transferring connections
-
-An idle connected `Connection` provides
-`to_transfer_payload(): string` and
-`Connection.from_transfer_payload(payload: string): Connection` for
-same-process handoff between independent Lua states. Use
-`async.TransferValue.from_value(connection)` to obtain the custom record policy,
-then reconstruct it with `packet:to_value()` in a state with an active async
-Runtime. Both hooks are synchronous and require the owning or destination
-Runtime to be active and not closing; neither needs a currently running Task.
-Reconstruction creates fresh native handles, subscriptions and callbacks.
-
-Transfer rejects an unconnected, closed or half-closed endpoint, a pending
-reader, write or shutdown, and registered input observers. It also rejects any
-native request still pending on the endpoint. A persistent read watcher can be
-stopped for handoff only when it has no pending native read request. In
-particular, an established Windows connection commonly has an overlapped read
-pending even while no Task is reading, so that state raises `EBUSY` without
-detaching. A fresh connection whose lazy read watcher has not started can move.
-For later handoff, call `connection:read_ahead(false)` before the first native
-read. This demand-driven mode stops the watcher before delivering each chunk,
-so Windows does not post another overlapped read while the consumer is idle.
-Call `async.yield()` after the last read or write before synchronous encoding
-to let its native callback retire. The pending-operation gate still applies.
-Rejected admission leaves the source connection usable.
-
-On Windows, the Task that called `connect` can resume before its native connect
-callback has returned. An immediate transfer can therefore report `EBUSY`
-even before reading starts. Call `async.yield()` after connecting to let that
-callback retire before attempting an otherwise idle handoff.
-
-Successful encoding detaches the source before delivery. It preserves unread
-delimiter excess and buffered binary input, and the destination resumes the same
-TCP byte stream. Source aliases behave as closed, and their `close()` cannot
-close the adopted endpoint. If serializing the enclosing value fails after the
-endpoint detached, the hook closes the detached endpoint and leaves the source
-closed. The payload is a manually owned, same-process capability: follow the
-[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules),
-adopting it exactly once or recovering it locally if delivery fails.
-
-`Connection.discard_transfer_payload(payload: string): integer` consumes a known
-unadopted payload by closing its endpoint, without needing an active Runtime. It
-returns the native close status. The close attempt consumes ownership even when
-the status reports an error; never adopt or discard that payload afterward.
-
-## Reading
-
-A Connection starts its libuv read watcher lazily on the first `read` or
-`read_until`. Once started, it keeps reading and retaining GC-owned chunks even
-when no Task is waiting. The retained application buffer has no size limit, so
-a peer that produces data faster than the program drains it can make memory
-use grow.
-
-`read_ahead(enabled?)` returns the previous setting, which defaults to true.
-Omitting the argument queries it. Changing the setting is allowed only before
-the first native read starts; later setter calls raise. With
-false, one positive or terminal callback stops the watcher before publishing
-its result, and a later read rearms it only after buffered input is exhausted.
-An empty callback keeps waiting. Delimiter excess, EOF and cancellation retain
-the ordinary read contract. Transfer preserves this setting, and demand-driven
-connections remain stopped in the destination until another read needs input.
-This mode changes prefetch policy; it does not limit the kernel socket buffer
-or impose message boundaries.
-
-`read()` returns the facade's retained delimiter excess first. Otherwise it
-returns the oldest native chunk already buffered, or waits for the next
-positive callback and returns that callback's nonempty binary string. Chunk
-boundaries are timing-dependent. Each returned chunk is an immutable copy;
-later receives cannot change its bytes. The Connection may reuse up to 64 KiB
-of private scratch storage while reading, separately from the unbounded queue
-of completed chunks. It releases that scratch storage on EOF, error, or
-explicit close. A Connection retained after Runtime teardown can retain that
-bounded scratch storage until it is closed, read again, or collected.
-It returns `nil` at EOF or after explicit close, and later reads remain at EOF.
-A reset or other read error stops the
-watcher and remains stored; after earlier buffered chunks have been drained,
-later reads raise that error until the Connection is closed.
-
-`read_until(delimiter, chop)` requires a nonempty delimiter. It consumes
-through the first delimiter, which may span native chunks, and retains bytes
-after it for the next call. With `chop` absent or false, the returned string
-includes an actual delimiter. With `chop == true`, the delimiter is omitted;
-if it occurs at the start, `""` is a valid result distinct from EOF `nil`.
-
-EOF after a nonempty unterminated tail returns that tail unchanged, then later
-calls return sticky `nil`. With no tail, EOF returns `nil`. Errors and
-cancellation propagate normally; a delimiter read is composition over several
-low-level reads and does not roll already consumed bytes back into the
-Connection.
-
-The low-level stream has at most one suspended reader. A second Task that tries
-to wait on the same Connection is rejected; no separate facade lock or queue is
-added. Cancelling a waiting reader detaches only that waiter, wakes it on a
-later loop turn, and leaves the physical read watcher and shared Connection
-available to another Task.
-
-`has_pending_input()` synchronously reports retained delimiter bytes, queued
-native input, EOF/error/close, or an endpoint that is not connected. It does not
-consume data, start reading, reserve a reader, check cancellation, or poll the
-socket. False means no input or terminal state has been observed yet; bytes can
-still be in the operating system or arrive later. Protocol pools can use this
-conservative snapshot to reject a connection with unsolicited input.
-
-`add_input_listener(listener)` registers a nonconsuming observer from a Task on
-a connected endpoint and returns an idempotent remover. It does not start the
-lazy read watcher or report old buffered input. After each new positive receive
-or EOF/error is buffered, listeners run in registration order in the native
-callback, outside Task execution. They must not yield or perform blocking I/O;
-they may remove listeners or schedule a Task. Removing a later listener skips
-it during the same notification. An observer error does not skip remaining
-listeners, but propagates to Runtime failure. Explicit close clears listeners
-without emitting an input event. Pair registration with `has_pending_input()`
-when previously buffered data matters, and remove observers before reuse by a
-different protocol owner.
-
-## Writing, shutdown, and close
-
-Writes are ordered per Connection by libuv itself. Titan submits one
-`uv_write_t` per call instead of maintaining another queue. `write` returns
-only after that request's callback and retains the original immutable input
-while libuv borrows its complete binary payload. An empty write still checks
-that the Connection and its write side are usable. Overlapping writes keep
-independent requests and strings until their own terminal callbacks.
-
-`shutdown` uses libuv's `uv_shutdown`, which completes after earlier writes,
-then leaves the read side open until EOF, error, or `close`. Repeated shutdown
-calls are idempotent.
-
-`close` closes both directions and is idempotent. For a Connection, it stops
-the continuous read, discards facade excess and queued native input, and wakes
-a blocking low-level reader with `nil` on a later loop turn. Later `read` and
-`read_until` calls remain at EOF, and new output is rejected. Libuv settles any
-already submitted stream requests through their terminal callbacks while the
-native handle closes. Runtime shutdown likewise closes a Connection or Server
-left open by the application.
-
-Cancellation never releases an active write request or its bytes early. Its
-terminal callback performs native cleanup, then the Task finishes with the
-`cancelled` status and its original `async.CancellationReason` value.
-
-## Accepting
-
-`accept` waits for the next Connection or takes the oldest already accepted
-Connection retained by the Server. Only one Task may wait in `accept` at a
-time. Cancelling that waiter leaves the Server listening.
-
-Every incoming notification is accepted into a fresh GC-owned TCP handle. If
-no Task is waiting, that Connection remains buffered until a later `accept`;
-this initial API has no application-level buffer limit beyond the listen
-backlog supplied to libuv. `Server:close` closes buffered clients and wakes an
-accept waiter with an error.
+`Server:accept()` returns the oldest buffered accepted `Connection` or suspends until the next client connects. At most one Task may wait in `accept()` at a time; cancelling that waiter leaves the `Server` listening. Incoming connections arriving with no waiting Task remain buffered up to the listen backlog. `Server:close()` closes the listener and any buffered unaccepted clients, waking a waiting `accept()` with an error.
 
 ## Errors
 
-Immediate and asynchronous libuv failures raise the public async-owned record
-`async.OperationError`. Its fields are `code: integer`, `name: string`,
-`message: string`, and `operation: string`. Its public constructor can be
-called directly as `async.OperationError(...)`
-(or explicitly through `async.OperationError.new`); ordinary callers normally receive these values
-from the operation that failed.
+Libuv failures raise [`async.OperationError`](async-io.md#errors-and-cancellation) (`code`, `name`, `message`, `operation`), using `EAI_*` names for DNS failures. Clean EOF returns `nil` from `read` and `read_until`.
 
-DNS errors use libuv's `EAI_*` names. EOF is normal for both `read` and
-`read_until`; an unterminated final batch is returned before sticky EOF.
+## Transferring connections
 
-## Example
-
-```titan
-local net = import "net"
-local async = import "async"
-
-function client(): value
-  local connection = net.connect("127.0.0.1", 8080)
-  defer connection:close()
-  connection:write("hello\0world\n")
-  connection:shutdown()
-  return connection:read_until("\n", false)
-end
-
-function main(args: {string}): integer
-  async.run<|value, value|>(client)
-  return 0
-end
+```text
+function Connection:to_transfer_payload(): string
+function Connection.from_transfer_payload(payload: string): Connection
+function Connection.discard_transfer_payload(payload: string): integer
 ```
 
-## Availability
+An idle connected `Connection` can move between independent Lua states in the same process via `async.TransferValue.from_value(conn)` and `packet:to_value()` (or the hooks directly). Both hooks are synchronous, require an active non-closing Runtime (no running Task), and preserve unread delimiter excess, buffered input, and the `read_ahead` setting.
 
-Linux and macOS are supported. The build downloads, verifies, and
-statically links the pinned, patched libuv release:
+- **Eligibility:** Transfer rejects unconnected, closed, or half-closed sockets, active readers/writers/shutdowns, registered input listeners, and pending native requests (leaving the source usable). On Windows, a persistent read watcher normally keeps an overlapped read pending even when idle, raising `EBUSY`: call `conn:read_ahead(false)` before the first read, and call `async.yield()` after `connect` or the last I/O operation so native callbacks retire before encoding.
+- **Ownership and recovery:** Encoding detaches the source before delivery (making source aliases behave as closed). If serializing an enclosing composite fails after detachment, the hook closes the detached endpoint. Follow the [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules): adopt the payload exactly once or recover it locally. `Connection.discard_transfer_payload(payload)` closes an unadopted payload without needing a Runtime and returns the native close status, consuming ownership even on error.
 
-```sh
-make libuv
-"$PREFIX/bin/luarocks" make
-```
-
-The Unix build includes a [failed-spawn cleanup correction](../../vendor/libuv/README.md).
-System libuv is not supported. Applications importing the installed binary
-`net` module do not need libuv headers at compile time; all native libuv and callback linkage
-remains in the combined standard-library provider
-`$ROCKS_TREE/lib/titan/0.6/titan.so`. The supported installation currently
-sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter
-owns Lua and LuaRocks. Repository contributors can still use
-`make stdlib` for an in-checkout standard-library build.
-
-The [`ssl` standard module](standard-library-ssl.md) wraps this public
-Connection and Server API with OpenSSL memory BIOs. It does not reach through
-`net` to private libuv handles.
-
-This high-level `net` module does not expose UDP, Unix-domain/named pipes,
-arbitrary socket options, or endpoint inspection. The public
-[`uv` binding](standard-library-uv.md) provides those native operations for
-low-level clients and adapters.
-
-A connected TCP socket that an inetd-style launcher supplies as descriptor 0, 1,
-or 2 is not a `net.Connection`. On Linux and macOS it is used through
-`os.stdin`, `os.stdout`, and `os.stderr`; see
-[TCP-backed parent streams](standard-library-os.md#tcp-backed-parent-streams).
+For UDP, Unix-domain/named pipes, socket options, or endpoint address queries, use the low-level [`uv`](standard-library-uv.md) module directly. For TLS over `net`, see [`ssl`](standard-library-ssl.md).

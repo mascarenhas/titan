@@ -1,6 +1,6 @@
 # Supplemental public API reference
 
-These 233 [supplemental declarations](supplemental-public-signatures.tsv) complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules, and [synchronization and native-carrier ownership](types.md#synchronization-and-native-carrier-ownership) for blocking synchronization, raw heap mutex/thread-token ownership, `once_t`/`key_t`, and cross-thread wake rules.
+These supplemental declarations complement the canonical libuv wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules, and [synchronization and native-carrier ownership](types.md#synchronization-and-native-carrier-ownership) for blocking synchronization, raw heap mutex/thread-token ownership, `once_t`/`key_t`, and cross-thread wake rules.
 
 ## Abandoned-loop retirement
 

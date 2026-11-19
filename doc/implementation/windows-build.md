@@ -56,7 +56,7 @@ authorized ordinary-command invocation of the explicit checks instead.
 
 Windows build scripts use `TITAN_BUILD_PROFILE=production` by default;
 component checks and the shared test scripts default to `validation`. The
-profile policy is in [build profiles](../language/build-profiles.md). The
+profile policy is in [build profiles](../language/toolchain.md#build-profiles). The
 Windows deltas are the variable names and the production default: override
 `LUA_CFLAGS`/`LUA_LDFLAGS`, `COMPILER_DEPS_CFLAGS`/`COMPILER_DEPS_LDFLAGS`, and
 `LPEGLABEL_BUILD_CFLAGS` for host components; dynamic LPegLabel uses the

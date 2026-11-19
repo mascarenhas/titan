@@ -1,236 +1,245 @@
 # Protocol Buffers standard library
 
-Import `protobuf` in Titan, or require `titan.protobuf` in Lua. The module copies
-public record and union values using the [Protocol Buffers wire
-format](https://protobuf.dev/programming-guides/encoding/). It also emits the
-matching proto3 schema. The declared types determine the wire format, and
-decoding constructs fresh values field by field without calling a user-defined
-`new`.
+`titan.protobuf` serializes and deserializes public Titan records and tagged
+unions in the [Protocol Buffers wire
+format](https://protobuf.dev/programming-guides/encoding/), emits matching
+proto3 schemas, and builds target-neutral portable codecs. Declared field order
+determines wire tags, and ordinary decoding constructs values directly without
+calling user-defined `new`.
+
+- **Import:** `local protobuf = import "protobuf"` (Titan) · `require "titan.protobuf"` (Lua)
+- **Targets:** Native & Browser (complete; synchronous)
+
+## Quick examples
+
+Serialize a record and union to binary wire bytes, decode them back via a
+reflection descriptor, and inspect the generated proto3 schema. Save this
+program as `pb_example.titan`:
 
 ```titan
 local protobuf = import "protobuf"
 local reflect = import "reflect"
+local io = import "io"
 
-record Message
+record Note
   const sequence: integer
   text: string
 end
 
-function round_trip(): Message
-  local original = Message.new(7, "hello\0world")
+union Event
+  note(Note)
+  ping(seq: integer)
+end
+
+function main(_args: {string}): integer
+  local original = Event.note(Note(7, "hello\0world"))
   local bytes = protobuf.serialize(original)
-  local target = reflect.Type.is_named(reflect.NamedType.new("example.Message"))
-  -- This complete module is named example.
-  return protobuf.deserialize(bytes, target)
+
+  local target = reflect.Type.is_named(reflect.NamedType("pb_example.Event"))
+  local restored: Event = protobuf.deserialize(bytes, target)
+  case restored
+  when note(n) then
+    io.print(n.sequence, #n.text)
+  when ping(seq) then
+    io.print("ping", seq)
+  end
+
+  io.print(protobuf.schema(target))
+  return 0
+end
+```
+
+For data shared across native and browser targets (including JavaScript peers),
+create a reusable `PortableCodec` with `protobuf.portable`. Save this program as
+`pb_portable.titan`:
+
+```titan
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+local io = import "io"
+
+record Reading
+  sensor: string
+  celsius: float
+end
+
+function main(_args: {string}): integer
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_named(reflect.NamedType("pb_portable.Reading")),
+    reflect.Type.is_string(),
+  }
+  local text_paths: const {string} = { "2", "pb_portable.Reading.sensor" }
+  local codec = protobuf.portable(fields, nil, text_paths)
+
+  local wire = codec:encode(Reading("roof", 21.5), "ok")
+  local reading: Reading, status: string = codec:decode(wire)
+  io.print(reading.sensor, reading.celsius, status)
+  io.print(codec:describe())
+  return 0
 end
 ```
 
 ## API
 
 ```text
-serialize(candidate: value): string
-deserialize(bytes: string, descriptor: reflect.Type): value
-deserialize_nominal(bytes: string, name: string, is_union: boolean): value
-schema(descriptor: reflect.Type): string
-serialize_fields(fields: const {reflect.Type}, ...: value): string
-deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
-
-record PortableCodec  -- private state
-portable(fields: const {reflect.Type},
-         dynamic: const {reflect.Type}?, text: const {string}?): PortableCodec
-PortableCodec:encode(...: value): string
-PortableCodec:decode(bytes: string): (...: value)
-PortableCodec:describe(): string
-
-serialize_to_buffer(buf: foreign *void, candidate: value)
-serialize_fields_to_buffer(buf: foreign *void,
-                           fields: const {reflect.Type}, ...: value)
-deserialize_nominal_buffer(data: foreign const *void, length: integer,
-                           name: string, is_union: boolean): value
-deserialize_fields_buffer(data: foreign const *void, length: integer,
-                          fields: const {reflect.Type}): (...: value)
-
-use_generated_codecs(enabled: boolean): boolean
+function serialize(candidate: value): string
+function deserialize(bytes: string, descriptor: reflect.Type): value
+function deserialize_nominal(bytes: string, name: string, is_union: boolean): value
+function schema(descriptor: reflect.Type): string
 ```
 
-The root must be a public Titan record or union. `deserialize` and `schema`
-accept its record/union descriptor or a named descriptor that resolves to it.
-`deserialize_nominal` performs the same operation using a fully qualified name,
-and checks the requested nominal kind. It is also the independent-state
-argument conversion entry. Unknown names raise; lookup does not load modules.
-When a root fails several checks, decoding reports the first of: an unknown
-name or unresolvable descriptor, a root of the wrong kind, a message larger
-than 2 GiB, and a root that is local or has private members.
+The root of `serialize`, `deserialize`, `deserialize_nominal`, and `schema` must
+be a public Titan record or union whose members are all public. `deserialize`
+and `schema` accept a record/union descriptor or a `NamedType` descriptor that
+resolves to one. `deserialize_nominal` looks up a fully qualified name directly
+and checks whether it matches `is_union`; lookup does not import modules and
+raises for unknown names. When a root fails multiple checks, decoding reports
+the first of: an unknown or unresolvable type, a kind mismatch, a message over
+2 GiB, and a local or partially private nominal.
 
-`serialize_to_buffer` and `serialize_fields_to_buffer` append wire bytes to a
-caller-initialized `titan_protobuf_buffer` (`buf`) without building a Lua
-string. The caller owns the buffer, keeps it and whatever its `context` field
-refers to valid until the call returns, and afterwards frees or detaches the
-storage with the matching native buffer operations. The buffer's `grow`
-callback may run synchronously during an append and must provide at least the
-capacity it is asked for. The capacities requested are not part of the
-contract; the
-[implementation chapter](../implementation/protobuf-library.md#encoding)
-describes the current growth policy. `deserialize_nominal_buffer` and
-`deserialize_fields_buffer` decode from the borrowed byte range of `length`
-bytes at `data`.
+Wire bytes returned by `serialize` are ordinary Titan binary strings and may
+contain embedded NULs. Codec failures raise error strings identifying the
+rejected type, value, or wire condition.
 
-The serialized result of `serialize` and `serialize_fields` is a binary string.
-Names, filenames, and schemas are ordinary strings too, but wire bytes need not
-be text and may contain NULs. Codec errors are strings identifying the rejected
-type, value, or wire condition.
+### Buffer entry points
+
+```text
+function serialize_to_buffer(buf: foreign *void, candidate: value)
+function serialize_fields_to_buffer(buf: foreign *void,
+                                    fields: const {reflect.Type}, ...: value)
+function deserialize_nominal_buffer(data: foreign const *void, length: integer,
+                                    name: string, is_union: boolean): value
+function deserialize_fields_buffer(data: foreign const *void, length: integer,
+                                   fields: const {reflect.Type}): (...: value)
+```
+
+The `*_to_buffer` functions append wire bytes directly to a caller-initialized
+`titan_protobuf_buffer` (`buf`) without allocating a Lua string. The caller owns
+the buffer and its `context` until the call returns, and frees or detaches the
+storage afterward. Its `grow` callback may run synchronously during an append
+and must supply at least the requested capacity. The `deserialize_*_buffer`
+functions decode from a caller-owned byte range of `length` bytes at `data`,
+which must stay alive and unchanged until the call returns or raises.
 
 ### Errors
 
-A nested encoding or decoding error can end with ` at <path>`. The text before
-that suffix is unchanged. Paths use the same syntax as
-[`json.Error.path`](standard-library-json.md#diagnostics-and-limits): `$` is the
-root, `["name"]` names a record field or union payload part, and `[n]` is a
-one-based Array element or anonymous root field. A `value` slot adds no segment
-of its own. For example:
+Nested encoding and decoding failures can end with ` at <path>`, using the same
+path syntax as [`json.Error.path`](standard-library-json.md#diagnostics-and-limits):
+`$` for the root, `["name"]` for record fields or union parts, and `[n]` for
+1-based Array elements or anonymous root fields (`value` slots add no segment):
 
 ```text
 protobuf: missing required field 2 at $["items"][3]["label"]
 protobuf: unsupported dynamic value at $[1]["payload"]
 ```
 
-The suffix is a debugging aid: it is added only when a replay in trace mode
-reproduces the complete original message at a nested position. Root-level
-errors, schema errors, hook-validation errors and registration errors remain
-unchanged. The replay never calls a transfer hook, resource callback or public
-`new`, and never loads a module.
+For nested encoding or decoding failures, Titan attaches ` at <path>` without
+re-invoking transfer hooks, resource callbacks, `new`, or module loaders; root,
+schema, hook-validation, and registration errors are reported directly.
+Generated codecs report up to 16 nesting levels before abbreviating deeper paths
+with `...`; reflective traversal reports full paths.
 
-The path names at most 16 nesting levels of values that generated codecs
-handle; a deeper position is reported as the path of its sixteenth level
-followed by `...`. Values traversed entirely by the reflective codec are
-reported in full.
+The `"protobuf: "` prefix is reserved for codec diagnostics. User callbacks that
+raise errors without that prefix (or raise non-string values) propagate
+unchanged.
 
-The `protobuf: ` prefix is reserved for codec diagnostics. A callback,
-including a transfer hook, resource callback or public `new`, that raises a
-message beginning with that prefix may receive a suffix naming a later
-position if the replay encounters the same message there. User errors without
-that prefix, including non-string error values, propagate unchanged.
+## Eligible values
 
-### Transfer collaboration entries
+Ordinary protobuf operations require every encountered nominal type to be public
+and to have only public fields or variants. Const fields are supported because
+decoding initializes fresh values directly.
 
-`titan.transfer` shares protobuf's codec with its packets through the
-following public declarations. They are compiled collaboration entries, not an
-application API: they add no serialization policy and make no unsupported root
-transferable.
+Eligible field and payload types:
 
-```text
-find_transfer_hooks(descriptor: reflect.RecordType, prefix: string):
-    (reflect.MethodType?, reflect.StaticFunctionType?)
-encode_transfer_payload(candidate: value, encode: reflect.MethodType,
-                        err_msg: string): string
-serialize_inspected_record_to_buffer(buf: foreign *void,
-                                     candidate: reflect.RecordValue,
-                                     context: value)
-serialize_inspected_union_to_buffer(buf: foreign *void,
-                                    candidate: reflect.UnionValue,
-                                    context: value)
-serialize_fields_to_buffer_with_context(buf: foreign *void,
-                                        fields: const {reflect.Type},
-                                        context: value, ...: value)
-deserialize_fields_buffer_with_context(data: foreign const *void,
-                                       length: integer,
-                                       fields: const {reflect.Type},
-                                       context: value): (...: value)
-deserialize_nominal_buffer_with_context(data: foreign const *void,
-                                        length: integer,
-                                        nominal: reflect.NominalType?,
-                                        name: string, is_union: boolean,
-                                        context: value): value
-find_generated_codec(candidate: value): foreign const *void
-serialize_generated_to_buffer(buf: foreign *void, codec: foreign const *void,
-                              candidate: value, context: value): boolean
+- `nil`, `boolean`, `integer`, `float`, and byte `string`.
+- Options of eligible types.
+- Public records and unions whose encountered values satisfy these rules.
+- Mutable, `const`, and `const?` Titan Arrays of eligible elements.
+- `value` slots (including erased generic parameters) holding `nil`, scalars,
+  public records or unions, or Titan Arrays of eligible values.
+- Foreign integer and float scalars, object and function pointers, complete
+  embedded C structs, and fixed embedded C arrays containing eligible data.
 
-record ResourceCodec
-  const identity: value
-  const descriptor: reflect.RecordType
-  const encode: function (value, value): (integer)
-  const decode: function (value, foreign const *void, integer): (value)
-end
-register_resource_codec(
-    candidate: value, descriptor: reflect.RecordType,
-    encode: function (value, value): (integer),
-    decode: function (value, foreign const *void, integer): (value))
-find_resource_codec(candidate: value): ResourceCodec?
-find_resource_codec_by_name(name: string): ResourceCodec?
-foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
-foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
-set_packet_context_provider(provider: function (boolean): (value))
-set_nominal_loader(loader: function (string, string): ())
-```
+Maps, Interfaces, Titan and Lua callables, owned foreign storage, C unions,
+incomplete C aggregates, and flexible C arrays are rejected. A `value` holding
+an unsupported kind raises `protobuf: unsupported dynamic value`. Foreign C
+visibility follows the [FFI rules](ffi.md).
 
-- `find_transfer_hooks` returns a record's validated `to_transfer_payload`
-  method and `from_transfer_payload` static function, or `(nil, nil)` when the
-  record defines neither; `prefix` (`"protobuf"` or `"transfer"`) only labels
-  validation errors. `encode_transfer_payload` calls that method under the
-  shared active-record cycle guard and raises `err_msg` if `candidate` is
-  already being encoded.
-- The `serialize_inspected_*` entries append a root, already inspected by the
-  caller, to a live, initialized buffer that they neither own nor free. All
-  visibility, cycle, nesting-depth, hook, and size checks still apply.
-- `context` is the packet scope that the transport has already resolved. It is
-  valid only during the call that receives it, including a `ResourceCodec`
-  `encode` or `decode` call; never keep it for later use. The three
-  `*_with_context` entries use exactly the context they are given, so `nil`
-  grants no resource authority, even inside a hook whose packet is
-  active: a `thread.Sender` or `thread.Receiver` field then raises
-  `"transfer: resource attachment requires an encode scope"` or
-  `"transfer: resource claim requires a decode scope"`. Given `nil`, the
-  `serialize_inspected_*` entries and `serialize_generated_to_buffer` instead
-  use the current execution's encode scope, if any, as `serialize_to_buffer`
-  does. `deserialize_nominal_buffer_with_context` takes the caller's
-  `reflect.find_nominal(name)` result as `nominal` and raises the same
-  unknown-name and kind-mismatch errors as `deserialize_nominal_buffer`, using
-  `name` only in those messages.
-- `find_generated_codec` returns the [generated codec](#generated-codecs) of a
-  nominal instance, or nil when the reflective codec handles it.
-  `serialize_generated_to_buffer` appends that root with the given codec, or
-  returns false and appends nothing when `codec` is not the value's codec.
-- `register_resource_codec` registers a packet-scoped resource record type for
-  the current Lua state (in the standard library, `thread.Sender` and
-  `thread.Receiver`). The registration is keyed by the record's erased type, so
-  it covers every application of a generic record. `find_resource_codec` and
-  `find_resource_codec_by_name` look it up by instance or by qualified name.
-  `write_resource_index_bytes` and `write_resource_index` write a four-byte
-  little-endian packet-local slot index to raw memory or to a buffer.
-- `set_packet_context_provider` and `set_nominal_loader` install
-  `titan.transfer`'s scope lookup and module loader in the current state.
+`serialize` inspects the runtime value graph lazily, so an absent Option or
+empty Array does not fail even if its declared element type is unsupported;
+`schema` walks declared types eagerly and rejects unsupported declarations.
+Cycles through records, unions, and Arrays raise. Shared acyclic references are
+copied independently. Foreign pointers copy their numeric address only; the
+caller owns pointee lifetime and synchronization.
 
-## Generated codecs
+## Wire mapping
 
-The compiler generates a native encoder and decoder for each public record or
-union whose members are all public, whose fields all have types this module can
-encode (so no callables, Maps, Interfaces, or owned or union C types), and that
-has no custom transfer hooks. Wide declarations stay reflective: a record with
-more than 64 fields, or a union with a variant of more than 63 parts; the
-number of variants does not matter. Every protobuf and transfer operation uses
-a generated codec wherever it meets such a nominal, as the root or nested in
-another value. Generated codecs produce exactly the bytes, values, errors, hook
-calls, and resource attachments described in this chapter; only their cost
-differs. Fields that a generated codec does not handle natively—Arrays, foreign
-values, records with hooks, `thread` endpoints, and `value` fields holding
-nominals or Arrays—use the reflective codec for that field. The
-[implementation chapter](../implementation/protobuf-library.md#generated-nominal-codecs)
-describes the allocation profile.
+Record fields take declaration order starting at field number 1. Union variants
+use their public ordinal inside a `oneof` of variant payload messages (empty
+variants carry an empty message). Field numbering skips protobuf's reserved
+range 19000–19999.
 
-`use_generated_codecs(false)` makes later codec lookups in the current Lua
-state choose the reflective codec, and returns the previous setting. It is a
-diagnostic for comparing the two codecs. Bytes, decoded values and diagnostics
-before the optional position suffix are unchanged; deep generated positions
-can be abbreviated as described under [Errors](#errors).
-Codec handles obtained before the call still run generated code when passed to
-`serialize_generated_to_buffer`.
+| Titan type | Proto3 representation |
+| --- | --- |
+| `boolean` | `optional bool` |
+| `integer` | `optional sint64` (ZigZag encoded) |
+| `float` | `optional double` |
+| `string` | `optional bytes` (no UTF-8 validation) |
+| Foreign signed / unsigned integer | `optional sint64` / `optional uint64` (width checked) |
+| Foreign `float` / `double` | `optional float` / `optional double` |
+| Foreign `long double` | `optional bytes` (exact C hexadecimal float text) |
+| Foreign object or function pointer | `optional fixed64` address |
+| Record or embedded C struct | Nested message |
+| Union | Nested message with `oneof` variant messages |
+| Titan Array or fixed C array | Nested message with repeated element-slot messages |
+| `value` | Nested `TitanValue` message (absent when `nil`) |
+
+Array elements are wrapped in slot messages carrying their element at field 1;
+an empty slot preserves an interior `nil` hole without shifting later indices.
+An empty Array is distinct from an absent optional Array, and trailing absent
+elements do not extend `#array`. Titan Array wrappers also store constness at
+field 2, which `const?` targets preserve on decode. Fixed C arrays verify exact
+length on decode.
+
+`value` fields use a self-describing `TitanValue` message with one `oneof`:
+`bool boolean = 1`, `sint64 integer = 2`, `double number = 3`,
+`bytes string = 4`, `TitanValue_Nominal nominal = 5`, or an Array of
+`TitanValue` at field 6. `TitanValue_Nominal` carries the declaring module name
+at field 1, the qualified nominal name at field 2, and the nominal's wire bytes
+at field 3. Decoding takes the last recognized arm and treats an empty message
+as `nil`. Nominals inside `value` must already be initialized in the receiving
+state (except during cross-state transfer packets, which preload declaring
+modules on demand).
+
+Absent options and `nil` fields emit no wire bytes. Present scalars always emit,
+even for protobuf zero defaults, and decoding requires every non-optional field
+to be present. `schema` emits `syntax = "proto3";` with `optional` scalar
+presence and deterministic declaration order, escaping punctuation in qualified
+names. Field numbers follow Titan declaration order, so reordering fields
+changes the wire format.
+
+Decoding skips unknown fields, takes the last repeated scalar, merges repeated
+singular messages (including Array slot sequences), and replaces earlier union
+variants with later ones. Malformed wire framing, groups, wrong wire types,
+out-of-range integers, missing required fields, unrecognized union tags, and
+messages above 2 GiB raise.
+
+Nesting depth is bounded at 128 levels across encoding, decoding, and `schema`
+on both native and browser targets (127 chained records under a nominal root, or
+126 under an anonymous root field). Deeper graphs raise
+`protobuf: nesting exceeds 128 levels`. String entry points retain their input
+string throughout decoding, and decoded byte fields are independent strings.
 
 ## Anonymous messages
 
-`serialize_fields` and `deserialize_fields` use an explicit ordered Array of
-field types instead of a nominal root. Keep the same descriptor beside both
-operations; the packet carries values, not the descriptor. This is useful for
-custom transfer hooks whose byte payload is an implementation detail:
+```text
+function serialize_fields(fields: const {reflect.Type}, ...: value): string
+function deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
+```
+
+`serialize_fields` and `deserialize_fields` encode and decode an ordered tuple
+described by `fields` without declaring a wrapper record. Both sides must supply
+the same field descriptor list:
 
 ```titan
 local protobuf = import "protobuf"
@@ -250,329 +259,227 @@ function decode_payload(bytes: string): (integer, string)
 end
 ```
 
-Encoding requires exactly one argument per declared field, including explicit
-nil arguments. Decoding returns exactly that many values, preserving interior
-and trailing nil positions. An empty descriptor encodes an empty message and
-decodes to no values. Field numbers follow descriptor order and use the same
-reserved-number skip, presence, merge, wire-validation, nesting, and size rules
-as nominal messages. The same fields in a record produce the same wire bytes.
-
-The caller selects field values explicitly; this path does not inspect or
-construct a record. Nested records and unions still require public declarations
-and public members. Pointer fields use
-`reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {})` and retain
-the same borrowed-address semantics as nominal pointer fields. No extra public
-record type is needed to define an anonymous root.
+Encoding requires one argument per declared field (including explicit `nil`s),
+and decoding returns that exact count while preserving interior and trailing
+`nil`s. An empty descriptor list encodes `""` and decodes to zero values. Field
+numbering, presence, merge, nesting, and size rules match a record with the same
+fields. Raw pointer fields use
+`reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {})`.
 
 ## Portable codecs
 
-`portable` creates a reusable codec for copied data shared by native and browser
-targets. Its ordered `fields` describe an anonymous root, just as for
-`serialize_fields`. Creation checks the complete public type graph before
-visiting any values, even for absent Options, empty Arrays, and inactive public
-union variants.
+```text
+record PortableCodec
+
+function portable(fields: const {reflect.Type},
+                  dynamic: (const {reflect.Type})?,
+                  text: (const {string})?): PortableCodec
+function PortableCodec:encode(...: value): string
+function PortableCodec:decode(bytes: string): (...: value)
+function PortableCodec:describe(): string
+```
+
+`portable` validates the entire reachable public type graph upfront—including
+absent Options, empty Arrays, and inactive union arms—and builds a reusable
+codec for pure copied data across native and browser targets.
 
 | Declared type | Portable policy |
 | --- | --- |
-| Nil, boolean, integer, float, string, `value` | Accepted |
-| Option or mutable, const, maybe-const Array | Accepted when its element is portable |
-| Public record | Accepted when every public field type is portable |
-| Public union | Accepted when every public variant's parts are portable |
-| Record with transfer hooks, or a packet resource | Rejected |
+| `nil`, `boolean`, `integer`, `float`, `string`, `value` | Accepted |
+| Option or mutable / `const` / `const?` Array | Accepted if element is portable |
+| Public record | Accepted if every public field is portable |
+| Public union | Accepted if every public variant part is portable |
+| Record with transfer hooks or packet resource | Rejected |
 | Local nominal | Rejected |
 | Map, Interface, callable, or any foreign type | Rejected |
 
-The codec closes over every record and union reachable through `fields` and the
-optional `dynamic` Array. Each `dynamic` entry must resolve to a record or
-union. A `value` position may contain the supported scalars, Arrays, and only
-those nominals in this closed set; include additional nominal descriptors in
-`dynamic` when they occur only inside `value` positions. Unknown or unlisted
-names raise `protobuf: <name> is not in this portable codec`. Decoding never
-loads modules on demand, calls transfer hooks, or attaches or claims packet
-resources. Registering a packet-resource codec after creation still makes
-encoding and decoding reject that nominal; neither resource callback runs
-under a portable codec. A `transfer.TransferValue` is not a portable type
-because some of its declared variants contain foreign values.
+The codec closes over every record and union reachable from `fields` and the
+optional `dynamic` list (each `dynamic` entry must resolve to a record or
+union). A `value` slot may carry supported scalars, Arrays, and only nominals in
+this closed set; any other nominal raises
+`protobuf: <name> is not in this portable codec`. Portable codecs never load
+modules on demand, run transfer hooks, or attach packet resources. Creation
+errors report the offending descriptor path (for example `$[1]`,
+`$[1]["items"][1]`, `$["dynamic"][2]`).
 
-Creation errors identify the descriptor path and rejected kind or nominal.
-Paths use JSON's syntax: `$[1]` selects the first root field,
-`$[1]["items"][1]` its Array element schema, and
-`$["dynamic"][2]` the second additional nominal. Options add no path component;
-an Array element schema uses the representative index 1. Field and part names
-are quoted. For example, a hooked record reports
-`protobuf: $[1]: <name> has transfer hooks`, and a resource reports
-`protobuf: $[1]: <name> is a packet resource and is not portable`.
-
-`codec:encode(...)` requires exactly one argument per field, including nil
-positions. `codec:decode(bytes)` returns exactly that many results. The
-ordinary protobuf wire validation, graph-cycle rejection, nesting bound, Array
-holes, and constness rules apply. Repeated acyclic references are copied
-independently. The codec retains its input string during decoding and returns
-independent values, not views into the input bytes.
-
-For values accepted by both entries, portable encoding is byte-for-byte
-identical to `serialize_fields(fields, ...)`. Public views also use the
-ordinary field framing; plain protobuf entries retain their stricter
-visibility checks.
+`encode` requires one argument per root field and `decode` returns that exact
+number of values. For values accepted by both APIs, portable wire bytes are
+identical to `serialize_fields`.
 
 ### Public views and construction
 
-A public record with local fields crosses as its public fields, in declaration
-order; local storage is not serialized. Decoding uses a compatible public
-`new`, found by [`RecordType:public_constructor()`](standard-library-reflect.md#public-nominal-members).
-Every fixed constructor parameter must be named after a public field. Each
-field is decoded and validated against its declared field type, and the
-same-named values are passed in constructor parameter order, preserving nil
-positions. Public fields not taken by the constructor are validated and
-dropped. Constructor errors propagate.
+Under a portable codec, a public record with `local` fields serializes its
+public fields in declaration order. Decoding uses a compatible public `new`
+found via [`RecordType:public_constructor()`](standard-library-reflect.md#public-nominal-members)
+whose fixed parameters are each named after a public field; decoded public
+fields are validated and passed in constructor parameter order (unused public
+fields are validated and discarded). Without such a constructor, the record is
+encode-only and decoding raises
+`protobuf: <name> has no public constructor over its public fields`. All-public
+records construct fields directly without invoking `new`.
 
-Without such a constructor, the record is encode-only: decoding raises
-`protobuf: <name> has no public constructor over its public fields` before
-constructing that record. All-public records instead retain ordinary protobuf
-construction: fields are initialized directly, without invoking `new`.
-
-A public union may have private variants. A public active arm crosses normally;
-encoding a private active arm raises `protobuf: private union variant`.
-Decoding an ordinal with no recognized public variant raises.
+A public union with `local` variants encodes active public arms normally and
+raises `protobuf: private union variant` for an active private arm.
 
 ### Schema descriptions and text positions
 
-`codec:describe()` returns cached JSON text for an external peer. The format is
-target-neutral and deterministic: root fields retain their order, and nominal
-entries are sorted by qualified name. It contains no version field.
+`codec:describe()` returns a deterministic cached JSON schema for external
+peers:
 
 ```json
 {"fields":[["nominal","app.Point"],"value"],"nominals":{"app.Point":{"module":"app","record":[["x","integer"],["label","bytes"]]}}}
 ```
 
-The top-level object has `fields`, an Array of type descriptions, and
-`nominals`, an object keyed by qualified nominal name. Each nominal entry has
-`module`, the declaring module name also carried by a dynamic nominal's wire
-arm, and exactly one of:
-
-| Entry | Ordered contents |
-| --- | --- |
-| `"record"` | `[fieldName, T]` pairs for public fields in declaration order |
-| `"union"` | `[variantName, parts]` pairs for public variants in public-ordinal order |
-
-A variant's `parts` is an Array of `[partName, T]` pairs. A part name is always
-a string: the declared name, or `"value"` for a single-type shorthand such as
-`count(integer)`. An empty variant has an empty parts Array. Local fields and
-private variants never appear. The nominal table includes every reachable and
-additional `dynamic` nominal, including recursive types.
+The object contains `fields` (ordered root descriptors) and `nominals` (sorted
+by qualified name). Each nominal entry carries `module` plus either `"record"`
+(`[fieldName, T]` pairs) or `"union"` (`[variantName, [[partName, T], ...]]`
+pairs, using `"value"` for single unnamed parts). Local fields and private
+variants are omitted.
 
 | Type description `T` | Meaning |
 | --- | --- |
-| `"nil"`, `"boolean"`, `"integer"`, `"float"` | Corresponding scalar |
-| `"bytes"` | Titan string, interpreted as bytes by the peer |
+| `"nil"`, `"boolean"`, `"integer"`, `"float"` | Scalar |
+| `"bytes"` | Titan string as raw bytes |
 | `"text"` | Titan string marked as UTF-8 text for the peer |
 | `"value"` | Self-describing dynamic value |
 | `["option", T]` | Optional `T` |
-| `["array", constness, T]` | Array of `T`; constness is `"mutable"`, `"const"`, or `"maybe"` |
-| `["nominal", qualifiedName]` | Reference to an entry in `nominals` |
+| `["array", constness, T]` | Array (`constness` is `"mutable"`, `"const"`, or `"maybe"`) |
+| `["nominal", qualifiedName]` | Entry in `nominals` |
 
-The optional `text` argument to `portable` lists string positions whose
-description should use `"text"` instead of `"bytes"`:
+Pass `text` paths to `portable` to mark specific string leaves as `"text"` in
+the JSON description: `"<n>"` for 1-based root field `n`,
+`"<Nominal>.<field>"` for a record field, or `"<Nominal>.<variant>.<part>"` for
+a union part. Paths may traverse Options and Arrays, but must end at a `string`
+(not `value`) inside the codec's closed set. Marking affects only `describe()`;
+Titan wire encoding and decoding treat strings as raw bytes without UTF-8
+checks.
 
-| Path | Position |
-| --- | --- |
-| `"<n>"` | Root field `n`, written as its 1-based decimal index |
-| `"<Nominal>.<field>"` | Public record field, using the qualified nominal name |
-| `"<Nominal>.<variant>.<part>"` | Named part of a public union variant |
-
-A position may be a string inside any number of Options and Arrays; the
-wrappers remain in the description and the string leaf becomes `"text"`.
-For example, an explicit descriptor
-`reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
-reflect.Type.is_option(reflect.Type.is_string()))`
-becomes `["array","mutable",["option","text"]]` when marked. Source `{T?}`
-is canonicalized to `{T}`, so its reflected Array element has no Option
-wrapper. Marking a field affects that field wherever its nominal occurs in
-the codec. Repeated paths are harmless.
-
-Creation raises an error naming the text path if it does not resolve, names
-an unlisted nominal, or designates anything other than a string through
-Options and Arrays. A `value` position cannot be marked as text. Text marks
-change only the description: Titan encoding and decoding remain byte-for-byte
-unchanged and do not validate UTF-8.
-
-For JavaScript classes, text and byte representations, shared class tables,
-and peer error codes and paths, see
+For JavaScript peer classes and error rules, see
 [Copying typed values](standard-library-browser.md#copying-typed-values).
-The standalone SDK peer accepts canonical Titan output; it is stricter than
-the native decoder about groups, wrong wire kinds in repeated scalars, and
-invalid UTF-8 in dynamic nominal names.
 
-## Eligible values
+## Generated codecs
 
-For ordinary protobuf entries, every encountered Titan nominal type must be
-public and have only public fields or variants. A local record or union is
-rejected even if all its members are public. Const fields are supported:
-reconstruction initializes a new value rather than assigning an existing
-field. [Portable codecs](#portable-codecs) instead accept the public views
-described above.
+```text
+function use_generated_codecs(enabled: boolean): boolean
+```
 
-Eligible field and payload types are:
+The compiler generates native encoders and decoders for every all-public record
+(up to 64 fields) and all-public union (up to 63 parts per variant) whose fields
+are protobuf-eligible and that defines no custom transfer hooks. Every protobuf
+and transfer call uses generated codecs automatically, falling back to
+reflection only for individual fields they do not handle natively (Arrays,
+foreign types, hooked records, `thread` endpoints, and dynamic nominals).
 
-- Nil, booleans, integers, floats, and byte strings.
-- Options of eligible values.
-- Public records and unions whose encountered data meets these rules.
-- Mutable, const, or maybe-const Titan Arrays of eligible elements.
-- `value` fields and parts, including erased generic parameters, holding nil,
-  a boolean, integer, float, or string, a public record or union whose
-  encountered data meets these rules, or a Titan Array of such values.
-- Foreign integer and floating scalars, object and function pointers, complete embedded C
-  structs, and fixed embedded C arrays, recursively containing eligible data.
+`use_generated_codecs(false)` forces subsequent codec lookups in the current Lua
+state to use the reflective path and returns the previous setting, useful for
+diagnostic comparisons.
 
-The module rejects Maps, Interfaces, Titan/Lua callables, owned foreign
-resources, C unions, incomplete aggregates, and flexible arrays. A `value`
-holding a Map, a callable, a raw pointer, or another unsupported kind raises
-`protobuf: unsupported dynamic value`. Foreign C exportability and declaration
-visibility also follow the [FFI contract](ffi.md).
-
-Encoding visits the actual graph without a preliminary schema walk. Unsupported
-data fails when encountered. For example, an absent optional field or an empty
-Array does not require visiting a value of its element type. `schema` traverses
-the declared types and can reject a type whose particular value encoded
-successfully.
-
-Cycles through records, unions, and Arrays raise. Repeated references in an
-acyclic graph are copied independently: decoding does not preserve aliasing.
-Pointers copy their numeric addresses without following them, retaining their
-targets, or extending their lifetimes. The caller owns pointee lifetime and
-synchronization across states.
-
-## Wire mapping
-
-Record fields use declaration order, starting at field number 1. Union variants
-use their public ordinal and each variant is a `oneof` member containing a
-message of its ordered payload parts. Empty variants have an empty payload
-message. Field numbering skips protobuf's reserved interval 19000–19999.
-
-| Titan value | Proto3 representation |
-| --- | --- |
-| `boolean` | `optional bool` |
-| `integer` | `optional sint64`, ZigZag encoded |
-| `float` | `optional double` |
-| `string` | `optional bytes`, without UTF-8 validation |
-| Foreign signed/unsigned integer | `optional sint64` / `optional uint64`, with declared-width checks |
-| Foreign `float` / `double` | `optional float` / `optional double` |
-| Foreign `long double` | `optional bytes` carrying the exact C hexadecimal floating representation |
-| Foreign object or function pointer | `optional fixed64` address |
-| Record or embedded C struct | Nested message |
-| Union | Nested message with a `oneof` of variant payload messages |
-| Titan Array or embedded C array | Nested message with repeated element-slot messages |
-| `value` | Nested `TitanValue` message with a `oneof` (below); absent when nil |
-
-An Array slot is a message containing its value at field 1. An empty slot
-represents nil, preserving interior holes without shifting subsequent elements.
-An empty Array is distinct from an absent optional Array. Titan Array wrappers
-also carry constness at field 2; maybe-const reconstruction preserves the
-observed qualifier. Fixed C array reconstruction checks the actual target
-extent. As elsewhere in Titan, trailing absent elements do not add observable
-Array length.
-
-A `value` field is self-describing. Its `TitanValue` message holds one `oneof`
-arm: `bool boolean = 1`, `sint64 integer = 2`, `double number = 3`,
-`bytes string = 4`, `TitanValue_Nominal nominal = 5`, or a Titan Array of
-`TitanValue` elements at 6. The nominal arm carries the declaring module name
-at field 1, the qualified nominal name at field 2, and at field 3 the bytes that
-a field of that nominal type carries: its message, its custom hook payload, or
-its packet resource index. Decoding uses the last recognized arm and treats a
-message with none as nil; a decoded Array keeps the constness it was encoded
-with.
-
-A nominal named inside a `value` field must already be initialized in the
-decoding state, or decoding raises `protobuf: unknown nominal type`. The one
-exception is decoding a transfer packet, which loads the declaring module on
-demand. `TransferValue:to_value` outside a packet therefore loads the root
-nominal's module but not a module named only inside a `value` field.
-
-Absent options and nil fields emit no field. Other scalars are emitted even
-when equal to protobuf defaults. Decoding requires present non-optional fields
-instead of inventing default values for a Titan constructor. Generated schemas
-use proto3 optional scalar presence so an external encoder can express this
-distinction. A nil field has an empty-message schema and is normally absent.
-
-Schema identifiers escape underscores and punctuation in nominal and field
-names; qualified names therefore remain distinct. The returned string includes
-`syntax = "proto3";` and all referenced message declarations. Declaration order
-is deterministic. Field numbers are tied to Titan declaration order, so changing
-that order changes the wire contract; the module is not a schema-versioning
-system.
-
-Unknown fields are skipped. Repeated scalar fields take their last value;
-repeated singular messages merge, including Array slot sequences. A later
-different union variant replaces the previous variant. Malformed tags, varints,
-lengths, groups, wire kinds, out-of-range native integers, missing required
-fields, and unrecognized union selections raise. Messages must fit the
-protobuf 2 GiB size bound.
-
-Nested encoding and decoding failures use the [error paths](#errors) above
-when a replay in trace mode reproduces the failure.
-
-Nesting is limited on every encoding, decoding, and schema path, generated or
-reflective. Levels count nested messages and the fields of the innermost one.
-A nominal-root chain whose innermost record has a field holds at most 127
-records; putting that chain in an anonymous root field adds a level, allowing
-126 records and rejecting 127. These bounds apply on native and browser
-targets, on the main stack or inside a Task or coroutine. Deeper input raises
-the ordinary catchable error `protobuf: nesting exceeds 128 levels`, with an
-error-path suffix for located encoding or decoding failures. This bounds the
-codec's own traversal, not stack already used by its caller.
-
-String entry points keep their input alive throughout decoding, including
-while a custom decoder runs after the caller has dropped its last reference to
-it. The raw `*_buffer` entry points borrow caller-owned memory: keep the
-complete byte range alive and unchanged until the synchronous call returns or
-raises, including while a custom decoder runs. A raw pointer does not retain a
-Titan string or native allocation. Decoded byte fields are independent strings,
-not views of the input.
-
-Extended C floating values use C hexadecimal text to avoid narrowing to Titan
-`float`; they do not acquire a standard protobuf numeric interpretation. Pointer
-values are meaningful only while their native targets remain valid in the
-receiving process. Native declarations and compatible target layouts remain
-the ordinary C FFI precondition.
-
-## Independent states
+## Independent states and transfer collaboration
 
 `transfer.TransferValue.is_record(module, name, bytes)` and
 `is_union(module, name, bytes)` (`async.TransferValue` is a transparent alias)
-carry the defining module, root type name, and
-wire payload. Independent-state calls automatically
-serialize eligible returned records and unions; an explicitly returned
-`TransferValue` takes precedence over this classification. Receiver messages
-copy the module, nominal name, and wire bytes into native packets. Their
-[lossy, coalescing delivery](async-io.md#cross-state-receivers) can replace an
-unread packet; protobuf encoding adds no delivery guarantee.
-
-`TransferValue:to_value()` first checks the destination nominal registry. On a
-miss it calls the recorded module's native preload loader and retries lookup.
-The standalone `protobuf.deserialize_nominal` helper only looks up an already
-initialized type. See [independent Lua states](standard-library-lua.md) and
-[transfer values](async-io.md#transfer-values) for ownership and preload rules.
+carry serialized nominals across independent Lua states and threads.
+`TransferValue:to_value()` checks the destination registry and, on a miss,
+preloads the declaring module before decoding; `protobuf.deserialize_nominal`
+only queries already-initialized types. See
+[independent Lua states](standard-library-lua.md),
+[cross-state receivers](async-io.md#cross-state-receivers), and
+[transfer values](async-io.md#transfer-values).
 
 ### Custom record transfer hooks
 
-During automatic transfer, a root record with the
-[custom transfer-hook pair](async-io.md#custom-record-transfer) travels as an
-`is_record_payload(module, name, bytes)` carrier. When such a record is a field,
-variant part, or Array element inside another public record or union,
-`protobuf.serialize`, `protobuf.deserialize`, and `protobuf.schema` represent
-it as `optional bytes` holding its hook payload, and its own fields need not be
-public. `thread.Sender` and `thread.Receiver` fields use the same
-representation, but their payload is a four-byte packet-local slot index that
-`titan.transfer` writes and claims directly, without calling their hooks. Hooks
-may use an anonymous-message descriptor to encode native tokens and copied
-state. Calling `protobuf.serialize` on a hooked record as the root still
-applies the structural public-data rules of this chapter.
+During automatic transfer, a root record with a
+[custom transfer-hook pair](async-io.md#custom-record-transfer) travels as
+`is_record_payload(module, name, bytes)`. When that record appears nested inside
+another public record, union, or Array, `protobuf.serialize`, `deserialize`, and
+`schema` encode it as `optional bytes` carrying its hook payload (its own fields
+need not be public). `thread.Sender` and `thread.Receiver` fields use the same
+wire field to carry a 4-byte packet-local resource index managed by
+`titan.transfer`. Calling `protobuf.serialize` directly on a hooked record as
+the root applies structural public-data rules instead.
 
-Standalone protobuf calls open no packet scope. When `protobuf.serialize`,
-`protobuf.deserialize`, or `protobuf.deserialize_nominal_buffer` meets a
-`thread.Sender` or `thread.Receiver` field, or a hook that attaches or claims
-one, it raises unless the call runs inside the current execution's matching
-scope, opened by a
-[packet transfer operation](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes).
-Hooks remain synchronous and nonyielding, including when called for nested
-fields.
+Standalone protobuf calls open no packet scope: encountering a `thread.Sender`
+or `thread.Receiver` (or a hook that attaches or claims one) raises unless
+running inside an active scope opened by
+[`titan.transfer`](standard-library-transfer.md). Hooks must be synchronous and
+non-yielding.
+
+### Transfer collaboration entries
+
+`titan.transfer` shares `titan.protobuf`'s codecs through the following public
+collaboration entries (they do not extend standalone serialization policy):
+
+```text
+record ResourceCodec
+  const identity: value
+  const descriptor: reflect.RecordType
+  const encode: function(value, value): integer
+  const decode: function(value, foreign const *void, integer): value
+end
+
+function find_transfer_hooks(descriptor: reflect.RecordType,
+                             prefix: string): (reflect.MethodType?,
+                                               reflect.StaticFunctionType?)
+function encode_transfer_payload(candidate: value, encode: reflect.MethodType,
+                                 err_msg: string): string
+function serialize_inspected_record_to_buffer(buf: foreign *void,
+                                              candidate: reflect.RecordValue,
+                                              context: value)
+function serialize_inspected_union_to_buffer(buf: foreign *void,
+                                             candidate: reflect.UnionValue,
+                                             context: value)
+function serialize_fields_to_buffer_with_context(buf: foreign *void,
+                                                 fields: const {reflect.Type},
+                                                 context: value, ...: value)
+function deserialize_fields_buffer_with_context(data: foreign const *void,
+                                                length: integer,
+                                                fields: const {reflect.Type},
+                                                context: value): (...: value)
+function deserialize_nominal_buffer_with_context(data: foreign const *void,
+                                                 length: integer,
+                                                 nominal: reflect.NominalType?,
+                                                 name: string,
+                                                 is_union: boolean,
+                                                 context: value): value
+function find_generated_codec(candidate: value): foreign const *void
+function serialize_generated_to_buffer(buf: foreign *void,
+                                       codec: foreign const *void,
+                                       candidate: value,
+                                       context: value): boolean
+function register_resource_codec(candidate: value,
+                                 descriptor: reflect.RecordType,
+                                 encode: function(value, value): integer,
+                                 decode: function(value, foreign const *void,
+                                                  integer): value)
+function find_resource_codec(candidate: value): ResourceCodec?
+function find_resource_codec_by_name(name: string): ResourceCodec?
+foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
+foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
+function set_packet_context_provider(provider: function(boolean): value)
+function set_nominal_loader(loader: function(string, string))
+```
+
+- `find_transfer_hooks` returns validated `to_transfer_payload` and
+  `from_transfer_payload` descriptors (or `(nil, nil)`), labeling validation
+  errors with `prefix`. `encode_transfer_payload` runs the encode hook under the
+  active-record cycle guard and raises `err_msg` on reentry.
+- `serialize_inspected_*` append an already-inspected root to a caller-owned
+  buffer with all visibility, cycle, nesting, hook, and size checks active.
+- `context` is valid only for the duration of the call that receives it. The
+  `*_with_context` entries use only the passed `context` (`nil` grants no
+  resource scope); `serialize_inspected_*` and `serialize_generated_to_buffer`
+  fall back to the current execution's encode scope when `context` is `nil`.
+  `deserialize_nominal_buffer_with_context` accepts a pre-looked-up `nominal`
+  and uses `name` in diagnostics.
+- `find_generated_codec` returns a nominal's generated codec handle or `nil`;
+  `serialize_generated_to_buffer` encodes with it or returns `false` if the
+  handle does not match `candidate`.
+- `register_resource_codec` registers a packet-scoped resource record keyed by
+  erased type (`find_resource_codec` and `find_resource_codec_by_name` query
+  it). `write_resource_index_bytes` and `write_resource_index` write a 4-byte
+  little-endian slot index. `set_packet_context_provider` and
+  `set_nominal_loader` install `titan.transfer`'s scope provider and module
+  loader for the current state.
+
+See [Protocol Buffers implementation](../implementation/protobuf-library.md) for
+encoder growth and generated-codec allocation details.

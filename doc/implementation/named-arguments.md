@@ -6,7 +6,7 @@ checker proves that the callee is an eligible declaration, matches labels, and
 rewrites the arguments into a dense positional list; the coder freezes explicit
 expressions in lexical order before emitting the unchanged native or direct-C
 call. The language contract is in
-[Named arguments](../language/named-arguments.md).
+[Named calls](../language/functions.md#named-calls).
 
 ## Parser and AST boundary
 
