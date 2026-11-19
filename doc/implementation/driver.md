@@ -762,7 +762,12 @@ and physical provenance own the process-wide nominal cache generation; each
 resolver keeps its own mutable profile and provider graphs. No native
 embedded inventories or dynamically loaded Titan providers participate.
 The SDK archive has first lookup priority; project archives use ordinary
-browser lookup. An analysis context has no build descriptor or output
+browser lookup.
+The captured completion catalog includes the SDK archive's interfaces even
+before any saved import selects its modules. A project source overlapping one
+module suppresses that whole provider from the default catalog. Capturing the
+catalog neither looks up other providers nor seeds the import registry.
+An analysis context has no build descriptor or output
 directory and cannot generate C objects, start a build worker, publish a
 provider or link an image.
 
@@ -783,9 +788,11 @@ headers, and compares the live C profile and Wasm object fingerprint to the
 published target before serving a header or an acceptance probe. It can use the
 same SDK's packaged `src/lua-5.5.1` headers when `lib/browser/include` is absent
 and the bytes match the browser header digest. Both forms use the browser Lua
-defines and the selected SDK's Titan headers. Neither asks for host CC, Lua
-or runtime link archives, `emar`, a runner, or Node. Missing or mismatched
-prerequisites fail the C-using module, not the browser target.
+defines and require all five selected SDK Titan headers to be readable,
+nonempty files. Their digests contribute to the lazy foreign identity, not
+the tool-free semantic key. Neither path asks for host CC, Lua or runtime link
+archives, `emar`, a runner, or Node. Missing or mismatched prerequisites fail
+the C-using module, not the browser target.
 
 ### Embedded interface provider and target profile
 

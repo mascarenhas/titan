@@ -17,6 +17,7 @@ local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +excepti
 local TRIPLE = "wasm32-unknown-emscripten"
 local FINGERPRINT = { format = "wasm", word_size = 32, linking_version = 2, features = FEATURES }
 local ANALYSIS_LIMIT = 64 * 1024
+M.SDK_HEADERS = { "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h", "titan/browser.h" }
 local BANNER = "# Lua 5.5.1 browser build record v1\n"
 local RECORD_KEYS = { "fork_revision", "archive_sha256", "headers_sha256",
     "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
@@ -786,7 +787,8 @@ local function compiler_configuration(context, tool, build_profile, defines, lua
     for _, define in ipairs(defines) do flags[#flags + 1] = define end
     for _, define in ipairs(TARGET_DEFINES) do flags[#flags + 1] = define end
     for _, flag in ipairs(extras or {}) do flags[#flags + 1] = flag end
-    local includes, include_error = cdriver.resolve_compiler_include_dirs(context.extra_ffi_include_dirs or {})
+    local includes, include_error =
+        cdriver.resolve_compiler_include_dirs(context.extra_ffi_include_dirs or {}, context.io)
     if not includes then return nil, "invalid extra_ffi_include_dirs: " .. include_error end
     table.insert(includes, 1, runtime_include)
     table.insert(includes, 1, lua_source)
@@ -812,6 +814,7 @@ end
 
 function M.analysis_toolchain(context, semantic, packaged_lua_source, flags)
     local data, paths = semantic.target, semantic.paths
+    flags = flags or {}
     local valid, err = M.validate_flags(flags, "browser foreign C flags")
     if not valid then return nil, err end
     valid, err = check_owned_tail(flags, 1, false, data.build_profile)
@@ -827,6 +830,17 @@ function M.analysis_toolchain(context, semantic, packaged_lua_source, flags)
     if headers ~= data.lua.headers_sha256 then
         return nil, lua_source .. ": matching SDK Lua headers are required" ..
             (header_error and (": " .. header_error) or " (digest disagrees with analysis-target)")
+    end
+    local titan_headers = {}
+    for _, relative in ipairs(M.SDK_HEADERS) do
+        local filename = compiler_paths.join(paths.include, relative)
+        local info, stat_error = context.io:stat(filename)
+        if stat_error ~= nil and type(stat_error) ~= "string" then error(stat_error, 0) end
+        if not info or info.kind ~= "file" or info.size == 0 then
+            return nil, filename .. ": matching Titan SDK header is required" ..
+                (stat_error and (": " .. stat_error) or "")
+        end
+        titan_headers[relative] = incremental.file_digest(context, filename)
     end
     local defines = assert(cdriver.split_shell_words(data.lua.defines))
     local config
@@ -845,6 +859,7 @@ function M.analysis_toolchain(context, semantic, packaged_lua_source, flags)
     config.target_identity = "browser-foreign:sha256:" .. incremental.digest(context, "browser-foreign-tool", {
         semantic = semantic.identity, executable = tool.cc[1], version = tool.version_output,
         executable_digest = incremental.file_digest(context, tool.cc[1]),
+        titan_headers = titan_headers,
     })
     return config
 end

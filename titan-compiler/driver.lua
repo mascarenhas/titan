@@ -1245,6 +1245,7 @@ do
             local bytes = read_asset("analysis-target", 64 * 1024)
             local data, err = driver._browser_target.decode_analysis(context, bytes)
             if not data then error(analysis_file .. ": " .. err, 0) end
+            local profile = assert(csemantics.import_profile(data.profile_data))
 
             local absent_file = path.join(directory, "absent-modules")
             local absent, absent_digest = read_asset("absent-modules", 64 * 1024)
@@ -1270,7 +1271,11 @@ do
                 target = data.fingerprint,
                 expected_abi = driver.TITAN_ABI_VERSION,
                 validate_types = function(name, serialized, origin)
-                    return driver.decode_module_interface(serialized, name, origin)
+                    local interface, decode_error = driver.decode_module_interface(serialized, name, origin)
+                    if not interface then return nil, decode_error end
+                    local valid, profile_error = types.normalize_portable_c_numeric_types(interface, profile)
+                    if not valid then return nil, profile_error end
+                    return interface
                 end,
             })
             if not provider then error(err, 0) end
@@ -1421,13 +1426,15 @@ function driver._new_resolver_context(options, target_descriptor)
     if not extra_ffi_include_dirs then
         error("invalid extra_ffi_include_dirs: " .. tostring(include_error), 2)
     end
-    local browser_foreign_flags
+    local browser_foreign_flags, browser_foreign_flags_error
     if browser_semantics then
         browser_foreign_flags = {}
         for _, flag in ipairs(driver.NATIVE_COMPILE_FLAGS or driver.EXTRA_CPPFLAGS or {}) do
             browser_foreign_flags[#browser_foreign_flags + 1] = flag
         end
         if not driver.NATIVE_COMPILE_FLAGS then
+            browser_foreign_flags_error = (driver.EXTRA_CPPFLAGS == nil and cppflags_error) or
+                (driver.EXTRA_CFLAGS == nil and cflags_error) or nil
             for _, flag in ipairs(driver.EXTRA_CFLAGS or {}) do
                 browser_foreign_flags[#browser_foreign_flags + 1] = flag
             end
@@ -1439,7 +1446,7 @@ function driver._new_resolver_context(options, target_descriptor)
         target_descriptor = target_descriptor,
         browser_semantics = browser_semantics,
         browser_foreign_flags = browser_foreign_flags,
-        browser_foreign_flags_error = browser_semantics and (cppflags_error or cflags_error) or nil,
+        browser_foreign_flags_error = browser_foreign_flags_error,
         io = io_strategy,
         target = options.target ~= "" and options.target or nil,
         cache_adapter = options.cache_adapter or default_digest_adapter(),
@@ -2103,25 +2110,28 @@ function driver.toolchain_descriptor(context)
     }
 end
 
+function perf.source_overlap(context, provider)
+    for _, name in ipairs(provider.key_order) do
+        local imported = driver.imported[name]
+        if context.source_modules[name] or (imported and imported ~= CIRCULAR_MARK and
+            (imported.ast or imported.kind == "source")) then
+            return name
+        end
+    end
+end
+
 local function available_embedded_interface_provider(context)
     local provider = context.embedded_interface_provider
     if not provider or context.embedded_interface_provider_rejected then
         return nil
     end
-    for _, name in ipairs(provider.key_order) do
-        local imported = driver.imported[name]
-        local cached_source = imported and imported ~= CIRCULAR_MARK and
-            (imported.ast or imported.kind == "source")
-        if context.source_modules[name] or cached_source then
-            -- One source identity rejects the complete physical inventory. This
-            -- mirrors archive overlap rather than mixing independently selected
-            -- entries from one embedded executable with project source. A
-            -- process-global source cache is still selected source provenance,
-            -- even when this context did not rediscover its project catalog.
-            context.embedded_interface_provider_rejected = true
-            context.embedded_interface_provider_overlap = name
-            return nil
-        end
+    -- One source identity rejects the whole bundled inventory, including
+    -- source entries already known to the process but not this resolver.
+    local overlap = perf.source_overlap(context, provider)
+    if overlap then
+        context.embedded_interface_provider_rejected = true
+        context.embedded_interface_provider_overlap = overlap
+        return nil
     end
     return provider
 end
@@ -2132,6 +2142,14 @@ end
 function driver.completion_binary_catalog(context)
     driver.assert_target_context(context)
     local result = {}
+    local semantic = context.browser_semantics
+    if semantic and not perf.source_overlap(context, semantic) then
+        for name, entry in pairs(semantic.entries) do
+            local docs = entry.decoded_types._documentation
+            result[name] = { serialized = entry.types, kind = "static",
+                filename = semantic.provider_file, documentation = docs and documentation.copy(docs) }
+        end
+    end
     -- Finalization selects whole archives, including siblings that ordinary
     -- imports never loaded. Capture their interfaces without selecting any
     -- additional providers or publishing siblings into driver.imported.

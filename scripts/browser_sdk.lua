@@ -124,14 +124,6 @@ local function check_no_forbidden_symbols(archive_path, archive)
 end
 
 local function stage_differing_roots()
-    local common_headers = {
-        "include/minicoro.h",
-        "include/titan.h",
-        "include/transfer.h",
-        "include/titan/ffi.h",
-        "include/titan/browser.h",
-    }
-
     local norm_prefix = strategy:realpath(prefix) or paths.normalize(prefix)
     local existing_tree = lfs.attributes(install_tree, "mode") == "directory"
     local norm_tree = (existing_tree and strategy:realpath(install_tree)) or paths.normalize(install_tree)
@@ -179,7 +171,8 @@ local function stage_differing_roots()
 
         -- Ensure common Titan headers exist in the differing install tree without
         -- ever touching native Lua headers.
-        for _, rel in ipairs(common_headers) do
+        for _, name in ipairs(browser_target.SDK_HEADERS) do
+            local rel = "include/" .. name
             local dst = install_tree .. "/" .. rel
             local src = prefix .. "/" .. rel
             if lfs.attributes(dst, "mode") ~= "file" and lfs.attributes(src, "mode") == "file" then
@@ -190,8 +183,8 @@ local function stage_differing_roots()
         ensure_dir(install_tree)
     end
 
-    for _, rel in ipairs(common_headers) do
-        local hdr = install_tree .. "/" .. rel
+    for _, name in ipairs(browser_target.SDK_HEADERS) do
+        local hdr = install_tree .. "/include/" .. name
         if lfs.attributes(hdr, "mode") ~= "file" then
             fail("missing installed header '" .. hdr .. "'; " .. browserlink.compiler_remedy())
         end
@@ -410,7 +403,7 @@ elseif action == "finalize" then
             digest_inputs[#digest_inputs + 1] = paths.join(descriptor.paths.lua_source, name)
         end
     end
-    for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h", "titan/browser.h" }) do
+    for _, rel in ipairs(browser_target.SDK_HEADERS) do
         digest_inputs[#digest_inputs + 1] = paths.join(descriptor.paths.include, rel)
     end
     for _, key in ipairs({
