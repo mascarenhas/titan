@@ -83,7 +83,8 @@ class SemanticPackTests(unittest.TestCase):
                 verify(files)
 
 
-@unittest.skipUnless(os.getenv("TITAN_PACK_TEST_PREFIX"), "requires a finished browser SDK")
+@unittest.skipUnless(os.getenv("TITAN_PACK_TEST_PREFIX"),
+                     os.getenv("TITAN_PACK_TEST_SKIP") or "requires a finished browser SDK")
 class FullSDKPackTests(unittest.TestCase):
     def setUp(self):
         root = tempfile.TemporaryDirectory(prefix="titan-pack-")

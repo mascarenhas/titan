@@ -13,13 +13,18 @@ describe("browser semantic pack transport", function()
         local semantic, stat_error = strategy:stat(path.join(directory, "analysis-target"))
         assert.is_nil(stat_error)
         if semantic then assert.equal("file", semantic.kind) end
+        -- Compiler shards copy source without Git administration. A full
+        -- producer test also needs local commit and submodule objects.
+        local git = strategy:stat(".git")
+        local full_sdk = semantic and git
+        local skip_reason = semantic and "requires a Git root" or "requires a finished browser SDK"
         local argv, options = {}, { stderr_to_stdout = true }
         if platform.windows then
-            options.env = { TITAN_PACK_TEST_PREFIX = semantic and prefix or false }
-        elseif semantic then
-            argv = { "env", "TITAN_PACK_TEST_PREFIX=" .. prefix }
+            options.env = { TITAN_PACK_TEST_PREFIX = full_sdk and prefix or false,
+                TITAN_PACK_TEST_SKIP = skip_reason }
         else
-            argv = { "env", "-u", "TITAN_PACK_TEST_PREFIX" }
+            argv = { "env", "TITAN_PACK_TEST_PREFIX=" .. (full_sdk and prefix or ""),
+                "TITAN_PACK_TEST_SKIP=" .. skip_reason }
         end
         for _, arg in ipairs({ python, "-B", "-m", "unittest", "discover",
                 "-s", "spec", "-p", "browser_semantic_pack_test.py", "-v" }) do
@@ -29,7 +34,7 @@ describe("browser semantic pack transport", function()
         local output = result.output or result.diagnostic
         assert.is_true(result.ok, output)
         assert.truthy(output:find("Ran 4 tests", 1, true), output)
-        assert.equal(not semantic, output:find("requires a finished browser SDK", 1, true) ~= nil)
+        assert.equal(not full_sdk, output:find(skip_reason, 1, true) ~= nil)
         io.stdout:write(output)
     end)
 end)

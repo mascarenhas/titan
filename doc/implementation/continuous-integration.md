@@ -368,8 +368,9 @@ locally from the matching checkout:
 TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover \
   -s spec -p browser_semantic_pack_test.py -v
 ```
-Ordinary compiler shards also invoke the Python pack suite through Busted;
-without installed semantic assets, the SDK-free transport cases still run.
+Ordinary compiler shards also invoke the Python pack suite through Busted.
+The SDK-free transport cases always run; the full cases need both an
+installed browser SDK and a Git checkout containing the pinned objects.
 
 8. **Complete browser core stdlib suite (`sdk` only).** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
