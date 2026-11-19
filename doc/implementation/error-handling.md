@@ -6,8 +6,7 @@ This chapter covers two related pieces of the implementation:
 * `raise`/`catch` and the internal `finally` that `defer` lowers to.
 
 The surface language is documented in
-[the language reference](../language/error-handling.md) and
-[defer](../language/defer.md). This chapter is the canonical home for the trace
+[Errors and Resource Cleanup](../language/error-handling.md). This chapter is the canonical home for the trace
 model, the error handler, trace pinning, the inline protected boundary, pending
 `finally` actions, and scalar recovery storage across `setjmp`. The code lives
 in `titan-runtime/titan.c` (`errorhandler` and the trace builder),

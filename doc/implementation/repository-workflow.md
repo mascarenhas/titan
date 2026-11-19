@@ -71,7 +71,7 @@ separate rather than republishing another profile into an active SDK. The
 SDK records its profile in `etc/titan/build-profile`; inspect it and the
 effective compiler argv when recording evidence. Per-component optimization
 levels, including the sanitizer domains, are specified in [build
-profiles](../language/build-profiles.md); test-harness flag overrides are in the
+profiles](../language/toolchain.md#build-profiles); test-harness flag overrides are in the
 [test-runner profile contract](test-runner.md#validation-profile-and-isolated-sdks).
 
 Distinct `--output` roots can separate generated Titan objects, but

@@ -7,7 +7,7 @@ deferred statement. All runtime semantics (pending actions, boundaries,
 allocation-free recovery, and setjmp-sensitive spills) are the `finally`
 machinery in [Error handling](error-handling.md#code-generator-overview). This
 chapter covers only what is specific to `defer`. The language contract is in
-[defer](../language/defer.md).
+[Resource cleanup with `defer`](../language/error-handling.md#resource-cleanup-with-defer).
 
 ## Lexer and grammar
 

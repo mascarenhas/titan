@@ -6,7 +6,7 @@ directories, and embeds the file inventory needed by the test executable. Lua
 code embedded in that executable resets counters and produces reports, with a
 small native counter-dump binding; no separate host command or run manifest is
 involved. User-facing commands are in [native
-coverage](../language/native-coverage.md); the test executable itself is
+coverage](../language/toolchain.md#native-source-coverage); the test executable itself is
 described in [test runner](test-runner.md).
 
 | Code | Owns |

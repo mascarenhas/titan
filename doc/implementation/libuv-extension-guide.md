@@ -35,11 +35,10 @@ For every proposed operation, determine:
   platform restrictions; and
 - whether it is safe on the Lua thread or is a C-only worker/thread entry.
 
-Update the specific disposition in the
-[native coverage map](../language/uv/coverage.md) rather than only a wrapper
-count. Keep its function, nonfunction, field, callback, constant, and macro
-inventories consistent with the public declarations; intentional omissions need
-individual ownership explanations.
+Update [native coverage notes](../language/uv/coverage.md) when adding an
+intentional omission or internally freed snapshot wrapper; keep public
+declarations consistent with the per-family reference pages under
+`doc/language/uv/`.
 
 ## Public native owners
 

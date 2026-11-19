@@ -6,7 +6,7 @@ non-contiguous producer. They add no run-time object, public ABI shape, or
 generated helper function. The parser and checker build a shared carrier plus
 projections; the coder emits the carrier setup and element reads directly in
 the consuming function. The language rules are in
-[Spread expressions](../language/spread-expressions.md).
+[Spread expressions](../language/functions.md#spread-expressions).
 
 ## Parser and AST ownership
 

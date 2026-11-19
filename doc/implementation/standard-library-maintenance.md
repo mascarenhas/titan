@@ -156,82 +156,198 @@ exclusive independent-state execution used by `titan.lua`.
 
 ## Keep C and the Lua C API to what Titan cannot do
 
-The style guide states six [rules for standard-library and runtime C and
-JavaScript](../style-guide.md#write-native-bindings-titan-first);
-a review justifies every new `lua_*`/`luaL_*` call, authored C line, and
-authored JavaScript line against them. This maintainer contract pairs each
-rule with its counterexample from the
-initial browser bridge (`titan-runtime/browser/titan-browser.c`,
-`titan/browser.browser.titan`, and `titan-runtime/browser/titan-browser.mjs` at
-commit `843b446e`, PR #364, before #371's rewrite), and with existing
-code that follows it. [Foreign functions](foreign-functions.md) and the
-[libuv extension rules](libuv-extension-guide.md) describe the mechanisms. The
-[`titan-ffi` cartridge](../../.agents/skills/titan-ffi/SKILL.md) carries the
-same pairs for agents under "Guard-rails for standard-library and runtime C",
-with compiled examples. [The same rules for browser
-JavaScript](#the-same-rules-for-browser-javascript) follow the six pairs.
+Standard-library and runtime code that touches C (authored C, a source
+`foreign function` callback, or a `lua_*`/`luaL_*` call) or JavaScript (a
+`--js-library` file, the browser loader, an `EM_JS` or `EM_ASM` block, or
+JavaScript glue that the compiler generates) follows six rules. A review counts
+the new Lua C API calls, authored C lines, and authored JavaScript lines in a
+diff and justifies each one against a rule.
 
-1. **Layering.** Wrong (`titan-browser.c` at `843b446e`): a 600-line runtime C
-   file (`titan-browser.c`) hand-writing the Emscripten exports, the image
-   launcher `protected_entry`, a C `states` linked list, and
-   `titan_browser_root_callable` (validating the closure, copying its signature
-   into a new userdata, and rooting it in C). Right: `titan-browser.c` is
-   gone; `browserentry.lua` generates the launcher (sharing `titan_entry_error_message`
-   with native `main`) and one-line weak forwards (`titan_browser_invoke`,
-   `titan_browser_release_callable`) to public `foreign function`s in
-   `titan/browser.browser.titan`. Its state record is Titan-owned module
-   storage finalized by an ordinary function through `gc.finalizable`;
-   `mark_closing` and the entry trampolines remain foreign functions. The
-   cross-state token map lives in the JavaScript registry. The libuv callbacks
-   are local `foreign function`s whose one C helper,
+Each rule below states the requirement, then pairs it with a counterexample
+from the initial browser bridge (`titan-runtime/browser/titan-browser.c`,
+`titan/browser.browser.titan`, and `titan-runtime/browser/titan-browser.mjs` at
+commit `843b446e`) and with current code that follows it. [Foreign
+functions](foreign-functions.md) and the [libuv extension
+rules](libuv-extension-guide.md) describe the mechanisms; the
+[`titan-ffi` cartridge](../../.agents/skills/titan-ffi/SKILL.md) carries the
+same pairs for agents with compiled examples. [The same rules for browser
+JavaScript](#the-same-rules-for-browser-javascript) apply across the browser
+host boundary.
+
+1. **Layering.** Write the work in Titan; do not add hand-written runtime C
+   files or JavaScript state machines for standard-library bindings. Place each
+   piece of a native boundary by how C or the host reaches it:
+   - *Called through a function pointer* (libuv callbacks, `__gc` and other
+     `lua_CFunction`s): a `local foreign function`, address taken.
+   - *Called by name where any C symbol works*: a public `foreign function`; C
+     callers use the generated `.titan.h` (or the mangled declaration).
+   - *A private helper of such an entry, or a C-only critical interval* (a body
+     that holds a native mutex, performs an atomic handoff, or moves a native
+     resource between two owners, where nothing may raise, collect, or grow the
+     Lua stack): a `local foreign function` called by name, taking formals and
+     returning a status (rule 2). Code that only computes, or that a raise on
+     entry cannot harm, is an ordinary Titan function.
+   - *Needs an exact unmangled C symbol* (an Emscripten export, a symbol a C
+     library looks up): a compiler-generated one-line forward to a public
+     `foreign function` (with a weak declaration when the owning module may be
+     absent), never a hand-written runtime C wrapper.
+   - *Program entry and image lifecycle* (native `main`, browser
+     `initialize`/`entry`/`close`): a compiler-generated launcher sharing one
+     error-conversion and trace implementation; protected calls live there, not
+     in runtime libraries.
+   - *Needs the JavaScript host* (browser target): JavaScript, and only for an
+     operation that the host alone can perform — suspending and resuming Wasm
+     (JSPI) or handling engine failure, holding and converting JavaScript
+     values and host objects, host scheduling and event APIs (`setTimeout`,
+     `MessageChannel`, `AbortSignal`, listeners, promise continuations), the
+     embedder-facing promise API (admission, settlement, `Error` objects,
+     option callbacks), and engine stack capture. State, policy, validation,
+     and bookkeeping stay in Titan, and an import is a one-line forward to the
+     JavaScript object that owns the capability.
+   - *Data placement*: per-state roots in module variables or owner fields; a
+     cross-state map with the host that owns the instance (the browser loader's
+     state-token map), not C statics in runtime code; in JavaScript only what
+     needs host lifetime (JavaScript values and host objects, promises and
+     their continuations, and items waiting for a point where Wasm can be
+     entered), never a running copy of a count or table that Titan owns,
+     because Titan passes such a fact with the call that needs it; the Lua
+     registry only to anchor an object before any module variable exists,
+     explicitly justified.
+   - *Struct access and marshalling*: in Titan through `foreign import`;
+     headers hold only struct layouts, declarations, and one-expression inline
+     bridges (`lmacro_*` in `titan/ffi.h`) for macros, internal fields of
+     incomplete structs, and `const` casts that the FFI cannot spell directly.
+   - *Platform-conditional code*: Titan has no conditional `foreign import`, so
+     an operation whose headers, types, or calls differ by platform lives in a
+     `static inline` function in the owning module's `*_platform.h` or
+     `*-native.h` header. It takes formals and returns a status or fills a
+     plain struct (rule 2), and its comment names the platform difference.
+     Classification, mapping to public errors, retries, and ownership stay in
+     Titan (`titan/os/os_platform.h` and its callers in `titan.os`). A platform
+     fact that takes no argument is not a function: define a macro on every
+     platform (`TITAN_PATH_WINDOWS` in `titan/path_platform.h`,
+     `TITAN_UV_NETWORK_WINDOWS` in `titan/uv/network-native.h`) and read it
+     through `ffi` as a constant.
+   - *Test-only C*: stays in test fixtures.
+
+   ```text
+   -- In titan/browser.browser.titan: public foreign function called by the
+   -- compiler-generated `titan_browser_invoke` weak forward in browserentry.lua.
+   foreign function invoke(
+       raw_id: unsigned long long, raw_token: unsigned int,
+       raw_slot: unsigned int, raw_generation: unsigned int,
+       raw_argc: unsigned int, raw_args: const *void): int
+   ```
+
+   ```javascript
+   // In titan-runtime/browser/titan-browser-bridge.js: an import is a one-line
+   // forward to the loader owner, which holds the JavaScript value in a slot.
+   titan_browser_host_adopt: (state, slot, generation) =>
+     TitanBridge.trusted('adoptSlot', state >>> 0, slot >>> 0, generation >>> 0),
+   ```
+
+   *Wrong* (`titan-browser.c` at `843b446e`): a 600-line runtime C file
+   hand-writing the Emscripten exports, the image launcher `protected_entry`, a
+   C `states` linked list, and `titan_browser_root_callable` (validating the
+   closure, copying its signature into a new userdata, and rooting it in C).
+   *Right*: `browserentry.lua` generates the launcher (sharing
+   `titan_entry_error_message` with native `main`) and one-line weak forwards
+   (`titan_browser_invoke`, `titan_browser_release_callable`) to public
+   `foreign function`s in `titan/browser.browser.titan`. Its state record is
+   Titan-owned module storage finalized by an ordinary function through
+   `gc.finalizable`; `mark_closing` and the entry trampolines remain foreign
+   functions, and the cross-state token map lives in the JavaScript registry.
+   The libuv callbacks are local `foreign function`s whose one C helper,
    `titan_uv_push_owner` in `titan/uv/callback.h`, wraps the `setuvalue` macro
    that the FFI cannot spell ([standard-library foreign
-   callbacks](foreign-functions.md#standard-library-foreign-callbacks)). Two
-   more kinds of C stay. A private helper of such an entry, or a C-only
-   critical interval, is a `local foreign function` called by name:
-   `channel_try_enqueue_native` in `titan/thread/channel.titan` holds the
-   channel mutex around the enqueue. A helper that only computes is an
-   ordinary function (`reserve_resource` in `titan/transfer.titan`).
-   Platform-conditional work is a `static inline` helper that returns a
-   status or fills a plain struct, as `titan_probe_parent_stdio` in
-   `titan/os/os_platform.h` does for `titan.os`, which keeps the classification;
-   a platform flag is a macro (`TITAN_UV_NETWORK_WINDOWS` in
-   `titan/uv/network-native.h`), not a function.
-2. **Plain C stays plain C.** Wrong (`titan-browser.c` at `843b446e`):
-   `root_callable_worker`, pushed with a light-userdata context and run under
-   `lua_pcall` only so that `luaL_ref` can raise, be caught, `luaL_unref`'d and
-   raised again. Right: a helper that returns a status for its caller to act
-   on, as each `uv_*` call returns its status to the Titan wrapper. Scratch
-   storage is not transit: `titan_path_query_root` in `titan_path.c` keeps the
-   child's environment block as userdata on its own stack until `posix_spawnp`
-   has copied it, and restores the top instead of taking a registry reference.
-3. **Protected work belongs in Titan.** Wrong (`titan-browser.c` at
-   `843b446e`): the invoke and release entries each run a C worker under
-   `protected_entry`'s `lua_pcall`, and `complete_failure` adds three more
-   (`original_trace`, `error_description`, `restore_trace`) to rebuild the
-   message and trace that a Titan `catch` has as `error` and `traceback`.
-   Right: `timer_callback` and its handler `timer_deliver` in
-   `titan/uv/uv.native.titan`, and `invoke` / `invoke_entry` and
-   `release_callable` / `release_entry` in `titan/browser.browser.titan`.
-4. **Pinning.** Wrong (`titan-browser.c` at `843b446e`): the first bridge's
-   callable roots and generations, `luaL_ref` slots in tables hanging off a
-   registry userdata's uservalues. Right: `loop.handles`, which `timer_init`
+   callbacks](foreign-functions.md#standard-library-foreign-callbacks)).
+   `channel_try_enqueue_native` in `titan/thread/channel.titan` is a `local
+   foreign function` holding the channel mutex around enqueue; `reserve_resource`
+   in `titan/transfer.titan` is an ordinary function; `titan_probe_parent_stdio`
+   in `titan/os/os_platform.h` is a `static inline` platform helper returning a
+   status while `titan.os` keeps the classification.
+
+2. **Plain C stays plain C.** Data that only C uses lives in C locals, formals,
+   and return codes, never on the Lua stack. Never `lua_pcall` a C function
+   that Lua never sees just to get a protected region; return a status from it
+   instead. Scratch storage is not transit: a `lua_CFunction` in the runtime
+   may allocate a buffer as userdata and keep it on its own stack while it
+   calls Lua API functions that can raise, anchoring the buffer by that stack
+   slot and never by `luaL_ref`.
+
+   *Wrong* (`titan-browser.c` at `843b446e`): `root_callable_worker`, pushed
+   with a light-userdata context and run under `lua_pcall` only so that
+   `luaL_ref` can raise, be caught, `luaL_unref`'d and raised again. *Right*: a
+   helper that returns a status for its caller to act on, as each `uv_*` call
+   returns its status to the Titan wrapper; and `titan_path_query_root` in
+   `titan_path.c`, which keeps the child's environment block as userdata on its
+   own stack until `posix_spawnp` has copied it and then restores the top.
+
+3. **Protected work belongs in Titan.** A boundary that must catch raises calls
+   a Titan function whose body uses `catch` and `defer`, where `error` and
+   `traceback` are available. The native callback trampolines are the model:
+   recover the state, owner, handler closure, and entry; push the owner when
+   the handler may remove its last other home; call the entry; restore the
+   stack top. A JavaScript import that can throw follows the same split: it
+   catches at its own boundary and fills a status record, and Titan raises
+   after the import returns. A JavaScript exception never unwinds Wasm frames.
+
+   *Wrong* (`titan-browser.c` at `843b446e`): the invoke and release entries
+   each run a C worker under `protected_entry`'s `lua_pcall`, and
+   `complete_failure` adds three more (`original_trace`, `error_description`,
+   `restore_trace`) to rebuild the message and trace that a Titan `catch` has
+   as `error` and `traceback`. *Right*: `timer_callback` and its handler
+   `timer_deliver` in `titan/uv/uv.native.titan`, and `invoke` / `invoke_entry`
+   and `release_callable` / `release_entry` in `titan/browser.browser.titan`.
+
+4. **Pinning.** Per-state roots live in a module variable (a Map or Array) or
+   in an owner record's field, as `loop.handles` does in `titan.uv`, never in
+   `luaL_ref` slots, registry tables, or userdata uservalue tables. The browser
+   state record uses owned module storage and `gc.finalizable`, not a registry
+   anchor; a genuinely pre-module lifecycle anchor needs separate justification.
+
+   *Wrong* (`titan-browser.c` at `843b446e`): the first bridge's callable roots
+   and generations, stored in `luaL_ref` slots inside tables hanging off a
+   registry userdata's uservalues. *Right*: `loop.handles`, which `timer_init`
    sets and `timer_closed` clears ([public native
    owners](libuv-extension-guide.md#public-native-owners)), and the per-state
-   `pins_by_slot` Array, `pins_by_fn` Map, and owned state record in
-   `titan/browser.browser.titan`. Its state record uses `gc.finalizable`, with
-   no bridge root in the Lua registry.
-5. **Rooting.** Wrong (`browser.browser.titan` at `843b446e`): `invoke`,
-   `request` and `callable` push their parameters, and `invoke` and `request`
-   push an `extra` buffer declared inside an `if`. Right: an owner local
-   declared before the `if` keeps the buffer, and the parameters need nothing.
-6. **Don't duplicate checks the receiver makes.** Wrong
-   (`browser.browser.titan` and `titan-browser.mjs` at `843b446e`): `callable`
-   reflects a closure's signature into kind descriptors that the loader
-   re-checks (`snapshotArguments`) before Titan's dynamic entry checks the call
-   again. Right: one tagged union (`BrowserValue`) marshalled by runtime type
-   at the boundary, with a callee that cases on it and raises for a variant it
-   rejects (the cartridge's `twice` example).
+   `pins_by_slot` Array, `pins_by_fn` Map, and `gc.finalizable` state record in
+   `titan/browser.browser.titan`.
+
+5. **Rooting.** A Titan parameter is rooted by its caller until the call
+   returns, wherever the caller read the argument from, and a local by its
+   frame slot, which is refreshed at its declaration and at every assignment
+   and is reused by sibling scopes once its block ends ([the function
+   frame](values-and-gc.md#1-the-function-frame-reserved-nil-initialized-stack-slots),
+   [home roots](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies),
+   and [calls](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
+   Declare a value that must outlive an inner block in the outer block. A Titan
+   function may remove an argument's last other home and keep using the
+   parameter. A `foreign function` that calls a native entry is the caller in
+   that contract and keeps what it passes reachable itself (rule 3). Never
+   `lua_pushtvalue` a parameter or local just to keep it alive.
+
+   *Wrong* (`browser.browser.titan` at `843b446e`): `invoke`, `request`, and
+   `callable` push their parameters, and `invoke` and `request` push an `extra`
+   buffer declared inside an `if`. *Right*: an owner local declared before the
+   `if` keeps the buffer, and the parameters need nothing.
+
+6. **Don't duplicate checks the receiver makes.** Where the other side of a
+   boundary is dynamically typed, marshal by runtime type into one tagged union
+   at the boundary and let the receiver decide what it accepts. Do not build
+   parallel signature or descriptor machinery that re-checks the same thing on
+   both sides. Across the JavaScript boundary in both directions, the side
+   that owns a fact checks it once: Titan refuses what Titan knows (a closed
+   handle, an inactive drive) before calling an import, and JavaScript refuses
+   what only JavaScript knows (a released wrapper, a disposing instance, an
+   ill-formed string).
+
+   *Wrong* (`browser.browser.titan` and `titan-browser.mjs` at `843b446e`):
+   `callable` reflects a closure's signature into kind descriptors that the
+   loader re-checks (`snapshotArguments`) before Titan's dynamic entry checks
+   the call again. *Right*: one tagged union (`BrowserValue`) marshalled by
+   runtime type at the boundary, with a callee that cases on it and raises for
+   a variant it rejects.
 
 ### The same rules for browser JavaScript
 
@@ -246,73 +362,59 @@ and the compiler's module check (`titan-browser-module-check.mjs`, which needs
 a JavaScript parser) are host tooling outside the image, reviewed as ordinary
 Node programs.
 
-A review counts the authored JavaScript lines that a diff adds and names, for
-each added function or block, the host capability that requires it:
+A review counts the authored JavaScript lines added by a diff and names, for
+each added function or block, which host capability listed under rule 1
+requires it. Any function or block without one is a finding of the same class
+as an avoidable C line: its state, policy, validation, or bookkeeping belongs
+in Titan. The counterexamples below come from the loader at commits `843b446e`
+and `48b26b75`; rules 2 and 5 are specific to C and the Lua stack.
 
-- suspending or resuming Wasm (JSPI), or handling an engine failure;
-- holding or converting JavaScript values and host objects;
-- a host scheduling or event API (`setTimeout`, `MessageChannel`,
-  `AbortSignal`, a listener, a promise continuation);
-- the embedder-facing promise API (admission, settlement, `Error` objects,
-  option callbacks);
-- engine stack capture.
-
-A function or block with none of these is a finding of the same class as an
-avoidable C line: its state, policy, validation, or bookkeeping belongs in
-Titan. The counterexamples below come from the loader at commit `843b446e`
-and at commit `48b26b75`; rules 2 and 5 have no JavaScript reading.
-
-1. **Layering.** Wrong (`titan-browser.mjs` at `843b446e`): `signatureAt`
-   decoded each exported callable's parameter and result descriptors,
-   `wrapCallable` stored them on the wrapper, and `completionTarget` rejected
-   a request whose completion had "an incompatible signature". That is
-   validation of Titan functions, written in JavaScript. Right:
-   `registerCallable` creates one wrapper object for a pin identity and
-   nothing else. Every import in `titan-browser-bridge.js` is one line that
-   forwards to the loader owner (`titan_browser_host_adopt` to `adoptSlot`),
-   and its two helpers hold the only shared logic: a trusted import that
-   throws poisons the instance (`trusted`), and a host import that throws
-   fills the response (`response`). A Task-form call is Titan too:
-   `spawn_call` and `shutdown_call` in `titan/async/runtime.browser.titan`
-   start, cancel, and settle the Task, while the loader keeps the promise,
-   the `AbortSignal` listener (`taskAborted`), and the `Error` objects.
-   Wrong (`titan-browser.mjs` at `48b26b75`): `armChunk` and `periodElapsed`
-   re-armed long delays inside the loader. Right: each SDK source arms one
-   bounded host timer, and `timer.browser.titan` chains chunks for long sleeps
-   and ticker periods.
-3. **Protected work belongs in Titan.** Right: `importResponse` catches a
-   binding's exception at the import, keeps the thrown value in a slot, and
-   fills `titan_browser_response`; `check_response` in
-   `titan/browser.browser.titan` raises `BrowserError` after the import
-   returns. A trusted import never throws into Wasm. The bridge library
-   treats the opposite as corruption: a synchronous callback that a
-   JavaScript exception ends poisons the instance (`callbacksLeft`).
-4. **Pinning and data placement.** Wrong (`titan-browser.mjs` at
-   `48b26b75`), twice. The `holds` map was a per-state copy of Titan's count
-   of open `BrowserPin`s, kept current by a dedicated import
-   (`titan_browser_host_hold`) only so that `hasWakeSources` could read it.
-   And each request record counted its queued notifications
-   (`pendingNotifications`, `holdsReleased`) to decide when Titan's holds on
-   `completion` and `failure` could drop. Right: the pin table and its hold
-   counts are module variables of `titan/browser.browser.titan`
-   (`pins_by_slot`, `Pin.holds`, `RequestHolds`), and the loader holds one
-   wrapper object per pin and the slot table of JavaScript values. Where the
-   loader needs a Titan fact, Titan passes it with the call that needs it.
-   `titan.browser` counts its open pins (`open_pins`), and `relinquish`
-   passes `WAIT_HELD` instead of `WAIT` while one is open. The driver's
-   choice between a turn and a wait crosses the same way
-   (`browser.relinquish(runtime.ready_head == nil)`), so the loader keeps no
-   copy of the ready queue either.
-6. **Don't duplicate checks the receiver makes.** Wrong (`titan-browser.mjs`
-   at `48b26b75`), twice. `driveBegin` poisoned when a drive was already
-   active, after `drive_begin` had refused the same call with `"browser drive
-   is already active"`. And the loader tested for an exhausted operation
-   identity at seven sites, though it allocates an identity at two. Right:
-   each side tests the fact it owns, once. `nextOperationId` is the one
-   place that refuses an exhausted identity. `validateCallable` tests what
-   only JavaScript knows (the wrapper's brand, its instance, and its logical
-   release, which is synchronous in JavaScript), and `invoke_work` tests the
-   pin generation that Titan owns.
+- **Rule 1 — Layering.** *Wrong* (`titan-browser.mjs` at `843b446e`): `signatureAt`
+  decoded each exported callable's parameter and result descriptors,
+  `wrapCallable` stored them on the wrapper, and `completionTarget` rejected
+  a request whose completion had "an incompatible signature" — validating
+  Titan functions in JavaScript. *Right*: `registerCallable` creates one
+  wrapper object for a pin identity and nothing else. Every import in
+  `titan-browser-bridge.js` is one line forwarding to the loader owner
+  (`titan_browser_host_adopt` to `adoptSlot`), and its two helpers hold the
+  only shared logic: a trusted import that throws poisons the instance
+  (`trusted`), and a host import that throws fills the response (`response`).
+  Task-form calls follow the same split: `spawn_call` and `shutdown_call` in
+  `titan/async/runtime.browser.titan` start, cancel, and settle the Task,
+  while the loader keeps the promise, the `AbortSignal` listener
+  (`taskAborted`), and the `Error` objects.
+  *Wrong* (`titan-browser.mjs` at `48b26b75`): `armChunk` and `periodElapsed`
+  re-armed long delays inside the loader. *Right*: each SDK source arms one
+  bounded host timer, and `timer.browser.titan` chains chunks for long sleeps
+  and ticker periods.
+- **Rule 3 — Protected work belongs in Titan.** *Right*: `importResponse`
+  catches a binding's exception at the import, keeps the thrown value in a
+  slot, and fills `titan_browser_response`; `check_response` in
+  `titan/browser.browser.titan` raises `BrowserError` after the import
+  returns. A trusted import never throws into Wasm; a synchronous callback
+  that ends by a JavaScript exception poisons the instance (`callbacksLeft`).
+- **Rule 4 — Pinning and data placement.** *Wrong* (`titan-browser.mjs` at
+  `48b26b75`), twice: the `holds` map mirrored Titan's count of open
+  `BrowserPin`s via a dedicated import (`titan_browser_host_hold`) just so
+  `hasWakeSources` could read it, and each request record counted its queued
+  notifications (`pendingNotifications`, `holdsReleased`) to decide when
+  Titan's holds on `completion` and `failure` could drop. *Right*: the pin
+  table and its hold counts are module variables of
+  `titan/browser.browser.titan` (`pins_by_slot`, `Pin.holds`, `RequestHolds`),
+  while the loader holds one wrapper object per pin and the slot table of
+  JavaScript values. Where the loader needs a Titan fact, Titan passes it with
+  the call: `relinquish` passes `WAIT_HELD` instead of `WAIT` while
+  `open_pins > 0`, and `browser.relinquish(runtime.ready_head == nil)` reports
+  ready-queue emptiness without duplicating the queue in JavaScript.
+- **Rule 6 — Don't duplicate checks the receiver makes.** *Wrong*
+  (`titan-browser.mjs` at `48b26b75`), twice: `driveBegin` poisoned on an
+  active drive after `drive_begin` had already refused it, and the loader
+  checked for an exhausted operation identity at seven sites even though it
+  allocates one at only two. *Right*: each side tests the fact it owns once.
+  `nextOperationId` is the single check for identity exhaustion;
+  `validateCallable` tests what only JavaScript knows (brand, instance, and
+  synchronous logical release), and `invoke_work` tests the pin generation
+  that Titan owns.
 
 ## Model actual call and result protocols
 

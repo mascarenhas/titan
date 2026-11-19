@@ -1,7 +1,7 @@
 # Explicit source-import collaboration interfaces
 
 This chapter implements the language rules in
-[Visibility through explicit source imports](../language/source-import-visibility.md).
+[Sharing private declarations across source modules](../language/modules.md#sharing-private-declarations-across-source-modules).
 The central invariant is that **written opt-in and trusted source provenance
 jointly grant permission**. Neither half is sufficient: an ordinary import is
 public-only even when the loader selected source, while a `.titan` import cannot

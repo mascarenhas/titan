@@ -836,7 +836,7 @@ are neither statically truthy nor falsy optionize the right side. The full
 sides, optionizing the right side of `and`, Value mixing) live in
 `checkexp`'s `Ast.ExpBinop` handler and are specified case-by-case in
 [expressions](../language/expressions.md#and-or-and-not) and
-[option types](../language/option-types.md).
+[option types](../language/types.md#option-types-t).
 
 ## Closures: capture analysis and lambda inference
 

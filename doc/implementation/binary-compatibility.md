@@ -2,7 +2,7 @@
 
 Separate shared-object imports verify the consumer's compiled assumptions
 instead of comparing the provider's complete serialized module interface byte
-for byte. The [language contract](../language/binary-compatibility.md) defines
+for byte. The [language contract](../language/toolchain.md#replacing-shared-library-dependencies) defines
 which changes an unchanged consumer accepts. This chapter describes the
 checker-owned requirements, separate metadata projection, and runtime
 verification path. Windows-specific loading, launchers, and DLL publication are

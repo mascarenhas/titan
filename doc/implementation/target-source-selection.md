@@ -3,7 +3,8 @@
 Target source selection lets one logical source file `name.titan` have target
 variants `name.<label>.titan`, and selects one file per family for the
 compilation's target before any source byte is read. The language rules are in
-the [language chapter](../language/target-source-selection.md). This chapter
+[Target-specific source files](../language/modules.md#target-specific-source-files)
+and [target CLI options](../language/toolchain.md#selecting-the-target--t----target-and-titan_target). This chapter
 covers the shared policy module, the target carried by the resolver context,
 the resolver, the callers routed through it, logical output stems, incremental
 certificates, the `titanc` option, test-root discovery, the language-server

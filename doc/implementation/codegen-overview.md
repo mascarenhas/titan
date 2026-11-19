@@ -266,7 +266,7 @@ reusing the old header; disk contents are never consulted.
 The cost of disabling directives is deliberate. Traceback reconstruction uses
 Titan-attributed debug filenames to keep ordinary native Titan frames, so this
 mode can drop them from logical traces even though the symbol-to-display-name
-registry is unchanged.
+registry remains populated.
 
 ### Deterministic emission order
 
@@ -279,10 +279,10 @@ method maps, nominal and owned-C metatable recovery blocks, static-dependency
 `extern` declarations and their binding code, and bound method/function
 entries. Registries that carry a source order keep it — declarations, fields,
 union parts, and the discovered adapter/Array-writer lists. Sorted emission
-does not change any emitted declaration or statement, only the order of
-independent groups, and `spec/coder/codegen_determinism_spec.lua` generates one
-module with every such registry in separate processes and requires byte
-equality.
+orders independent groups deterministically without altering any emitted
+declaration or statement, and `spec/coder/codegen_determinism_spec.lua`
+generates one module with every such registry in separate processes and requires
+byte equality.
 
 A trimmed but real example of an unsplit module (elisions marked `...`). This
 module:
@@ -521,9 +521,9 @@ fixed module entries and public raw foreign functions are exported
 protocol functions keep ordinary external linkage. Local source entries that
 other modules may reach keep `TITAN_SOURCE_LOCAL`.
 
-A function-type tag string used to be a `static` array in `$SIGS`. It is now a
-pinned `TITAN_MODULE_PRIVATE` definition in part 0, and a split module's
-header declares it `extern`, so every part publishes the same tag address.
+Each function-type tag string is a pinned `TITAN_MODULE_PRIVATE` definition in
+part 0, and a split module's header declares it `extern`, so every part
+publishes the same tag address.
 The remaining `static` objects are function-local statics, section payloads in
 part 0 (`.titan.meta` and `.titan.source`; external on Wasm so that final
 images drop them, and named with the private `\u2119` separator on every target

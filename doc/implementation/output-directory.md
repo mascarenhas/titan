@@ -8,7 +8,7 @@ form determine the source-root-relative native output stem beneath the
 destination. No absolute source prefix or `..` component enters an
 output-relative stem.
 
-The [language chapter](../language/output-directory.md) defines paths and
+[Output directories](../language/toolchain.md#output-directories) defines paths and
 compatibility. The implementation lives in `titanc`, `driver.lua`, `build.lua`,
 `incremental.lua`, `nativeinputs.lua`, `linkcertificate.lua`, and
 `coverage.lua`.

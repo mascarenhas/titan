@@ -4,7 +4,7 @@ Flexible returns add a runtime-sized homogeneous tail after a callable's fixed
 result prefix. They also make a call through `value` contextual: the checker
 synthesizes a structural function type from the call's positional arguments
 and from the result demand imposed by its consumer. The language semantics are
-in the [flexible returns chapter](../language/flexible-returns.md).
+in [Flexible return tails](../language/functions.md#flexible-return-tails).
 
 The implementation is not a second multiple-return subsystem. The checker
 reduces declarations, assignments, returns, calls, positional

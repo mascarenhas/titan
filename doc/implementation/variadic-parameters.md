@@ -8,8 +8,8 @@ untyped `...` whose element type is [inferred from context](#untyped-lambda-vara
 Inside the declaring function the parameter is reached through `#...` (count),
 `...[e]` (1-based element), and a trailing spread (`f(a, ...)`, `return a, ...`,
 `{a, ...}`). The same `...: t` syntax annotates a first-class function type
-(`function (integer, ...: string): (integer)`). The language rules are in the
-[variadic parameters chapter](../language/variadic-parameters.md).
+(`function (integer, ...: string): (integer)`). The language rules are in
+[Variadic parameters](../language/functions.md#variadic-parameters).
 
 There is no slice type. `...` is **not first-class**: it cannot be captured,
 stored, or escape its declaring function, and it is invisible to inner lambdas.
