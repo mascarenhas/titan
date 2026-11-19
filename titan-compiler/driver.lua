@@ -1445,6 +1445,7 @@ function driver._new_resolver_context(options, target_descriptor)
         _target_initializing = true,
         target_descriptor = target_descriptor,
         browser_semantics = browser_semantics,
+        browser_foreign_modules = browser_semantics and {} or nil,
         browser_foreign_flags = browser_foreign_flags,
         browser_foreign_flags_error = browser_foreign_flags_error,
         io = io_strategy,
@@ -5112,6 +5113,9 @@ local function check_source_module(
             return driver.get_target_profile(context)
         end,
         probe_service_provider = function()
+            if context.browser_foreign_modules then
+                context.browser_foreign_modules[modname] = true
+            end
             return driver.get_probe_service(context)
         end,
         prepare_ffi_header = function(checked_ast)

@@ -199,6 +199,7 @@ end
         assert.equal(selected.provider_file, catalog["titan.json"].filename)
         assert.is_nil(subject.imported["titan.json"])
         assert.is_nil(subject.browser_foreign_cache_identity({ context = browser }))
+        assert.same({}, browser.browser_foreign_modules)
 
         local entry = subject.imported.active
         local allowed, err = subject.compile("active", entry.ast, entry.filename, {}, false, { context = browser })
@@ -215,6 +216,7 @@ end
         assert.is_true(ok)
         assert.truthy(table.concat(diagnostics, "\n"):find("browser foreign C work needs Emscripten 6.0.13", 1, true))
         assert.equal("browser-foreign-unavailable", subject.browser_foreign_cache_identity({ context = browser }))
+        assert.same({ foreign_header = true }, browser.browser_foreign_modules)
         assert.equal(cache_identity, assert(subject.language_server_cache_identity({ context = browser })))
         assert.same({}, unexpected)
 
@@ -416,6 +418,7 @@ function narrow(x: foreign test_browser_long): integer return x end
             return loader("uses_header")
         end
         loaded(subject.defaultloader({}, { context = first, source_roots = { uses_browser = true } }), "uses_browser")
+        assert.same({}, first.browser_foreign_modules)
         local registry, imported = types.registry, subject.imported
         local owner = assert(registry["titan.browser.BrowserHandle"])
         local ok, _, errors = load_header(first)
@@ -425,11 +428,18 @@ function narrow(x: foreign test_browser_long): integer return x end
         assert.equal(imported, subject.imported)
         assert.equal(owner, types.registry["titan.browser.BrowserHandle"])
         assert.is_true(calls > 0)
+        assert.same({ uses_header = true }, first.browser_foreign_modules)
         local identity = assert(subject.browser_foreign_cache_identity({ context = first }))
         local previous = calls
         assert.equal(identity, subject.browser_foreign_cache_identity({ context = first, validate = true }))
         assert.equal(previous, calls)
-        assert.equal(identity, subject.browser_foreign_cache_identity({ context = context(), validate = true }))
+        local restored = context()
+        assert.equal(identity, subject.browser_foreign_cache_identity({ context = restored, validate = true }))
+        assert.same({}, restored.browser_foreign_modules)
+        local restored_ok, _, restored_errors = load_header(restored)
+        assert.is_true(restored_ok)
+        assert.equal(0, #restored_errors, table.concat(restored_errors, "\n"))
+        assert.same({ uses_header = true }, restored.browser_foreign_modules)
         local browser_paths = subject.installed_paths(prefix, "browser")
         local semantic = assert(browser_target.decode_analysis(first,
             files.read(path.join(browser_paths.titan_bin, "analysis-target"))))

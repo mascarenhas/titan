@@ -779,9 +779,18 @@ returns nil until a source actually needs tool-backed C analysis. With
 `validate = true` it obtains that identity if this resolver has not yet done
 so. The first attempt fixes the resolver's result: an opaque available
 identity or `browser-foreign-unavailable`; source diagnostics report the
-detailed failure. Persist that dependency alongside a saved publication that
-used it (including failures), and compare on restoration in a fresh resolver.
-Do not request live validation for a publication with no such dependency.
+detailed failure.
+
+`context.browser_foreign_modules` is a set of logical source-module names
+whose checks requested this resolver's tool-backed C service. A module is
+recorded before acquisition, even if it fails or serves a cached result.
+Pure checks and explicit identity validation without a source check do not
+add an owner. The set is empty at construction and accumulates for the life
+of the resolver. Read it after the saved attempt and before closing the
+resolver. Persist ownership and identity alongside the saved revisions that
+used them (including failures), and compare the identity on restoration in a
+fresh resolver. Do not request live validation for a publication with no such
+dependency.
 
 The lazy path locates pinned Emscripten 6.0.13, verifies the selected SDK's Lua
 headers, and compares the live C profile and Wasm object fingerprint to the
