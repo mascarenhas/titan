@@ -303,6 +303,10 @@ require:
   64 KiB payload bound, at most 128 graph nodes and at most 1,024 entries.
   It checks the pinned Wasm and C ABI traits and the Lua record's numeric
   types and canonical browser defines before returning the semantic facts.
+  The encoder visits string keys in bytewise order before assigning graph
+  reference IDs, so identical semantic inputs give identical bytes in
+  separate Lua processes. Companion pack tooling re-encodes decoded data
+  through the same `browsertarget.encode_analysis_data` entry point.
 
 The language manual's [browser SDK
 file list](../language/browser-target.md#installing-the-browser-sdk) names every

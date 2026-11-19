@@ -240,6 +240,40 @@ describe("browser target descriptor", function()
         assert.has_error(function() browser.encode_analysis(nil, descriptor, "bad", absent) end)
     end)
 
+    it("publishes identical semantic descriptor bytes from separate Lua states", function()
+        local strategy = compiler_io.new_sync()
+        local prefix = require("spec.support.installed_prefix").active()
+        local lua = path.join(prefix, platform.windows and "bin/lua.exe" or "bin/lua")
+        local source = [[
+local filename = ...
+package.path = "./?.lua;./?/init.lua;" .. package.path
+local browser = require "titan-compiler.browsertarget"
+local fixtures = require "spec.support.browser_fixtures"
+local built = assert(browser.import(fixtures.descriptor()))
+local bytes = assert(browser.encode_analysis(nil, built, ("a"):rep(64), ("b"):rep(64)))
+local data = assert(browser.decode_analysis(nil, bytes))
+assert(bytes == assert(browser.encode_analysis_data(nil, data)))
+local file = assert(io.open(filename, "wb"))
+assert(file:write(bytes))
+assert(file:close())
+]]
+        local script = assert(strategy:tmpname())
+        local first, second = assert(strategy:tmpname()), assert(strategy:tmpname())
+        local cleanup <close> = setmetatable({}, { __close = function()
+            strategy:unlink(script)
+            strategy:unlink(first)
+            strategy:unlink(second)
+        end })
+        assert(strategy:write_file(script, source))
+        for _, filename in ipairs({ first, second }) do
+            local run = strategy:run({ lua, "-E", script, filename })
+            assert.is_true(run.ok, run.output or run.diagnostic)
+        end
+        local bytes = assert(strategy:read_file(first))
+        assert(browser.decode_analysis(nil, bytes))
+        assert.equal(bytes, assert(strategy:read_file(second)))
+    end)
+
     it("rejects malformed semantic data even with a valid graph checksum", function()
         local descriptor = assert(browser.import(fixtures.descriptor()))
         local bytes = assert(browser.encode_analysis(nil, descriptor, ("a"):rep(64), ("b"):rep(64)))

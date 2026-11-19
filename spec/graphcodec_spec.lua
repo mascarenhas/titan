@@ -47,6 +47,19 @@ describe("literal compiler graph codec", function()
         assert.equal("shared", child.value)
     end)
 
+    it("orders canonical string-keyed maps without changing the transport format", function()
+        local left = { z = {}, a = {}, ["a\0b"] = false, ["a\255"] = {} }
+        local right = {}
+        for _, key in ipairs({ "a", "a\255", "z", "a\0b" }) do right[key] = left[key] end
+        local options = { canonical_string_keys = true }
+        local payload = assert(codec.encode(left, options))
+        assert.equal(payload, assert(codec.encode(right, options)))
+        assert.same(left, assert(codec.decode(payload)))
+        local rejected, err = codec.encode({ [1] = "value" }, options)
+        assert.is_nil(rejected)
+        assert.truthy(err:find("canonical graphs require string keys", 1, true))
+    end)
+
     it("round trips binary strings and exact Lua numeric representations", function()
         local original = {
             binary = "\0\255\192text\0",

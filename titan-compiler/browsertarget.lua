@@ -392,6 +392,7 @@ local function analysis_codec_options(context)
     return {
         max_bytes = ANALYSIS_LIMIT, max_string_bytes = ANALYSIS_LIMIT,
         max_nodes = 128, max_entries = 1024,
+        canonical_string_keys = true,
         sha256_binary = context and context.cache_adapter and context.cache_adapter.sha256_binary,
     }
 end
@@ -409,7 +410,7 @@ function M.encode_analysis(context, descriptor, provider_sha256, absent_sha256)
     local valid
     valid, err = validate_browser_profile(profile, data.lua.record.numeric)
     if not valid then return nil, err end
-    return graphcodec.encode({
+    return M.encode_analysis_data(context, {
         target = data.label, triple = data.triple, fingerprint = copy(data.fingerprint),
         abi = version.TITAN_ABI_VERSION, release = version.TITAN_VERSION,
         emscripten_version = data.tools.version, build_profile = data.build_profile,
@@ -421,7 +422,13 @@ function M.encode_analysis(context, descriptor, provider_sha256, absent_sha256)
             numeric = data.lua.record.numeric,
         },
         provider_sha256 = provider_sha256, absent_sha256 = absent_sha256,
-    }, analysis_codec_options(context))
+    })
+end
+
+-- Companion tools that rebind a decoded descriptor to a real subset archive
+-- use the same bounded deterministic encoding as the SDK publisher.
+function M.encode_analysis_data(context, data)
+    return graphcodec.encode(data, analysis_codec_options(context))
 end
 
 function M.decode_analysis(context, bytes)
