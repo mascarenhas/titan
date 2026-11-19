@@ -23,24 +23,27 @@ titanc -o out hello    # compiles hello.titan
 ./out/hello Titan      # Hello, Titan!
 ```
 
-Titan is a prototype (version 0.6.0). Linux and macOS are supported. The
-Windows port is experimental.
+Titan is an evolving language, so expect breaking changes. Linux and macOS are supported. The Windows port and WASM browser target are experimental.
 
 ## What is in it
 
 - **Language:** integers, floats, booleans, strings, option types (`T?`),
-  Arrays and Maps, records, unions, interfaces, generics with interface
-  constraints, closures, multiple results, and a `value` type for dynamic Lua
-  data. Errors use `raise`, `catch`, and `defer`.
+  arrays and maps, nomimal records and unions, structural interfaces,
+  generics with type erasure and interface constraints, first-class functions
+  with multiple return values, a gradually-typed `value` type for dynamic Lua
+  data, and error handling with `raise`, `catch`, and `defer`.
 - **Modules:** one module per source file or folder, importable by name, and
   compiled to shared and static libraries that carry their type information.
-- **C interface:** `foreign import` binds C headers directly. `foreign function`
-  writes C callbacks in Titan.
+- **C interface:** `foreign import` binds C headers directly. `foreign function`s
+  have a restricted Titan subset that does not depend on the Titan runtime
+  and has more C-like semantics.
 - **Standard library:** async tasks and timers on libuv, files, DNS and TCP,
   verified TLS, an HTTP/1.1 client and server, WebSocket, child processes,
   OS threads with channels, JSON, Protocol Buffers, SQLite, parsing
-  expressions, byte strings and regular expressions, reflection, garbage
+  expressions grammars, byte strings and regular expressions, reflection, garbage
   collector control, and a native test runner.
+- **WASM browser target**: compiled through
+ [Emscripten](https://emscripten.org/index.html), supports a large subset of the standard library and includes a Titan<->JS bridge.
 
 ## Install
 
@@ -186,55 +189,6 @@ Use `make clean` to remove generated outputs and `make distclean` to also remove
 downloaded dependency sources. See
 [Cleaning a checkout](doc/language/installation.md#cleaning-a-checkout).
 
-## Roadmap
+## License
 
-This roadmap toward Titan 1.0 is preliminary. Everything is subject to change,
-and items further down are more likely to change.
-
-### Supported
-
-- Control structures from Lua, including generic `for ... in`
-- Errors with `raise`, `catch`, and `defer`, integrated with Lua errors, with
-  unified Lua and Titan backtraces
-- Multiple assignment and multiple results
-- Scalar types: integers, floats, booleans, strings
-- The `value` type, with checked conversions at its boundary
-- Arrays that can have interior holes while `#` stays O(1), and Maps that are
-  ordinary Lua tables
-- Variadic functions (`...: T`) and flexible results (`(...: T)`)
-- First-class functions, anonymous functions with lexical scope, and bound
-  methods
-- [Generics](doc/language/generics.md) with interface constraints and local
-  type inference
-- Nominal records and unions, interfaces, const values, and transparent type
-  aliases (including public re-exports of nominal types)
-- [Native storage in records](doc/language/nominal-storage.md), module-local
-  fields, `{ ... }` construction, record and union methods, and bound methods
-- `case`/`when` dispatch on union variants
-- Modules that can span several `.titan` files in one folder and publish type
-  information in `.a` and `.so` files. Ordinary imports see only public
-  declarations. `import "foo.bar.titan"` requires source and also exposes the
-  module's local declarations to that one importer. Dotted module names ending
-  in `titan` are reserved for this syntax.
-- Module initializers: a `do ... end` block that runs at module startup
-- A C interface: primitive types, pointers, arrays, structs and unions
-  (including stack allocation and flexible array members), owned heap
-  allocation, C varargs, and C function calls
-- `foreign` functions, which define C callbacks in Titan
-- Asymmetric, tagged, nestable coroutines as the base for async I/O
-- Async tasks, timers, files, DNS, TCP, verified TLS, HTTP/1.1 clients and
-  servers, WebSocket, OS utilities and signals, child processes with pipes, and
-  graceful process exit
-- OS threads, each with its own Lua state, connected by bounded channels
-- JSON, Protocol Buffers, SQLite, typed parsing expressions (PEGs), byte
-  strings with Lua-compatible formatting and packing, and compiled regular
-  expressions
-- Math and random numbers, dynamic Lua loading, generic iteration, runtime
-  reflection, explicit garbage-collector control, and table and userdata
-  finalizers
-- A native test runner with source coverage
-
-### Next
-
-- A language server
-- Titan 1.0
+Titan is available under the terms of the MIT license. See [LICENSE](LICENSE).
