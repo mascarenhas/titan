@@ -6325,6 +6325,7 @@ printf '%s\n' "${schedule[@]}"
                     "spec/coder/browser_scheduler_spec.lua",
                     "spec/coder/browser_incremental_spec.lua",
                     "spec/browser_sdk_spec.lua",
+                    "spec/browser_isolation_spec.lua",
                     "spec/coder/browser_stdlib_closure_spec.lua",
                     "spec/coder/browser_protocol_spec.lua",
                 } },

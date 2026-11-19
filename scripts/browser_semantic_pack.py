@@ -37,7 +37,10 @@ def regular(path):
 
 
 def git(tree, *args):
-    return subprocess.check_output(["git", "-C", str(tree), *args])
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1",
+               GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    return subprocess.check_output(["git", "-C", str(tree), *args], env=env)
 
 
 def git_inventory(tree, commit, directory=""):
@@ -104,16 +107,15 @@ def compiler_receipt(args, prefix, pins):
     native_ext = "dll" if os.name == "nt" else "so"
     lua_path = f"{lua_dir.as_posix()}/?.lua;{lua_dir.as_posix()}/?/init.lua"
     lua_cpath = f"{prefix.as_posix()}/lib/lua/5.5/?.{native_ext}"
-    env = {**os.environ, "TITAN_ROOT": str(prefix)}
+    env = {key: value for key, value in os.environ.items()
+           if not key.upper().startswith(("TITAN_", "LUA_", "GIT_"))}
+    env["TITAN_ROOT"] = str(prefix)
     result = subprocess.check_output([args.lua, "-E", "scripts/browser_semantic_pack.lua",
                                       str(prefix), args.profile, pins["lua-5.5.1"], lua_path, lua_cpath],
                                      env=env, text=True, encoding="utf-8")
     version_row, *files = result.splitlines()
     release, library, abi, api, emscripten, profile = version_row.split("\t")
-    verified = {}
-    for row in files:
-        name, digest, recorded = row.split("\t")
-        verified[name] = (digest, recorded)
+    verified = dict(row.split("\t") for row in files)
     require(tuple(verified) == SEMANTIC_FILES, "unexpected compiler semantic receipt")
     return release, library, abi, int(api), emscripten, profile, verified
 
@@ -170,15 +172,14 @@ def produce(args):
     require(output.name == f"titan-{release}-1-browser-semantics.tar.gz", "unexpected PACK_OUTPUT basename")
 
     payloads, digests, sdk_digests = {}, {}, []
-    for name, (expected_hash, recorded) in verified.items():
+    for name, expected_hash in verified.items():
         relative = f"lib/titan-browser/{library}/{name}"
         data = regular(prefix / relative)
         digest = hashlib.sha256(data).hexdigest()
         require(digest == expected_hash, f"{relative}: SDK file changed during validation")
         payloads[relative] = data
         digests[relative] = digest
-        if recorded != "-":
-            sdk_digests.append({"path": relative, "sha256": recorded})
+        sdk_digests.append({"path": relative, "sha256": expected_hash})
     for name in NOTICES:
         relative = f"share/titan/{name}"
         data = regular(prefix / relative)
@@ -206,10 +207,17 @@ def produce(args):
     print(f"Browser semantic pack ({profile}): {output}")
 
 
+def nonempty(value):
+    if not value.strip():
+        raise argparse.ArgumentTypeError("a nonempty value is required")
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+
     for name in ("lua", "prefix", "rocks-tree", "rock", "output", "commit", "git-root"):
-        parser.add_argument(f"--{name}", required=True)
+        parser.add_argument(f"--{name}", type=nonempty, required=True)
     parser.add_argument("--profile", choices=("production", "validation"), required=True)
     args = parser.parse_args()
     try:

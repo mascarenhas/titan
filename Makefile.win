@@ -102,6 +102,7 @@ help:
 	@echo '  lua         install those files and the complete matching Lua SDK'
 	@echo '  lua-browser  build/install the fork WebAssembly Lua archive'
 	@echo '  browser-sdk  build/install the browser runtime and SDK (prepared compiler and browser Lua required)'
+	@echo '  browser-semantic-pack  package an installed browser SDK for offline editor analysis'
 	@echo '  uninstall-browser-sdk  remove the owned browser SDK files'
 	@echo '  titan-stdlib-browser-test  build, audit and run the browser suite (use the SDK build profile)'
 	@echo '  lua-check   check native exports/imports and exercise SDK consumers'
@@ -368,6 +369,7 @@ BROWSER_EXE_SUFFIX := .exe
 BROWSER_LUA_MODULE_SUFFIX := .dll
 ifeq ($(OS),Windows_NT)
 BROWSER_NATIVE_PATH = $(shell cygpath -am "$(1)")
+BROWSER_PACK_PATH = $(call BROWSER_NATIVE_PATH,$(1))
 endif
 BROWSER_RUNNER_SHELL := sh
 BROWSER_COMPILER_REMEDY := run 'mingw32-make -f Makefile.win compiler' first

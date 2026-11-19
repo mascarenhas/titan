@@ -773,6 +773,7 @@ jobs:
               spec/coder/browser_scheduler_spec.lua
               spec/coder/browser_incremental_spec.lua
               spec/browser_sdk_spec.lua
+              spec/browser_isolation_spec.lua
               spec/coder/browser_stdlib_closure_spec.lua
               spec/coder/browser_protocol_spec.lua
     permissions:
@@ -984,10 +985,18 @@ jobs:
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
               titan-browser-node-worker.mjs titan-browser-page.mjs titan-browser-module-check.mjs \
-              titan-protobuf.mjs build-profile absent-modules sdk-digests; do
+              titan-protobuf.mjs build-profile analysis-target absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
           test "$(cat "$PREFIX/lib/titan-browser/0.6/build-profile")" = "$TITAN_BUILD_PROFILE"
+
+      - name: Verify the offline browser semantic release pack
+        if: matrix.shard == 'scheduler'
+        run: |
+          test -z "${EMSDK:-}"
+          ! command -v emcc >/dev/null 2>&1
+          TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover \
+            -s spec -p browser_semantic_pack_test.py -v
 
       - name: Run complete browser core stdlib suite under Node and Chromium
         if: matrix.stdlib-suite

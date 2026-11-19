@@ -55,9 +55,8 @@ print(driver.TITAN_VERSION, driver.TITAN_LIBRARY_VERSION, driver.TITAN_ABI_VERSI
 for _, asset in ipairs({ "absent-modules", "analysis-target", "titan.a" }) do
     local filename = paths.join(layout.titan_bin, asset)
     local physical = assert(strategy:realpath(filename))
-    local row = recorded.files[physical]
+    local row = assert(recorded.files[physical], "sdk-digests: missing record for " .. asset)
     local hash = asset == "titan.a" and semantic.provider_sha256 or incremental.file_digest(context, filename)
-    assert(row or asset == "absent-modules", "sdk-digests: missing record for " .. asset)
-    assert(not row or hash == row.digest, "sdk-digests: digest disagrees for " .. asset)
-    print(asset, hash, row and row.digest or "-")
+    assert(hash == row.digest, "sdk-digests: digest disagrees for " .. asset)
+    print(asset, hash)
 end

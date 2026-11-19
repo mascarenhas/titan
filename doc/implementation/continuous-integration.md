@@ -358,6 +358,17 @@ CI-only memory-limit wrapper or extra renderer-memory feature is applied.
 
 After step 7, `browser-stdlib` runs:
 
+On the `scheduler` shard, the browser semantic release pack suite runs with
+emsdk absent from the environment. It stages a private copy of the SDK, pairs
+it with a source rock from the exact pinned source tree, and exercises pack
+reproducibility, relocation, and rejection of invalid pairs. Run the same gate
+locally from the matching checkout:
+
+```sh
+TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover \
+  -s spec -p browser_semantic_pack_test.py -v
+```
+
 8. **Complete browser core stdlib suite (`sdk` only).** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
    once, unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
@@ -383,7 +394,7 @@ After step 7, `browser-stdlib` runs:
    | Shard | Spec files (`spec/`-relative) |
    | --- | --- |
    | `sdk` | `coder/browser_bridge_spec.lua`, `coder/browser_stdlib_gate_spec.lua`, `coder/browser_entry_gate_spec.lua`, `coder/browser_images_spec.lua`, `coder/browser_net_spec.lua`, `minicoro_spec.lua`, `coder/browser_fixtures_spec.lua`, `coder/browser_providers_spec.lua` |
-   | `scheduler` | `coder/browser_scheduler_spec.lua`, `coder/browser_incremental_spec.lua`, `browser_sdk_spec.lua`, `coder/browser_stdlib_closure_spec.lua`, `coder/browser_protocol_spec.lua` |
+   | `scheduler` | `coder/browser_scheduler_spec.lua`, `coder/browser_incremental_spec.lua`, `browser_sdk_spec.lua`, `browser_isolation_spec.lua`, `coder/browser_stdlib_closure_spec.lua`, `coder/browser_protocol_spec.lua` |
 
    The CI-contract spec requires these lists to cover the full gate exactly
    once, without overlap, and the core suite to run only in `sdk`. A missing
