@@ -1,96 +1,154 @@
 # Mathematical standard library
 
-The `math` standard module provides typed numeric functions, Lua 5.5's
-xoshiro256** pseudo-random generator, and numeric-string conversion:
+The `math` standard module provides float-typed mathematical functions,
+unsigned integer comparison, Lua 5.5's xoshiro256** pseudo-random number
+generator, and numeral parsing. Titan imports it with
+`local math = import "math"` (parser sugar for `import "titan.math"`); Lua
+loads the same module with `require "titan.math"`.
+
+**Target availability:** Native & Browser (complete). Loading `titan.math` does
+not replace Lua's global `math` table.
+
+## Example
+
+The following module parses numeric text inputs with `math.tonumber`, computes
+summary statistics using `math.min`, `math.max`, and `math.sqrt`, and draws a
+reproducible bootstrap sample using `math.randomseed` and `math.random`:
 
 ```titan
 local math = import "math"
+
+record Stats
+  count: integer
+  minimum: float
+  maximum: float
+  mean: float
+  stddev: float
+end
+
+function summarize(inputs: {string}): Stats?
+  local samples: {float} = {}
+  local sum = 0.0
+  local low = math.huge
+  local high = -math.huge
+
+  for i = 1, #inputs do
+    local parsed? = math.tonumber(inputs[i])
+    if parsed ~= nil then
+      local x = parsed as float
+      samples[#samples + 1] = x
+      sum = sum + x
+      low = math.min(low, x)
+      high = math.max(high, x)
+    end
+  end
+
+  if #samples == 0 then return nil end
+  local mean = sum / #samples
+  local variance = 0.0
+  for i = 1, #samples do
+    local delta = samples[i] - mean
+    variance = variance + delta * delta
+  end
+  return Stats(#samples, low, high, mean, math.sqrt(variance / #samples))
+end
+
+function roll_dice(seed: integer, rolls: integer): {integer}
+  math.randomseed(seed)
+  local results: {integer} = {}
+  for i = 1, rolls do
+    results[i] = math.random(6) as integer
+  end
+  return results
+end
 ```
 
-Lua loads the same module with `require "titan.math"`. Loading it does not
-replace Lua's global `math` table.
-
-## Typed numeric surface
-
-Titan keeps `integer` and `float` distinct and does not overload functions by
-parameter type. Operations whose Lua result can dynamically switch between
-integer and float therefore use an explicitly float-typed interface:
+## Constants and numeric types
 
 ```text
-function abs(number: float): float
-function acos(number: float): float
-function asin(number: float): float
-function atan(y: float, x: float?): float
-function ceil(number: float): float
-function cos(number: float): float
-function deg(radians: float): float
-function exp(number: float): float
-function floor(number: float): float
-function fmod(numerator: float, denominator: float): float
-function frexp(number: float): (float, integer)
-function ldexp(mantissa: float, exponent: integer): float
-function log(number: float, base: float?): float
-function log2(number: float): float
-function log10(number: float): float
-function max(first: float, ...: float): float
-function min(first: float, ...: float): float
-function modf(number: float): (float, float)
-function rad(degrees: float): float
-function sin(number: float): float
-function sqrt(number: float): float
-function tan(number: float): float
-
-function tointeger(candidate: value): integer?
-function ult(left: integer, right: integer): boolean
-
 pi: float
 huge: float
 const maxinteger: integer
 const mininteger: integer
 ```
 
-An integer argument is accepted where a `float` is required through Titan's
-ordinary integer-to-float coercion. Results from `abs`, `ceil`, `floor`,
-`fmod`, `max`, `min`, and the integral result of `modf` are nevertheless
-always floats. This is the principal difference from Lua's dynamically tagged
-math API: Lua sometimes returns an integer from those operations. Keeping the
-Titan signatures fixed avoids returning a `value` from every ordinary numeric
-calculation.
+- `pi` is the circle constant π as a `float`.
+- `huge` is positive floating-point infinity (`+inf`).
+- `maxinteger` (`2^63 - 1`) and `mininteger` (`-2^63`) are read-only
+  64-bit integer bounds on both native and browser targets. Assigning to them
+  is a compile-time error in Titan and raises an error from Lua.
 
-`max` and `min` accept one or more numeric operands and return a float. They do
-not accept arbitrary Lua values or invoke a `<` metamethod. Their comparison
-order otherwise matches Lua: `max` replaces the current result only when it is
-strictly below the next operand, and `min` replaces it only when the next
-operand is strictly below it.
+Titan keeps `integer` and `float` statically distinct. Integer arguments coerce
+implicitly to `float` parameters, and functions such as `abs`, `ceil`, `floor`,
+`fmod`, `max`, `min`, and `modf` always return `float` rather than switching
+dynamically between integer and float. To test or convert a dynamic `value`,
+use Titan's `is integer` / `as integer` operators (there is no `math.type`).
 
-`ceil` and `floor` remain total for finite values outside Titan's integer
-range because they return floats. `fmod` always uses C floating remainder,
-including its NaN result for a zero denominator; it does not select Lua's
-integer-only zero-denominator error. `modf` returns the integral part followed
-by the fractional part, both as floats.
+## Trigonometry and exponentials
 
-`atan` defaults `x` to `1.0`. `log` defaults to the natural logarithm. With an
-explicit base it always computes `ln(number) / ln(base)`, including bases 2
-and 10. Use `log2` or `log10` to call the corresponding faster C math-library
-operation directly.
-`frexp` returns a mantissa and integer exponent; `ldexp` reconstructs their
-product. The `ldexp` exponent must fit the target C `int`, and raises Titan's
-ordinary checked-FFI range error otherwise.
+```text
+function sin(number: float): float
+function cos(number: float): float
+function tan(number: float): float
+function asin(number: float): float
+function acos(number: float): float
+function atan(y: float, x: float?): float
+function deg(radians: float): float
+function rad(degrees: float): float
 
-`ult` compares two integers as unsigned 64-bit values. Thus `ult(0, -1)` is
-true and `ult(-1, 0)` is false.
+function exp(number: float): float
+function log(number: float, base: float?): float
+function log2(number: float): float
+function log10(number: float): float
+function sqrt(number: float): float
+```
 
-The numeric members have the Lua 5.5 meanings: `pi` is pi, `huge` is positive
-infinity, and `mininteger`/`maxinteger` bound Titan's 64-bit integer range.
-`math.maxinteger` is $2^{63} - 1$ and `math.mininteger` is $-2^{63}$ on both
-native and browser targets. These two integer bounds are const members:
-Titan assignments are rejected at compile time, and Lua writes raise an error.
+- `sin`, `cos`, `tan`, `asin`, `acos`, and `atan` operate in radians. `atan(y)`
+  defaults `x` to `1.0`; `atan(y, x)` returns the quadrant-aware angle in
+  `[-π, π]`.
+- `deg` converts radians to degrees; `rad` converts degrees to radians.
+- `exp(x)` computes `e^x`; `sqrt(x)` computes the square root of `x`.
+- `log(number)` computes the natural logarithm. With an explicit `base`,
+  `log(number, base)` computes `ln(number) / ln(base)`. Use `log2` and `log10`
+  for direct base-2 and base-10 library operations.
 
-`math.type` is intentionally absent. Titan already represents integer and
-float as distinct static types, while its public dynamic numeric cast accepts
-an exactly integral float as an integer. Implementing Lua's raw numeric-tag
-query would require inspecting Lua internal values, contrary to this module's
-direct-C, no-Lua-API boundary.
+## Rounding, remainders, parts, and bounds
+
+```text
+function abs(number: float): float
+function ceil(number: float): float
+function floor(number: float): float
+function fmod(numerator: float, denominator: float): float
+function modf(number: float): (float, float)
+function frexp(number: float): (float, integer)
+function ldexp(mantissa: float, exponent: integer): float
+function min(first: float, ...: float): float
+function max(first: float, ...: float): float
+```
+
+- `abs`, `ceil`, and `floor` return floats and therefore stay total even for
+  finite numbers outside Titan's 64-bit integer range.
+- `fmod(numerator, denominator)` computes the C floating-point remainder with
+  quotient rounded toward zero (returning `NaN` for a zero denominator).
+- `modf(number)` splits `number` into its integral and fractional parts rounded
+  toward zero, both as `float`.
+- `frexp(number)` returns `(mantissa, exponent)` such that
+  `number = mantissa * 2^exponent` with `|mantissa|` in `[0.5, 1)` (or
+  `0.0, 0` for zero).
+- `ldexp(mantissa, exponent)` computes `mantissa * 2^exponent`.
+  `exponent` must fit in the target C `int`, raising a range error otherwise.
+- `min` and `max` accept one or more float operands (without invoking `<`
+  metamethods). `max` replaces its result only when `current < candidate`, and
+  `min` replaces its result only when `candidate < current`.
+
+## Unsigned integer comparison
+
+```text
+function ult(left: integer, right: integer): boolean
+```
+
+`ult` compares two 64-bit integer bit patterns as unsigned integers. For
+example, `math.ult(0, -1)` is `true` and `math.ult(-1, 0)` is `false`.
 
 ## Pseudo-random numbers
 
@@ -99,63 +157,59 @@ function random(lower: integer?, upper: integer?): value
 function randomseed(first: integer?, second: integer?): (integer, integer)
 ```
 
-`random` implements the same xoshiro256** state transition, float extraction,
-and unbiased integer projection as Lua 5.5:
+`random` implements Lua 5.5's xoshiro256** generator and unbiased interval
+projection. This generator is non-cryptographic; each loaded Lua state keeps
+its own independent generator state.
 
-* `random()` returns a float in `[0, 1)`;
-* `random(0)` returns an integer containing all 64 random bits;
-* `random(upper)` returns an integer in `[1, upper]`;
-* `random(lower, upper)` returns an integer in the inclusive interval.
+| Call | Return type and range |
+| --- | --- |
+| `random()` | `float` in `[0, 1)` |
+| `random(0)` | `integer` with all 64 random bits |
+| `random(upper)` | `integer` in `[1, upper]` |
+| `random(lower, upper)` | `integer` in `[lower, upper]` |
 
-The result type is `value` because the no-argument form returns a float and
-the bounded forms return integers. A typed Titan caller casts according to the
-form it used:
+Because the zero-argument form returns a `float` and bounded forms return an
+`integer`, the declared return type is `value`. Cast according to the form you
+call:
 
-```titan
+```text
 local unit = math.random() as float
 local die = math.random(6) as integer
 ```
 
-An empty interval raises `random interval is empty`. Supplying `upper` while
-omitting `lower` raises `random lower limit is required`; as with other option
-parameters, omission and an explicit nil are otherwise equivalent.
+An empty interval (`lower > upper`) raises `"random interval is empty"`.
+Passing a non-`nil` `upper` with `lower == nil` raises
+`"random lower limit is required"`.
 
-`randomseed(first, second)` resets the state and returns the two effective
-components. `second` defaults to zero. Reusing the returned pair reproduces
-the same sequence exactly, including sequences produced by Lua 5.5 on the same
-64-bit configuration. Calling `randomseed()` makes a weak default seed from
-the C wall and process-CPU clocks plus the preceding generator state. This is
-not a cryptographic random-number generator. Supplying a second component
-without a first raises.
+`randomseed(first?, second?)` seeds the generator and returns the two effective
+integer components:
 
-Each loaded `math` module has independent state. As with every Titan
-module variable, separate Lua states do not share it.
+- With `first` supplied, `second` defaults to `0`. Replaying the returned pair
+  reproduces the exact sequence (matching Lua 5.5 on the same 64-bit target).
+- With no arguments, `randomseed()` derives a weak default seed from the wall
+  clock, process CPU clock, and current generator state.
+- Passing `second` without `first` raises `"randomseed first component is required"`.
 
-## Numeric conversion
+## Numeral parsing
 
 ```text
 function tonumber(candidate: value, base: integer?): value?
 function tointeger(candidate: value): integer?
 ```
 
-With no base, `tonumber` returns an existing integer or float unchanged, so
-its numeric representation is preserved without inspecting an internal Lua
-tag. A string is validated over its exact byte length before conversion. It
-accepts leading and trailing ASCII whitespace, an optional sign, decimal and
-hexadecimal integers, decimal floats and exponents, and hexadecimal floats
-with binary exponents. It rejects embedded NUL, trailing junk, `nan`, and
-`inf`. Decimal integers are returned as integers when they fit; overflow and
-written float syntax produce floats. Hexadecimal integer accumulation follows
-Lua's 64-bit wrapping behavior.
-
-With a base, `candidate` must be a string and `base` must be in `2..36`.
-Digits are case-insensitive, surrounding ASCII whitespace and a sign are
-accepted, and an invalid digit returns nil. Accumulation wraps over 64 bits in
-the same way as Lua. An invalid base or a non-string base conversion raises.
-
-The parser recognizes Lua's `.` decimal byte independently of the process
-locale, then substitutes the active C locale byte only for the final validated
-`strtod` call. It never passes unvalidated or NUL-containing input to C.
-
-`tointeger` returns an integer for an integer, an exactly integral in-range
-float, or a numeric string with such a value. Every other value returns nil.
+- `tonumber(candidate)` with no base returns an existing `integer` or `float`
+  unchanged. For a `string`, it validates the full byte length (rejecting
+  embedded NUL, trailing characters, `"nan"`, and `"inf"`). It accepts optional
+  surrounding ASCII whitespace, an optional `+`/`-` sign, decimal and
+  hexadecimal integers, decimal floats (`e`/`E`), and hexadecimal floats
+  (`p`/`P`), always recognizing `.` as the decimal point regardless of the
+  process C locale. Decimal integers that fit in 64 bits return an `integer`;
+  overflow or float syntax returns a `float`; hexadecimal integers wrap modulo
+  `2^64`. Unrecognized inputs return `nil`.
+- `tonumber(candidate, base)` requires `candidate` to be a `string` and `base`
+  to be in `2..36` (raising otherwise). Digits are case-insensitive, optional
+  whitespace and sign are accepted, invalid digits return `nil`, and integer
+  accumulation wraps modulo `2^64`.
+- `tointeger(candidate)` returns an `integer` when `candidate` is an `integer`,
+  an exact in-range integral `float`, or a numeral string representing such an
+  integer; all other values return `nil`.

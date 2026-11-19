@@ -1,246 +1,254 @@
 # Lua states and loading standard library
 
-The `titan.lua` module creates independent Lua states, compiles Lua chunks,
-reads chunks through Titan I/O, and loads modules into the current Lua state.
-Native targets also execute Lua files asynchronously and search for Lua, C,
-and Titan provider files. Import it by its short name:
+`titan.lua` compiles and executes Lua chunks in the current Lua state, loads
+modules through Lua's `package.loaded` cache and searchers, and creates
+isolated `lua.Lua` states with independent globals, registries, and garbage
+collectors.
+
+- **Import:** `local lua = import "lua"` (Titan) · `require "titan.lua"` (Lua)
+- **Targets:** Native & Browser (subset: `dofile`, `Lua:run_async`, and `Lua:run_async_from_loader` are native-only; see [On the browser](#on-the-browser))
+
+## Quick example
+
+Compile a Lua chunk with a custom environment and call a Lua standard module in
+the current state:
 
 ```titan
 local lua = import "lua"
+local io = import "io"
+
+function main(_args: {string}): integer
+  local env: {string: value} = { ["factor"] = 7 }
+  local chunk = lua.load("local n = ...; return n * factor", "=scale", env)
+  local product: integer = chunk(6)
+  io.print(product) -- 42
+
+  local math_mod: {string: value} = lua.require("math")
+  local abs: function(integer): integer = math_mod["abs"]
+  io.print(abs(-42)) -- 42
+  return 0
+end
 ```
 
-## Target availability
+## Loading chunks in the current state
 
-| Members | Native | Browser |
-| --- | --- | --- |
-| `load`, `load_from_reader`, `require`, `new` | available | available |
-| `Lua:run`, `Lua:run_from_loader`, `Lua:close`, `Lua:detach` | available | available |
-| `dofile`, `Lua:run_async`, `Lua:run_async_from_loader` | available | absent |
+```text
+function load(chunk: string, name: string?,
+              env: value): function(...: value): (...: value)
+function load_from_reader(reader: io.Reader, name: string?,
+                          env: value): function(...: value): (...: value)
+function dofile(filename: string, ...: value): (...: value) -- native only
+```
 
-A browser `lua.new()` creates another state in the same WebAssembly instance,
-not another instance or a Worker. Its calls execute synchronously on the owner
-thread. Browser async Tasks belong to the instance's original state; a child
-state cannot start or drive them. The native asynchronous execution and
-Receiver sections below do not apply on the browser.
+### `load`
+
+`load` compiles all bytes in `chunk` as a Lua text or binary chunk using its
+explicit byte length (embedded NUL bytes are preserved). Syntax or load errors
+raise directly rather than returning `(nil, message)`. `name` sets the
+diagnostic chunk name, defaulting to `chunk`.
+
+The returned callable accepts and returns a flexible sequence of `value`s,
+preserving `nil` slots. Omitting `env` (or passing `nil`) keeps the default
+global environment; any non-nil `env` replaces the chunk's first upvalue
+(`_ENV` for ordinary text chunks, or ignored for binary chunks with no
+upvalues). `load` compiles without executing the chunk.
+
+### `load_from_reader`
+
+`load_from_reader` iterates `reader:read` until `nil` (EOF), buffers every
+chunk (including `""`), and compiles the result with the same rules as `load`.
+It never closes `reader`. If `reader:read` suspends, `load_from_reader` must
+run inside an async Task:
+
+```titan
+local lua = import "lua"
+local strings = import "string"
+
+function load_passthrough(): (value, value, value)
+  local reader = strings.reader("return ...")
+  defer reader:close()
+  local chunk = lua.load_from_reader(reader, "=passthrough", nil)
+  return chunk("first", nil, "third")
+end
+```
+
+### `dofile`
+
+*(Native only.)* `dofile` opens `filename` via
+[`fs.open`](standard-library-fs.md), compiles its contents with chunk name
+`@filename`, executes it with all trailing arguments, and returns all results
+(preserving interior `nil`s). The file closes on success, read/compile error,
+or runtime error. Because opening and reading use asynchronous filesystem I/O,
+`dofile` must run inside an [async Task](async-io.md).
+
+## Requiring modules
+
+```text
+function require(modname: string): value
+```
+
+`require` shares Lua's registry-backed `package.loaded` table: a truthy cached
+entry returns immediately, a loader's non-nil result is cached and returned,
+and a `nil` result with no `package.loaded[modname]` entry installs `true` (a
+cached `false` triggers a fresh load on the next call). Only the module value
+is returned.
+
+Searcher order mirrors Lua while using non-blocking source loading:
+
+1. `package.searchers[1]` (the preload searcher).
+2. On native targets, every template in `package.path` using asynchronous `fs`
+   operations (dots become directory separators; `?` expands to the path). On
+   the browser, this step reports
+   `no source search: the browser target has no filesystem`.
+3. `package.searchers[3]` onward (Lua's C searchers, Titan's package searcher,
+   and any custom searchers) up to the first `nil` slot.
+
+Slot `package.searchers[2]` is reserved for step 2 and is not called directly.
+Custom searchers in other slots receive `modname` and return either a loader
+(plus optional loader data) or a diagnostic string; searchers and loaders run
+across a non-yieldable Lua boundary and raise if they attempt to yield.
+
+After each compiled Titan module finishes initialization, it registers its
+native loader in the registry preload table (`package.preload`), so initialized
+imports (including statically linked modules) resolve via step 1 without a
+separate provider file. Unused linked modules are not published automatically.
+
+Once a source candidate opens, read or syntax errors are terminal rather than
+continuing to later searchers. Task cancellation during open or read takes
+precedence with its original `async.CancellationReason`. Simultaneous or
+recursive `require` calls for the same module raise
+`module '<name>' is already being loaded` (distinct modules may load
+concurrently), and the guard clears on both success and error.
 
 ## Independent Lua states
 
 ```text
 record Lua
-  -- Private state ownership.
-end
 
 function new(): Lua
 function Lua:close()
 function Lua:detach(): foreign *lua_State
 
-function Lua:run(chunk: string, name: string?, ...: async.TransferValue):
-    (...: async.TransferValue)
-function Lua:run_async(chunk: string, name: string?, ...: async.TransferValue):
-    (...: async.TransferValue)
+function Lua:run(chunk: string, name: string?,
+                 ...: async.TransferValue): (...: async.TransferValue)
 function Lua:run_from_loader(reader: io.Reader, name: string?,
-    ...: async.TransferValue): (...: async.TransferValue)
+                             ...: async.TransferValue): (...: async.TransferValue)
+function Lua:run_async(chunk: string, name: string?,
+                       ...: async.TransferValue): (...: async.TransferValue) -- native only
 function Lua:run_async_from_loader(reader: io.Reader, name: string?,
-    ...: async.TransferValue): (...: async.TransferValue)
+                                   ...: async.TransferValue): (...: async.TransferValue) -- native only
 ```
 
-`new` creates a Lua state with its own globals, registry, and garbage
-collector, and opens the Lua standard libraries. Its globals and loaded-module
-cache are independent of the Titan program's hosting Lua state and every
-other `Lua` instance. Changes persist between calls on that instance.
-`new` also snapshots native loaders from the creating state's
-registry-backed preload table. String-keyed C functions with no upvalues are
-installed under the same names in the new state's preload table. This includes
-the generated loaders of initialized Titan modules, so code in the new state
-can require modules embedded in the hosting executable without a separate
-provider file. Lua closures, C closures with upvalues, nonfunction values,
-and nonstring keys are skipped.
+`lua.new()` creates a fresh Lua state with its own globals, registry, loaded
+module cache, and garbage collector, with the standard Lua libraries opened.
+State persists across calls on the same `Lua` handle:
 
-Only loader names and native function pointers are copied. Requiring a Titan
-module initializes that module in the new state; no host module value or
-`package.loaded` cache entry is shared. The snapshot is taken at creation, so
-later changes to either state's preload table do not update the other. The
-source is the canonical registry `LUA_PRELOAD_TABLE`, even if Lua code has
-reassigned the public `package.preload` field. Custom native loaders and any
-library containing their code must remain loaded for every state using the
-copied function pointers, just as for a transferred native function.
+```titan
+local lua = import "lua"
+local transfer = import "transfer"
 
-For generated Titan loaders, the snapshot also carries a matching native
-provider descriptor containing code pointers, not module state. Compiled
-dynamic imports use an already initialized destination module first, then a
-copied native provider, then the ordinary provider file search. Dependencies
-available in the snapshot therefore need no manual initialization order or
-filesystem path. ABI and consumer compatibility checks still run before a new
-dependency is initialized. Globals, metatables, module values, and resolved
-bindings are created independently in each state. A nested `lua.new()` can
-copy inherited loaders and descriptors even before their modules have been
-initialized in the intermediate state.
+function run_isolated(text: string): string
+  local state = lua.new()
+  defer state:close()
+  local result = state:run(
+    "return string.upper(...)",
+    "=isolated-upper",
+    transfer.TransferValue.is_string(text))
+  case result
+  when is_string(upper) then return upper
+  else raise "unexpected result from isolated Lua state"
+  end
+end
+```
 
-On native targets, `require` otherwise uses the new state's own `package.path`,
-`package.cpath`, and searchers, initially configured by Lua's standard-library
-initialization, followed by Titan's package searcher. Host path/searcher
-customizations are not copied. The new state computes its own
-[Titan path](modules.md#the-titan-path) from the environment rather than
-inheriting the host's, so installed providers remain available when that path
-finds them. On the browser, both file searches miss and the Titan searcher
-does not read the environment or probe providers; copied preload entries still
-work. A linked module that no initialized module imports has no published
-loader and is not requirable merely because its code is in the image.
+At creation, `new()` snapshots string-keyed, zero-upvalue native C loaders from
+the creating state's registry preload table (including initialized Titan
+modules and their native provider descriptors). Requiring a Titan module in the
+child initializes a fresh independent instance there without needing a provider
+file on disk; nested `lua.new()` calls inherit these loaders too. Custom native
+loaders and their libraries must stay loaded while any child state uses them.
 
-`run` compiles and executes the complete text or binary chunk, passing
-its variadic arguments to Lua's `...` and returning the complete result list.
-An omitted or nil `name` uses the chunk itself, as in `load`. Input byte
-lengths are explicit; strings and chunks can contain embedded zero bytes.
-A synchronous call blocks the calling thread until Lua returns.
+On native targets, the child state initializes its own `package.path`,
+`package.cpath`, and [Titan path](modules.md#the-titan-path) from the
+environment rather than copying host overrides. On the browser, file and
+provider searches miss and only copied preload loaders resolve.
 
-`detach` transfers ownership of an idle open `lua_State *` out of the `Lua`
-wrapper and marks the wrapper closed so neither `close` nor GC finalization
-closes the underlying state. Calling `detach` on a busy or already closed
-`Lua` instance raises. The caller becomes responsible for eventually calling
-`lua_close` on the returned pointer.
+`run` compiles and executes `chunk` synchronously on the calling thread,
+forwarding `...` arguments and returning all results (`name` defaults to
+`chunk`; embedded NULs are supported). `run_from_loader` and
+`run_async_from_loader` drain `reader` completely without closing it before
+invoking `run` or `run_async` (state reservation starts only after reading
+completes).
+
+`close()` closes the state (idempotent after closure) and runs Lua `__gc`
+finalizers; prefer `defer state:close()` for lexical lifetimes. An unclosed
+unreachable `Lua` handle closes on finalization (in-flight `run_async` work
+retains the handle until completion). `detach()` transfers ownership of an idle
+open `foreign *lua_State` to the caller (who must eventually call `lua_close`)
+and marks the wrapper closed; detaching a busy or closed handle raises.
 
 ### Transferring values
 
-The canonical [`transfer.TransferValue`](standard-library-transfer.md) union is
-defined by `titan.transfer`; `async.TransferValue` in the signatures above is a
-transparent alias of that same type. Import `transfer` or `async` to construct
-its variants. Only these variants cross the independent-state boundary:
+Values cross the independent-state boundary as
+[`transfer.TransferValue`](standard-library-transfer.md) (`async.TransferValue`
+is a transparent alias):
 
-| Variant | Argument in the independent state | Result mapped to this variant |
+| Variant | Argument in child state | Returned from child state |
 | --- | --- | --- |
-| `is_nil` | nil | nil |
-| `is_boolean` | boolean | boolean |
+| `is_nil` | `nil` | `nil` |
+| `is_boolean` | `boolean` | `boolean` |
 | `is_integer` | Lua integer | Lua integer |
-| `is_float` | Lua float | Lua float, even when numerically integral |
-| `is_string` | a copied Lua byte string | a copied Titan byte string |
-| `is_lua_state` | lightuserdata containing the borrowed state address | Lua thread, as its borrowed `lua_State *` |
-| `is_function` | a C function with no upvalues | light C function or C closure with no upvalues |
-| `is_pointer` | lightuserdata containing the borrowed address | lightuserdata or other full userdata's payload address |
-| `is_record(module, name, data)` | a fresh record decoded from protobuf bytes | a public record serialized with its module and fully qualified name |
-| `is_union(module, name, data)` | a fresh union decoded from protobuf bytes | a public union serialized with its module and fully qualified name |
-| `is_closure(module, entry, data)` | a reconstructed Titan closure with copied captures | a Titan closure, including an adjusted closure or bound method |
-| `is_record_payload(module, name, data)` | a record reconstructed by its static transfer hook | a public record with the custom transfer-hook pair |
+| `is_float` | Lua float | Lua float (even if integral) |
+| `is_string` | Copied byte string | Copied byte string |
+| `is_lua_state` | Light userdata (borrowed `lua_State *`) | Lua thread (borrowed `lua_State *`) |
+| `is_function` | Zero-upvalue C function | Light C function or zero-upvalue C closure |
+| `is_pointer` | Light userdata (borrowed address) | Light userdata or full userdata payload pointer |
+| `is_record(module, name, data)` | Fresh record decoded from protobuf | Public record serialized via protobuf |
+| `is_union(module, name, data)` | Fresh union decoded from protobuf | Public union serialized via protobuf |
+| `is_closure(module, entry, data)` | Reconstructed Titan closure | Titan closure (including adjusted/bound methods) |
+| `is_record_payload(module, name, data)` | Reconstructed via static transfer hook | Public record with custom transfer hooks |
 
-**Existing policies.** A result that is already an origin-state `async.TransferValue` uses that
-variant's policy. For example, returning `TransferValue.is_string(bytes)`
-copies those bytes, and returning `TransferValue.is_record(module, name, data)` carries
-that existing serialized payload without serializing the wrapper. Pointer and
-state variants preserve their explicitly selected kind. Custom record payloads
-likewise retain their supplied module, name, and opaque bytes.
+Key boundary rules:
 
-**Custom records.** Public records with the exact synchronous
-[`to_transfer_payload` / `from_transfer_payload` pair](async-io.md#custom-record-transfer)
-use that protocol before structural protobuf encoding. Their fields may be
-private. The returned `is_record_payload` is an inspectable policy;
-`policy:to_value()` invokes the current state's reconstruction hook. Incoming
-custom-record arguments reconstruct before the chunk runs. Their policy
-carries the defining module name, record name, and opaque byte string. If the
-record is absent from the destination registry, transfer calls that module's
-native preload loader and retries lookup. It does not infer a module name from
-the record's dotted name. The reconstruction hook interprets the bytes, using
-the same descriptor as its encoder when it uses an anonymous protobuf message.
-
-**No packet attachments.** These calls carry values over the Lua library's own
-native carrier, not a transfer packet. `Lua:run`, `run_async`, and both
-Reader-loading companions open no packet scope, so they cannot move
-packet-attached resources such as `thread.Sender` or `thread.Receiver`, whether
-passed directly, nested in records, inside opaque hook bytes, or in closure
-captures. Converting an endpoint to a policy outside a packet scope raises.
-Inside an enclosing packet scope the conversion reuses that packet, but the
-index bytes own nothing and do not turn this carrier into an attachment
-transport. Use a
-[`thread` packet route](standard-library-thread.md#closing-cloning-and-transferring-endpoints)
-or an [`async.Receiver`](async-io.md#cross-state-receivers) when endpoint
-ownership must cross states.
-
-**Manual handoff.** The programmer owns safe native resource handoff inside supported custom hooks.
-Transport copies opaque payloads and borrows explicit native tokens; it neither
-moves native ownership automatically nor rolls back hook side effects if
-conversion or later execution fails. Only the specific types listed in the
-[manual-handoff inventory](standard-library-transfer.md#manual-handoff-api-inventory)
-provide those hooks; other filesystem, process, stream, and SQLite objects do
-not acquire a handoff API by using this carrier. Deliver each detached payload
-to exactly one adopter or use its documented recovery/disposal path.
-
-**Closures.** Titan closures transfer automatically when returned directly. Their owning
-modules are initialized through the receiving state's native preload table
-before reconstruction. A missing preload is an error. The loader returns its
-memoized module and does not depend on global `require`.
-Captured values follow the [closure transfer rules](async-io.md#transfer-values):
-captures are snapshotted by `TransferValue.from_value`, each restored closure
-receives fresh mutable cells,
-module globals belong to the destination module, and unsupported captures or
-cycles raise in the origin. The returned `is_closure` contains the module name,
-an immutable native entry token, and capture bytes. Calling `to_value()` builds
-a callable owned by the caller's collector. The policy survives the independent
-state closing, subject to the lifetime of any borrowed native pointers it contains.
-
-**Records and unions.** Public records without custom transfer hooks, and public unions, are serialized through
-[`protobuf.serialize`](standard-library-protobuf.md). All record fields and
-union variants must be public, and the encountered value graph must contain
-only supported data and no cycles. Unsupported nominal values raise; they do
-not silently become borrowed addresses. The caller receives the nominal name
-and defining module name plus wire bytes and may decode them with `TransferValue:to_value()` or
-`protobuf.deserialize_nominal`.
-Incoming record/union arguments are decoded automatically before the chunk
-runs. `TransferValue:to_value()` uses the defining module's preload loader on a
-registry miss; direct `protobuf.deserialize_nominal` still requires the type
-to be initialized already.
-
-**Counts and results.** Argument and result counts preserve nil positions. Results follow Titan's
-ordinary flexible-return demand: a finite consumer takes the requested prefix,
-while materializing an open result run has the usual 200-value limit. The
-independent-state API does not impose that limit on a larger Lua result run
-consumed through a smaller finite prefix. Every returned value is still
-validated, including an ignored tail. A table, Lua function, or ordinary C closure
-with upvalues has no transfer representation and raises if returned. An `is_lua_state` argument
-is an opaque pointer in the destination, not a coroutine attached to its
-collector. Its original variant is erased there: returning that lightuserdata
-produces `is_pointer` unless Lua explicitly returns an `is_lua_state` wrapper.
-Foreign userdata metatables, uservalues, and ownership are never copied.
-A null `is_function` pointer is rejected before execution or when encountered
-in an origin-state transfer wrapper.
-
-**Strings and borrowed pointers.** Each side allocates its own strings from the exact bytes; neither side installs
-the other state's `TString` in its own collector. Serialized nominal graphs
-also allocate fresh destination values. The three pointer variants are borrowed addresses. They
-neither retain nor validate the originating object or native code. Keep a
-returned thread or full userdata reachable in its originating state for the
-complete borrow, and keep the state open. For example, a global or registry
-reference can retain an object; retaining only its `async.TransferValue` cannot.
-Native memory and C functions likewise require an independently valid
-lifetime. Concurrent access to pointed-to mutable data must be synchronized
-by the caller.
-
-**Errors.** Load errors, execution errors, and unsupported results raise on the Titan
-caller. The independent state's stack is restored to its entry height on
-success and failure, preserving any preexisting stack values, so a failed call
-does not prevent a later call. Effects already made
-to globals or external resources are not rolled back. Lua errors cross as
-copied diagnostics, not shared error objects.
+- **Existing policies:** Returning an explicit `TransferValue` preserves its
+  chosen variant (for example, keeping `is_record` bytes or `is_lua_state` kind
+  verbatim).
+- **Custom records and manual handoff:** Public records defining the
+  [`to_transfer_payload` / `from_transfer_payload` pair](async-io.md#custom-record-transfer)
+  cross via `is_record_payload`, preloading their declaring module on a registry
+  miss. Resource-detaching hooks obey the
+  [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules):
+  the caller ensures single adoption and handles recovery on failed delivery.
+- **No packet attachments:** `Lua:run` and `Lua:run_async` open no transfer
+  packet scope, so packet-attached endpoints (`thread.Sender`,
+  `thread.Receiver`) cannot cross through them directly, nested in records, or
+  in closure captures. Use [`titan.thread`](standard-library-thread.md) or
+  [`async.Receiver`](async-io.md#cross-state-receivers) to transfer channel
+  endpoints.
+- **Closures:** Titan closures snapshot their captures via
+  `TransferValue.from_value`, preload their owning module in the destination,
+  and create fresh mutable capture cells
+  ([transfer values](async-io.md#transfer-values)).
+- **Records and unions:** All-public records without transfer hooks and
+  all-public unions serialize via [`titan.protobuf`](standard-library-protobuf.md);
+  cycles and unsupported fields raise.
+- **Counts, pointers, and errors:** `nil` slots are preserved in arguments and
+  results. Tables, Lua functions, C closures with upvalues, and `NULL`
+  `is_function` pointers raise. Every returned value is validated even if the
+  caller ignores trailing results. Strings and nominals are copied; pointer
+  variants (`is_pointer`, `is_lua_state`, `is_function`) are borrowed addresses
+  whose origin objects and states must stay alive and synchronized. Load and
+  execution errors raise copied diagnostics in the caller and restore the child
+  state's stack height without rolling back globals or side effects.
 
 ### Asynchronous execution
 
-This section and the following Receiver bootstrap section are native-only.
-
-`run_async` executes the chunk in
-[`async.run_foreign`](async-io.md)'s shared libuv worker pool. It must run in
-an async Task; while the worker runs, other Titan Tasks can continue. The
-worker has exclusive access to the independent state. The chunk can require
-and execute Titan modules initialized in that state, including running their
-own async Tasks and loop. Their module values, runtime, and GC objects belong
-to that state; they cannot access the hosting state's corresponding objects.
-C functions or modules used by the chunk must obey the same isolation and
-their own thread-safety contracts. A job computes `long double` at the main
-thread's precision: on Windows the worker restores x87 precision before each
-job, and other targets need no reset
-([worker threads](windows-build.md#long-double-on-worker-threads)).
-Synchronous `run` keeps the calling thread's floating-point state.
-
-For example, this complete Titan module requires Titan's string module in
-the independent state and calls it on a worker. The module can be found through
-a copied native preload entry or the state's configured provider paths. Call
-`uppercase` from an async Task:
+*(Native only.)* `Lua:run_async` and `Lua:run_async_from_loader` execute the
+chunk on [`async.run_foreign`](async-io.md)'s shared libuv worker pool while
+other Tasks in the hosting state continue running. The child state can require
+Titan modules and run its own `async.loop()` completely isolated from the host
+(on Windows, worker threads restore x87 precision before each job; see
+[Windows build](windows-build.md)):
 
 ```titan
 local lua = import "lua"
@@ -260,41 +268,23 @@ function uppercase(text: string): string
 end
 ```
 
-Only one chunk call may own a `Lua` instance at a time. A concurrent
-`run`, `run_async`, or `close` on that busy instance raises
-immediately. Different independent states may execute concurrently. A raw
-pointer does not bypass this ownership rule: foreign code must not access the
-state while its worker is active.
+Only one call may occupy a `Lua` instance at a time; concurrent `run`,
+`run_async`, `close`, or `detach` calls on a busy handle raise immediately
+(separate `Lua` handles run concurrently).
 
-Cancellation does not interrupt running Lua code or release the state early.
-After an async call has been accepted, the worker must finish and its native
-completion must reach the event loop before the waiting Task receives its
-pending cancellation. The state remains reserved through that completion;
-after cleanup it can be used again or closed. A Lua chunk that never returns
-therefore also prevents that Task's cancellation from completing. Long jobs
-share worker capacity with filesystem and DNS operations.
-
-If the hosting Lua state closes while a Task waits in `run_async`, that Task is
-[unwound](coroutines.md#abandoned-coroutines) before the chunk returns. The
-independent state is never closed under its running chunk. It is closed, and
-the call's results discarded, once the worker returns; the host's close waits
-for that. From the unwind on, the `Lua` wrapper behaves as closed.
+Cancellation does not interrupt running Lua code: once accepted, the worker
+finishes and posts completion before the waiting Task receives its pending
+cancellation. If the hosting Lua state closes while `run_async` is in flight,
+the waiting Task unwinds ([abandoned coroutines](coroutines.md#abandoned-coroutines)),
+the `Lua` handle behaves as closed, and host teardown waits for the worker to
+finish before closing the child state.
 
 ### Two-phase receiver bootstrap
 
-A first `run_async` call can create a receiver before its independent state's
-loop starts. Keep its owner rooted there and return only its native handle. A
-second call runs that state's Tasks and loop. `async.send` uses the handle
-without accessing the remote state's Lua objects and can publish a message
-before the loop starts. The Receiver retains only the latest pending packet;
-its [coalescing contract](async-io.md#cross-state-receivers) does not guarantee
-one receipt per send.
-
-This complete standalone module sends one copied control message before
-starting the remote loop. The send has returned before the remote waiter can
-close the Receiver or end its Runtime. The handle stays inside one lexical
-scope and is never published to another sender. Cleanup closes and drains the
-remote Runtime before releasing its Receiver root and closing the state.
+*(Native only.)* Create an [`async.Receiver`](async-io.md#cross-state-receivers)
+in a first `run_async` call, keep it rooted in the child state, return its
+borrowed handle, publish messages with `async.send`, and run the child's event
+loop in a second call:
 
 ```titan
 local lua = import "lua"
@@ -335,227 +325,54 @@ function main(_args: {string}): integer
 end
 ```
 
-A long-lived service can send through the same handle while `run_async` owns
-the remote state. Its shutdown protocol must stop senders and establish that
-every send has returned before the remote Receiver closes or its Runtime
-shuts down. A stop message can arrive before its sender returns, so receipt
-alone does not establish that ordering. Then wait for the worker to finish
-before dropping the remote Receiver root or calling `Lua:close`. Cancelling
-the hosting Task does not interrupt its Lua chunk or synchronize senders.
+For long-lived services that send while `run_async` is running, ensure every
+`async.send` call has returned before closing the remote Receiver or shutting
+down its Runtime (receipt of a stop message does not prove the sender has
+returned), then wait for `run_async` to finish before releasing the Receiver
+root or closing the state.
 
-Long-lived `run_async` calls occupy libuv worker threads for their entire
-execution, even while their remote event loop is waiting. The pool is shared
-across every state and loop, including filesystem, DNS, and other
-`run_foreign` work such as SQLite. Keep capacity for work that these services
-need; occupying every worker with services that await queued pool jobs can
-prevent progress. Configure `UV_THREADPOOL_SIZE` before the first pool use;
-creating a new Lua state does not create another pool. See
-[libuv's thread-pool contract](https://docs.libuv.org/en/v1.x/threadpool.html).
+Long-lived `run_async` calls occupy worker threads from libuv's process-wide
+pool shared with `fs`, `net` DNS, and `sqlite3`. Reserve worker capacity or
+configure `UV_THREADPOOL_SIZE` before first pool use (see
+[libuv threadpool](https://docs.libuv.org/en/v1.x/threadpool.html)).
 
-### Reader input and closing
+## On the browser
 
-`run_from_loader` and `run_async_from_loader` first collect the complete
-Reader contents, then call the matching chunk method. They accept empty chunks and preserve all
-bytes, and never close the borrowed Reader. Reader methods may suspend and
-therefore require an async Task when they do. The state is reserved only
-after reading finishes: another call may use or close it while the Reader is
-being drained, and admission is checked when the chunk call starts.
+| Members | Native | Browser |
+| --- | --- | --- |
+| `load`, `load_from_reader`, `require`, `new` | Available | Available |
+| `Lua:run`, `Lua:run_from_loader`, `Lua:close`, `Lua:detach` | Available | Available |
+| `dofile`, `Lua:run_async`, `Lua:run_async_from_loader` | Available | Absent |
 
-`close` releases the independent state and is idempotent after successful
-closure. Later chunk calls raise. Call it explicitly with `defer` when the
-state's useful lifetime is lexical. If an unclosed `Lua` wrapper becomes
-unreachable, its finalizer closes the state. Closing invokes Lua's `__gc`
-metamethods as part of `lua_close`; code owning resources inside the state can
-use those metamethods for shutdown. Accepted asynchronous work retains the
-wrapper until native completion, so GC cannot close a state that a worker is
-still using.
+On `--target browser`, `lua.new()` creates another Lua state inside the same
+WebAssembly instance and executes calls synchronously on the owner thread.
+Browser async Tasks belong exclusively to the instance's owner state; child
+states cannot run or drive browser Tasks.
 
-## Loading a string
+### Stock Lua libraries on the browser
 
-```text
-function load(chunk: string, name: string?, env: value):
-    function (...: value): (...: value)
-```
+Both the launcher state and every `lua.new()` state open Lua's standard
+libraries with the following browser profile (for Lua chunks calling stock Lua
+APIs, distinct from `titan.io` and `titan.os`):
 
-`load` compiles all bytes in `chunk` as a Lua text or binary chunk. It uses
-an explicit byte length, so an embedded zero byte is never mistaken for the end
-of the input. An invalid text chunk, an invalid binary chunk, or any other load
-failure raises the Lua error; unlike Lua's global `load`, this API does not
-return a `(nil, message)` pair.
-
-`name` is the chunk name used in diagnostics. When it is omitted or nil, the
-chunk string itself is the name, matching Lua's default. The returned callable
-forwards a run-time-sized sequence of `value` arguments and results, including
-nil elements:
-
-```text
-local lua = import "lua"
-
-local chunk = lua.load("return ...", "=passthrough", nil)
-return chunk("first", nil, "third")
-```
-
-When `env` is omitted or nil, the chunk retains the ordinary global
-environment. A nonnil value replaces its first upvalue, which is `_ENV` for
-an ordinary text chunk. This is Lua's environment rule: the supplied value need
-not be a Map, and indexing a value that cannot satisfy the chunk's global
-accesses raises when the chunk runs. For a binary chunk, the first upvalue is
-set regardless of its debug name; a chunk with no upvalues simply ignores the
-environment.
-
-`load` compiles but does not execute the chunk. Errors raised later by the
-callable propagate normally.
-
-## Loading through a Reader
-
-```text
-function load_from_reader(reader: io.Reader, name: string?, env: value):
-    function (...: value): (...: value)
-```
-
-`load_from_reader` uses `reader:read` as a generic-for iterator. Every nonnil
-string, including `""`, is the next exact chunk of Lua input, and nil is EOF.
-After EOF the collected bytes are compiled with the same name, environment,
-error, and flexible-call rules as `load`.
-
-Reader methods may yield; each accepted chunk is appended through a
-synchronous `titan.string` writer so loading adds no scheduling boundary of
-its own. When the supplied Reader yields, the function must run in an async
-Task with the usual loop discipline. It never closes the Reader, whether
-reading or compilation succeeds or raises; ownership remains with the caller.
-
-## Executing a file
-
-This operation is native-only.
-
-```text
-function dofile(filename: string, ...: value): (...: value)
-```
-
-`dofile` opens `filename` with
-[`fs.open`](standard-library-fs.md), compiles the complete file with chunk
-name `@filename`, and executes it. It forwards every argument to the chunk and
-every result back to its caller without collapsing inner nil values. The File
-is closed after success, a read or syntax error, or an error raised while the
-chunk runs.
-
-Opening and reading use asynchronous filesystem operations. A call which
-reaches those operations must therefore run in an async Task with the usual
-[`async`](async-io.md) loop discipline.
-
-## Loading modules
-
-```text
-function require(modname: string): value
-```
-
-`require` shares Lua's registry-backed `package.loaded` table. A truthy
-cached value is returned immediately. A loader's nonnil result is stored and
-returned; if both its result and `package.loaded[modname]` are nil, `true`
-is installed as the fallback. A stored false value deliberately causes the
-next call to load the module again.
-
-Loader lookup preserves the ordinary Lua ordering while replacing the
-source-file operation:
-
-1. Call `package.searchers[1]`, normally the preload searcher.
-2. On native targets, search every template in `package.path` with asynchronous
-   `fs` operations. Dots in `modname` become directory separators and every `?`
-   becomes that path. A readable candidate is compiled and receives
-   `(modname, filename)` when its loader runs. On the browser, contribute only
-   `no source search: the browser target has no filesystem`.
-3. Call searchers at indexes 3 and above, normally the two C searchers followed
-   by Titan's package searcher and any appended custom searchers, until the
-   first nil slot.
-
-On native targets this source pass loads ordinary Lua files, and C modules
-continue through Lua's installed C searchers. Compiled Titan modules use
-Titan's package searcher in the third step. On the browser, that searcher
-returns a canonical initialized module or a published preload loader;
-otherwise it contributes
-`no Titan provider search: the browser target has no dynamic providers`.
-It never reads `TITAN_PATH_0_6` or `TITAN_PATH` or probes files. Miss diagnostics
-retain the order above, including the stock C-searcher misses before Titan's
-miss. Custom searchers in the callable slots work on either target.
-
-A standalone Titan entrypoint initially publishes only the main module through
-the first, preload searcher. Its bootstrap require performs the normal
-transitive Titan initialization before `main`. After each generated module
-finishes `_init` successfully, it publishes its own `luaopen_*` function in
-`registry[LUA_PRELOAD_TABLE]`; `package.preload` aliases that registry table.
-This makes every initialized import, including a private static archive
-dependency, visible to the preload searcher without a separate provider DSO.
-Registration itself performs no initialization and does
-not fill `package.loaded`. A later `titan.lua.require` calls the published
-loader, receives the canonical initialized userdata, and installs it in the
-loaded table. The entrypoint does not publish unused or otherwise
-uninitialized linked modules. Independent-state snapshots can inherit these
-native loaders before their modules are initialized in the destination, as
-described above.
-
-The second searcher slot is reserved for the selected source pass and is
-never called. Replacing `package.searchers[2]` therefore does not replace that
-pass. Moving or copying Lua's built-in source searcher to another slot is not
-supported: it would reintroduce blocking file I/O on native targets and cannot
-provide files on the browser.
-Replacement or appended custom searchers in the callable slots are supported;
-they receive the module name and may return a loader plus loader data, or a
-diagnostic string. Searchers and loaders are invoked through Titan's
-non-yieldable Lua-callable boundary. A custom searcher or loader that attempts
-to yield raises rather than suspending.
-
-Missing source candidates contribute `no file` lines, and diagnostic strings
-from other searchers are accumulated into the final
-`module ... not found` error. Once a source candidate opens, a read or
-compilation failure is terminal instead of being treated as another miss.
-Task cancellation during open or reading remains authoritative: the Task's
-terminal status is `cancelled` with its original
-`async.CancellationReason`, and no contextual source-load failure is reported
-as an uncaught Task error.
-
-Source lookup can yield between the start of a load and installing its cache
-entry. A simultaneous or recursive `titan.lua.require` for that same module
-raises `module 'name' is already being loaded`; it does not start a duplicate
-loader and does not wait on hidden scheduler state. The guard is removed after
-both success and error, so a later call can retry. Different module names may
-load concurrently.
-
-`require` returns only the module value. Lua 5.5's additional loader-data
-result is intentionally not part of this typed API.
-
-## Stock Lua libraries on the browser
-
-The launcher's state and every `lua.new()` state open Lua's standard
-libraries. They share the following browser profile; these are the stock Lua
-APIs called from a Lua chunk, not the typed `titan.io` and `titan.os` APIs.
-
-| Lua operation | Browser behavior |
+| Stock Lua API | Browser behavior |
 | --- | --- |
-| `io.open`, `io.lines(filename)`, `io.input(filename)`, `io.output(filename)`, `io.tmpfile`, `os.remove`, `os.rename`, `os.tmpname`, `dofile`, `loadfile` | fail with Lua's documented error result or raised error; there is no filesystem |
-| `io.popen`, `os.execute(command)` | fail without starting a process; `os.execute()` reports no shell |
-| `io.read`, `io.stdin:read` | fail with a read error, not EOF; embedding input is available through `titan.os.stdin` |
-| `package.loadlib` | returns `nil, message, "absent"` |
-| `package.path`, `package.cpath` searches | miss; no provider or source files are available |
-| `os.getenv` | reads the instance environment, initially empty (`HOME` is nil) |
-| `print`, `io.write`, `io.stdout`, `io.stderr` | send their bytes to the instance's copied output queues |
-| `os.clock()` | raises `os.clock is unavailable on the browser target (no process CPU-time clock)` |
-| `os.exit(code)` | loads a linked `titan.os` through Lua's normal loader and delegates to its exit request; otherwise raises the unavailable error below |
+| `io.open`, `io.lines(file)`, `io.input(file)`, `io.output(file)`, `io.tmpfile`, `os.remove`, `os.rename`, `os.tmpname`, `dofile`, `loadfile` | Fail with Lua's standard error (no filesystem) |
+| `io.popen`, `os.execute(cmd)` | Fail without starting a process (`os.execute()` reports no shell) |
+| `io.read`, `io.stdin:read` | Fail with a read error (use `titan.os.stdin` for embedding input) |
+| `package.loadlib` | Returns `nil, message, "absent"` |
+| `package.path`, `package.cpath` searches | Miss (only copied preload entries resolve) |
+| `os.getenv` | Reads the instance environment (initially empty) |
+| `print`, `io.write`, `io.stdout`, `io.stderr` | Send bytes to the instance's output queues |
+| `os.clock()` | Raises `os.clock is unavailable on the browser target (no process CPU-time clock)` |
+| `os.exit(code)` | Delegates to linked `titan.os` exit request in an owner-state Task; otherwise raises |
 
-Stock `os.exit` never calls C `exit()`. When `titan.os` is linked, the first
-call loads it with Lua's normal `require` if necessary. This reuses the same
-per-state module and `stdin`, `stdout` and `stderr` instances as a native
-Titan import; it does not initialize them a second time. In an owner-state
-async Task it uses Titan's [exit request](standard-library-os.md#on-the-browser),
-mapping `true` to status 0 and `false` to status 1. Without a linked `titan.os`,
-or outside a Task, it raises
+Stock `os.exit` never calls C `exit()`. When `titan.os` is linked and called
+from an owner-state async Task, it maps `true` to `0` and `false` to `1` and
+issues Titan's [exit request](standard-library-os.md#on-the-browser); outside a
+Task, without linked `titan.os`, or in any `lua.new()` child state, it raises
 `os.exit is unavailable outside an async Task on the browser target`.
-An independent state always raises that error, including after it requires
-`titan.os`: it cannot run a browser Task. Both replacements keep the `error`,
-`require`, `package.loaded` and `package.preload` values present when the
-state opened, so later reassignment of those globals does not change them.
-Native stock Lua libraries are unchanged.
 
-Stock output retains C stdio buffering: `print` flushes at its newline, and
-`io.flush` flushes pending `io.write` bytes. A print flush can send the body
-and newline as separate copied chunks. Chunk boundaries are not print-call
-boundaries; binary bytes and their order with Titan writes are preserved.
+Stock output uses C stdio buffering (`print` flushes at newline; `io.flush`
+flushes pending `io.write` bytes), preserving binary bytes and ordering with
+Titan writes.

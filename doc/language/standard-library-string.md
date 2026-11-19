@@ -2,129 +2,123 @@
 
 The `string` standard module provides byte-oriented string operations,
 Lua-compatible formatting and binary packing, synchronous in-memory streams,
-and a compiled regular-expression API with convenience iterators.
-Titan imports the canonical module with `import "string"`; Lua uses
-`require "titan.string"`.
+and compiled regular expressions. Titan imports it with
+`local strings = import "string"` (parser sugar for `import "titan.string"`,
+conventionally bound to `strings` because `string` is a type keyword); Lua
+loads the same module with `require "titan.string"`.
+
+**Target availability:** Native & Browser (complete). Loading `titan.string`
+does not modify Lua's global `string` table, the string metatable, or
+`package.loaded.string`.
+
+## Example
+
+The following module reads lines from an in-memory string, matches `key = value`
+entries with a compiled regular expression, and writes a numbered summary into
+a `StringWriter`:
 
 ```titan
 local strings = import "string"
 
-function sample(): string
-  return strings.upper(strings.sub("hello", 2, 4))
+local entry_re = strings.compile_regex(
+  [[^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$]])
+
+function format_config(source: string): string
+  local reader = strings.reader(source)
+  defer reader:close()
+
+  local out = strings.writer()
+  defer out:close()
+
+  local count = 0
+  while true do
+    local line? = reader:read_until("\n", true)
+    if line == nil then break end
+    local hit? = entry_re:match(line)
+    if hit then
+      local key?, val? = hit:values()
+      if key ~= nil and val ~= nil then
+        count = count + 1
+        out:write(strings.format("%d. %s = %q\n", count, key, val))
+      end
+    end
+  end
+  return out:drain()
 end
 ```
 
-`string` remains a type keyword, so examples conventionally bind the imported
-module to another local name. The short import is parser sugar for
-`import "titan.string"`.
-
-Loading `titan.string` does not replace Lua's global `string` table, change the
-Lua string metatable, or modify `package.loaded.string`. Titan's regex syntax
-is independent of Lua's native string patterns.
-
 ## Byte strings and typed boundaries
 
-All operations in this module treat a string as an immutable sequence of
+Every operation in this module treats a string as an immutable sequence of
 bytes:
 
-* lengths and positions count bytes, not characters;
-* an embedded NUL is an ordinary byte unless a documented C-style format
-  rejects it;
-* character classes, word boundaries, and case conversion are not implicit
-  UTF-8 or Unicode operations;
-* public positions are one-based, and inclusive end positions are used where
-  an API returns a range.
+- Lengths and positions count bytes, not Unicode characters.
+- Embedded NUL bytes are ordinary data unless a C-style format explicitly
+  rejects them.
+- Character classes, word boundaries, and case transforms operate on single
+  bytes (ASCII or the process C locale), not UTF-8.
+- Public positions are one-based, and returned spans have inclusive end
+  positions.
 
-The Lua-derived byte, case, format, and pack operations follow Lua 5.5
-semantics for values admitted by their Titan signatures. The regex API below
-deliberately uses typed `Regex` and `RegexMatch` records instead of Lua's
-pattern-result tuples. A fixed `string` parameter requires an actual string;
-unlike some Lua library functions, it does not coerce a number to a string. A
-fixed `integer` parameter accepts a Lua integer or an exactly integral,
-representable Lua float at the Lua boundary. Fractional and out-of-range
-numbers are rejected.
+Fixed `string` parameters require strings without coercing numbers. At the Lua
+boundary, fixed `integer` parameters accept Lua integers and exact, in-range
+integral floats. Dynamic `value` operands of `format` and `pack` use Titan's
+`as` conversions selected by the specifier: `as integer` for integer branches,
+`as float` for floating-point branches, and `as string` for `c[n]`, `s[n]`, and
+`z`. Integral floats therefore work in integer formats, while numeric strings
+are rejected and numbers are not implicitly converted to strings for binary
+string formats.
 
-The dynamic `value` operands of `format` and `pack` are checked with Titan
-casts selected by the format. Integer branches use `as integer`, floating
-branches use `as float`, and binary-string packing branches use `as string`.
-Consequently, an exactly integral representable Lua float is accepted by an
-integer branch, but numeric strings are not converted to numbers and numbers
-are not converted to strings for `c[n]`, `s[n]`, or `z`.
+Variadic inputs and flexible-result lists in this module are capped at 200
+total elements:
 
-Titan variadic and flexible-result tails contain at most 200 elements. This
-module additionally caps each projected result list at 200 total values, even
-when its type has a fixed prefix. Thus:
-
-* `byte` returns at most 200 bytes;
-* `char`, `format`, and `pack` accept at most 200 variadic operands;
-* `unpack` returns at most 200 values, including its final next-position
-  result;
-* a regex may contain at most 200 capture groups, all of which can be returned
-  by `RegexMatch:values`.
-
-Crossing one of the argument or result bounds raises Titan's ordinary variadic
-or flexible-result error. `compile_regex` instead reports
-`too_many_captures` for the capture bound. For `unpack` and
-`RegexMatch:values`, the fixed first result leaves room for at most 199 values
-in the flexible tail.
+- `byte` returns at most 200 bytes.
+- `char`, `format`, and `pack` accept at most 200 variadic operands.
+- `unpack` returns at most 200 values in total, including its trailing
+  next-position result (leaving up to 199 decoded values).
+- A regular expression may contain at most 200 capture groups (exceeding this
+  raises `too_many_captures`), all of which `RegexMatch:values` can return.
 
 ## Byte operations
 
 ```text
 function len(subject: string): integer
-function sub(subject: string,
-             first: integer,
-             last: integer?): string
+function sub(subject: string, first: integer, last: integer?): string
 function reverse(subject: string): string
 function lower(subject: string): string
 function upper(subject: string): string
-function rep(subject: string,
-             count: integer,
-             separator: string?): string
-
-function byte(subject: string,
-              first: integer?,
-              last: integer?): (...: integer)
+function rep(subject: string, count: integer, separator: string?): string
+function byte(subject: string, first: integer?, last: integer?): (...: integer)
 function char(...: integer): string
-
-function find(subject: string,
-              needle: string,
-              init: integer?): (integer?, integer?)
+function find(subject: string, needle: string, init: integer?): (integer?, integer?)
 ```
 
-`len` returns `#subject`. `reverse` reverses bytes, including NUL and high-bit
-bytes.
-
-`sub` uses Lua 5.5 index normalization. A negative index counts from the end;
-zero and an overshoot are clamped as in Lua. Omitted or nil `last` means `-1`.
-An empty normalized interval returns `""`.
-
-`lower` and `upper` apply the process C locale one byte at a time. They are not
-Unicode case transforms. For deterministic ASCII behavior, run under the
-`C` locale.
-
-`rep` repeats `subject` `count` times, placing `separator` between adjacent
-copies. Omitted or nil `separator` means `""`; a nonpositive count returns
-`""`. Empty subject and separator also return `""` for any count.
-Result-size arithmetic is checked before allocation.
-
-`byte` defaults `first` to 1 and defaults `last` to that same raw
-supplied/defaulted `first` before normalizing either endpoint. This detail
-means that `byte("abc", 0)` and a negative overshoot return no values rather
-than byte 1. An empty interval likewise returns no values.
-
-`char` returns a string made from its byte operands. Every operand must be in
-`0..255`; `char()` returns `""`.
-
-`find` searches for the first literal occurrence of `needle`. Regex
-metacharacters have no special meaning, and embedded NUL and high-bit bytes
-are ordinary data. Success returns its one-based first and inclusive last
-positions; failure returns the fixed pair `nil, nil`. A caller interested only
-in success may consume the first result and let ordinary call adjustment
-discard the second. `init` uses the same normalization as `sub`: omitted/nil
-means 1, zero or a negative overshoot becomes 1, and an in-range negative
-value counts from the end. A positive start after `#subject + 1` fails. An
-empty needle at a valid start succeeds with `last == first - 1`.
+- `len(subject)` returns `#subject`.
+- `sub(subject, first, last?)` slices bytes with Lua 5.5 index normalization:
+  negative indices count from the end, zero and out-of-range bounds clamp,
+  omitted or `nil` `last` defaults to `-1`, and an empty normalized interval
+  returns `""`.
+- `reverse(subject)` reverses raw bytes, including NUL and high-bit bytes.
+- `lower(subject)` and `upper(subject)` transform one byte at a time under the
+  process C locale. Run under the `"C"` locale for deterministic ASCII case
+  conversion.
+- `rep(subject, count, separator?)` repeats `subject` `count` times with
+  `separator` (default `""`) between copies. A nonpositive `count` or empty
+  `subject` and `separator` returns `""`. Result size is checked before
+  allocation.
+- `byte(subject, first?, last?)` returns the numeric byte values (`0..255`) in
+  the slice. `first` defaults to `1`, and `last` defaults to that raw `first`
+  before either bound is normalized. Consequently, `byte("abc", 0)` and
+  negative overshoots return zero values rather than byte `1`.
+- `char(...: integer)` builds a string from byte values in `0..255`; `char()`
+  returns `""`.
+- `find(subject, needle, init?)` searches for the first literal, binary-safe
+  occurrence of `needle` (regex metacharacters have no special meaning). It
+  returns the one-based inclusive `(first, last)` pair, or `(nil, nil)` on
+  failure. `init` defaults to `1`; `0` and negative overshoots clamp to `1`;
+  negative in-range values count from the end; values greater than
+  `#subject + 1` fail. An empty `needle` at a valid start succeeds with
+  `last == first - 1`.
 
 ## Value conversion
 
@@ -132,22 +126,18 @@ empty needle at a valid start succeeds with `last == first - 1`.
 function tostring(candidate: value): string
 ```
 
-`tostring` applies Lua 5.5's built-in value conversion directly, including a
-callable `__tostring` metamethod. Replacing `_G.tostring` does not affect it.
+`tostring` invokes Lua 5.5's value-to-string conversion directly, honoring a
+callable `__tostring` metamethod and ignoring any replacement of `_G.tostring`.
 
-This function has one ordinary `value` parameter, not a variadic parameter.
-Titan's normal fixed-call adjustment supplies nil for a missing parameter and
-discards surplus values. Consequently:
+Because `candidate` is one fixed `value` parameter, Titan's standard fixed-call
+adjustment applies: an omitted argument becomes `nil`, and surplus argument
+expressions evaluate left to right before their values are discarded:
 
-```titan
-strings.tostring()                 -- "nil"
-strings.tostring(nil)              -- "nil"
-strings.tostring(42, "ignored")    -- "42"
+```text
+strings.tostring()                -- "nil"
+strings.tostring(nil)             -- "nil"
+strings.tostring(42, "ignored")   -- "42"
 ```
-
-Surplus argument expressions are still evaluated from left to right before
-their values are discarded. This is the general Titan call rule: an API does
-not need a variadic tail merely to ignore extra arguments.
 
 ## Formatting
 
@@ -155,7 +145,7 @@ not need a variadic tail merely to ignore extra arguments.
 function format(format_string: string, ...: value): string
 ```
 
-`format` implements Lua 5.5's formatting language:
+`format` implements Lua 5.5's formatting language with specifiers:
 
 ```text
 %%  %c  %d  %i  %u  %o  %x  %X
@@ -163,29 +153,32 @@ function format(format_string: string, ...: value): string
 %p  %q  %s
 ```
 
-Flags, widths, and precisions follow Lua's accepted combinations. Integer and
-floating conversions use the configured target Lua/C widths and formatting
-configuration. A Lua build using its hexadecimal-float fallback, including the
-controlled Windows SDK, accepts bare `%a` and `%A` but rejects their flags,
-widths, and precisions. Native pointer and non-finite-number spellings follow
-that same Lua build. `%p` uses the
-Lua identity pointer for the value. `%q` writes a Lua-readable literal for a
-string, number, boolean, or nil and rejects other values.
+Flags, widths, and precisions follow Lua 5.5 rules for the target platform's
+Lua/C build. Builds that use Lua's hexadecimal-float fallback (such as the
+Windows SDK) accept bare `%a` and `%A` and reject flags, widths, or precisions
+on them.
 
-`%c`, `%d`, `%i`, `%u`, `%o`, `%x`, and `%X` cast their operand to `integer`;
-the floating conversions cast it to `float`. Numeric strings are rejected.
-Because the `%q` type dispatch uses the same checked relation as `as`, an
-integral float takes `%q`'s integer branch and is written as an integer
-literal; a fractional float takes the hexadecimal-float branch.
+- `%c`, `%d`, `%i`, `%u`, `%o`, `%x`, and `%X` convert their operand with
+  `as integer`; floating specifiers convert with `as float`. Numeric strings
+  are rejected.
+- `%p` formats Lua's identity pointer for the value.
+- `%q` formats a Lua-readable literal for strings, numbers, booleans, and
+  `nil`, raising for other types. Integral floats take the integer branch;
+  fractional floats write hexadecimal-float literals.
+- `%s` converts its operand via `tostring` (calling `__tostring` if present).
+  Unmodified `%s` preserves embedded NUL bytes; modified `%s` (with flags,
+  width, or precision) rejects strings containing NUL.
+- `%%` writes a literal `%` and consumes no operand. Missing operands and
+  malformed specifiers raise; surplus operands evaluate and are ignored.
 
-`%s` first applies the same conversion as this module's `tostring`. It can
-therefore call `__tostring` and propagate its error. An unmodified `%s`
-preserves the complete converted byte string. A modified `%s` is a C-style
-conversion and rejects a converted string containing NUL.
+```titan
+local strings = import "string"
 
-Each conversion consumes one variadic operand; `%%` consumes none. Missing
-operands and invalid conversion specifications raise. Surplus operands are
-ignored after their expressions have been evaluated.
+function format_entry(id: integer, rate: float, label: string): string
+  return strings.format(
+    "[#%04x] rate=%6.2f label=%q", id, rate, label)
+end
+```
 
 ## Binary packing
 
@@ -197,52 +190,70 @@ function unpack(format_string: string,
                 initial: integer?): (value, ...: value)
 ```
 
-The binary format language is the Lua 5.5 language:
+Binary format strings follow Lua 5.5's packing language:
 
-| Options | Meaning |
+| Option | Meaning |
 | --- | --- |
-| `<`, `>`, `=` | little endian, big endian, or native endian |
-| `![n]` | set maximum alignment; omitted `n` uses Lua's target-native `LUAI_MAXALIGN` maximum |
-| `b`, `B` | signed or unsigned byte |
-| `h`, `H` | signed or unsigned C `short` |
-| `l`, `L` | signed or unsigned C `long` |
-| `j`, `J` | signed or unsigned `lua_Integer` |
+| `<`, `>`, `=` | Little endian, big endian, or native endian |
+| `![n]` | Maximum alignment (default: platform `LUAI_MAXALIGN`) |
+| `b`, `B` | Signed or unsigned byte |
+| `h`, `H` | Signed or unsigned C `short` |
+| `l`, `L` | Signed or unsigned C `long` |
+| `j`, `J` | Signed or unsigned `lua_Integer` |
 | `T` | C `size_t` |
-| `i[n]`, `I[n]` | signed or unsigned integer in `n` bytes; default C `int`, maximum 16 |
+| `i[n]`, `I[n]` | Signed or unsigned integer in `n` bytes (default C `int`, max 16) |
 | `f`, `n`, `d` | C `float`, `lua_Number`, or C `double` |
-| `c[n]` | fixed-width byte string, padded with zero bytes |
-| `s[n]` | byte string prefixed by an unsigned `n`-byte length |
-| `z` | NUL-terminated byte string; the operand itself may not contain NUL |
-| `x` | one zero padding byte |
-| `X<next-option>` | padding needed for the alignment of the following option |
-| space | ignored |
+| `c[n]` | Fixed-width byte string, zero-padded |
+| `s[n]` | Byte string prefixed by an unsigned `n`-byte length |
+| `z` | NUL-terminated byte string (operand may not contain NUL) |
+| `x` | One zero padding byte |
+| `X<option>` | Padding to match the alignment of the following option |
+| space | Ignored |
 
-Widths, alignments, endianness, and floating representations come from the
-exact target C compiler and Lua configuration. Signed and unsigned overflow,
-integer sign/zero extension, result sizes, alignment, and short input are
-checked.
+Widths, alignments, endianness, and floating representations match the target C
+compiler and Lua build. Overflow, sign/zero extension, alignment, result sizes,
+and truncated inputs are checked. Integer options convert with `as integer`,
+floating options with `as float`, and `c[n]`/`s[n]`/`z` with `as string`.
 
-Integer options cast their dynamic operand to `integer`, and floating options
-cast it to `float`; integral floats therefore work in integer options while
-numeric strings do not. The `c[n]`, `s[n]`, and `z` options cast to `string`
-and reject every non-string operand instead of applying Lua's number-to-string
-conversion.
+- `packsize(format_string)` returns the fixed byte size of `format_string` and
+  rejects variable-length `s[n]` and `z` options.
+- `unpack(format_string, data, initial?)` returns every decoded value followed
+  by the one-based byte position of the next unread byte. Its fixed leading
+  `value` result reflects that the next-position integer is always returned,
+  even when the format decodes zero fields. `initial` defaults to `1`; `0` and
+  negative overshoots clamp to `1`; negative in-range values count from the
+  end; `#data + 1` is valid, and positions past `#data + 1` raise.
 
-`packsize` returns the size of a fixed-width format and rejects the
-variable-length `s[n]` and `z` options.
+```titan
+local strings = import "string"
 
-`unpack` returns every decoded value followed by the one-based position of the
-next unread byte. Its fixed `value` result expresses that there is always at
-least that final position, even when the format decodes no values; the
-flexible tail accounts for the format-dependent remainder. Omitted or nil
-`initial` means 1. Zero and a negative overshoot normalize to byte 1; a
-negative in range counts from the end. `#data + 1` is valid, while a larger
-positive position raises.
+record FrameHeader
+  version: integer
+  kind: integer
+  length: integer
+end
+
+const HEADER_FORMAT = ">BBH"
+
+function encode_header(header: FrameHeader): string
+  return strings.pack(
+    HEADER_FORMAT, header.version, header.kind, header.length)
+end
+
+function decode_header(data: string): (FrameHeader?, integer)
+  if #data < strings.packsize(HEADER_FORMAT) then
+    return nil, 1
+  end
+  local ver, kind, length, next_pos = strings.unpack(HEADER_FORMAT, data)
+  return FrameHeader(ver as integer, kind as integer, length as integer),
+         next_pos as integer
+end
+```
 
 ## In-memory streams
 
-The module provides structurally typed in-memory implementations of the
-`io.ReaderCloser` and `io.WriterCloser` interfaces without importing `io`:
+`StringReader` and `StringWriter` structurally satisfy `io.ReaderCloser` and
+`io.WriterCloser` without importing `io`:
 
 ```text
 record StringReader
@@ -250,8 +261,7 @@ record StringWriter
 
 function reader(contents: string): StringReader
 function StringReader:read(): string?
-function StringReader:read_until(delimiter: string,
-                                 chop: boolean?): string?
+function StringReader:read_until(delimiter: string, chop: boolean?): string?
 function StringReader:close()
 
 function writer(): StringWriter
@@ -260,35 +270,53 @@ function StringWriter:drain(): string
 function StringWriter:close()
 ```
 
-`reader` starts before the first byte. `read` returns the entire unread suffix,
-or nil at end of input. `read_until` returns through the first literal,
-binary-safe delimiter; a true `chop` omits that delimiter. If no delimiter
-remains, it returns the unread suffix, and the next call returns nil. An empty
-delimiter raises while unread input remains; an exhausted or closed reader
-returns nil first. These in-memory reads are synchronous.
+- `reader(contents)` positions a synchronous reader before byte `1`.
+  `read()` returns the entire unread suffix, or `nil` at end of input.
+  `read_until(delimiter, chop?)` reads through the first literal, binary-safe
+  `delimiter` (omitting it when `chop` is `true`), or returns the unread suffix
+  if `delimiter` does not occur; a subsequent call returns `nil`. An empty
+  delimiter raises while unread bytes remain; an exhausted or closed reader
+  returns `nil`. `close()` discards unread bytes and is idempotent.
+- `writer()` accumulates chunks synchronously with checked total-size
+  arithmetic. `drain()` joins all written chunks in linear time, resets the
+  writer for reuse, and returns `""` when empty. `close()` is an idempotent
+  no-op so generic code can always pair `defer` with a closer.
 
-`writer` synchronously accumulates binary chunks with checked total-size
-arithmetic. `drain` joins the current chunks in linear time, clears both its
-chunks and aggregate length for reuse, and returns `""` when it was empty.
-`StringReader:close` discards any unread suffix, after which both read methods
-return nil; `StringWriter:close` is a no-op. Both are idempotent, making these
-records useful in generic code that always defers a closer.
+```titan
+local strings = import "string"
 
-For Task-synchronized string communication, `async.reader_writer_channel`
-provides channel-backed ReaderCloser/WriterCloser records. Its contract is in
-[Asynchronous I/O and tasks](async-io.md#channel-backed-string-streams);
-`string.reader` and `string.writer` themselves remain synchronous.
+function render_csv(rows: {{string}}): string
+  local out = strings.writer()
+  defer out:close()
+
+  for r = 1, #rows do
+    local row? = rows[r]
+    if row then
+      for c = 1, #row do
+        if c > 1 then out:write(",") end
+        out:write(row[c] or "")
+      end
+      out:write("\n")
+    end
+  end
+  return out:drain()
+end
+```
+
+For Task-synchronized streams across cooperative tasks, use
+`async.reader_writer_channel` in [Asynchronous I/O and tasks](async-io.md).
 
 ## Compiled regular expressions
 
-Regexes operate on bytes. Character classes and word boundaries are ASCII;
-there is no implicit UTF-8 or Unicode mode.
+Regular expressions operate on bytes with ASCII character classes and word
+boundaries.
 
 ```text
 record Span
   first: integer
   last: integer
 end
+-- Synthesized constructor: Span(first: integer, last: integer): Span
 
 record Regex
 record RegexMatch
@@ -297,10 +325,8 @@ function compile_regex(expression: string): Regex
 
 function Regex:source(): string
 function Regex:group_count(): integer
-function Regex:match(subject: string,
-                     init: integer?): RegexMatch?
-function Regex:gmatch(subject: string,
-                      init: integer?): function (): (RegexMatch?)
+function Regex:match(subject: string, init: integer?): RegexMatch?
+function Regex:gmatch(subject: string, init: integer?): function (): (RegexMatch?)
 function Regex:gsub(subject: string,
                     replacement: function (string): (string),
                     maximum: integer?): (string, integer)
@@ -313,80 +339,86 @@ function RegexMatch:group(index: integer): string?
 function RegexMatch:values(): (string?, ...: string?)
 ```
 
-`compile_regex` parses once and returns a reusable regex. `source` returns its
-expression, and `group_count` returns the number of capturing groups.
-
-`Regex:match` returns a typed match record containing the whole-match and group
-spans, or nil. The match roots the exact subject from which its spans are
-read. It performs an unanchored search and returns the leftmost match at or
-after the normalized `init`; `^` is the explicit way to require the match to
-start there. Span accessors return fresh records. `Span.last` is inclusive; an
-empty match has `last == first - 1`.
-
-`group_span` and `group` use indices in
-`1..RegexMatch:group_count()`. An out-of-range index raises. An unmatched
-in-range group returns nil, while an empty participating group returns an
-empty span/string. A repeated group retains its final iteration. `values`
-returns the whole match when there are no groups; otherwise it returns one
-value per group, preserving unmatched nil slots. Its fixed optional prefix
-expresses that every match produces at least one projected value.
-
-`Regex:gmatch` returns an iterator whose non-nil result is always a
-`RegexMatch`. The record result is intentional: returning an unmatched first
-capture as nil would prematurely terminate Titan's generic `for`.
-
-The source-expression conveniences compile through a private weak cache:
+Top-level convenience functions compile through an internal weak cache:
 
 ```text
-function match(subject: string,
-               expression: string,
-               init: integer?): RegexMatch?
+function match(subject: string, expression: string, init: integer?): RegexMatch?
 function gmatch(subject: string,
                 expression: string,
                 init: integer?): function (): (RegexMatch?)
 function matches(subject: string,
                  pattern: string): function (): (string?, ...: string?)
-function split(subject: string,
-               delimiter: string?): function (): (string?)
+function split(subject: string, delimiter: string?): function (): (string?)
 function gsub(subject: string,
               expression: string,
               replacement: function (string): (string),
               maximum: integer?): (string, integer)
 ```
 
-Top-level `match` is the cached source-expression form of `Regex:match` and
-performs the same leftmost search, returning the same typed record. Call
-`RegexMatch:values` when capture strings are the desired result.
+- `compile_regex(expression)` parses `expression` once into a reusable `Regex`.
+  `source()` returns its pattern string, and `group_count()` returns the number
+  of capturing groups.
+- `Regex:match(subject, init?)` performs an unanchored leftmost search starting
+  at the normalized `init` and returns a `RegexMatch` or `nil`. `Span` bounds
+  are one-based and inclusive; an empty match has `last == first - 1`.
+- `group_span(index)` and `group(index)` accept `1..group_count()` and raise
+  out of range. An unmatched optional group returns `nil`; an empty matched
+  group returns `""` and an empty `Span`. A repeated group keeps its last
+  iteration.
+- `RegexMatch:values()` returns the whole match when there are no capturing
+  groups, or one slot per group preserving `nil` for unmatched groups.
+- `gmatch` yields non-`nil` `RegexMatch` records, making it safe in generic
+  `for` loops even when group `1` is optional. `matches` yields `values()`
+  directly; because generic `for` stops on a `nil` first value, use `gmatch`
+  when group `1` can be unmatched.
+- `split(subject, delimiter?)` yields one byte at a time when `delimiter` is
+  omitted or `nil` (yielding nothing for `""`). A string `delimiter` is
+  compiled as a regex whose captures are ignored; leading, trailing, and
+  adjacent delimiters yield empty fields.
 
-`matches` wraps `gmatch` and projects each accepted match with `values`: a
-pattern without captures yields the whole match, while a capturing pattern
-yields its captures. This direct tuple form has the ordinary generic-for
-limitation that an unmatched first capture is nil and therefore terminates a
-`for` loop; use `gmatch` and inspect its non-nil `RegexMatch` when the first
-capture can be optional. Direct calls to the returned iterator still preserve
-all capture slots.
+```titan
+local strings = import "string"
 
-With a nil or omitted delimiter, `split` yields one byte at a time and yields
-nothing for an empty subject. A non-nil delimiter is a compiled regex: its
-captures are ignored, and leading, trailing, and adjacent delimiters produce
-empty fields. Zero-width delimiters use the same byte-progress rule as
-`gmatch`, so they cannot loop indefinitely.
+local tag_re = strings.compile_regex([[(\w+)(?::(\d+))?]])
+
+record Tag
+  name: string
+  port: string?
+  start: integer
+end
+
+function extract_tags(input: string): {Tag}
+  local found: {Tag} = {}
+  for m in tag_re:gmatch(input) do
+    local name = m:group(1) or ""
+    local port? = m:group(2)
+    found[#found + 1] = Tag(name, port, m:span().first)
+  end
+  return found
+end
+
+function mask_digits(input: string): (string, integer)
+  return strings.gsub(input, [[\d+]], function (digits)
+    return strings.rep("#", #digits)
+  end)
+end
+```
 
 ### Initial positions and anchors
 
-Regex searches normalize `init` as follows:
+`match` and `gmatch` normalize `init` as follows:
 
 | Supplied `init` | Search start |
 | --- | --- |
-| nil or omitted | byte 1 |
-| `0` or a negative overshoot | byte 1 |
-| positive `1..#subject+1` | that position |
-| negative within range | `#subject + init + 1` |
-| positive `>#subject+1` | immediate no-match |
+| `nil` or omitted | Byte `1` |
+| `0` or negative overshoot | Byte `1` |
+| Positive `1..#subject + 1` | That byte position |
+| Negative in range | `#subject + init + 1` |
+| Positive `> #subject + 1` | Immediate no-match |
 
-`^` anchors at this normalized search start, not necessarily absolute byte 1.
-`$` tests the absolute end of the subject. Position `#subject + 1` can match an
-empty expression.
+`^` anchors at the normalized search start (not necessarily byte `1`). `$`
+matches the end of `subject`. Position `#subject + 1` can match an empty
+pattern.
 
 ### Regex syntax
 
@@ -408,74 +440,47 @@ atom          ::= "."
                 | backreference
 ```
 
-The supported operations are:
+Supported features:
 
-* literal bytes and `.` (any byte except LF; CR is included);
-* classes, ordered ranges, and leading-`^` class negation;
-* left-biased alternation;
-* capturing and `(?:...)` noncapturing groups;
-* greedy, continuation-aware `*`, `+`, `?`, `{n}`, `{n,}`, and `{n,m}`;
-* complete-expression `^` and `$`;
-* ASCII `\w`, `\W`, `\d`, `\D`, `\s`, and `\S`;
-* `\t`, `\n`, `\r`, `\f`, `\e`, and `\a`;
-* word boundaries `\<` and `\>`;
-* single-digit backreferences `\1` through `\9`.
+- Literal bytes and `.` (any byte except LF; CR matches `.`).
+- Character classes `[...]`, ranges `a-z`, and negation `[^...]`. Inside a
+  class, escape `]` as `\]`; `-` is literal when first, last, or escaped.
+- Left-biased alternation (`a|ab` matches `"a"` in `"ab"`).
+- Capturing `(...)` and non-capturing `(?:...)` groups.
+- Greedy, backtracking quantifiers `*`, `+`, `?`, `{n}`, `{n,}`, `{n,m}`.
+- Outer anchors `^` and `$` covering the entire alternation (`^a|b$` anchors
+  both branches; anchors inside subexpressions are rejected).
+- ASCII classes `\w` (`[A-Za-z0-9_]`), `\W`, `\d`, `\D`, `\s` (space, tab, VT,
+  LF, CR — excluding FF), and `\S`.
+- Control escapes `\t`, `\n`, `\r`, `\f`, `\e`, `\a`, and word boundaries
+  `\<` and `\>`.
+- Single-digit backreferences `\1`..`\9` referring to an earlier closed group
+  (an unmatched referenced group produces an ordinary mismatch).
+- Escaped metacharacters `()[]{}\?*+|.^$`. Literal braces must be escaped;
+  `\v`, `\b`, octal/hex escapes, and multi-digit backreferences are rejected.
 
-`\w` is `[A-Za-z0-9_]`. `\s` is space, tab, vertical tab, LF, and CR; it
-deliberately excludes form feed.
-
-Alternatives commit left to right: `a|ab` matches `"a"` in `"ab"`.
-Repetition is greedy but can shorten to allow its continuation to match.
-Outer anchors bind the complete alternation, so `^a|b$` anchors both branches.
-An anchor elsewhere is an error.
-
-Empty expressions, alternatives, and groups are valid: `""`, `"|"`, `"()"`,
-`"(?:)"`, `"a|"`, and `"|a"` all compile.
-
-Inside a class, `]` is literal only as `\]`; `-` is literal when first, last,
-or escaped. Empty/unclosed classes and reversed ranges are errors. Outside a
-class, the metacharacters `()[]{}\?*+|.^$` can be escaped to become literal.
-Unknown escapes, `\v`, hexadecimal/octal escapes, `\b`, and multi-digit
-backreferences are unsupported. Literal braces must be escaped.
-
-A backreference may refer only to a previously closed group 1 through 9. If
-that group did not participate in the chosen alternative, the backreference
-is an ordinary mismatch.
-
-Nullable operands cannot be placed under an unbounded repetition. Repeat
-bounds are checked, the maximum must not be smaller than the minimum, and
-oversized compiled patterns are rejected before native construction.
+Empty expressions, alternatives, and groups (`""`, `"|"`, `"()"`, `"(?:)"`) are
+valid. Nullable operands under unbounded repetition (`*`, `+`, `{n,}`) and
+inverted bounds (`{5,2}`) are rejected at compile time.
 
 ### Iteration and substitution
 
-`gmatch` and `gsub` follow Lua 5.5's empty-match progress rule: an empty match
-at the end of the previous accepted match is suppressed, and searching then
-makes byte progress. This prevents an iterator or substitution from looping
-forever without discarding bytes.
+`gmatch`, `matches`, `split`, and `gsub` follow Lua 5.5's empty-match progress
+rule: an empty match immediately at the end of the previous accepted match is
+suppressed, advancing one byte so iteration always terminates.
 
-`gsub` accepts exactly one replacement function of type
-`function (string): (string)`. It calls the function once for each accepted match and
-passes the whole matched string as its sole argument, whether or not the
-regular expression contains captures. Capture groups remain available through
-the `RegexMatch` operations returned by `match` and `gmatch`; `gsub` does not
-project them into callback arguments.
-
-The callback's returned string replaces the match. Return the supplied
-whole-match argument to retain the original text, or `""` to delete it.
-Percent signs in the returned string are ordinary bytes; `gsub` has no
-replacement-template language. A callback error propagates, and a Lua
-callback that returns a non-string observes the ordinary typed-return error.
-
-An accepted empty match passes `""` to the callback. An empty candidate
-suppressed by the progress rule does not call it. The count is the number of
-accepted matched occurrences, including occurrences for which the callback
-returns the original text. Omitted or nil `maximum` allows at most
-`#subject + 1` substitutions; a nonpositive maximum performs none.
+`gsub` takes a callback `function (string): (string)` invoked once per accepted
+match with the whole matched substring (captures are not forwarded as separate
+arguments; use `match` or `gmatch` to inspect groups). The returned string is
+inserted literally with no `%` template expansion; return the argument
+unchanged to keep it or `""` to delete it. The returned count is the number of
+accepted matches. Omitted or `nil` `maximum` allows up to `#subject + 1`
+replacements; a nonpositive `maximum` performs none.
 
 ### Regex diagnostics and limits
 
-Invalid expressions raise a string with a stable label, one-based byte
-position, line/column, source line, and caret:
+Invalid expressions raise a diagnostic string with a stable label, one-based
+byte position, line/column, source line, and caret:
 
 ```text
 invalid regular expression [bad_quantifier_bounds] at L1:C6 (byte 6): maximum repeat is smaller than minimum
@@ -483,23 +488,8 @@ a{5,2}
      ^
 ```
 
-Labels distinguish malformed groups/classes/ranges/quantifiers, nullable
-repetition, dangling or unsupported escapes, misplaced anchors/quantifiers,
-invalid backreferences, excessive captures/group nesting/pattern size, and
-trailing input. CRLF counts as one line ending.
-
-Capturing and noncapturing groups share a stable maximum nesting depth of 512.
-The 200-capture limit therefore remains valid even when all captures are
-nested. Exceeding the nesting limit raises `group_nesting_too_deep`;
-`peg.set_max_stack` does not control which group depths compile. It still
-controls LPegLabel's execution stack when a compiled regex is matched.
-
-Regex compilation exposes no raw PEG-engine error. The relabel grammar builds
-its AST through constant-depth match-time actions, so parsing cannot leak a
-depth-dependent backtrack-stack overflow and remains independent of
-`peg.set_max_stack`. During matching, a backreference to a group which did not
-participate is ordinary mismatch rather than a missing-back-capture error.
-
-The [`url` standard module](standard-library-url.md) also uses this module's
-binary writer and byte operations for RFC 3986 normalization; URL parsing does
-not assume Unicode text or delegate to Lua's mutable string table.
+| Limit | Value |
+| --- | --- |
+| Capturing groups | 200 (`too_many_captures`) |
+| Group nesting depth (capturing + non-capturing) | 512 (`group_nesting_too_deep`) |
+| Match execution stack | Governed by [`peg.set_max_stack`](standard-library-peg.md) |

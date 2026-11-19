@@ -1,23 +1,81 @@
 # Filesystem standard library
 
-The `fs` standard module provides asynchronous file and path operations with a
-synchronous-looking Titan interface. Titan imports the canonical module with
-`import "fs"`; Lua loads the same module identity with `require "titan.fs"`.
-The current supported hosts are Linux and macOS. The
-[installation chapter](installation.md#libuv) explains how Titan builds its
-pinned libuv on both platforms. System libuv is not supported.
+The `fs` standard module provides asynchronous file I/O, metadata queries,
+directory operations, temporary paths, and filesystem event watching behind a
+synchronous-looking Titan API. Titan imports it with `local fs = import "fs"`
+(parser sugar for `import "titan.fs"`); Lua loads the same module with
+`require "titan.fs"`.
+
+**Target availability:** Native only (absent on the browser target).
+
+## Example
+
+The following module writes a file safely with `defer file:close()` and sums
+the byte sizes of regular files in a directory:
+
+```titan
+local fs = import "fs"
+local path = import "path"
+
+function save_note(file_path: string, contents: string)
+  local file = fs.open(file_path, "w")
+  defer file:close()
+  file:write(contents)
+  file:flush()
+end
+
+function total_regular_bytes(dir: string): integer
+  local total = 0
+  local names = fs.list(dir)
+  for i = 1, #names do
+    local entry? = names[i]
+    if entry then
+      local info? = fs.stat(path.join(dir, entry))
+      if info and info.kind == "file" then
+        total = total + info.size
+      end
+    end
+  end
+  return total
+end
+```
+
+## Tasks, concurrency, and errors
+
+- **Async Task requirement:** File, metadata, directory, `realpath`, `tmpname`,
+  and `Watcher` operations perform asynchronous libuv work and must run inside
+  an [async Task](async-io.md). Importing `fs` installs the standalone async
+  bootstrap for `main`; Lua hosts schedule work with `async.run` and drive
+  `async.loop`. Only `tmpdir`, `homedir`, `pwd`, `chdir`, and `File` transfer
+  hooks are synchronous and require no active Task.
+- **`io` Interfaces:** `File` structurally satisfies all seven
+  [`io` Interfaces](standard-library-io.md#standard-implementations) (adjusted
+  dispatch for `read` and `write`, exact for `read_until` and `close`).
+- **Paths vs. payloads:** Paths are text and reject embedded NUL bytes; file
+  contents are unrestricted binary strings.
+- **Errors:** Native libuv failures raise `async.OperationError` with
+  `operation` naming the failing call (for example, `"fs.open"` or
+  `"fs.rename"`). Two operations use non-raising results instead: `stat` and
+  `lstat` return `nil` on `ENOENT`, and `Watcher:poll()` surfaces notification
+  or classification failures as `WatcherEvent.error`.
+- **Ownership and cancellation:** Application code owns `File:close()`; async
+  Runtime shutdown does not track or close open `File` descriptors. Task
+  cancellation lets accepted libuv requests complete before releasing buffers
+  and delivering sticky cancellation (a cancelled `open` closes the acquired
+  descriptor before raising cancellation).
+
+### Closing the Lua state
+
+When a Lua state closes, Titan synchronously closes every open `File` owned by
+that state so a suspended Task's `defer file:close()` succeeds during unwind. A
+`File` with an in-flight worker-pool `read`, `write`, or `flush` request stays
+open until process exit so a reused OS descriptor number can never redirect
+in-flight worker I/O.
+
+## Opening, reading, and writing files
 
 ```text
 record File
-record Stat
-record Watcher
-
-union WatcherEvent
-  created(string)
-  deleted(string)
-  modified(string)
-  error(async.OperationError)
-end
 
 function open(path: string, mode: string): File
 function read_file(path: string): string
@@ -29,209 +87,58 @@ function File:write(data: string): integer
 function File:flush()
 function File:close()
 function File:is_closed(): boolean
-function File:to_transfer_payload(): string
-function File.from_transfer_payload(payload: string): File
-
-function stat(path: string): Stat?
-function lstat(path: string): Stat?
-function realpath(path: string): string
-function tmpname(): string
-function tmpdir(): string
-function homedir(): string
-function pwd(): string
-function chdir(path: string)
-function mkdir(path: string)
-function unlink(path: string)
-function rmdir(path: string)
-function rename(from: string, to: string)
-function list(path: string): {string}
-
-function watcher(): Watcher
-function Watcher:watch(path: string)
-function Watcher:stop(path: string)
-function Watcher:is_watching(path: string): boolean
-function Watcher:clear()
-function Watcher:poll(): {WatcherEvent}
 ```
 
-`File` structurally satisfies all seven
-[`io` Interfaces](standard-library-io.md#standard-implementations). The
-Interface wrapper adjusts the zero-argument `Reader.read` call to the optional
-`max_bytes` parameter and discards `write`'s byte-count result; its
-`read_until` and `close` slots are exact.
+`open(path, mode)` accepts standard mode families (with an optional binary `b`
+flag after the base letter or after `+`, such as `"rb"`, `"r+b"`, `"rb+"`; all
+Titan file I/O is binary):
 
-Operations that can wait must run inside an [async Task](async-io.md). Importing
-`fs` transitively installs the standalone async bootstrap, so a Titan `main`
-may call these functions directly. A Lua host schedules a Task with `async.run`
-and drives it with `async.loop` after loading `require "titan.async"`.
-
-## Opening and using files
-
-`open(path, mode)` accepts these mode families:
-
-| Mode | Meaning |
+| Mode | Behavior |
 | --- | --- |
 | `r` | Read an existing file. |
-| `w` | Write; create the file or truncate it to zero bytes. |
-| `a` | Write; create the file or append to it. |
+| `w` | Write; create or truncate to zero bytes. |
+| `a` | Write; create or append to end of file. |
 | `r+` | Read and write an existing file. |
-| `w+` | Read and write; create or truncate the file. |
-| `a+` | Read and append; create the file if necessary. |
+| `w+` | Read and write; create or truncate. |
+| `a+` | Read and append; create if absent. |
 
-An optional `b` is accepted after the base letter or after `+`, where familiar:
-for example, `rb`, `r+b`, and `rb+`. It does not change behavior on Linux or
-macOS because Titan file payloads are already binary. Any other mode raises.
-Files created by `open` request permissions `0666`, subject to the process
-umask.
+Created files request mode `0666` (masked by the process umask). Unknown modes
+raise.
 
-The returned `File` is an opaque wrapper around an operating-system descriptor;
-ordinary file operations do not expose that descriptor. The trusted
-same-process transfer hooks below carry it in a manually owned payload.
+- `File:read(max_bytes?)` reads sequentially from the current file position,
+  defaulting to 64 KiB when `max_bytes` is omitted or `nil` (explicit values
+  must be positive). If an earlier `read_until` retained excess bytes, `read`
+  returns up to `max_bytes` from that buffer immediately without submitting a
+  native read. Returns `nil` only at EOF; EOF is not sticky if the file later
+  grows.
+- `File:read_until(delimiter, chop?)` reads through the first literal,
+  binary-safe `delimiter`, omitting it only when `chop` is `true`, and retaining
+  trailing bytes for later reads. Rejects an empty delimiter. An unterminated
+  tail at EOF is returned once before the next call returns `nil`. Because
+  `read_until` composes repeated `read()` calls, already consumed bytes are not
+  rolled back on error, and Tasks sharing one `File` must coordinate externally.
+- `File:write(data)` writes every byte of `data` (continuing short native
+  writes automatically) and returns `#data`. Writing `""` returns `0` without
+  submitting native work.
+- `File:flush()` synchronizes the descriptor with `uv_fs_fsync`.
+- `File:close()` submits a native close and marks the wrapper terminal once
+  libuv accepts the request (even if the close callback reports an error, so a
+  reused descriptor number is never closed twice). Subsequent `close()` calls
+  are idempotent no-ops, `is_closed()` returns `true`, `read` / `read_until`
+  return `nil`, and `write` / `flush` raise. Coordinate `close()` externally
+  with concurrent Task operations on the same `File`.
+- `read_file(path)` reads an entire file in 64 KiB chunks into memory (without
+  trusting `stat.size`) and closes the handle on success or error.
+  `write_file(path, data)` creates or truncates `path`, writes all bytes, and
+  closes the handle. Use `File:read` and `File:write` directly for streaming.
 
-`read(max_bytes)` uses 64 KiB when `max_bytes` is omitted or `nil`. An
-explicit size must be positive. It returns at most that many bytes, possibly
-fewer, and returns `nil` only when no bytes are available at end of file.
-Allocation failure raises normally. Reads use the File's current position;
-there is no random-access offset API in this version.
+Each `File` operation submits an independent libuv thread-pool request without
+per-descriptor serialization; Tasks sharing one `File` must coordinate
+externally when operation order matters.
 
-A delimiter read may have already retained bytes beyond its result. A plain
-`read(max_bytes)` consumes at most `max_bytes` from those bytes and returns
-immediately, without topping up the result with another native read. Any
-retained remainder stays with the File for the next read.
+## Metadata, directories, and paths
 
-`read_until(delimiter, chop)` reads through the first literal delimiter. The
-delimiter is included by default and omitted only when `chop` is `true`.
-Delimiter matching and results are binary-safe, including embedded NUL bytes.
-An empty delimiter raises. Bytes after the first delimiter are retained and
-are observed by the next `read` or `read_until`.
-
-```titan
-local line = file:read_until("\n", true)
-```
-
-If EOF arrives after some bytes but before the delimiter, `read_until`
-returns that unterminated tail. It returns `nil` only when EOF supplies no
-bytes. EOF is not permanently sticky: if another descriptor later grows the
-file, a subsequent read from this File can observe the new bytes.
-
-`write(data)` writes the complete string and returns `#data`. A short native
-write is continued internally before the method returns. Writing `""` returns
-zero without submitting native work. Strings are binary: embedded NUL and all
-byte values are preserved.
-
-`flush()` asks the operating system to synchronize the File with
-`uv_fs_fsync`.
-
-```titan
-local fs = import "fs"
-
-function replace(path: string, data: string)
-  local file = fs.open(path, "w")
-  defer file:close()
-  file:write(data)
-  file:flush()
-end
-```
-
-## Concurrency and closing
-
-Each File operation submits its own libuv filesystem request. Libuv runs those
-requests as independent thread-pool jobs and does not promise per-descriptor
-ordering. Tasks that share one File must therefore coordinate externally when
-operation order matters. A `read` satisfied entirely from facade-retained
-excess submits no request and returns immediately.
-
-`read_until` is high-level composition over repeated `read()` calls. Each
-underlying native read is a separate operation, so another Task's read,
-write, flush, or close may run between iterations. Code that shares one File
-between Tasks must coordinate externally when it needs an uninterrupted
-delimiter read.
-
-`close()` submits an ordinary libuv filesystem close and consumes the wrapper's
-descriptor once libuv accepts it. After that point `read` and `read_until`
-return `nil` as ordinary Reader EOF, while `write` and `flush` reject the
-closed File. Repeated close is idempotent, `is_closed()` reports that terminal
-state, and close discards facade-retained delimiter excess. If another
-filesystem request is already using the descriptor, its result follows the
-host/libuv ordering; Titan does not serialize or queue closes behind those
-operations. Its operation counter only rejects transfer while a File operation
-is pending. Coordinate close with other File operations when that distinction
-matters.
-
-Task cancellation does not abandon or suppress accepted native work. The
-runtime still consumes the terminal callback before releasing the request and
-buffers, and only then injects sticky cancellation into the Task. If a
-cancelled `open` succeeds, the runtime closes the descriptor that was never
-delivered to the caller.
-`read_until` is ordinary composition rather than a transaction: if it raises,
-bytes already consumed by its earlier reads are not restored. A currently
-pending native read retains the ordinary File-read cancellation semantics.
-Cancellation remains sticky after the callback: it is delivered at the next
-ordinary asynchronous operation or makes the Task terminally cancelled when it
-returns.
-
-Application code owns `File:close()`. A File is an operating-system descriptor,
-not a libuv loop handle, so async Runtime shutdown neither tracks nor closes a
-File left open. Such a descriptor remains open until application code closes
-it, its Lua state closes, or operating-system process teardown reclaims it.
-Once libuv accepts a close submission, the File wrapper is terminal even if the
-callback reports an error. The runtime reports that error once and never
-retries the close, because the operating system may already have reused that
-descriptor number.
-
-### Closing the Lua state
-
-Closing the Lua state closes every File of that state that is still open. The
-close runs synchronously on the closing thread, because the state close cannot
-await a libuv request, so a suspended Task's `defer file:close()` completes
-instead of raising. A File whose read, write or flush request was still in
-flight when a Task waiting for it was unwound stays open: the worker may still
-be using the descriptor, and closing it could redirect that request to a
-reused descriptor number. That descriptor remains open until the process
-exits.
-
-## Transferring files
-
-`File:to_transfer_payload()` moves an open, idle File into a same-process
-opaque protobuf byte string containing its descriptor and copied delimiter-read
-remainder. Serialization finishes before the source relinquishes ownership.
-It rejects a pending `read`, `read_until`, `write`, `flush`, or `close` before
-detaching anything. Successful detachment makes the source behave like a closed
-File. `File.from_transfer_payload(payload)` adopts that descriptor without reopening
-the path, preserving its position and mode. The two hooks themselves do not
-wait or require a running Task; subsequent file I/O retains its usual Task
-requirement.
-
-These hooks implement the manual resource-handoff contract of
-[`async.TransferValue`](async-io.md#transfer-values) under the
-[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
-Deliver and adopt the payload exactly once in this process, and close the
-adopted File explicitly. File has no public `discard_transfer_payload`: after a
-failed delivery, adopt the payload locally with `File.from_transfer_payload` and
-close the File. Copying the payload does not duplicate its descriptor, and
-discarding it does not close the descriptor. Replaying or forging a payload can
-close or use an unrelated descriptor.
-
-## Whole-file helpers
-
-`read_file(path)` opens in `r` mode, iterates the bound `File:read` method with
-its 64-KiB default until EOF, and closes the File on both success and error. It
-does not trust `stat.size`: files
-may change while they are read. Chunks accumulate in `string.StringWriter`,
-which checks their aggregate length against Titan's integer/string limit and
-joins them with one exact-size copy when drained.
-
-`write_file(path, data)` opens in `w` mode, writes the complete binary string,
-and closes the File on success or error.
-
-These helpers keep all data in memory. Use `File:read` and `File:write` directly
-when an application should stream or bound its memory use.
-
-## Metadata and path operations
-
-`stat(path)` returns:
-
-```titan
+```text
 record Stat
   size: integer
   kind: string
@@ -241,175 +148,159 @@ record Stat
   modified_seconds: integer
   modified_nanoseconds: integer
 end
+-- Synthesized constructor: Stat(...)
+
+function stat(path: string): Stat?
+function lstat(path: string): Stat?
+function realpath(path: string): string
+function mkdir(path: string)
+function unlink(path: string)
+function rmdir(path: string)
+function rename(from: string, to: string)
+function list(path: string): {string}
+function tmpname(): string
+function tmpdir(): string
+function homedir(): string
+function pwd(): string
+function chdir(path: string)
 ```
 
-`kind` is `"file"`, `"directory"`, `"symlink"`, or `"other"`. `stat` uses
-`uv_fs_stat`, so **it follows symbolic links**: asking about an ordinary
-symlink reports the target's metadata and kind. `lstat` returns the same
-`Stat` shape but uses `uv_fs_lstat`, so asking about a symbolic link reports
-the link itself with `kind == "symlink"`. `mode` is the platform mode bitset
-supplied by libuv; its numeric permission/type bits are host-specific. The two
-modification fields form one timestamp, with nanoseconds in the range 0
-through 999,999,999. `device` and `inode` form an opaque physical-file
-identity pair. Compare both fields for equality when identifying the same
-physical file through aliases; do not interpret their numeric values. Either
-field may be negative because Titan preserves the complete unsigned host value
-through its signed integer carrier.
-
-If the requested path does not exist, `stat` and `lstat` return `nil`.
-Only libuv's `UV_ENOENT` result has that meaning; permission failures,
-invalid path components, and every other error still raise
-`async.OperationError`. A dangling symbolic link therefore returns `nil` from
-`stat`, while `lstat` returns the link's own `Stat` value.
-
-The optional results, including their serialized public `titan.fs` interface
-and exact native result signatures, are part of ABI 2. The same ABI includes
-`device` and `inode` in the serialized public `Stat` record. A mismatched
-provider is rejected rather than migrated or adapted.
-
-`realpath(path)` resolves symbolic links plus `.` and `..` components and
-returns the canonical absolute path. The complete path must exist. It rejects
-embedded NUL bytes and raises `async.OperationError` for a missing or otherwise
-unresolvable path. Like metadata operations, it runs inside the current Task.
-If the current Task is cancelled while the native request is pending, it stays
-waiting until the terminal callback has copied the result and cleaned the
-request. Delivery then raises the Task's first cancellation reason instead of
-returning the path.
-
-`mkdir(path)` requests mode `0777`, subject to the process umask. `unlink(path)`
-removes a file or symbolic link; it does not stand in for directory removal.
-`rmdir(path)` removes an empty directory. `rename(from, to)` uses libuv's
-filesystem rename operation.
-
-`list(path)` returns entry names without `.` or `..`. Names are copied before
-the native scandir request is cleaned up. Titan does not specify their order;
-sort them in application code when order matters.
-
-Paths are text arguments. An embedded NUL is rejected instead of silently
-truncating it; libuv copies paths for accepted asynchronous filesystem
-requests. File contents remain unrestricted binary strings.
-
-## Watching filesystem changes
-
-`watcher()` creates a `Watcher` bound permanently to the current async Runtime
-and event loop. Creating or using one requires a running Task. After that
-Runtime stops, every operation on the Watcher raises; a Watcher is not reset
-for reuse by a later Runtime.
-
-`watch(path)` requires an existing file or directory. It calls `realpath` once
-and registers the resulting canonical absolute target. Repeating the call for
-the same target is idempotent, including through another symbolic link or an
-equivalent `.` or `..` spelling. A directory watch covers its immediate
-entries, not descendants of nested directories. A file watch reports only
-that file. `watch` returns after libuv accepts the registration. On Darwin,
-libuv activates the underlying FSEvents stream asynchronously, so a mutation
-issued immediately afterward may predate the native subscription; let the event
-loop settle before relying on a subsequent mutation.
-
-`stop(path)` resolves the supplied spelling and stops its canonical
-registration. A missing or unwatched path is a no-op. `is_watching(path)` uses
-the same lookup and returns false for either case. The Watcher stores only
-canonical identities; it does not retain every spelling used by callers.
-`clear()` stops every registration. Both `stop` and `clear` wait until each
-native watcher handle has closed, and `clear` is idempotent after completion.
-While one clear is waiting for those closes, a new `poll` or second `clear`
-raises.
-
-`poll()` returns the currently buffered events. If none are buffered while a
-registration is active, it suspends the current Task until a callback arrives
-or the last registration is removed. If the Watcher has no registrations, it
-returns an empty Array immediately. Only one Task may poll a given Watcher at a
-time. Tasks that mutate one Watcher concurrently must coordinate those calls
-externally. Cancelling a blocked poll detaches only that Task's waiter. It does
-not discard buffered events or stop registrations that another Task may poll.
-The subscription keeps one reader reservation until that wait exits, including
-while a wake is queued. Public `Task:resume` is not a filesystem completion API;
-a token unrelated to that exact internal wait raises in its caller and cannot
-finish the poll. Native events publish notifications, while removing the final
-registration wakes the pending batch reader. After `stop` or `clear` removes
-that final registration, wait for the awakened poll to return before registering
-another path on the Watcher.
-
-Classification may suspend while more native callbacks are copied. If one of
-those callbacks belongs to a registration retired by the current `poll`, that
-poll also drains the complete follow-on callback batch in order. This keeps the
-retirement boundary complete: after a deletion event retires a direct file or
-watched root, the next `poll` cannot return an already-copied notification for
-that retired registration. Notifications for registrations that remain live
-normally stay buffered for the next `poll`.
+- `stat(path)` follows symbolic links (`uv_fs_stat`); `lstat(path)` inspects
+  the link itself (`uv_fs_lstat`). Both return `nil` on `ENOENT` (so a dangling
+  symlink returns `nil` from `stat` and a `"symlink"` `Stat` from `lstat`),
+  raising `async.OperationError` for other failures such as permission errors.
+  - `kind` is `"file"`, `"directory"`, `"symlink"`, or `"other"`.
+  - `mode` is the host-specific permission and type bitset.
+  - `modified_seconds` and `modified_nanoseconds` (`0..999,999,999`) form the
+    modification timestamp.
+  - `(device, inode)` is an opaque physical-file identity pair for equality
+    comparison across aliases (either field may be negative because Titan stores
+    the full unsigned host value in a signed integer).
+- `realpath(path)` resolves symbolic links, `.`, and `..` for an existing path
+  and returns its canonical absolute path.
+- `mkdir(path)` creates a directory with mode `0777` (masked by umask).
+  `unlink(path)` removes a file or symlink; `rmdir(path)` removes an empty
+  directory; `rename(from, to)` renames or moves an entry.
+- `list(path)` returns an Array of entry names excluding `"."` and `".."` in
+  unspecified order.
+- `tmpname()` atomically creates an empty regular file in the temporary
+  directory, closes its descriptor, and returns its path. The caller owns
+  removing it with `unlink`.
+- `tmpdir()`, `homedir()`, `pwd()`, and `chdir(path)` are synchronous and need
+  no async Task. `tmpdir()` and `homedir()` follow the same platform rules as
+  [`os.tmpdir()` and `os.homedir()`](standard-library-os.md#directories-and-host-identity).
+  `chdir(path)` mutates the process-wide working directory; coordinate it across
+  concurrent Tasks and restore the prior directory with `defer`.
 
 ```titan
-union WatcherEvent
-  created(string)
-  deleted(string)
-  modified(string)
-  error(async.OperationError)
+local fs = import "fs"
+local path = import "path"
+
+function atomic_replace(target: string, payload: string): boolean
+  local dir = path.dirname(target)
+  local staging = path.join(dir, path.basename(target) .. ".tmp")
+  fs.write_file(staging, payload)
+  fs.rename(staging, target)
+  local info? = fs.lstat(target)
+  return info ~= nil and info.kind == "file"
 end
 ```
 
-Every path payload is canonical and absolute. A directory callback's filename
-is joined to the watched directory using the native path separator (`/` on
-Unix, `\` on Windows), without duplicating a root directory's trailing
-separator; a file callback names the watched file.
-Each native notification maps to one `WatcherEvent`. A native rename flag is
-classified as `created` or `deleted` by calling `lstat` when `poll` drains the
-notification; if rename and change flags are both present, rename takes
-precedence. An ordinary directory change maps to `modified`. Every direct-file
-notification checks the watched path as well, because Darwin may report that
-file's deletion with only a change flag: a missing path maps to `deleted` and
-retires the registration, while an existing change maps to `modified`. A
-watched directory likewise retires when draining its own deletion event.
+## Watching filesystem changes
 
-A negative native status or an `async.OperationError` raised while classifying
-one notification maps to the `error` arm instead of making `poll` raise. Other
-Task errors, including cancellation or use outside the Watcher's Runtime,
-retain their ordinary behavior.
+```text
+record Watcher
 
-Filesystem notifications are hints rather than a journal. The operating
-system or libuv may combine, duplicate, or omit changes, and the target may
-change again before drain-time classification. Applications must not assume
-one notification per filesystem operation, exact counts, or a total order.
-Events copied before `stop` or `clear` remain observable. A poll that crosses
-that registration's retirement drains its complete follow-on callback batch;
-otherwise they remain buffered for a final `poll`.
+union WatcherEvent
+  created(value: string)
+  deleted(value: string)
+  modified(value: string)
+  error(value: async.OperationError)
+end
 
-## Temporary files and working directory
+function watcher(): Watcher
+function Watcher:watch(path: string)
+function Watcher:stop(path: string)
+function Watcher:is_watching(path: string): boolean
+function Watcher:clear()
+function Watcher:poll(): {WatcherEvent}
+```
 
-`tmpname()` atomically creates a unique empty regular file in the platform
-temporary directory and returns its path. The file remains present and belongs
-to the caller, which should eventually remove it with `unlink`. Titan closes
-the descriptor acquired by `uv_fs_mkstemp` before `tmpname` returns; the API
-does not return an open `File`.
+- `watcher()` creates a `Watcher` permanently bound to the current async
+  Runtime. After that Runtime stops, all operations on the `Watcher` raise.
+- `watch(path)` canonicalizes an existing file or directory via `realpath` and
+  registers it (idempotent across equivalent paths or symlinks). A directory
+  watch monitors immediate children only (not nested subdirectories); a file
+  watch monitors that file. On macOS, FSEvents activates asynchronously after
+  `watch` returns.
+- `stop(path)` removes the canonical registration (no-op if unwatched or
+  missing); `is_watching(path)` tests membership using the same lookup.
+  `clear()` stops every registration and waits for native handles to close
+  (idempotent after completion; concurrent `poll()` or `clear()` while clearing
+  raises).
+- `poll()` returns buffered `WatcherEvent` values, suspends if none are
+  buffered while registrations are active, or returns `{}` immediately when no
+  registrations remain. At most one Task may poll a `Watcher` at a time.
+  Cancelling a blocked `poll()` detaches only that waiter without discarding
+  buffered events or stopping registrations. After `stop` or `clear` removes
+  the last registration, let the awakened `poll()` return before calling
+  `watch` again.
+- **Event payloads and classification:** Every path in `created`, `deleted`,
+  and `modified` is canonical and absolute. Native rename flags classify as
+  `created` or `deleted` via `lstat` at drain time (taking precedence over
+  change flags). Direct-file notifications also check existence so deletion
+  events retire the registration cleanly; watched directories likewise retire
+  upon their own deletion. Classification or native status errors surface as
+  `WatcherEvent.error` rather than raising from `poll()`. Filesystem
+  notifications are OS hints—events may coalesce, duplicate, or omit changes.
 
-Like every accepted filesystem request, temporary-file creation keeps its
-native request alive until the callback even when its Task is cancelled. A
-successful cancelled operation closes the descriptor that `uv_fs_mkstemp`
-returned before delivering cancellation, but it does not unlink the path: the
-operation is not transactional. Applications that need stronger cleanup
-should create temporary files inside an application-owned directory.
+```titan
+local fs = import "fs"
 
-`tmpdir()` returns the platform temporary directory without creating a file or
-directory. `homedir()` returns the current user's home directory. They follow
-the same libuv platform and environment-variable rules as
-[`os.tmpdir()` and `os.homedir()`](standard-library-os.md#directories-and-host-identity),
-respectively. Both functions are synchronous and do not require an active
-async Task.
+function collect_next_events(dir: string): {string}
+  local w = fs.watcher()
+  defer w:clear()
+  w:watch(dir)
 
-`pwd()` returns the process working directory. `chdir(path)` changes that
-process-wide directory, so it affects relative paths used by every Task and by
-the embedding host. These two helpers are synchronous and do not require an
-active async Task. Coordinate `chdir` externally when Tasks can run
-concurrently, and restore the previous directory with `defer` when the
-change is temporary.
+  local summary: {string} = {}
+  local events = w:poll()
+  for i = 1, #events do
+    local event = events[i]
+    case event
+    when created(p) then
+      summary[#summary + 1] = "created: " .. p
+    when deleted(p) then
+      summary[#summary + 1] = "deleted: " .. p
+    when modified(p) then
+      summary[#summary + 1] = "modified: " .. p
+    when error(err) then
+      summary[#summary + 1] = "error: " .. err.message
+    end
+  end
+  return summary
+end
+```
 
-## Errors and current scope
+## Transferring files
 
-Libuv failures raise [`async.OperationError`](async-io.md#errors-and-cancellation).
-Its `operation` identifies the failing action (for example, `fs.open` or
-`fs.rename`). Watcher notification and classification failures are the one
-result-valued exception: `poll` returns them as `WatcherEvent.error`. The
-library does not print errors.
+```text
+function File:to_transfer_payload(): string
+function File.from_transfer_payload(payload: string): File
+```
 
-This module does not provide random-access reads/writes,
-permissions/ownership changes, link creation, recursive filesystem watching,
-memory mapping, or synchronous file-content operations.
+`File:to_transfer_payload()` moves an open, idle `File` (its OS descriptor and
+any retained delimiter-read remainder) into a same-process opaque protobuf
+payload. Serialization completes before detachment; pending `read`,
+`read_until`, `write`, `flush`, or `close` operations are rejected before
+changing the source. After detachment, the source behaves like a closed `File`.
+`File.from_transfer_payload(payload)` adopts the descriptor without reopening
+its path, preserving file offset and mode. Both hooks are synchronous and need
+no active Task; subsequent I/O on the adopted `File` requires a Task as usual.
+
+These hooks follow the [`async.TransferValue`](async-io.md#transfer-values)
+contract and [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules):
+deliver and adopt each payload exactly once in the same process and close the
+adopted `File` explicitly. `File` has no `discard_transfer_payload`; recover an
+undelivered payload by calling `File.from_transfer_payload` and closing the
+resulting `File`. Copying or dropping a payload does not duplicate or close the
+descriptor.

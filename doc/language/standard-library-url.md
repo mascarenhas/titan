@@ -1,73 +1,83 @@
 # URL standard library
 
-The `url` standard module parses and normalizes absolute HTTP, HTTPS, WS and WSS URLs,
-including URLs supplied as separate scheme, authority, and request-target
-components. It is synchronous and performs no network I/O: callers can use
-the parsed value for HTTP, routing, validation, logging, or another layer that
-consumes HTTP(S) or WebSocket endpoint identifiers. Titan source uses the short import:
+The `url` module synchronously parses and normalizes absolute `http`, `https`, `ws`, and `wss` URLs without performing network I/O, including URLs assembled from separate scheme, authority, and request-target components. Import it in Titan with `local url = import "url"` or load it in Lua with `require "titan.url"`.
+
+**Target availability:** Native & Browser (full API on both targets).
+
+## Example
+
+This program parses both a valid URL (showing case, port, and percent-escape normalization) and a malformed URL (showing the error `kind`, 1-based byte `position`, and formatted `message`):
 
 ```titan
+local io = import "io"
 local url = import "url"
-```
 
-The parser resolves that spelling to the canonical `titan.url` module
-identity. Lua loads the same module with `require "titan.url"`.
+local function inspect(source: string): string
+  local parsed?, problem? = url.parse(source)
+  if problem then
+    return "error [" .. problem.kind .. "] at byte "
+      .. problem.position .. ": " .. problem.message
+  end
+  return parsed.scheme .. "://" .. parsed:host_header() .. parsed.target
+end
+
+function main(args: {string}): integer
+  io.print(inspect("HTTPS://Example.COM/items%5f1?page=2"))
+  io.print(inspect("http://[::%25]/"))
+  return 0
+end
+```
 
 ## API
 
 ```text
 record Url
-    scheme: string
-    host: string
-    port: integer
-    path: string
-    query: string?
-    target: string
-    authority: string
+  scheme: string
+  host: string
+  port: integer
+  path: string
+  query: string?
+  target: string
+  authority: string
 end
+function Url.new(scheme: string, host: string, port: integer,
+                 path: string, query: string?, target: string,
+                 authority: string): Url
 
 record Error
-    position: integer
-    kind: string
-    message: string
+  position: integer
+  kind: string
+  message: string
 end
+function Error.new(position: integer, kind: string, message: string): Error
 
 function parse(source: string): (Url?, Error?)
-function parse_request(
-  scheme: string,
-  authority: string,
-  target: string
-): (Url?, Error?)
+function parse_request(scheme: string, authority: string,
+                       target: string): (Url?, Error?)
 function Url:host_header(): string
 ```
 
-`parse` and `parse_request` are recoverable boundaries. A valid input returns
-the parsed `Url` and nil. Invalid input returns nil and an `Error`; malformed
-input never raises. The two positions are mutually exclusive:
+`parse` and `parse_request` never raise on malformed input. They return `(Url, nil)` on success and `(nil, Error)` on failure; the two tuple positions are mutually exclusive. Because field access automatically unwraps Options, handle `problem` first and access `parsed` fields directly without `as` casts.
 
-```titan
-local url = import "url"
+### Accepted URLs and normalization
 
-function endpoint(source: string): (string?, string?)
-  local parsed?, problem? = url.parse(source)
-  if problem then
-    return nil, problem.message
-  end
-  return parsed.host .. ":" .. parsed.port, nil
-end
-```
+`url` accepts absolute `http://`, `https://`, `ws://`, and `wss://` URLs with a nonempty host and no userinfo (`user@`) or `#fragment`. Hosts may be RFC 3986 registered names, IPv4 addresses, bracketed IPv6 addresses (including RFC 6874 `%25` zone identifiers with a nonempty zone), or bracketed IPvFuture literals. Explicit ports must be decimal integers in `1..65535`.
 
-The condition does not flow-narrow either option. Field access is already a
-bare-value context, so Titan inserts the checked option force for `problem` and
-`parsed`; explicit `as url.Error`/`as url.Url` casts would only restate that
-ordinary conversion.
+Normalized fields on `Url`:
 
-The `Error` field is named `kind`, rather than `type`, because `type` is a
-Titan keyword. `position` is the one-based byte position at which parsing or a
-semantic URL policy check failed. For `parse_request`, positions refer to the
-virtual absolute URL `scheme .. "://" .. authority .. target`, even when an
-authority or origin-form boundary check fails before those components are
-joined. The stable `kind` values and corresponding message details are:
+- **`scheme`**: lowercased (`"http"`, `"https"`, `"ws"`, or `"wss"`); `ws`/`wss` are preserved rather than converted to `http`/`https`.
+- **`host`**: host formatted for DNS, TCP, and TLS identity checks, **without** URI brackets (for example `[fe80::1%25eth0]` becomes `"fe80::1%eth0"`). Registered names, IPv6 hex digits, and IPvFuture version prefixes are lowercased.
+- **`port`**: explicit port, or the scheme default (`80` for `http`/`ws`, `443` for `https`/`wss`).
+- **`path`**: normalized path (`"/"` when omitted in the source).
+- **`query`**: normalized query string without `?`, distinguishing absent (`nil`) from present empty (`""`).
+- **`target`**: origin-form `path` plus optional `"?" .. query`.
+- **`authority`** (and **`Url:host_header()`**): normalized `Host`-header spelling, retaining brackets for IP literals and retaining an explicitly supplied port even when it equals the default.
+
+In `host`, `path`, `query`, and zone identifiers, percent-encoded unreserved bytes are decoded (such as `%5f` -> `_`) while retained escapes use uppercase hexadecimal digits (such as `%2F`). All strings and byte positions are byte-oriented; `url` performs no Unicode IDNA conversion, DNS resolution, or redirect logic.
+
+### Structured errors
+
+`Error.position` is the 1-based byte offset where parsing or policy validation failed. `Error.message` formats `kind`, `position`, and detail (for example `URL parse error [zone] at byte 14: expected a nonempty zone identifier after '%25'`). Branch on `kind` programmatically:
 
 | `kind` | Detail |
 | --- | --- |
@@ -88,89 +98,16 @@ joined. The stable `kind` values and corresponding message details are:
 | `url_tail` | `unexpected byte in the path or query` |
 | `url` | `invalid absolute HTTP or WebSocket URL` |
 
-`message` combines that identifier and position with its detail:
-
-```text
-URL parse error [port] at byte 20: expected a decimal port in the range 1..65535
-```
-
-Callers should branch on `kind` when behavior depends on the failure and use
-`message` for display.
-
-For example, `http://[::%25]/` returns kind `zone` at byte 14 with message:
-
-```text
-URL parse error [zone] at byte 14: expected a nonempty zone identifier after '%25'
-```
-
 ## Separately received request components
 
-`parse_request(scheme, authority, target)` builds the same normalized `Url`
-from the three components which an HTTP server receives independently. The
-scheme must be exactly `http`, `https`, `ws` or `wss`, compared case-insensitively; an
-invalid separate scheme reports `scheme` at byte 1. The authority must be one
-complete authority: an unescaped `/`, `?`, or `#` is an
-`authority_tail` error instead of being allowed to consume part of `target`.
-Raw `@` remains part of the absolute grammar's user-information check and
-therefore reports `userinfo`.
+`parse_request(scheme, authority, target)` constructs the same normalized `Url` from the three components an HTTP server receives separately:
 
-The target must be origin-form and begin with `/`. Empty, absolute-form,
-authority-form, and asterisk-form targets report `origin_form`. Once these
-component boundaries are established, the exact concatenation is parsed by the
-same absolute grammar as `parse`, so host, IP-literal, port, path, query,
-percent-escape, normalization, and structured-error behavior stay identical.
+- **`scheme`** must be `http`, `https`, `ws`, or `wss` (ASCII case-insensitive); invalid values report `scheme` at byte `1`.
+- **`authority`** must be a single complete authority: unescaped `/`, `?`, or `#` reports `authority_tail` rather than bleeding into `target`, and `@` reports `userinfo`.
+- **`target`** must be origin-form starting with `/` (empty, absolute-form, authority-form, and `*` targets report `origin_form`).
 
-## Accepted URLs
-
-This iteration accepts an absolute `http://`, `https://`, `ws://` or `wss://` URL with an
-authority and nonempty host. User information and fragments are deliberately
-unsupported. The host grammar accepts RFC 3986 registered names, IPv4
-addresses, bracketed IPv6 addresses, and bracketed IPvFuture literals. IPv6
-zone identifiers use the RFC 6874 `%25` separator and require a nonempty zone
-component. An unbracketed IPv6 authority is invalid.
-
-The returned fields are normalized:
-
-- `scheme` is lowercase;
-- `host` is the connection and TLS-identity spelling, without URI brackets;
-- `port` is the explicit port or the effective default, 80 for HTTP/WS and 443
-  for HTTPS/WSS;
-- `path` is `/` when the source path is empty;
-- `query` distinguishes an absent query from a present empty query;
-- `target` is the origin-form path plus the optional `?query`; and
-- `authority` is the normalized Host-header spelling, including brackets for
-  an IP literal and an explicitly supplied canonical decimal port.
-
-An explicit port must contain decimal digits and have value `1..65535`. Its
-presence is preserved in `authority` even when it equals the scheme's default.
-`host_header()` returns `authority`.
-
-The scheme is preserved after normalization: parsing `wss://` does not turn
-it into `https://`. The WebSocket client derives its HTTP opening target from
-this value. Ordinary HTTP entry points accept only HTTP/HTTPS and reject WS/WSS
-before acquiring a transport.
-
-For an IP literal, `host` omits brackets because it is suitable for DNS/TCP
-and TLS identity handling, while `authority` preserves them. A zoned address
-such as `[fe80::1%25eth0]` therefore has `host == "fe80::1%eth0"` and keeps
-`[fe80::1%25eth0]` in `authority`.
-
-Normalization lowercases a registered-name host. In the host, path, query,
-and zone identifier, a percent-encoded unreserved byte is decoded; every
-retained escape keeps its meaning but uses uppercase hexadecimal digits. Thus
-`%5f` becomes `_`, while encoded `/` remains `%2F`. IPv6 hexadecimal and the
-IPvFuture version prefix are lowercase; an IPvFuture suffix and
-zone-identifier letters otherwise retain their case.
-
-Strings and positions are byte-oriented. The module does not perform Unicode
-host-name conversion, resolve names, open connections, follow redirects, or
-attach meaning to paths and queries.
+Once component boundaries pass, the combined virtual URL `scheme .. "://" .. authority .. target` is parsed and normalized by the same grammar as `parse`, and `Error.position` always indexes into that virtual URL.
 
 ## Grammar provenance
 
-The parser is a Titan `peg` relabel-source translation of the RFC 3986 URI
-grammar from `daurnimator/lpeg_patterns` at commit
-`0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`. Titan specializes that grammar at
-the public boundary described above and uses labeled failures for precise
-errors. The derivative is covered by the upstream MIT license recorded in
-`LICENSES/lpeg-patterns-LICENSE` and `THIRD_PARTY_NOTICES.md`.
+The parser is a `titan.peg` relabel-source translation of the RFC 3986 URI grammar from `daurnimator/lpeg_patterns` (commit `0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`), specialized with labeled failures. See `LICENSES/lpeg-patterns-LICENSE` and `THIRD_PARTY_NOTICES.md`.

@@ -1,256 +1,215 @@
 # SQLite standard library
 
-`titan.sqlite3` embeds SQLite and provides reusable prepared statements,
-streamed query results, and explicit transactions. Import it with
-`local sqlite3 = import "sqlite3"`; Lua loads `require "titan.sqlite3"`.
-Database operations suspend the current [async Task](async-io.md) while a
-native worker runs SQLite. Rows and their values are owned snapshots.
+`titan.sqlite3` embeds SQLite with prepared statements, streamed query cursors,
+explicit transactions, and row-to-record mapping. Database operations suspend
+the current [async Task](async-io.md) while a native worker executes SQLite;
+rows and their values are owned snapshots.
+
+- **Import:** `local sqlite3 = import "sqlite3"` (Titan) · `require "titan.sqlite3"` (Lua)
+- **Targets:** Native only (requires a running async Task for database operations and `close`; `Row:get` and `Row:fill` are synchronous)
+
+## Quick example
+
+Create an in-memory database, populate rows inside an explicit transaction,
+query with a prepared statement, and map each row onto a Titan record:
 
 ```titan
 local sqlite3 = import "sqlite3"
 local io = import "io"
 
-function main(args: {string}): integer
+record Note
+  id: integer
+  body: string
+end
+
+function main(_args: {string}): integer
   local db = sqlite3.connect(":memory:")
   defer db:close()
+
   local create = db:prepare("CREATE TABLE notes(id INTEGER, body TEXT)")
   defer create:close()
   create:execute()
 
   local insert = db:prepare("INSERT INTO notes VALUES (?, ?)")
   defer insert:close()
-  insert:execute(1, "hello")
+  db:set_autocommit(false)
+  insert:execute(1, "first note")
+  insert:execute(2, "second note")
+  db:commit()
 
   local select = db:prepare("SELECT id, body FROM notes ORDER BY id")
   defer select:close()
   local cursor = select:query()
   defer cursor:close()
   for row in cursor:fetch do
-    io.print(row:get(1), row:get(2))
+    local note = Note(0, "")
+    row:fill(note)
+    io.print(note.id, note.body)
   end
   return 0
 end
 ```
 
-The normal standalone bootstrap runs `main` as a Task. A Lua host schedules
-Titan work and drives the Runtime as described in [async I/O](async-io.md).
-Operations that submit native work need a running Task, including close.
-`Row:get` and `Row:fill` are synchronous and need no Runtime.
-
-## Public surface
-
-```text
-connect(name: string): Connection
-
-Connection:prepare(sql: string): Statement
-Connection:close()
-Connection:get_autocommit(): boolean
-Connection:set_autocommit(autocommit: boolean)
-Connection:commit()
-Connection:rollback()
-Connection:to_transfer_payload(): string
-Connection.from_transfer_payload(payload: string): Connection
-
-Statement:execute(...: value): integer
-Statement:query(...: value): Cursor
-Statement:close()
-
-Cursor.columns: const {Column}
-Cursor:fetch(): Row?
-Cursor:close()
-
-Row.columns: const {Column}
-Row:get(i: integer): value
-Row:fill(target: value)
-
-Blob(bytes: string): Blob
-Blob.bytes: string                  -- const field
-Column.name: string                 -- const field
-Column.declared_type: string?       -- const field
-
-Error.message: string               -- const field
-Error.code: integer?                -- primary SQLite code; const field
-Error.extended_code: integer?       -- extended SQLite code; const field
-Error.operation: string             -- const field
-```
-
-Connections, Statements, Cursors, and Rows have source-private constructors.
-Create them through their owning operations. `Blob` explicitly distinguishes
-binary data from ordinary TEXT strings.
+Standalone executables run `main` inside an async Task automatically. When
+called from Lua, schedule work and drive the Runtime as described in
+[async I/O](async-io.md).
 
 ## Connections and statement lifetime
 
-`connect` opens a database for read/write, creating it when necessary. SQLite's
-`:memory:` name creates a private in-memory database, and the empty filename
-creates a temporary database. Filenames reject embedded NUL. This version has
-no URI option, read-only overload, busy timeout, or connection pool.
+```text
+record Connection
+record Statement
 
-The bundled build uses `SQLITE_THREADSAFE=1`, and each connection explicitly
-requests `SQLITE_OPEN_FULLMUTEX`. A Connection admits only one outstanding
-native operation. Overlap raises `Error` before submission. Independent
-Connections can run concurrently in libuv's shared worker pool. SQLite's
-`long double` arithmetic in an operation has the main thread's precision: on
-Windows the worker restores x87 precision before each operation, and other
-targets need no reset
-([worker threads](windows-build.md#long-double-on-worker-threads)).
+function connect(name: string): Connection
+function Connection:prepare(sql: string): Statement
+function Connection:close()
+function Statement:close()
+```
 
-`prepare` accepts exactly one SQL statement. Trailing whitespace, empty
-semicolons, and comments are allowed; empty/comment-only SQL, embedded NUL,
-and a second statement are rejected. SQLite itself parses the tail; quoted
-semicolons and trigger bodies retain SQLite's syntax. SQL errors have native
-diagnostic codes.
+`connect` opens a database file for reading and writing, creating it if absent.
+`":memory:"` creates a private in-memory database, and `""` creates a temporary
+database. Filenames reject embedded NUL bytes.
 
-A Statement retains its Connection, and a Cursor retains its Statement. One
-active Cursor reserves execution on the whole Connection. Until it exhausts
-or closes, new `execute`/`query` calls and transaction changes are rejected.
-Preparing another Statement, closing an idle Statement, and reading
-autocommit state are allowed when no native operation is outstanding. The
-active Statement cannot be finalized directly; close its Cursor first.
+The bundled SQLite build enables `SQLITE_THREADSAFE=1` and opens each connection
+with `SQLITE_OPEN_FULLMUTEX`. A single `Connection` allows one outstanding
+native operation at a time; overlapping calls raise `sqlite3.Error` before
+submission. Independent connections run concurrently in libuv's shared worker
+pool (on Windows, worker threads restore x87 precision before SQLite runs; see
+[Windows build](windows-build.md)).
 
-Close explicitly, in Cursor, Statement, Connection order, normally with
-lexical `defer`. Close is idempotent. A Connection with open Statements refuses
-close and remains usable. Statement finalization closes the Statement even if
-SQLite reports a delayed execution error. Early Cursor close resets and
-clears its Statement; it does not roll back a transaction. Cleanup may raise.
-Forgetting explicit close is outside the prompt resource-release guarantee;
-ordinary garbage collection does not perform database I/O, but closing the
-Lua state does.
+`prepare` compiles exactly one SQL statement. Trailing whitespace, comments, and
+empty semicolons are allowed; empty SQL, embedded NUL bytes, and multiple
+statements are rejected.
+
+A `Statement` retains its `Connection`, and a `Cursor` retains its `Statement`.
+While a `Cursor` is active, it reserves execution on the whole `Connection`:
+new `execute`/`query` calls and transaction changes raise, and its owning
+`Statement` cannot be closed until the `Cursor` finishes or closes. Preparing
+other statements, closing idle statements, and reading `get_autocommit` are
+permitted when no native call is in flight.
+
+Close resources explicitly with lexical `defer` in Cursor, Statement, Connection
+order:
+
+- `close` is idempotent.
+- Closing a `Connection` with open statements raises and leaves the
+  connection usable.
+- Finalizing a `Statement` closes it even if SQLite reports a delayed execution
+  error.
+- Closing a `Cursor` early resets and clears its statement without rolling back
+  any open transaction.
+- Garbage collection does not perform database I/O; explicit close is required
+  for prompt release.
 
 ### Closing the Lua state
 
-Closing the Lua state closes every Connection that is still open: SQLite
-finalizes its Statements, including an active Cursor's execution, and rolls
-back an open transaction. Its database
-file, descriptor and locks are released before the state's close returns. This
-release runs synchronously on the closing thread, so it can briefly block it.
+Closing a Lua state releases every open `Connection` synchronously on the
+closing thread: SQLite finalizes open statements (including active cursors),
+rolls back open transactions, and releases descriptors and locks before state
+close returns.
 
-A suspended Task's `defer` close made in the documented Cursor, Statement,
-Connection order completes during the close instead of raising, although it
-cannot [await](coroutines.md#cleanup-that-needs-asynchronous-io). Ordinary
-misuse errors, such as closing a Connection that still owns Statements, still
-raise, and the state close then releases the Connection anyway. Closing a
-Statement or Cursor whose Connection the state close already released does
-nothing.
-
-A Task can be waiting for a database operation when the state closes. That
-operation's worker may still be running, so its Connection is never released
-under it: the Connection is released when the operation returns, which the
-state close waits for. The Task never sees the result. As with cancellation, a
-COMMIT may or may not have taken effect.
-
-## Transferring connections
-
-Connection implements the [custom record transfer protocol](async-io.md#custom-record-transfer).
-`async.TransferValue.from_value(connection)` detaches its native SQLite handle;
-the resulting carrier's `to_value()` adopts it into a fresh Connection. Both
-hooks are synchronous and need no running Task. Ordinary operations and close
-on the receiving Connection still use the receiving state's worker queue.
-
-Transfer rejects a closed Connection, an outstanding operation, an active
-Cursor, or any open Statement before detaching. Close every Cursor and
-Statement first, including idle Statements. Successful detachment makes every
-alias of the source Connection behave as closed; its `close()` becomes a no-op.
-The same native database moves, including a private `:memory:` database, open
-transaction, and savepoints. Transfer does not commit or roll back anything.
-
-Encoding finishes before the source handle is cleared.
-`Connection.from_transfer_payload` rejects malformed bytes (including a
-mismatched field kind) and a null native handle. It trusts that a nonnull handle
-came from this protocol; it cannot validate an arbitrary address or detect prior
-adoption.
-
-This is a manual ownership handoff under the
-[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
-Connection has no public `discard_transfer_payload`. Adopt the payload exactly
-once, retain it while delivery is pending, and recover it yourself after failed
-delivery. For example, a carrier rejected by `async.send` can be adopted locally
-with `:to_value()` and then closed. Replaying a carrier can create two owners
-and cause use-after-free or double-close; abandoning one leaks the database.
-Transfer does not roll back detachment when later packing or delivery fails, and
-queue disposal does not close a pointer payload. These rules also apply when a
-Connection is captured by a transferred closure.
+A suspended Task's `defer` closes in Cursor, Statement, Connection order succeed
+during state teardown even though they cannot await asynchronous I/O (see
+[Coroutines](coroutines.md)). If a worker operation is in flight when the state
+closes, state teardown waits for that worker before releasing the connection;
+the Task never resumes, and an in-flight `COMMIT` may or may not have taken
+effect.
 
 ## Binding values
 
-Each invocation supplies exactly SQLite's parameter-slot count. Repeated
-named placeholders share a slot. The highest numbered placeholder determines
-the count: `?5` requires five positions, including fillers for the lower slots.
-Arguments remain positional even when the SQL uses names. A record, Map, or
-Array is never automatically expanded into bindings.
+```text
+record Blob
+  const bytes: string
+end
+```
 
-| Titan argument | SQL binding |
+`execute` and `query` take positional arguments matching SQLite's exact
+parameter count (repeated named placeholders share a slot; `?5` requires five
+positions). Passing too few or too many arguments raises before the statement is
+modified. Trailing `nil` arguments are counted via `#...`, and each call resets
+and clears prior bindings before binding the new set.
+
+| Titan argument | SQLite binding |
 | --- | --- |
-| nil | NULL |
-| boolean | INTEGER 0 or 1 |
-| integer | signed 64-bit INTEGER, without conversion through float |
-| finite float | REAL, including an integral floating value |
-| string | UTF-8 TEXT with an explicit byte length |
-| exact `sqlite3.Blob` | BLOB with an explicit byte length |
+| `nil` | `NULL` |
+| `boolean` | `INTEGER` `0` or `1` |
+| `integer` | Signed 64-bit `INTEGER` |
+| finite `float` | `REAL` (including integral floats) |
+| `string` | Valid UTF-8 `TEXT` (no embedded NUL) |
+| `sqlite3.Blob` | `BLOB` with explicit byte length |
 
-Argument count uses `#...`, so trailing nil arguments are preserved. Every
-argument is inspected and validated before the statement is changed. Each
-accepted execution resets and clears the preceding binding set and binds the
-complete new set; omitted values never inherit prior bindings.
-
-TEXT must be valid UTF-8 and contain no NUL. Use `Blob(bytes)` for arbitrary
-bytes, including empty data, embedded NUL, and invalid UTF-8. Empty BLOB is
-distinct from NULL. NaN and positive/negative infinity are rejected as inputs.
-Other records, unions, Interfaces, containers, functions, threads, raw
-pointers, and owned C storage are unsupported scalar bindings.
-
-Reflection preserves the actual input integer/float tag at the bind boundary.
-SQLite column affinity can change the stored representation; there is no
-promise that every database column preserves the input tag. SQLite has no
-separate Boolean or date storage class.
+Use `sqlite3.Blob(bytes)` for arbitrary binary data, including embedded NULs or
+non-UTF-8 bytes; an empty `Blob("")` is distinct from `NULL`. `NaN`, infinities,
+and composite Titan values (other records, unions, Interfaces, containers,
+callables, pointers) are rejected as bindings. Reflection preserves integer vs
+float tags on input, though SQLite column affinity may coerce stored values.
 
 ## Executing and querying
 
-`execute` binds, performs one step, requires `SQLITE_DONE`, captures
-`sqlite3_changes64`, and resets/clears the Statement for reuse. A first-step
-`SQLITE_ROW` raises an Error suggesting `query`. That rejection does not
-promise an absence of side effects: a modifying statement with `RETURNING`
-may already have changed the database.
+```text
+record Column
+  const name: string
+  const declared_type: string?
+end
 
-The returned count is literally SQLite's connection change counter for its
-latest completed INSERT/UPDATE/DELETE. Other successful statements need not
-reset it. For example, CREATE TABLE after an INSERT may return that INSERT's
-count; a zero-row SELECT accepted by `execute` can do the same. It excludes
-SQLite's documented auxiliary trigger/foreign-key effects. See SQLite's
-[change-counter contract](https://sqlite.org/c3ref/changes.html).
+record Cursor
+  const columns: const {Column}
+end
 
-`query` requires result columns and supports both SELECT and statements with
-`RETURNING`. It binds and performs the first step before returning. Current
-column metadata is copied after that step, including SQLite's automatic schema
-reprepare. A first result row is buffered in the Cursor; each later `fetch`
-performs one step and returns one owned Row. No implicit retry is added.
+function Statement:execute(...: value): integer
+function Statement:query(...: value): Cursor
+function Cursor:fetch(): Row?
+function Cursor:close()
+```
 
-An empty result returns an already exhausted Cursor with its column metadata.
-On natural exhaustion, reset/clear completes before `fetch` returns nil, and
-the execution reservation is released. Repeated exhausted fetches return nil.
-Fetching an explicitly closed Cursor raises. A failed native fetch or failed
-row publication retires that execution and closes the Cursor.
+`execute` binds arguments, runs one step requiring `SQLITE_DONE`, captures
+`sqlite3_changes64`, and resets/clears the statement for reuse. If the statement
+yields a row (`SQLITE_ROW`), `execute` raises an error directing you to `query`
+(note that a statement with `RETURNING` may already have modified rows before
+returning that row). The returned integer is SQLite's connection
+[change counter](https://sqlite.org/c3ref/changes.html) from the latest
+completed `INSERT`, `UPDATE`, or `DELETE`; statements such as `CREATE TABLE` or
+an empty `SELECT` do not reset it.
+
+`query` accepts statements with result columns (`SELECT` or `RETURNING`). It
+binds arguments, executes the first step, captures `Cursor.columns` (after any
+SQLite schema reprepare), and buffers the first row. Each `Cursor:fetch()`
+returns one owned `Row` and advances the cursor, returning `nil` after the final
+row and releasing the connection's execution reservation. An empty result
+returns an already-exhausted cursor with populated `columns`. Repeated fetches
+on an exhausted cursor return `nil`; fetching an explicitly closed cursor
+raises. A failed fetch closes the cursor and retires that execution.
 
 ## Rows and mapping
 
-`#row.columns` is the authoritative column count, and `Row:get(i)` accepts
-1-based indices through that count. NULL returns nil. A row containing only
-NULLs is still a nonnil Row; a trailing NULL does not truncate its columns.
+```text
+record Row
+  const columns: const {Column}
+end
+
+function Row:get(i: integer): value
+function Row:fill(target: value)
+```
+
+`#row.columns` is the column count, and `Row:get(i)` takes 1-based indices in
+`1..#row.columns`. A row of all `NULL`s is a non-nil `Row`, and trailing
+`NULL`s do not shorten `columns`. `Column.declared_type` is descriptive metadata
+(`nil` for expressions) and does not affect value conversion.
 
 | SQLite storage class | `Row:get` result |
 | --- | --- |
-| NULL | nil |
-| INTEGER | integer |
-| REAL | float |
-| TEXT | copied string |
-| BLOB | Blob containing copied bytes |
+| `NULL` | `nil` |
+| `INTEGER` | `integer` |
+| `REAL` | `float` |
+| `TEXT` | copied `string` |
+| `BLOB` | `sqlite3.Blob` containing copied bytes |
 
-Rows remain valid after later fetches and after every Cursor, Statement, and
-Connection closes. Columns are ordered and preserve duplicate names; indexed
-access remains unambiguous. `declared_type` is descriptive metadata and can be
-nil for expressions. It does not determine result conversion.
+Rows are self-contained snapshots that outlive their `Cursor`, `Statement`, and
+`Connection`. Duplicate column names are preserved in `columns` and are
+unambiguous by index.
 
-An explicit application factory is the primary route to domain records,
-especially records with const fields or invariants:
+For records with `const` fields, validation invariants, or nested structure,
+write a small typed factory:
 
 ```titan
 local sqlite3 = import "sqlite3"
@@ -265,66 +224,115 @@ function note_from_row(row: sqlite3.Row): Note
 end
 ```
 
-`Row:fill(target)` fills an existing mutable record through
-[public reflection](standard-library-reflect.md). Before writing, it rejects
-duplicate column names, missing/extra public fields, const destination fields,
-and unsupported field kinds. Local fields are invisible and left alone.
-Supported destinations are nil, value, boolean, integer, float, string, Blob,
-and their eligible Options. Erased generic `value` fields remain `value`.
-
-Writes follow public field declaration order and use each field's ordinary
-dynamic conversion/range checks. SQL NULL requires a nil-capable destination.
-TEXT fills strings, BLOB fills Blob, and Boolean fields explicitly accept only
-SQL integer 0 or 1 as false/true, including inside Options. Nested structures
-require an application mapper.
-
-Shape validation precedes writes, but conversion failure can leave earlier
-fields changed. `fill` does not promise atomic mutation. Use a factory that
-validates all cells before construction when atomic object creation matters.
+`Row:fill(target)` populates an existing mutable record via
+[reflection](standard-library-reflect.md). Before writing any field, it verifies
+that column names are unique, match the record's public fields one-to-one, and
+target mutable fields of supported types (`nil`, `value`, `boolean`, `integer`,
+`float`, `string`, `Blob`, and their Options; `local` fields are ignored).
+Writes proceed in field declaration order using ordinary dynamic conversion:
+`NULL` requires a nil-admitting field, `TEXT` fills `string`, `BLOB` fills
+`Blob`, and `boolean` accepts only integer `0` or `1`. Because validation
+precedes writes but per-field conversions run sequentially, a conversion error
+can leave earlier fields updated; use a factory when atomic construction is
+required.
 
 ## Transactions
 
-`get_autocommit` reads SQLite's actual state, including changes caused by
-explicit SQL or automatic rollback after an error. No driver-mode flag is
-maintained.
+```text
+function Connection:get_autocommit(): boolean
+function Connection:set_autocommit(autocommit: boolean)
+function Connection:commit()
+function Connection:rollback()
+```
 
-| Operation | Behavior |
+`get_autocommit` queries SQLite's live autocommit state directly, reflecting
+changes made by explicit SQL statements or automatic SQLite rollbacks.
+
+| Call | Behavior |
 | --- | --- |
-| `set_autocommit(false)` in autocommit | BEGIN DEFERRED |
+| `set_autocommit(false)` in autocommit | `BEGIN DEFERRED` |
 | `set_autocommit(false)` in a transaction | no-op |
-| `set_autocommit(true)` in a transaction | COMMIT |
+| `set_autocommit(true)` in a transaction | `COMMIT` |
 | `set_autocommit(true)` in autocommit | no-op |
-| `commit()` / `rollback()` in a transaction | COMMIT / ROLLBACK |
+| `commit()` / `rollback()` in a transaction | `COMMIT` / `ROLLBACK` |
 | `commit()` / `rollback()` in autocommit | no-op |
 
-Commit/rollback do not start a replacement transaction. Enabling autocommit
-commits; it does not adopt LuaSQL's SQLite manual-mode rollback policy. A
-failed COMMIT can leave the transaction active. Close active Cursors before
-changing transaction state, and keep a transaction with one logical caller.
-Use explicit SQL SAVEPOINT/RELEASE for SQLite's nested savepoint mechanism.
+`commit()` and `rollback()` return the connection to autocommit mode without
+opening a new transaction. Enabling autocommit commits any open transaction (a
+failed `COMMIT` can leave the transaction active). Close active cursors before
+changing transaction state, and use SQL `SAVEPOINT`/`RELEASE` statements for
+nested savepoints:
+
+```titan
+local sqlite3 = import "sqlite3"
+
+function transfer_funds(db: sqlite3.Connection, from_id: integer,
+                        to_id: integer, amount: integer)
+  local debit = db:prepare("UPDATE accounts SET balance = balance - ? WHERE id = ?")
+  defer debit:close()
+  local credit = db:prepare("UPDATE accounts SET balance = balance + ? WHERE id = ?")
+  defer credit:close()
+
+  db:set_autocommit(false)
+  debit:execute(amount, from_id)
+  credit:execute(amount, to_id)
+  db:commit()
+catch
+  if not db:get_autocommit() then db:rollback() end
+  raise
+end
+```
 
 ## Errors and cancellation
 
-SQLite failures and wrapper contract violations raise `sqlite3.Error`.
-`message` identifies the failure, and `operation` identifies its public
-operation. Native errors include primary and extended SQLite codes; wrapper
-errors have nil codes. Execution errors retain the original SQLite diagnostic
-when reset/clear also fails, with cleanup context appended to the message.
-There is no automatic BUSY/LOCKED retry.
+```text
+record Error
+  const message: string
+  const code: integer?
+  const extended_code: integer?
+  const operation: string
+end
+```
 
-Ordinary native work uses `async.run_foreign`. Pending cancellation prevents
-new ordinary work from being submitted; once accepted, the native operation
-finishes before cancellation is delivered. Cancellation can therefore arrive
-after SQL side effects or a commit. Do not retry merely because the Task was
-cancelled. Prompt SQLite interruption is not provided.
+SQLite failures and contract violations raise `sqlite3.Error`. `operation` names
+the public entry point; native SQLite errors populate `code` and
+`extended_code`, while wrapper errors leave both `nil`. When execution fails and
+statement cleanup also fails, the original SQLite error is preserved with
+cleanup details appended to `message`. Busy/locked errors are raised directly
+without automatic retries.
 
-Close/reset/finalize and retirement of unpublished handles use the private
-ownership-cleanup path and complete despite pending cancellation. They never
-perform blocking SQLite work on the event-loop thread, except while the
-[Lua state closes](#closing-the-lua-state). Native packets and all referenced
-buffers remain owned until their accepted callbacks finish.
-Submission failure remains an `async.OperationError`, and cancellation retains
-its original async reason instead of becoming a SQLite Error.
+Database operations run on libuv's shared worker pool via `async.run_foreign`.
+Pending Task cancellation prevents submitting new work, but an already-accepted
+operation finishes before cancellation is delivered—so cancellation may arrive
+after a write or `COMMIT` has succeeded. Cancellation retains its async
+cancellation reason, and worker submission errors raise `async.OperationError`.
+Close, reset, and finalization run through ownership cleanup and complete even
+when a Task is cancelled.
 
-The worker pool is shared with filesystem and DNS work. The module does not
-change its process-wide size or create a thread per Connection.
+## Transferring connections
+
+```text
+function Connection:to_transfer_payload(): string
+function Connection.from_transfer_payload(payload: string): Connection
+```
+
+`Connection` implements the
+[custom record transfer protocol](async-io.md#custom-record-transfer).
+`async.TransferValue.from_value(db)` detaches the native SQLite handle
+synchronously, and `:to_value()` adopts it into a fresh `Connection` in the
+receiving state (no running Task is required for either hook; subsequent queries
+run on the receiving state's worker queue).
+
+Detachment rejects a closed connection, an in-flight operation, an active
+cursor, or any open statement—close all cursors and statements first. After
+detachment, every alias of the source connection behaves as closed and its
+`close()` is a no-op. The exact native database moves intact, including a
+private `:memory:` database, open transaction, and savepoints.
+
+Transferring a `Connection` follows the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
+`Connection` has no `discard_transfer_payload`: adopt each payload exactly once,
+retain it while delivery is pending, and adopt-and-close it locally if delivery
+fails (for example, if `async.send` rejects the carrier). Replaying a payload
+causes double-close or use-after-free, and abandoning one leaks the database.
+The same rules apply when a transferred closure captures a `Connection`.
