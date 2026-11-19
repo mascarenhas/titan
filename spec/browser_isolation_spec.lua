@@ -144,6 +144,12 @@ describe("published browser analysis target", function()
             error({ unexpected_process = unexpected[#unexpected] })
         end
         function offline:executable() return false end
+        function offline:stat(filename)
+            -- Windows selects an exact .exe by stat before launching it;
+            -- unlike POSIX it does not consult the executable capability.
+            if platform.windows and path.basename(filename):lower() == "emcc.exe" then return nil end
+            return strategy:stat(filename)
+        end
         local original = assert(subject.browser_analysis_target(installed, { io = offline }))
         local selected = assert(subject.browser_analysis_target(prefix, { io = offline }))
         assert.equal(original.identity, selected.identity)
