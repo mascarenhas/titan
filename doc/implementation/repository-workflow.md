@@ -44,6 +44,8 @@ tar, curl or wget, and sha256sum or shasum. `CC`, `AR`, and `RANLIB` may be
 command strings; pass the same selected tools through Make, LuaRocks,
 installation checks, and consumer builds. `clang-format` is needed only for
 `titanc --pretty-print`.
+The compiler test suite also needs Python 3.9 or newer (`python3` on `PATH`)
+for the offline browser-pack transport regressions.
 
 `PREFIX` owns Lua and LuaRocks; `ROCKS_TREE` owns the Titan rock, SDK, and
 standard provider and defaults to `PREFIX`. The supported developer layout sets

@@ -94,9 +94,14 @@ class FullSDKPackTests(unittest.TestCase):
         self.relative = Path("lib/titan-browser/0.6")
         self.assets = self.prefix / self.relative
         self.assets.mkdir(parents=True)
-        self.lua = self.prefix / "bin/lua"
+        self.windows = os.name == "nt"
+        lua_name = "lua.exe" if self.windows else "lua"
+        self.lua = self.prefix / "bin" / lua_name
         self.lua.parent.mkdir()
-        shutil.copy2(installed / "bin/lua", self.lua)
+        shutil.copy2(installed / "bin" / lua_name, self.lua)
+        if self.windows:
+            for dll in (installed / "bin").glob("*.dll"):
+                shutil.copy2(dll, self.lua.parent / dll.name)
         for leaf in (*pack.SEMANTIC_FILES, "build-profile"):
             shutil.copyfile(installed / self.relative / leaf, self.assets / leaf)
         for directory in ("share/lua/5.5", "lib/lua/5.5", "share/titan"):
@@ -141,9 +146,11 @@ assert(incremental.write_sdk_digests(digest, copied .. "/sdk-digests", files))
                 self.archive_git(zip_archive, tree / name, info.split()[-1], f"{prefix}/{name}")
 
     def run_lua(self, script, *args):
-        package = self.prefix / "share/lua/5.5"
-        native = self.prefix / "lib/lua/5.5"
-        setup = f'package.path = "{package}/?.lua;{package}/?/init.lua"; package.cpath = "{native}/?.so"\n'
+        package_root = self.prefix / "share/lua/5.5"
+        native_root = self.prefix / "lib/lua/5.5"
+        ext = "dll" if self.windows else "so"
+        setup = (f'package.path = "{package_root.as_posix()}/?.lua;{package_root.as_posix()}/?/init.lua"; '
+                 f'package.cpath = "{native_root.as_posix()}/?.{ext}"\n')
         subprocess.run([str(self.lua), "-E", "-", *map(str, args)], input=setup + script,
                        cwd=repository, env=self.env, text=True, check=True)
 
@@ -158,8 +165,10 @@ assert(incremental.write_sdk_digests(digest, copied .. "/sdk-digests", files))
                     "GIT_WORK_TREE": str(self.root / "wrong worktree"), "LUA_PATH": "/invalid/?.lua",
                     "LUA_INIT": "error('unexpected startup')", "TITAN_TARGET": "invalid",
                     "TITAN_PATH": str(self.root / "wrong provider"), "TITAN_ROOT": "/invalid"}
-        return subprocess.run(["make", "--no-print-directory", "browser-semantic-pack",
-                               *(f"{key}={value}" for key, value in values.items())],
+        command = ["mingw32-make", "-f", "Makefile.win"] if self.windows else ["make"]
+        return subprocess.run([*command, "--no-print-directory", "browser-semantic-pack",
+                               *(f"{key}={value.as_posix() if isinstance(value, Path) else value}"
+                                 for key, value in values.items())],
                               cwd=repository, env=poisoned, capture_output=True, text=True)
 
     def output(self, directory):
@@ -173,7 +182,7 @@ assert(incremental.write_sdk_digests(digest, copied .. "/sdk-digests", files))
             result = self.make_pack(output)
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual(first.read_bytes(), second.read_bytes())
-        semantic = [str(self.relative / name) for name in pack.SEMANTIC_FILES]
+        semantic = [(self.relative / name).as_posix() for name in pack.SEMANTIC_FILES]
         expected = sorted(semantic + [f"share/titan/{name}" for name in pack.NOTICES])
         relocated = self.root / "relocated"
         with tarfile.open(first, "r:gz") as archive:
@@ -275,9 +284,10 @@ assert(io:write_file(pathname, assert(codec.encode(record))))
         reject("Lua fork does not match")
         target.write_bytes(original_target)
         obj = self.root / "browser.o"
-        obj.write_bytes(subprocess.check_output(["ar", "p", str(provider), "browser.o"], env=self.env))
+        ar = "llvm-ar" if self.windows else "ar"
+        obj.write_bytes(subprocess.check_output([ar, "p", str(provider), "browser.o"], env=self.env))
         provider.unlink()
-        subprocess.run(["ar", "qc", str(provider), str(obj)], check=True, env=self.env)
+        subprocess.run([ar, "qc", str(provider), str(obj)], check=True, env=self.env)
         self.run_lua("""
 local target, provider = ...
 local io = require("titan-compiler.io").new_sync()

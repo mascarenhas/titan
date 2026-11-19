@@ -42,6 +42,7 @@ compiler spec/binary_compatibility_spec.lua 0.017 0.107
 compiler spec/browser_isolation_spec.lua 1.000 -
 compiler spec/browser_target_spec.lua 1.000 -
 compiler spec/browser_sdk_spec.lua 1.000 -
+compiler spec/browser_semantic_pack_spec.lua 1.000 -
 compiler spec/browser_stdlib_spec.lua 1.000 -
 compiler spec/browser_trace_map_spec.lua 1.000 -
 compiler spec/cdeclarator_spec.lua 0.017 0.058
