@@ -98,8 +98,9 @@ The browser target supports four kinds of work, all with an explicit
 
 `titanc` never runs a program or test image it links; the [runner](#the-runner)
 does. The only image `titanc` executes is the temporary protocol probe.
-The language server analyzes the host-native selection only: it ignores
-`TITAN_TARGET` and creates no browser context.
+Semantic clients can instead select a [browser analysis
+target](driver.md#browser-analysis-target); this uses the real SDK library
+interfaces without building an image. It does not read `TITAN_TARGET`.
 
 ### Bootstrap order
 
@@ -818,8 +819,9 @@ delivered.
 When no lookup finds a module, every not-found site of the loaders,
 publication revalidation, and external resolution calls
 `driver.missing_module_message(context, modname, source_required)`. For a
-browser context it reads `absent-modules` from the descriptor's `titan_bin`
-once per resolver context; a listed module reports `module '<m>' is not
+browser build it reads `absent-modules` from the descriptor's `titan_bin`
+once per resolver context. Browser analysis uses the validated list bound to
+its semantic target. A listed module reports `module '<m>' is not
 available for target 'browser': <reason>` for a plain and a `.titan` import
 alike. Any other name, and any build without the file (no SDK installed yet,
 or a native target), keeps `module '<m>' not found` or `source module '<m>'

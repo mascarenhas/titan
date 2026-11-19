@@ -75,9 +75,10 @@ anything else. It stores `nil` for `""`. For a host label the driver option is
 a source-selection choice: it does not consult the host, so an embedding may
 select another host's files, and it changes no toolchain, link policy, or probe
 identity. `"browser"` additionally selects the [browser
-target](browser-target.md): construction builds the target descriptor, which
-owns the toolchain, probe cache, provider lookup, and output policy. Only
-`titanc` applies the narrower CLI vocabulary.
+target](browser-target.md): construction builds the target descriptor unless
+the caller supplies a [browser analysis handle](driver.md#browser-analysis-target).
+Both apply the same source row and archive policy. Only `titanc` applies the
+narrower CLI vocabulary.
 
 `driver.initialize_platform(context)` sets `context.host_target` from the
 platform it detects (`Windows` → `windows`, `Linux` → `linux`, a `uname`
@@ -376,18 +377,19 @@ test-root discovery](build-coordinator.md#automatic-test-root-discovery).
 The helpers in the [driver API](#driver-api) are part of the
 [language-server compiler API](driver.md#language-server-compiler-api), which
 stays at `LANGUAGE_SERVER_API_VERSION = 1`: the server classifies workspace
-filenames with `classify_source_filename`, obtains its host target with
+filenames with `classify_source_filename`, obtains its selected target with
 `context_target`, and selects members with `target_selection_labels` or
 `target_label_applies`, rather than mirroring the grammar.
 
-The vscode-titan server analyzes the host target only. Its project discovery
-groups variants under their logical module with the host selection and follows
-the composition order, privacy, and precedence rules above. Only selected files
+The vscode-titan server defaults to the native host target. A browser root uses
+the SDK's browser analysis target. Project discovery groups variants under
+their logical module with that root's selection and follows the composition
+order, privacy, and precedence rules above. Only selected files
 carry unsaved editor text into analysis. An inactive variant is never a module
 file and gets no `invalid-module` issue; it receives one information-severity
 diagnostic that names the selected member, or says that the family has no
 active variant. The default contributors of a folder module absent for the
-host get the same diagnostic, named after the main family. Such files get no
+selected target get the same diagnostic, named after the main family. Such files get no
 semantic completion.
 Creating or deleting a variant re-selects and re-analyzes the affected module.
 The server's `source_overrides` descriptors set `native_output` to the

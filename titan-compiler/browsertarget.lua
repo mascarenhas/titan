@@ -514,7 +514,7 @@ local function resolution_error(filename, reason)
         string.format("%q", filename) .. ": " .. reason .. INSTALL
 end
 
-function M.discover_tools(context)
+local function discover_compiler(context)
     local strategy = context.io
     local emsdk, cc = platform.getenv("EMSDK")
     if emsdk and emsdk ~= "" then
@@ -562,8 +562,14 @@ function M.discover_tools(context)
             " reports " .. found .. INSTALL
     end
     local location = platform.windows and platform.parent(cc) or compiler_paths.dirname(cc)
-    local out = { cc = { cc }, version = found, source = emsdk and emsdk ~= "" and "EMSDK" or "PATH",
+    return { cc = { cc }, version = found, source = emsdk and emsdk ~= "" and "EMSDK" or "PATH",
         location = location, version_output = result.output }
+end
+
+function M.discover_tools(context)
+    local out, err = discover_compiler(context)
+    if not out then return nil, err end
+    local location, cc = out.location, out.cc[1]
     for _, item in ipairs({ { "ar", "emar" }, { "ranlib", "emranlib" } }) do
         local key, name = item[1], item[2]
         local filename = tool_path(location, name)
@@ -676,8 +682,8 @@ local function parse_record(bytes, paths)
     return validate_record(record, paths)
 end
 
-local function header_digest(context, paths)
-    local names, err = context.io:list(paths.lua_source)
+local function header_digest(context, directory)
+    local names, err = context.io:list(directory)
     if not names then return nil, err end
     local headers = {}
     for _, name in ipairs(names) do if name:match("^[^/\\]+[.]h$") then headers[#headers + 1] = name end end
@@ -686,7 +692,7 @@ local function header_digest(context, paths)
     local lines = {}
     for _, name in ipairs(headers) do
         lines[#lines + 1] = name .. " " .. incremental.file_digest(context,
-            compiler_paths.join(paths.lua_source, name)) .. "\n"
+            compiler_paths.join(directory, name)) .. "\n"
     end
     return sha256.hex_via(context.cache_adapter and context.cache_adapter.sha256_binary, table.concat(lines))
 end
@@ -698,14 +704,13 @@ local function probe_fingerprint(context, descriptor)
     -- tmpname can choose that suffix for an ordinary reservation.
     local source = reservation .. ".c"
     local object = source .. ".o"
-    local function finish(value, failure)
+    local cleanup <close> = setmetatable({}, { __close = function()
         context.io:unlink(reservation)
         context.io:unlink(source)
         context.io:unlink(object)
-        return value, failure
-    end
+    end })
     local written, write_error = context.io:write_file(source, "int titan_browser_target_probe(void) { return 0; }\n")
-    if not written then return finish(nil, write_error) end
+    if not written then return nil, write_error end
     local command = { table.unpack(descriptor.compiler_argv) }
     for _, flag in ipairs(descriptor.compile_flags) do command[#command + 1] = flag end
     command[#command + 1] = "-x"; command[#command + 1] = "c"
@@ -713,12 +718,82 @@ local function probe_fingerprint(context, descriptor)
     command[#command + 1] = "-o"; command[#command + 1] = object
     local result = context.io:run(command, { stderr_to_stdout = true })
     if type(result) ~= "table" or not result.ok then
-        return finish(nil, type(result) == "table" and (result.diagnostic or result.output) or "browser object probe failed")
+        return nil, type(result) == "table" and (result.diagnostic or result.output) or "browser object probe failed"
     end
     local bytes, read_error = context.io:read_file(object)
-    if not bytes then return finish(nil, read_error) end
+    if not bytes then return nil, read_error end
     local parsed, parse_error = staticmetadata.classify_object(bytes, object)
-    return finish(parsed and parsed.fingerprint, parse_error)
+    return parsed and parsed.fingerprint, parse_error
+end
+
+-- Common compile and profile inputs, shared by the full SDK build and the
+-- smaller C-only capability of a browser analysis context.
+local function compiler_configuration(context, tool, build_profile, defines, lua_source, runtime_include, extras)
+    local flags = M.object_flags(build_profile)
+    for _, define in ipairs(defines) do flags[#flags + 1] = define end
+    for _, define in ipairs(TARGET_DEFINES) do flags[#flags + 1] = define end
+    for _, flag in ipairs(extras or {}) do flags[#flags + 1] = flag end
+    local includes, include_error = cdriver.resolve_compiler_include_dirs(context.extra_ffi_include_dirs or {})
+    if not includes then return nil, "invalid extra_ffi_include_dirs: " .. include_error end
+    table.insert(includes, 1, runtime_include)
+    table.insert(includes, 1, lua_source)
+    for index, directory in ipairs(includes) do
+        if not text(directory) or directory == "" then return nil, "invalid browser include path" end
+        local resolved, resolve_error = include_root(context.io, directory)
+        if not resolved then return nil, resolve_error end
+        includes[index] = resolved
+    end
+    local compiler = M.compiler_argv(tool.cc)
+    local inputs, err = cdriver.target_profile_inputs({ io = context.io,
+        cache_adapter = context.cache_adapter, compiler = compiler, language_flag = false,
+        compiler_include_dirs = includes, compile_flags = flags, language_mode = "c99" })
+    if not inputs then return nil, err end
+    local profile
+    profile, err = csemantics.build_profile(inputs)
+    if not profile then return nil, err end
+    return { io = context.io, compiler_argv = compiler, stage_tools = { tool.cc[1] },
+        compile_flags = flags, language_mode = "c99", language_flag = false,
+        cppflags = {}, cflags = {}, include_dirs = includes,
+        profile = profile, profile_identity = profile.identity }
+end
+
+function M.analysis_toolchain(context, semantic, packaged_lua_source, flags)
+    local data, paths = semantic.target, semantic.paths
+    local valid, err = M.validate_flags(flags, "browser foreign C flags")
+    if not valid then return nil, err end
+    valid, err = check_owned_tail(flags, 1, false, data.build_profile)
+    if not valid then return nil, err end
+    local tool
+    tool, err = discover_compiler(context)
+    if not tool then return nil, err end
+    local lua_source = paths.lua_source
+    local installed, stat_error = context.io:lstat(lua_source)
+    if stat_error then return nil, stat_error end
+    if not installed then lua_source = packaged_lua_source end
+    local headers, header_error = header_digest(context, lua_source)
+    if headers ~= data.lua.headers_sha256 then
+        return nil, lua_source .. ": matching SDK Lua headers are required" ..
+            (header_error and (": " .. header_error) or " (digest disagrees with analysis-target)")
+    end
+    local defines = assert(cdriver.split_shell_words(data.lua.defines))
+    local config
+    config, err = compiler_configuration(context, tool, data.build_profile,
+        defines, lua_source, paths.include, flags)
+    if not config then return nil, err end
+    if config.profile_identity ~= data.profile_data.identity then
+        return nil, "live C profile disagrees with analysis-target"
+    end
+    local fingerprint
+    fingerprint, err = probe_fingerprint(context, config)
+    if not fingerprint then return nil, err end
+    local matches
+    matches, err = staticmetadata.fingerprint_matches(fingerprint, data.fingerprint)
+    if not matches then return nil, "live Wasm fingerprint disagrees with analysis-target: " .. err end
+    config.target_identity = "browser-foreign:sha256:" .. incremental.digest(context, "browser-foreign-tool", {
+        semantic = semantic.identity, executable = tool.cc[1], version = tool.version_output,
+        executable_digest = incremental.file_digest(context, tool.cc[1]),
+    })
+    return config
 end
 
 function M.build(context, inputs)
@@ -748,40 +823,18 @@ function M.build(context, inputs)
             if type(archive) ~= "string" then error(archive, 0) end
             return nil, mismatch(remedy_paths, record, "archive_sha256", "unavailable: " .. archive)
         elseif archive ~= record.archive_sha256 then return nil, mismatch(remedy_paths, record, "archive_sha256", archive) end
-        local header_ok, headers, header_error = pcall(header_digest, context, paths)
+        local header_ok, headers, header_error = pcall(header_digest, context, paths.lua_source)
         if not header_ok and type(headers) ~= "string" then error(headers, 0) end
         if not header_ok or not headers then
             return nil, mismatch(remedy_paths, record, "headers_sha256", "unavailable: " .. tostring(header_error or headers))
         elseif headers ~= record.headers_sha256 then return nil, mismatch(remedy_paths, record, "headers_sha256", headers) end
-        -- Emscripten -g2 preserves names but strips object line tables.
-        local flags = M.object_flags(build_profile)
-        for _, define in ipairs(defines) do flags[#flags + 1] = define end
-        local target_defines = { table.unpack(TARGET_DEFINES) }
-        for _, define in ipairs(target_defines) do flags[#flags + 1] = define end
-        for _, flag in ipairs(inputs.compile_flags or {}) do flags[#flags + 1] = flag end
-        local includes, include_error = cdriver.resolve_compiler_include_dirs(context.extra_ffi_include_dirs or {})
-        if not includes then return nil, "invalid extra_ffi_include_dirs: " .. include_error end
-        table.insert(includes, 1, inputs.runtime_include or paths.include)
-        table.insert(includes, 1, paths.lua_source)
-        for index, directory in ipairs(includes) do
-            if not text(directory) or directory == "" then return nil, "invalid browser include path" end
-            local resolved, resolve_error = include_root(context.io, directory)
-            if not resolved then return nil, resolve_error end
-            includes[index] = resolved
-        end
-        local compiler = M.compiler_argv(tool.cc)
-        local provisional = { io = context.io, compiler_argv = compiler, compile_flags = flags,
-            language_mode = "c99", language_flag = false, cppflags = {}, cflags = {}, include_dirs = includes }
-        local profile_inputs, profile_error = cdriver.target_profile_inputs({ io = context.io,
-            cache_adapter = context.cache_adapter, compiler = compiler, language_flag = false,
-            compiler_include_dirs = includes, compile_flags = flags, language_mode = "c99" })
-        if not profile_inputs then return nil, profile_error end
-        local profile
-        profile, profile_error = csemantics.build_profile(profile_inputs)
-        if not profile then return nil, profile_error end
+        local config, profile_error = compiler_configuration(context, tool, build_profile,
+            defines, paths.lua_source, inputs.runtime_include or paths.include, inputs.compile_flags)
+        if not config then return nil, profile_error end
+        local profile = config.profile
         local numeric = "integer=" .. profile.lua_integer .. ",float=" .. profile.lua_number
         if numeric ~= record.numeric then return nil, mismatch(remedy_paths, record, "numeric", numeric) end
-        local fingerprint, fingerprint_error = probe_fingerprint(context, provisional)
+        local fingerprint, fingerprint_error = probe_fingerprint(context, config)
         if not fingerprint then return nil, fingerprint_error end
         local matches, mismatch_error = staticmetadata.fingerprint_matches(fingerprint, FINGERPRINT)
         if not matches then
@@ -800,9 +853,9 @@ function M.build(context, inputs)
             return nil, diagnostic
         end
         local data = { label = "browser", triple = TRIPLE, memory_bits = 32,
-            tools = tool, build_profile = build_profile, compile_flags = flags,
+            tools = tool, build_profile = build_profile, compile_flags = config.compile_flags,
             trace_control = inputs.trace_control == true,
-            include_dirs = includes, target_defines = target_defines,
+            include_dirs = config.include_dirs, target_defines = { table.unpack(TARGET_DEFINES) },
             paths = paths, lua = { path = paths.lua_record, record = record,
                 record_sha256 = sha256.hex_via(context.cache_adapter and context.cache_adapter.sha256_binary, bytes) },
             profile_data = assert(csemantics.export_profile(profile)), profile_identity = profile.identity,

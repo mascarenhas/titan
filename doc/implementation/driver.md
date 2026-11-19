@@ -736,11 +736,56 @@ The context owns cooperative `yield` checkpoints and the ordered
 [`driver.new_resolver_context`](#drivernew_resolver_contextoptions), whose
 option table lists every context option.
 
-The subsections below are the complete compiler-side contract, in order: the
-embedded interface provider, declared project manifests, the cache adapter and
-its persistent payloads, observability callbacks, the compiler I/O strategy,
-analysis loader options, the target source selection helpers, C-header
-dependency closures, and the two metadata-only helpers.
+The subsections below cover browser analysis, the embedded interface
+provider, declared project manifests, the cache adapter and its persistent
+payloads, observability, compiler I/O, analysis loader options, source
+selection, C-header dependency closures, and metadata-only helpers.
+
+### Browser analysis target
+
+`driver.browser_analysis_target(prefix, options?)` returns an opaque,
+immutable handle or `nil, diagnostic`. A nil prefix selects `compiler_root`;
+an explicit prefix never falls back to another installation. `options.io`
+and `options.cache_adapter` use the same contracts as a resolver. Acquisition
+validates the [three browser semantic assets](browser-target.md#the-browser-sdk)
+and scans the real Wasm archive, checking its C profile, target fingerprint,
+ABI and interfaces. It neither starts a process nor activates a registry.
+The handle exposes the content-derived `identity`, the SDK `directory` and
+the physical `provider_file`.
+
+Use `driver.new_resolver_context{target = "browser", analysis_only = true,
+browser_analysis_target = handle}` with this handle for saved checks,
+metadata, rename and private completion. Use one handle for a worker lifetime,
+and reacquire it when the selected publication changes. The compiler permit
+serializes registry activation and checking. The target's semantic identity
+and physical provenance own the process-wide nominal cache generation; each
+resolver keeps its own mutable profile and provider graphs. No native
+embedded inventories or dynamically loaded Titan providers participate.
+The SDK archive has first lookup priority; project archives use ordinary
+browser lookup. An analysis context has no build descriptor or output
+directory and cannot generate C objects, start a build worker, publish a
+provider or link an image.
+
+The browser's `language_server_cache_identity` is tool-free. It includes the
+validated publication and its provenance, the working directory and requested
+C inputs, not a live preprocessor. `driver.browser_foreign_cache_identity`
+accepts `{context = context, validate = boolean?}`. Without `validate` it
+returns nil until a source actually needs tool-backed C analysis. With
+`validate = true` it obtains that identity if this resolver has not yet done
+so. The first attempt fixes the resolver's result: an opaque available
+identity or `browser-foreign-unavailable`; source diagnostics report the
+detailed failure. Persist that dependency alongside a saved publication that
+used it (including failures), and compare on restoration in a fresh resolver.
+Do not request live validation for a publication with no such dependency.
+
+The lazy path locates pinned Emscripten 6.0.13, verifies the selected SDK's Lua
+headers, and compares the live C profile and Wasm object fingerprint to the
+published target before serving a header or an acceptance probe. It can use the
+same SDK's packaged `src/lua-5.5.1` headers when `lib/browser/include` is absent
+and the bytes match the browser header digest. Both forms use the browser Lua
+defines and the selected SDK's Titan headers. Neither asks for host CC, Lua
+or runtime link archives, `emar`, a runner, or Node. Missing or mismatched
+prerequisites fail the C-using module, not the browser target.
 
 ### Embedded interface provider and target profile
 
@@ -862,8 +907,10 @@ and store editor facts separately before releasing each checked AST.
   opaque digest or `nil, error`. It includes API, graph, release/library/ABI,
   conversion and target identities, working directory, compiler command, and
   the actual preprocessor argv/include-root/predefined-macro/forced-header
-  world. Call it once per saved analysis before reading project payloads. A
-  verified embedded profile allows a distinct native-unavailable identity
+  world for native analysis. Call it once per saved analysis before reading
+  project payloads. Browser analysis uses the separate tool-free and lazy
+  identities [above](#browser-analysis-target). A verified embedded profile
+  allows a distinct native-unavailable identity
   when no SDK is installed. Hosts additionally fingerprint the loaded compiler
   and native-module files, embedded provider, configuration, source roots and
   semantic schema. The generated-code ABI alone is not a cache namespace.

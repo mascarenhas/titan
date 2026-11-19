@@ -11,6 +11,10 @@ local platform = require "titan-compiler.platform"
 local build = require "titan-compiler.build"
 local lfs = require "lfs"
 local path = require "titan-compiler.path"
+local installed_prefix = require "spec.support.installed_prefix"
+local checker_support = require "spec.support.browser_toolchain"
+local graphcodec = require "titan-compiler.graphcodec"
+local sha256 = require "titan-compiler.sha256"
 
 local function fresh_driver()
     local saved = package.loaded["titan-compiler.driver"]
@@ -34,6 +38,226 @@ local function loaded(loader, name)
     assert.equal(0, #errors, table.concat(errors, "\n"))
     return modtype
 end
+
+describe("published browser analysis target", function()
+    local strategy = compiler_io.new_sync()
+    local subject, root, contexts, saved_registry
+    local installed = installed_prefix.active()
+
+    before_each(function()
+        root = temporary.name()
+        assert(os.remove(root))
+        files.mkdir(root)
+        contexts, saved_registry = {}, types.registry
+        subject = fresh_driver()
+        subject.TITAN_SOURCE_PATH = root
+        subject.TITAN_BIN_PATH = root
+    end)
+
+    after_each(function()
+        for _, context in ipairs(contexts) do assert(subject.close_resolver_context(context)) end
+        types.registry = saved_registry
+        files.remove(root)
+    end)
+
+    local function new_context(options)
+        local context = subject.new_resolver_context(options)
+        contexts[#contexts + 1] = context
+        return context
+    end
+
+    local function semantic_pack(name)
+        local source = subject.installed_paths(installed, "browser").titan_bin
+        if not strategy:stat(path.join(source, "analysis-target")) then return nil end
+        local prefix = path.join(root, name)
+        local directory = subject.installed_paths(prefix, "browser").titan_bin
+        files.mkdir(directory)
+        for _, leaf in ipairs({ "analysis-target", "titan.a", "absent-modules" }) do
+            files.write(path.join(directory, leaf), files.read(path.join(source, leaf)))
+        end
+        return prefix, directory
+    end
+
+    it("checks browser source and real archive interfaces on a relocated pack with all subprocesses forbidden", function()
+        local prefix, directory = semantic_pack("other SDK")
+        if not prefix then pending("requires published browser SDK semantic assets"); return end
+        local offline = setmetatable({}, { __index = strategy })
+        local unexpected = {}
+        function offline:run(argv)
+            unexpected[#unexpected + 1] = table.concat(argv, " ")
+            error({ unexpected_process = unexpected[#unexpected] })
+        end
+        function offline:executable() return false end
+        local original = assert(subject.browser_analysis_target(installed, { io = offline }))
+        local selected = assert(subject.browser_analysis_target(prefix, { io = offline }))
+        assert.equal(original.identity, selected.identity)
+        assert.equal(assert(strategy:realpath(path.join(directory, "titan.a"))), selected.provider_file)
+        assert.has_error(function() selected.identity = "native" end)
+        for _, bad in ipairs({
+            { target = "linux", analysis_only = true, browser_analysis_target = selected },
+            { target = "browser", browser_analysis_target = selected },
+            { target = "browser", analysis_only = true, browser_analysis_target = {} },
+        }) do
+            assert.has_error(function() subject.new_resolver_context(bad) end)
+        end
+        local native = new_context({ target = "linux" })
+        local old_registry = types.registry
+        local browser = new_context({ target = "browser", analysis_only = true,
+            browser_analysis_target = selected, io = offline, transient_caches = true,
+            embedded_interface_provider = { must_not_be_used = true } })
+        assert.not_equal(old_registry, types.registry)
+        assert.has_error(function() subject.context_target(native) end)
+
+        files.mkdir(path.join(root, "active"))
+        files.write(path.join(root, "active/active.browser.titan"), [[
+local browser = import "browser"
+function handle(): browser.BrowserHandle
+    return browser.binding("offline")
+end
+]])
+        files.write(path.join(root, "active/first.titan"), "function first(): integer return 1 end\n")
+        files.write(path.join(root, "active/first.native.titan"), "inactive")
+        files.write(path.join(root, "active/last.browser.titan"), "function last(): integer return 2 end\n")
+        files.write(path.join(root, "absent.titan"), 'local fs = import "fs"\n')
+        files.write(path.join(root, "numeric.titan"),
+            "function narrow(x: foreign long): integer return x end\n")
+        files.write(path.join(root, "foreign_header.titan"), 'foreign import "stddef.h"\n')
+
+        local source = assert(subject.resolve_source(browser, "active", root))
+        assert.same({ path.join(root, "active/active.browser.titan"), path.join(root, "active/first.titan"),
+            path.join(root, "active/last.browser.titan") }, source.files)
+        local cache_identity = assert(subject.language_server_cache_identity({ context = browser }))
+        local loader = subject.defaultloader({}, { context = browser,
+            source_roots = { active = true, absent = true, numeric = true, foreign_header = true } })
+        local active = loaded(loader, "active")
+        assert.equal("titan.browser.BrowserHandle", active.members.handle.type.rettypes[1].fqtn)
+        loaded(loader, "numeric")
+        assert.equal(32, subject.get_target_profile(browser).integers.long.type.bits)
+        assert.equal(selected.provider_file, subject.imported["titan.browser"].static_archive)
+        local ok, _, diagnostics = loader("absent")
+        assert.is_true(ok)
+        assert.truthy(table.concat(diagnostics, "\n"):find(
+            "module 'titan.fs' is not available for target 'browser': requires a filesystem", 1, true))
+        assert(subject.finalize_resolver_context(browser))
+        local catalog = subject.completion_binary_catalog(browser)
+        assert.equal(selected.provider_file, catalog["titan.json"].filename)
+        assert.is_nil(subject.imported["titan.json"])
+        assert.is_nil(subject.browser_foreign_cache_identity({ context = browser }))
+
+        local entry = subject.imported.active
+        local allowed, err = subject.compile("active", entry.ast, entry.filename, {}, false, { context = browser })
+        assert.is_nil(allowed)
+        assert.truthy(err:find("analysis%-only"))
+        allowed, err = subject.worker_configuration(browser)
+        assert.is_nil(allowed)
+        assert.truthy(err:find("cannot compile or link", 1, true))
+        allowed, err = subject.compile_program("active", {}, nil, false, {}, nil, {}, nil, nil, { context = browser })
+        assert.is_nil(allowed)
+        assert.truthy(err:find("cannot compile or link", 1, true))
+
+        ok, _, diagnostics = loader("foreign_header")
+        assert.is_true(ok)
+        assert.truthy(table.concat(diagnostics, "\n"):find("browser foreign C work needs Emscripten 6.0.13", 1, true))
+        assert.equal("browser-foreign-unavailable", subject.browser_foreign_cache_identity({ context = browser }))
+        assert.equal(cache_identity, assert(subject.language_server_cache_identity({ context = browser })))
+        assert.same({}, unexpected)
+
+        local native_again = new_context({ target = "linux" })
+        assert.has_error(function() subject.context_target(browser) end)
+        assert.equal("linux", subject.context_target(native_again))
+        assert.is_nil(types.registry["titan.browser.BrowserHandle"])
+    end)
+
+    it("rejects mixed, missing, malformed and wrong-target semantic assets with their file names", function()
+        local prefix, directory = semantic_pack("broken SDK")
+        if not prefix then pending("requires published browser SDK semantic assets"); return end
+        local analysis_file = path.join(directory, "analysis-target")
+        local absent_file = path.join(directory, "absent-modules")
+        local provider_file = path.join(directory, "titan.a")
+        local analysis = files.read(analysis_file)
+        local absent = files.read(absent_file)
+        local function reject(filename, fragment)
+            local handle, err = subject.browser_analysis_target(prefix)
+            assert.is_nil(handle)
+            assert.truthy(err:find(filename, 1, true), err)
+            assert.truthy(err:find(fragment, 1, true), err)
+        end
+        files.write(analysis_file, analysis:sub(1, -2))
+        reject("analysis-target", "matching browser SDK")
+        files.write(analysis_file, analysis)
+        files.write(absent_file, absent .. "titan.extra\tmixed publication\n")
+        reject("absent-modules", "digest disagrees")
+        files.write(absent_file, absent)
+        assert(os.remove(provider_file))
+        reject("titan.a", "missing file")
+        -- Rebind the descriptor to actual non-Wasm bytes: the content hash
+        -- alone must not allow a different object target into analysis.
+        local native = files.read(path.join(installed, "lib/titan/0.6/libtitan.a"))
+        files.write(provider_file, native)
+        local data = assert(graphcodec.decode(analysis))
+        local support = require "titan"
+        data.provider_sha256 = sha256.hex_via(support._sha256_binary, native)
+        files.write(analysis_file, assert(graphcodec.encode(data)))
+        reject("titan.a", "does not match target format wasm")
+    end)
+
+    it("lazily checks real foreign headers from a pack with no browser Lua or runtime archive", function()
+        local info, why = checker_support.require()
+        if not info then pending(why); return end
+        local prefix = semantic_pack("editor SDK")
+        assert.is_string(prefix)
+        local installed_paths = subject.installed_paths(installed)
+        local editor_paths = subject.installed_paths(prefix)
+        for _, roots in ipairs({ { installed_paths.lua_source, editor_paths.lua_source },
+            { installed_paths.include, editor_paths.include } }) do
+            files.mkdir(roots[2])
+            for _, name in ipairs(assert(strategy:list(roots[1]))) do
+                local from = path.join(roots[1], name)
+                if strategy:stat(from).kind == "file" then
+                    files.write(path.join(roots[2], name), files.read(from))
+                end
+            end
+        end
+        files.mkdir(path.join(editor_paths.include, "titan"))
+        files.write(path.join(editor_paths.include, "titan/ffi.h"), files.read(path.join(installed_paths.include, "titan/ffi.h")))
+        assert.is_nil(strategy:stat(subject.installed_paths(prefix, "browser").liblua))
+        local live = setmetatable({}, { __index = strategy })
+        local calls = 0
+        function live:run(argv, options)
+            assert.equal("env", argv[1])
+            assert.equal("EMCC_CFLAGS=", argv[2])
+            assert.equal(info.tools.cc[1], argv[3])
+            calls = calls + 1
+            return strategy:run(argv, options)
+        end
+        local target = assert(subject.browser_analysis_target(prefix, { io = live }))
+        local function context()
+            return new_context({ target = "browser", analysis_only = true,
+                browser_analysis_target = target, io = live, transient_caches = true })
+        end
+        local first = context()
+        assert(subject.language_server_cache_identity({ context = first }))
+        assert.equal(0, calls)
+        files.write(path.join(root, "for_browser.h"), [[
+#if !defined(__EMSCRIPTEN__) || !defined(TITAN_TARGET_BROWSER) || __SIZEOF_POINTER__ != 4
+#error browser-only header used with the wrong target
+#endif
+#include <titan/ffi.h>
+typedef unsigned long test_browser_long;
+]])
+        files.write(path.join(root, "uses_header.titan"), [[
+foreign import "for_browser.h"
+function narrow(x: foreign test_browser_long): integer return x end
+]])
+        loaded(subject.defaultloader({}, { context = first, source_roots = { uses_header = true } }), "uses_header")
+        assert.is_true(calls > 0)
+        local identity = assert(subject.browser_foreign_cache_identity({ context = first }))
+        local previous = calls
+        assert.equal(identity, subject.browser_foreign_cache_identity({ context = first, validate = true }))
+        assert.equal(previous, calls)
+        assert.equal(identity, subject.browser_foreign_cache_identity({ context = context(), validate = true }))
+    end)
+end)
 
 -- Isolate descriptor verification (covered by its own specs) with a validated,
 -- frozen fixture. Constructors, accessors and cache activation remain real.

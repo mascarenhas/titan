@@ -565,6 +565,19 @@ installed and keeps any other file in `lib/titan-browser/0.6/`, such as a
 library archive; `titan-uninstall` removes them too. See [what each command
 removes](installation.md#what-each-command-removes).
 
+### Editor type checking
+
+A browser-target editor root can check imports and show types and completion
+without the browser build tools. It needs a matching Titan compiler and
+`titan.a`, `analysis-target` and `absent-modules` together under the selected
+SDK's `lib/titan-browser/0.6/`. These files are not a build SDK. If an explicitly
+selected SDK is missing or has incompatible browser files, rebuild that SDK
+with `make browser-sdk` or select a matching one.
+
+Real C header or acceptance probes still need Emscripten 6.0.13 and matching
+SDK headers. Without those inputs, only the source requiring a C probe gets
+a diagnostic. Browser type checking never substitutes a native C compiler.
+
 ### Bootstrap order
 
 The pieces build in this order:
