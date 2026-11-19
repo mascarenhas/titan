@@ -767,9 +767,9 @@ The captured completion catalog includes the SDK archive's interfaces even
 before any saved import selects its modules. A project source overlapping one
 module suppresses that whole provider from the default catalog. Capturing the
 catalog neither looks up other providers nor seeds the import registry.
-An analysis context has no build descriptor or output
-directory and cannot generate C objects, start a build worker, publish a
-provider or link an image.
+An analysis context has no build descriptor or output directory. Build
+entry points reject it before touching staged objects, restoring build
+records, publishing providers or invoking an image runner.
 
 The browser's `language_server_cache_identity` is tool-free. It includes the
 validated publication and its provenance, the working directory and requested

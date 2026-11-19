@@ -5376,6 +5376,9 @@ function driver.defaultloader(static_deps, options)
     options = options or {}
     local context = options.context
     driver.assert_target_context(context)
+    if context.browser_semantics and (options.incremental or options.plan_mode or options.worker_plan) then
+        error("browser analysis context cannot compile or link", 2)
+    end
     local source_roots = options.source_roots or {}
     -- The object code-generation policy certification compares records
     -- against; compilation requests of the same invocation use these values.
@@ -6995,6 +6998,7 @@ function driver.restore_source_object(context, modname, source, record, options)
         error("restoring an object requires a resolver context", 2)
     end
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local binding = context.loader and loader_contexts[context.loader]
     if not binding or binding.context ~= context or not binding.restore then
         error("restoring an object requires a loader bound to its " ..
@@ -7695,6 +7699,7 @@ end
 -- `imports`), with status `built` rather than `hit` when uncertified.
 function driver.publish_staged_module(context, result)
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local modname = result.modname
     local primary, parts = nil, {}
     for _, staged in ipairs(result.staged or {}) do
@@ -13274,6 +13279,7 @@ end
 -- Success records `plan.reservations` and the validated `plan.inputs`.
 function driver.preflight_build_outputs(context, plan, options)
     driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     if options.output_root then
         local valid, target_error = driver.validate_output_target(
             context, options.output_root, true)
@@ -13678,6 +13684,9 @@ end
 function driver.publish_provider_bundle(
         staged_dso, staged_archive, public_dso, options)
     options = options or {}
+    if options.context and options.context.browser_semantics then
+        return nil, "browser analysis context cannot compile or link"
+    end
     if options.archive_only then
         local valid, err = driver.validate_provider_output_paths(
             public_dso, options.native_inputs, nil, options.context)
@@ -14426,6 +14435,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
 end
 
 function driver.browser_node_ready(context, assets)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
     local result = context.io:run(driver.browserlink.runner_argv(assets.runner, "--probe"), { stderr_to_stdout = true })
     if type(result) == "table" and result.ok then return true, nil, result.output end
     local detail = type(result) == "table" and (result.output or result.diagnostic) or "runner probe failed"

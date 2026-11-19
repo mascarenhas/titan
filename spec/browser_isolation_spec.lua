@@ -234,6 +234,62 @@ end
         assert.is_nil(types.registry["titan.browser.BrowserHandle"])
     end)
 
+    it("refuses build publication and execution without touching staging files", function()
+        local prefix = semantic_pack("read-only SDK")
+        if not prefix then pending("requires published browser SDK semantic assets"); return end
+        local target = assert(subject.browser_analysis_target(prefix, { io = strategy }))
+        local denied, calls = false, {}
+        local io = setmetatable({}, { __index = strategy })
+        for _, method in ipairs({ "lstat", "stat", "read_file", "write_file", "rename",
+                "unlink", "mkdir", "rmdir", "run", "tmpname", "realpath" }) do
+            io[method] = function(_, ...)
+                if denied then calls[#calls + 1] = method end
+                return strategy[method](strategy, ...)
+            end
+        end
+        local context = new_context({ target = "browser", analysis_only = true,
+            browser_analysis_target = target, io = io, transient_caches = true })
+        local staged, public = path.join(root, "staged.o"), path.join(root, "public.o")
+        files.write(staged, "incomplete staged object")
+        files.write(public, "last published object")
+        denied = true
+        local message = "browser analysis context cannot compile or link"
+        for _, action in ipairs({
+            function()
+                return subject.publish_staged_module(context, {
+                    modname = "app", staged = { { role = "primary", from = staged, to = public } },
+                })
+            end,
+            function() return subject.restore_source_object(context, "app", nil, nil) end,
+            function() return subject.preflight_build_outputs(context, {}, {}) end,
+            function()
+                return subject.publish_provider_bundle(nil, staged, path.join(root, "lib.a"),
+                    { context = context, archive_only = true })
+            end,
+            function()
+                return subject.publish_provider_bundle(staged, staged, path.join(root, "lib.so"),
+                    { context = context })
+            end,
+            function() return subject.browser_node_ready(context, { runner = "unused" }) end,
+        }) do
+            local result, diagnostic = action()
+            assert.is_nil(result)
+            assert.equal(message, diagnostic)
+        end
+        for _, flags in ipairs({ { incremental = true }, { plan_mode = true }, { worker_plan = {} } }) do
+            flags.context = context
+            local ok, diagnostic = pcall(subject.defaultloader, {}, flags)
+            assert.is_false(ok)
+            assert.truthy(diagnostic:find(message, 1, true), diagnostic)
+        end
+        assert.same({}, calls)
+        denied = false
+        assert.equal("incomplete staged object", files.read(staged))
+        assert.equal("last published object", files.read(public))
+        assert.is_nil(strategy:lstat(path.join(root, "lib.a")))
+        assert.is_nil(strategy:lstat(path.join(root, "lib.so")))
+    end)
+
     it("rejects mixed, missing, malformed and wrong-target semantic assets with their file names", function()
         local prefix, directory = semantic_pack("broken SDK")
         if not prefix then pending("requires published browser SDK semantic assets"); return end
