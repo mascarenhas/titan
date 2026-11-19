@@ -284,7 +284,7 @@ assert(io:write_file(pathname, assert(codec.encode(record))))
 """, target)
         reject("Lua fork does not match")
         target.write_bytes(original_target)
-        self.run_lua("""
+        self.run_lua(r"""
 local target, provider = ...
 local io = require("titan-compiler.io").new_sync()
 local codec = require "titan-compiler.graphcodec"
