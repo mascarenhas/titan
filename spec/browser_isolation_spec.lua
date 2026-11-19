@@ -180,8 +180,9 @@ end
         files.write(path.join(root, "foreign_header.titan"), 'foreign import "stddef.h"\n')
 
         local source = assert(subject.resolve_source(browser, "active", root))
-        assert.same({ path.join(root, "active/active.browser.titan"), path.join(root, "active/first.titan"),
-            path.join(root, "active/last.browser.titan") }, source.files)
+        local source_root = path.to_slash(root)
+        assert.same({ source_root .. "/active/active.browser.titan", source_root .. "/active/first.titan",
+            source_root .. "/active/last.browser.titan" }, source.files)
         local cache_identity = assert(subject.language_server_cache_identity({ context = browser }))
         local loader = subject.defaultloader({}, { context = browser,
             source_roots = { active = true, absent = true, numeric = true, foreign_header = true } })
@@ -452,7 +453,7 @@ function narrow(x: foreign test_browser_long): integer return x end
             local checked, _, diagnostics = load_header(resolver)
             assert.is_true(checked)
             local text = table.concat(diagnostics, "\n")
-            assert.truthy(text:find(pathname, 1, true), text)
+            assert.truthy(path.to_slash(text):find(path.to_slash(pathname), 1, true), text)
             assert.truthy(text:find(message, 1, true), text)
             assert.equal("browser-foreign-unavailable",
                 subject.browser_foreign_cache_identity({ context = resolver, validate = true }))
