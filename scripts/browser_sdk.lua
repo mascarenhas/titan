@@ -44,10 +44,12 @@ if not ok_support or type(support) ~= "table" then
 end
 
 local driver = require "titan-compiler.driver"
+local browser_target = require "titan-compiler.browsertarget"
 local incremental = require "titan-compiler.incremental"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local compiler_io = require "titan-compiler.io"
 local paths = require "titan-compiler.path"
+local sha256 = require "titan-compiler.sha256"
 local util = require "titan-compiler.util"
 local stdlib_checks = dofile("scripts/browser_stdlib.lua")
 local platform = require "titan-compiler.platform"
@@ -82,12 +84,13 @@ local function copy_file_atomic(source, destination, executable)
     end
     -- MSYS sh reads the launcher as a script on Windows; NTFS has no POSIX
     -- execute mode to preserve for a native Titan invocation.
-    if platform.windows then return end
+    if platform.windows then return bytes end
     local mode = executable and "0755" or "0644"
     local chmod_res = strategy:run({ "chmod", mode, destination }, { stderr_to_stdout = true })
     if not chmod_res or not chmod_res.ok then
         fail("cannot chmod '" .. destination .. "'")
     end
+    return bytes
 end
 
 local function check_no_forbidden_symbols(archive_path, archive)
@@ -358,21 +361,29 @@ elseif action == "finalize" then
                 tostring(scanned.key_order[index]) .. "', expected '" .. modname .. "'")
         end
     end
-    copy_file_atomic(staged_provider, assets.provider, false)
-    -- The compiler names an absent module and its reason from this list. It
-    -- changes only diagnostics, so sdk-digests does not record it.
+    local provider_digest = sha256.hex_via(support._sha256_binary,
+        copy_file_atomic(staged_provider, assets.provider, false))
     local absent_lines = {}
     for _, row in ipairs(stdlib_checks.status_inventory.modules) do
         if row[2] == "absent" then absent_lines[#absent_lines + 1] = row[1] .. "\t" .. row.reason .. "\n" end
     end
+    local absent_bytes = table.concat(absent_lines)
     local absent_file = paths.join(descriptor.paths.titan_bin, "absent-modules")
-    local written, write_err = strategy:write_file(absent_file, table.concat(absent_lines))
+    local written, write_err = strategy:write_file(absent_file, absent_bytes)
     if not written then fail("cannot write '" .. absent_file .. "': " .. tostring(write_err)) end
+    local analysis_file = paths.join(descriptor.paths.titan_bin, "analysis-target")
+    local analysis_bytes, analysis_err = browser_target.encode_analysis(context, descriptor,
+        provider_digest, sha256.hex_via(support._sha256_binary, absent_bytes))
+    if not analysis_bytes then fail("cannot encode '" .. analysis_file .. "': " .. tostring(analysis_err)) end
+    written, write_err = strategy:write_file(analysis_file, analysis_bytes)
+    if not written then fail("cannot write '" .. analysis_file .. "': " .. tostring(write_err)) end
 
     -- Collect all installed browser SDK inputs for sdk-digests (written LAST).
     local digest_inputs = {
         descriptor.paths.liblua,
         descriptor.paths.lua_record,
+        absent_file,
+        analysis_file,
         paths.join(descriptor.paths.titan_bin, "titan-protobuf.mjs"),
     }
     local lua_headers, list_err = strategy:list(descriptor.paths.lua_source)

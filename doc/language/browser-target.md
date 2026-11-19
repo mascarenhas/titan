@@ -542,6 +542,7 @@ root; other chapters refer to this list:
 | `titan-browser-module-check.mjs` | the [module check](#c-helpers-and-emscripten-apis) that `titanc` runs on each linked image module, under emcc's Node with emcc's acorn parser |
 | `build-profile` | the [build profile](#build-profiles), `production` or `validation`, that compiled the SDK's archives |
 | `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
+| `analysis-target` | the relocatable browser type-checking profile, bound to the standard library and absent-module list |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
 On Windows, the SDK also installs the native runner helper

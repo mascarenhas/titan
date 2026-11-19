@@ -2,16 +2,21 @@ local compiler_paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local browserlink = require "titan-compiler.browserlink"
 local cdriver = require "c-parser.cdriver"
+local graphcodec = require "titan-compiler.graphcodec"
 local csemantics = require "titan-compiler.csemantics"
 local incremental = require "titan-compiler.incremental"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local sha256 = require "titan-compiler.sha256"
+local version = require "titan-compiler.version"
 local util = require "titan-compiler.util"
 local M = {}
 
 M.EMSCRIPTEN_VERSION = "6.0.13"
 local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling " ..
     "+multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
+local TRIPLE = "wasm32-unknown-emscripten"
+local FINGERPRINT = { format = "wasm", word_size = 32, linking_version = 2, features = FEATURES }
+local ANALYSIS_LIMIT = 64 * 1024
 local BANNER = "# Lua 5.5.1 browser build record v1\n"
 local RECORD_KEYS = { "fork_revision", "archive_sha256", "headers_sha256",
     "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
@@ -117,6 +122,25 @@ local function fields(data, keys, optional)
     return true
 end
 
+local function valid_fingerprint(data)
+    if not fields(data, { "format", "word_size", "linking_version", "features" }) then return false end
+    for key, expected in pairs(FINGERPRINT) do
+        if data[key] ~= expected then return false end
+    end
+    return true
+end
+
+local function valid_lua_defines(defines)
+    local previous
+    for _, flag in ipairs(defines) do
+        if not flag:match("^%-D[A-Za-z_][A-Za-z0-9_]*") or previous and not util.bytewise_less(previous, flag) then
+            return false
+        end
+        previous = flag
+    end
+    return true
+end
+
 local function text(value)
     return type(value) == "string" and not value:find("[%z\r\n]")
 end
@@ -192,7 +216,7 @@ local function validate(data, context)
             "include_dirs", "target_defines", "paths", "lua", "profile_data", "profile_identity",
             "fingerprint", "output_policy", "provider_policy", "identity" },
             { "probe_cache_directory", "trace_control" }) or
-        data.label ~= "browser" or data.triple ~= "wasm32-unknown-emscripten" or data.memory_bits ~= 32 or
+        data.label ~= "browser" or data.triple ~= TRIPLE or data.memory_bits ~= 32 or
         not M.valid_profile(data.build_profile) or not argv(data.compile_flags) or
         not argv(data.include_dirs) or not argv(data.target_defines) then
         return nil, "invalid browser target descriptor"
@@ -263,9 +287,7 @@ local function validate(data, context)
     for _, directory in ipairs(data.include_dirs) do
         if not normalized_absolute(directory) then return nil, "invalid browser include path" end
     end
-    if not fields(data.fingerprint, { "format", "word_size", "linking_version", "features" }) or
-        data.fingerprint.format ~= "wasm" or data.fingerprint.word_size ~= 32 or
-        data.fingerprint.linking_version ~= 2 or data.fingerprint.features ~= FEATURES then
+    if not valid_fingerprint(data.fingerprint) then
         return nil, "invalid browser Wasm fingerprint"
     end
     if not fields(data.output_policy, { "requires_output", "marker", "marker_contents" }) or
@@ -307,6 +329,70 @@ function M.import(data)
         return nil, result
     end
     return result, err
+end
+
+local function analysis_codec_options(context)
+    return {
+        max_bytes = ANALYSIS_LIMIT, max_string_bytes = ANALYSIS_LIMIT,
+        max_nodes = 128, max_entries = 1024,
+        sha256_binary = context.cache_adapter and context.cache_adapter.sha256_binary,
+    }
+end
+
+-- Only semantic facts from the validated build descriptor belong here. The
+-- asset hashes bind the publication across moves, unlike the build manifest's
+-- path/stat observations.
+function M.encode_analysis(context, descriptor, provider_sha256, absent_sha256)
+    local data = proxy_data[descriptor]
+    assert(data and data.tools, "browser build descriptor required")
+    assert(hex(provider_sha256, 64) and hex(absent_sha256, 64), "browser asset digests required")
+    return graphcodec.encode({
+        target = data.label, triple = data.triple, fingerprint = FINGERPRINT,
+        abi = version.TITAN_ABI_VERSION, release = version.TITAN_VERSION,
+        emscripten_version = data.tools.version, build_profile = data.build_profile,
+        profile_data = copy(data.profile_data),
+        lua = {
+            fork_revision = data.lua.record.fork_revision,
+            headers_sha256 = data.lua.record.headers_sha256,
+            defines = data.lua.record.lua_defines,
+        },
+        provider_sha256 = provider_sha256, absent_sha256 = absent_sha256,
+    }, analysis_codec_options(context))
+end
+
+function M.decode_analysis(context, bytes)
+    local data, err = graphcodec.decode(bytes, analysis_codec_options(context))
+    if not data then return nil, err end
+    if not fields(data, { "target", "triple", "fingerprint", "abi", "release",
+        "emscripten_version", "build_profile", "profile_data", "lua",
+        "provider_sha256", "absent_sha256" }) or data.target ~= "browser" or
+        data.triple ~= TRIPLE or data.abi ~= version.TITAN_ABI_VERSION or
+        data.release ~= version.TITAN_VERSION or data.emscripten_version ~= M.EMSCRIPTEN_VERSION or
+        not M.valid_profile(data.build_profile) then
+        return nil, "incompatible browser semantic target"
+    end
+    if not valid_fingerprint(data.fingerprint) then return nil, "invalid browser Wasm fingerprint" end
+    if not fields(data.lua, { "fork_revision", "headers_sha256", "defines" }) or
+        not hex(data.lua.fork_revision, 40) or not hex(data.lua.headers_sha256, 64) or
+        not text(data.lua.defines) then
+        return nil, "invalid browser Lua facts"
+    end
+    local defines = cdriver.split_shell_words(data.lua.defines)
+    if not defines or #defines == 0 or not valid_lua_defines(defines) then
+        return nil, "invalid browser Lua defines"
+    end
+    if not hex(data.provider_sha256, 64) or not hex(data.absent_sha256, 64) then
+        return nil, "invalid browser semantic asset digests"
+    end
+    local profile
+    profile, err = csemantics.import_profile(data.profile_data)
+    if not profile then return nil, err end
+    if profile.char_bit ~= 8 or profile.integers.long.type.bits ~= 32 or
+        profile.integers[profile.size_t].type.bits ~= 32 or
+        profile.integers[profile.ptrdiff_t].type.bits ~= 32 then
+        return nil, "C profile does not describe the browser's wasm32 target"
+    end
+    return data
 end
 
 local UNSUPPORTED = { ["-fPIC"] = true, ["-fpic"] = true, ["-fPIE"] = true,
@@ -529,7 +615,7 @@ validate_record = function(record, paths)
             return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", item[1]) .. ": invalid hexadecimal value")
         end
     end
-    for _, item in ipairs({ { "sjlj", "wasm" }, { "target", "wasm32-unknown-emscripten" },
+    for _, item in ipairs({ { "sjlj", "wasm" }, { "target", TRIPLE },
             { "emscripten_version", M.EMSCRIPTEN_VERSION } }) do
         if record[item[1]] ~= item[2] then return nil, mismatch(paths, record, item[1], item[2]) end
     end
@@ -538,12 +624,8 @@ validate_record = function(record, paths)
     if record.wasm_features ~= FEATURES then return nil, mismatch(paths, record, "wasm_features", FEATURES) end
     local defines, split_error = record_list(record, paths, "lua_defines")
     if not defines then return nil, split_error end
-    local previous
-    for _, flag in ipairs(defines) do
-        if not flag:match("^%-D[A-Za-z_][A-Za-z0-9_]*") or previous and not util.bytewise_less(previous, flag) then
-            return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": expected sorted unique -D tokens")
-        end
-        previous = flag
+    if not valid_lua_defines(defines) then
+        return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": expected sorted unique -D tokens")
     end
     local flags, flags_error = record_list(record, paths, "cflags")
     if not flags then return nil, flags_error end
@@ -701,8 +783,7 @@ function M.build(context, inputs)
         if numeric ~= record.numeric then return nil, mismatch(remedy_paths, record, "numeric", numeric) end
         local fingerprint, fingerprint_error = probe_fingerprint(context, provisional)
         if not fingerprint then return nil, fingerprint_error end
-        local expected = { format = "wasm", word_size = 32, linking_version = 2, features = FEATURES }
-        local matches, mismatch_error = staticmetadata.fingerprint_matches(fingerprint, expected)
+        local matches, mismatch_error = staticmetadata.fingerprint_matches(fingerprint, FINGERPRINT)
         if not matches then
             local diagnostic = "browser target compiler probe does not match the required Wasm target: " ..
                 tostring(mismatch_error)
@@ -718,14 +799,14 @@ function M.build(context, inputs)
             end
             return nil, diagnostic
         end
-        local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
+        local data = { label = "browser", triple = TRIPLE, memory_bits = 32,
             tools = tool, build_profile = build_profile, compile_flags = flags,
             trace_control = inputs.trace_control == true,
             include_dirs = includes, target_defines = target_defines,
             paths = paths, lua = { path = paths.lua_record, record = record,
                 record_sha256 = sha256.hex_via(context.cache_adapter and context.cache_adapter.sha256_binary, bytes) },
             profile_data = assert(csemantics.export_profile(profile)), profile_identity = profile.identity,
-            fingerprint = expected, probe_cache_directory = inputs.probe_cache_directory,
+            fingerprint = FINGERPRINT, probe_cache_directory = inputs.probe_cache_directory,
             output_policy = { requires_output = true, marker = ".titan-target", marker_contents = "browser\n" },
             provider_policy = { archive_only = true, sdk_first = true, dynamic = false } }
         data.identity = descriptor_identity(data, context)

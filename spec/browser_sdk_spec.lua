@@ -1024,6 +1024,28 @@ end
                 sha256_stream = support._sha256_stream,
             },
         }
+        local analysis_file = paths.join(browser_paths.titan_bin, "analysis-target")
+        local absent_file = paths.join(browser_paths.titan_bin, "absent-modules")
+        local semantic_bytes = assert(strategy:read_file(analysis_file))
+        local semantic = assert(browser.decode_analysis(digest_ctx, semantic_bytes))
+        local live = assert(browser.build(digest_ctx, {
+            paths = browser_paths, build_profile = "validation",
+        }))
+        assert.same(browser.export(live.fingerprint), semantic.fingerprint)
+        assert.same(browser.export(live.profile_data), semantic.profile_data)
+        assert.equal(live.lua.record.headers_sha256, semantic.lua.headers_sha256)
+        assert.equal(live.lua.record.lua_defines, semantic.lua.defines)
+        assert.equal(live.lua.record.fork_revision, semantic.lua.fork_revision)
+        assert.equal(live.tools.version, semantic.emscripten_version)
+        assert.equal(version.TITAN_ABI_VERSION, semantic.abi)
+        assert.equal(version.TITAN_VERSION, semantic.release)
+        assert.equal("validation", semantic.build_profile)
+        assert.equal(incremental.file_digest(digest_ctx, assets.provider), semantic.provider_sha256)
+        assert.equal(incremental.file_digest(digest_ctx, absent_file), semantic.absent_sha256)
+        assert.is_nil(semantic_bytes:find(rocks_tree, 1, true))
+        assert.is_nil(semantic_bytes:find(info.tools.cc[1], 1, true))
+        assert.is_nil(browser.decode_analysis(digest_ctx, semantic_bytes:sub(1, -2)))
+
         assert(incremental.load_sdk_digests(digest_ctx, assets.sdk_digests))
         local recorded = assert(digest_ctx.incremental and digest_ctx.incremental.sdk)
         assert.is_nil(recorded.files[assert(strategy:realpath(assets.sdk_digests))])
@@ -1031,6 +1053,8 @@ end
         local expected_digest_files = {
             browser_paths.liblua,
             browser_paths.lua_record,
+            analysis_file,
+            absent_file,
             paths.join(browser_paths.titan_bin, "titan-protobuf.mjs"),
         }
         local staged_lua_headers = assert(strategy:list(browser_paths.lua_source))

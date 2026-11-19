@@ -112,7 +112,8 @@ browser-sdk` builds and installs the runtime archive, loader library and
 runner tool into `lib/titan-browser/<ver>/`; (5) it publishes the [core
 stdlib provider](#the-browser-standard-library), protocol-probes it against
 the runtime staged in step (4), and checks its dependency closure; (6) it
-writes the browser SDK digest manifest last. Missing browser-SDK
+publishes the semantic target alongside the absent-module list and writes
+the browser SDK digest manifest last. Missing browser-SDK
 paths are diagnosed, naming `make browser-sdk`, only when a program or test
 is linked or when library-mode publication runs the executing protocol check;
 compile-only work needs only the verified Lua pieces.
@@ -285,11 +286,18 @@ The SDK also installs `titan-protobuf.mjs` in `titan_bin`. This standalone ES
 module encodes and decodes copied JavaScript values using a portable protobuf
 description. Pages deploy and import it separately; the compiler neither
 links it nor embeds it in an image, so it is not a `browserlink.sdk_assets`
-entry. Likewise `absent-modules` in `titan_bin` lists the modules the browser
-target lacks, one `<module>\t<reason>` line each, which `browser_sdk.lua
-finalize` writes from the [status inventory](#subset-parity-gate). The
-compiler reads it only to word a [missing-module
-diagnostic](#the-absent-module-diagnostic), so `sdk-digests` does not record it.
+entry. The SDK also publishes two data-only files that the linker does not
+require:
+
+* `absent-modules` lists the modules the target lacks, one `<module>\t<reason>`
+  line each, for [missing-module diagnostics](#the-absent-module-diagnostic).
+* `analysis-target` records the Titan release and ABI, Emscripten pin, browser
+  Wasm fingerprint, exported C profile, and the verified Lua header digest and
+  defines. It uses the bounded graph codec, with no tool or installation
+  paths. SHA-256 digests bind it to the exact `titan.a` and `absent-modules`
+  contents. These three files can move together without the build
+  `sdk-digests` manifest, which records installation-specific observations.
+
 The language manual's [browser SDK
 file list](../language/browser-target.md#installing-the-browser-sdk) names every
 installed file once; `installer.browser_sdk_owned` is the same list in code,
@@ -400,7 +408,8 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    `titan.path`, `titan.peg`, `titan.protobuf`, `titan.reflect`,
    `titan.string`, `titan.test`, `titan.timer`, `titan.transfer`, `titan.url`,
    and `titan.websocket`; copies it to `titan.a`; writes `absent-modules`
-   from the [status inventory](#subset-parity-gate); and finally writes
+   from the [status inventory](#subset-parity-gate) and `analysis-target`
+   from the validated compiler descriptor; and finally writes
    `sdk-digests` with `incremental.write_sdk_digests` and the existing
    schema.
 
