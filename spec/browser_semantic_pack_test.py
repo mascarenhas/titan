@@ -284,18 +284,26 @@ assert(io:write_file(pathname, assert(codec.encode(record))))
 """, target)
         reject("Lua fork does not match")
         target.write_bytes(original_target)
-        obj = self.root / "browser.o"
-        ar = "llvm-ar" if self.windows else "ar"
-        obj.write_bytes(subprocess.check_output([ar, "p", str(provider), "browser.o"], env=self.env))
-        provider.unlink()
-        subprocess.run([ar, "qc", str(provider), str(obj)], check=True, env=self.env)
         self.run_lua("""
 local target, provider = ...
 local io = require("titan-compiler.io").new_sync()
 local codec = require "titan-compiler.graphcodec"
+local archive = assert(require("titan-compiler.staticmetadata").scan_archive(provider, { io = io }))
+local object
+for _, member in ipairs(archive.members) do
+    if member.metadata and member.metadata.module == "titan.browser" then
+        object = member.bytes
+        break
+    end
+end
+assert(object, "full provider is missing titan.browser's primary object")
+-- A regular archive needs no symbol index for metadata-only admission.
+local header = ("%-16s%-12d%-6d%-6d%-8s%-10d`\n"):format("browser.o/", 0, 0, 0, "100644", #object)
+local subset = "!<arch>\n" .. header .. object .. (#object % 2 == 1 and "\n" or "")
+assert(io:write_file(provider, subset))
 local record = assert(codec.decode(assert(io:read_file(target))))
 record.provider_sha256 = require("titan-compiler.sha256").hex_via(
-    require("titan")._sha256_binary, assert(io:read_file(provider)))
+    require("titan")._sha256_binary, subset)
 assert(io:write_file(target, assert(codec.encode(record))))
 """, target, provider)
         reject("expected the full browser standard provider inventory")
