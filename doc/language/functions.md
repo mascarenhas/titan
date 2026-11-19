@@ -1,219 +1,109 @@
-# Functions
+# Functions, Arguments, and Results
 
-Functions are the unit of Titan code. They come in two syntactic forms
-declared at the top level of a module: plain module functions (this
-chapter), and the methods of records or unions (declared with `:` after a
-nominal type name; see [Records](records.md) and [Unions](unions.md)). The
-owner's written declaration may appear
-on either side of a method declaration. Functions are also **first-class
-values** — a function name can be used as a value (see
-[Functions as values](#functions-as-values)) — and there are **anonymous
-function expressions** that close over the enclosing function's locals,
-which have their own chapter
-([anonymous functions and closures](closures.md)). Everything this chapter
-says about parameters, return values and arity applies to every form, and
-to the compiler-synthesized `new` static of each record and the
-constructor synthesized for each union variant. An
-[Interface](interfaces.md) contains bodyless method signatures that reuse the
-same parameter, variadic, and return grammar; calls through an Interface obey
-the same adjustment rules.
+Functions are the basic unit of executable code in Titan. Top-level module
+functions, record and union methods, static nominal functions, generated
+constructors, and anonymous functions all share the same rules for
+parameters, argument adjustment, multiple returns, variadic tails, and
+flexible results. This chapter covers declaring and calling functions;
+[Chapter 5](closures.md) covers functions as first-class values, lambdas,
+closures, and bound methods.
 
 ## Declaring functions
 
-A function declaration names the function, gives every parameter a type,
-optionally declares the return type(s), and ends with `end`:
+A top-level function names its parameters with mandatory type annotations,
+optionally declares its return types, and ends with `end`:
 
 ```titan
-function clamp(x: integer, lo: integer, hi: integer): integer
-    if x < lo then
-        return lo
-    elseif x > hi then
-        return hi
-    else
-        return x
-    end
-end
-```
-
-The pieces:
-
-* **Parameters** are a comma-separated list of `name: type` pairs. The
-  type annotation is mandatory for every parameter — parameter types are
-  never inferred. Declaring two parameters with the same name is a
-  compile-time error (`duplicate parameter 'x' in declaration of
-  function 'f'`).
-* **The return annotation is optional, and omitting it means zero return
-  values.** A function declared without `: type` returns *nothing* — `function log_it(msg: string)` is the
-  same as `function log_it(msg: string): ()`, and `select('#', m.log_it(s))`
-  from Lua is `0`. This matches Lua, where `function f() end` returns no
-  values. If you want a function that returns a single `nil`, write it
-  explicitly as `: nil`. A single return type is written bare
-  (`: integer`); multiple return types are written as a parenthesized list
-  (`: (integer, string)`); zero return values are written `: ()`. A
-  parenthesized list may instead end in a flexible tail, such as
-  `: (...: string)` or `: (boolean, ...: integer)`, whose run-time length is
-  chosen by each call; see [Flexible returns](flexible-returns.md).
-* **A function with fixed returns may fall through only when that fixed
-  prefix is exactly one `nil`.** A reachable path may return or may provably
-  never reach the end (for example, an unbreakable literal `while true`). If
-  some other fixed-result function can fall off the end, the compiler rejects
-  it. This includes multi-result signatures whose first result happens to be
-  `nil`: every additional fixed result still requires an explicit value.
-  Zero-return (`()`) functions and exactly-one-`nil` functions may simply fall
-  off the end. A function with only a flexible return tail may also fall off,
-  producing an empty run. A `return`
-  statement can only appear as the last statement of a block — see
-  [Statements](statements.md).
-  A `case` establishes this fact when every `when` arm terminates and either
-  those arms cover every variant of the statically known closed union or a
-  terminating `else` handles the remainder. Imported hidden variants prevent
-  consumer-side complete coverage by visible arms alone.
-* Declaring two top-level functions (or a function and a variable) with
-  the same name is a compile-time error (`duplicate declaration for f,
-  previous one at path/to/source.titan:N:C`). Folder modules use the same
-  rule across contributors, so the earlier declaration's full location is
-  unambiguous.
-
-In a zero-return (`()`) function — including any function written without
-a return annotation — a bare `return` returns no values. Expressions may also
-be written: they are evaluated from left to right for their effects, but the
-zero-result function exposes none of their values. Thus `return nil` still
-returns zero values in such a function. In an explicitly `: nil` function, a
-bare `return` or fallthrough supplies one `nil` through ordinary return
-adjustment. That convenience applies only to exactly one fixed `nil`; a
-multi-result function must supply every fixed position explicitly. For option-
-or `value`-returning functions, write `return nil` explicitly when that result
-is intended.
-
-## Exported and `local` functions
-
-By default a top-level function is **exported**: it becomes part of the
-module's interface, callable from other Titan modules that `import` this
-one and from Lua as a member of the module value returned by `require`.
-Prefixing the declaration with `local` makes the function private to the
-module:
-
-```titan
--- geometry.titan
-local function square(x: float): float    -- private helper
+local function square(x: float): float
     return x * x
 end
 
-function dist2(x: float, y: float): float -- exported
+function distance_squared(x: float, y: float): float
     return square(x) + square(y)
 end
-```
 
-A `local` function does not appear in the module's type, is invisible to
-importing Titan modules and to Lua (`require "geometry"` yields a module
-value with `dist2` but no `square`). This is an interface-visibility rule, not
-a different first-class representation: when a local function is materialized
-as an unadjusted value, it uses the same canonical source closure with native,
-strict Titan-generic, and coercive Lua entries. A later non-exact target-typed
-edge may conditionally realize a fresh
-[adjustment wrapper](closure-adjustment-wrappers.md), just as it may for an
-exported function. See [Modules](modules.md) for module interfaces and
-[Lua interoperability](lua-interop.md) for what exported functions look like
-from Lua.
-
-## Argument adjustment
-
-Positional Titan calls adjust to the callee's parameter shape in both
-directions. A function declared with *n* fixed parameters may be called with
-fewer than *n* arguments; the missing positions are filled with `nil` and then
-type-checked as if the caller had written those `nil` arguments explicitly.
-Surplus argument expressions are still evaluated from left to right, but a
-non-variadic Titan function ignores their values. A
-[variadic function](variadic-parameters.md) receives the surplus in its `...`
-run instead.
-
-This is why omitted parameters are "optional" only when their declared
-type can accept the synthesized `nil` (for example `T?`, `value`,
-`boolean`, or a nullable pointer type). Omitting a non-optional
-`integer`, `float`, `string`, array, map, record, union, Interface, or function
-parameter is a type error at the call site:
-
-```titan
-function fma(a: float, b: float, c: float): float
-    return a * b + c
+function is_even(n: integer): boolean
+    if n == 0 then return true end
+    return is_odd(n - 1)
 end
 
-function wrong(): float
-    return fma(2.0, 3.0)   -- compile-time error: c receives nil
+function is_odd(n: integer): boolean
+    if n == 0 then return false end
+    return is_even(n - 1)
 end
 ```
 
-```
-test.titan:6:15: type error: types in argument 3 of call to function 'fma' do not match, expected float but found nil
-```
+Key declaration rules:
 
-The same adjustment applies to concrete and Interface methods, record/union
-static functions
-(including `Rec.new` and generated union-variant constructors), imported
-Titan functions, anonymous functions, and calls through function-typed
-values. Foreign C functions keep C-style arity: Titan does not invent
-missing C arguments in a parenthesized positional call. A supported named
-direct-C call may omit a fixed parameter whose Titan-visible type accepts
-`nil`; see [Named arguments](named-arguments.md#matching-checking-and-omission).
+- **Visibility:** Top-level functions are exported by default—visible to
+  importing Titan modules and to Lua through `require`. Prefixing `local`
+  keeps a function private to its module.
+- **Parameters:** Every parameter requires an explicit `name: type`
+  annotation, and parameter names must be unique within the declaration.
+- **Return annotations:** Omitting `: Ret` means **zero** return values
+  (`: ()`), matching Lua—not a single `nil`. Write `: integer` for one result,
+  `: (integer, string)` for several, `: nil` for one explicit `nil`, or a
+  parenthesized [flexible tail](#flexible-return-tails) such as
+  `: (...: string)` or `: (boolean, ...: integer)`.
+- **Order independence:** The compiler collects all top-level declarations in
+  a module before checking bodies, so recursion and mutual recursion need no
+  forward declarations. Duplicate top-level names in the same module (or
+  across files of a folder module) are compile-time errors.
 
-**Titan callers are checked at compile time.** Once missing positions
-have been filled with `nil`, each argument used by the callee receives its
-admitted argument adjustment and is checked against the corresponding
-parameter type. Surplus expressions do not
-need to match a parameter, but they still run for their effects:
+Methods (`function Record:m(...)`) and static nominal functions
+(`function Record.f(...)`), as well as bodyless Interface method signatures,
+follow the same parameter and result grammar; see [Records](records.md),
+[Unions](unions.md), and [Interfaces](interfaces.md).
+
+## Positional argument adjustment
+
+Positional calls to Titan functions adjust in both directions:
+
+- **Missing arguments** are filled with `nil` and then type-checked against
+  the missing parameters. An optional parameter is simply one whose type
+  accepts `nil` (`T?`, `value`, `boolean`, or a nullable C pointer). Omitting
+  a required `integer`, `float`, `string`, container, nominal, or function
+  parameter is a compile-time error.
+- **Surplus arguments** are evaluated left to right for their side effects. A
+  non-variadic Titan function discards their values; a variadic function
+  collects them in `...`.
+
+Calls to Titan functions from Lua apply the same nil-padding and surplus rules
+at run time using Lua's dynamic conversions. Direct C calls written with
+parentheses enforce strict C arity without inventing missing arguments.
+
+### Argument reachability during a call
+
+Every argument—along with a method's receiver, a called function value, and
+every element passed through `...` or a spread—stays reachable for garbage
+collection until the call returns, even if the callee or a later argument
+clears the field or variable that originally held it:
 
 ```titan
-local effects: integer = 0
+local effects = 0
 
-local function record_effect(): string
+local function log_effect(): string
     effects = effects + 1
     return "ignored"
 end
 
-function ignored_extra(): float
-    return fma(2.0, 3.0, 1.0, record_effect())
-    -- record_effect() runs; fma receives only 2.0, 3.0, 1.0
+function format_tag(label: string, prefix: string?): string
+    return (prefix or "[") .. label .. "]"
 end
-```
 
-**Lua callers are adjusted and dynamically coerced at run time.** Lua code is
-not compiled by the Titan compiler, so the generated coercive entry of each
-exported function pads missing arguments with `nil`, then applies the shared
-target-directed boundary conversion. A fixed-parameter function ignores
-surplus Lua arguments; an input-variadic function collects them:
+function call_examples(): (string, string)
+    local short = format_tag("ok")                    -- prefix receives nil
+    local extra = format_tag("ok", "<", log_effect()) -- log_effect() runs; value discarded
+    return short, extra
+end
 
-```lua
--- Lua
-local m = require "test"
-print(m.fma(2.0, 3.0, 1.0))            --> 7.0
-print(pcall(m.fma, 2.0, 3.0))          --> false   test.titan:1:1: type error, expected float but found nil
-print(m.fma(2.0, 3.0, 1.0, 0.0))       --> 7.0    fourth argument ignored
-```
-
-The same finite-demand principle governs `return`, multiple assignment, and
-multiple declaration: surplus values are ignored, but an ordinary fixed-only
-producer that cannot fill a required position is still an error. A declared
-flexible result tail represents positions that may be absent; see the next
-section and [Flexible returns](flexible-returns.md).
-
-### Arguments stay reachable during the call
-
-An argument stays reachable until its call returns, wherever the caller read
-it from. The callee may clear the record field, module variable, or captured
-local that held the value, and the evaluation of a later argument may do the
-same: the parameter still holds a valid value. The same is true of a method's
-receiver, of a function value while it is being called, and of every value a
-variadic function receives through `...`, including the elements of a spread
-Array.
-
-```titan
 record Holder
     item: value
 end
 
 local function take(holder: Holder, item: value): value
-    holder.item = nil     -- removes the argument's only other home
-    return item           -- still the value the caller passed
+    holder.item = nil  -- clears the caller's field
+    return item        -- argument stays reachable during the call
 end
 
 function detach(holder: Holder): value
@@ -221,491 +111,374 @@ function detach(holder: Holder): value
 end
 ```
 
-The guarantee covers the call. To keep a value longer, store it in a local,
-a field, or a container.
-
-It sets no upper limit either. An argument can stay reachable after its call
-has returned, while the calling function goes on, even when its last other
-home is cleared in the meantime. Clearing a field right after passing its
-value does not make the value collectable, and a finalizer that depends on it
-does not run yet. Code that needs an object to be collected or finalized at a
-known point makes the call in a function of its own, or releases the object
-explicitly. An immediately called function literal is enough: what it held is
-released when it returns.
-
-```titan
-record Resource
-    name: string
-end
-
-function Resource:use(): boolean
-    return #self.name > 0
-end
-
-record Slot
-    resource: Resource?
-end
-
-function use_and_drop(slot: Slot): boolean
-    -- `slot.resource:use()` written directly in this body could keep the
-    -- Resource reachable until the function returns.
-    local used = (function (): boolean
-        return slot.resource:use()
-    end)()
-    slot.resource = nil    -- nothing in this function holds the Resource now
-    return used
-end
-```
+Arguments may remain reachable in the caller until the calling function itself
+returns. If code requires an object to become collectable immediately after a
+call, isolate the call in a helper function or an
+[immediately called lambda](closures.md#immediate-calls-as-expressions).
 
 ## Named calls
 
-A direct declaration can also be called with a brace-delimited named list:
+Direct calls to declarations that publish parameter names may use
+brace-delimited named arguments. The compiler resolves every label at compile
+time to its positional slot—there is no runtime argument table or name lookup:
 
 ```titan
-function clamp(x: integer, lo: integer, hi: integer): integer
-    if x < lo then return lo elseif x > hi then return hi else return x end
+record Point
+    x: float
+    y: float
 end
 
-local function use_clamp(): integer
-    local y = clamp { hi = 10, x = 17, lo = 0 }
-    return y
+function Point:translate(dx: float, dy: float)
+    self.x = self.x + dx
+    self.y = self.y + dy
+end
+
+union Message
+    write(string)
+    move(x: float, y: float)
+end
+
+function configure(label: string?, enabled: boolean, retries: integer?): string
+    local text = label or "default"
+    local suffix = enabled and "on" or "off"
+    return text .. ":" .. suffix .. ":" .. (retries or 0)
+end
+
+function named_call_examples(): (Point, Message, Message, string)
+    local point = Point { y = 3.0, x = 2.0 }
+    point:translate { dy = 1.5, dx = -0.5 }
+    local written = Message.write { value = "hello" }
+    local moved = Message.move { y = 20.0, x = 10.0 }
+    local status = configure { enabled = true } -- label and retries receive nil
+    return point, written, moved, status
 end
 ```
 
-Names are matched to formal positions, so they may be written in any order.
-An omitted formal receives the same synthesized `nil` and type check described
-above. Explicit expressions are nevertheless evaluated left to right as
-written, and each named item contributes exactly one value.
+### Braces and eligibility
 
-Named syntax is available for direct Titan functions, record/union functions
-(including generated constructors), and direct concrete or Interface methods, plus direct
-fixed-arity C functions whose
-prototypes publish complete
-parameter names. It is not available through a function value, anonymous
-function, bound-method value, or C function pointer, and it is rejected for
-variadic functions. Bare braces always select this form; write
-`consume({ x = 1 })` to pass one constructor positionally. See
-[Named arguments](named-arguments.md) for the full syntax, eligibility table,
-evaluation order, FFI metadata rules, and Lua boundary.
-Generated union-variant constructors publish their payload part names; an
-unnamed single payload uses `value`.
+Bare braces after a callee (`f { x = 1 }`, `f {}`, `obj:m { x = 1 }`) always
+select named-call syntax. To pass a brace constructor as a single positional
+argument, wrap it in call parentheses: `consume({ x = 1 })`,
+`consume({ 1, 2 })`, `consume({})`. Bare-string call sugar (`greet "world"`)
+remains positional.
+
+Named lists contain only `label = expression` entries separated by `,` or `;`,
+with an optional trailing separator. Mixing positional and named items,
+computed keys, or `...` is a syntax error. Labels accept raw identifier
+spellings, including Titan keywords such as `repeat` or `end`, which allows
+named calls to C functions and union constructors whose parameter names happen
+to be keywords.
+
+| Call target | Named syntax |
+| --- | --- |
+| Direct local, exported, or imported Titan function | Yes |
+| Record or union static function, including `Record { ... }` (`Record.new`) | Yes |
+| Generated union-variant constructor (unnamed single payload uses `value`) | Yes |
+| Direct concrete record or union method (`self` is not a named parameter) | Yes |
+| Direct Interface method (uses the Interface signature's parameter names) | Yes |
+| Direct fixed-arity C function with complete, unique prototype names (`f(void)` accepts `f{}`) | Yes |
+| Function value, anonymous function, bound method, or `value` call | No |
+| C function pointer or C allocation form (`foreign T.new`) | No |
+| Any input-variadic Titan or C function | No |
+
+A function with fixed parameters and a flexible *return* tail remains eligible
+for named calls. Parameter names belong to the declaration, not to structural
+function types, so storing a function in a variable makes it positional-only:
+
+```text
+local fn = configure
+-- compile error: named calls are not supported on function values
+fn { enabled = true }
+```
+
+### Matching, omission, and evaluation order
+
+Labels may appear in any order; unknown or duplicate labels are compile-time
+errors. Omitted parameters receive `nil` and must accept it (so omitted
+`boolean` becomes `false`, and an omitted C pointer in a named C call becomes
+`NULL`). `f {}` requests named matching and fills every parameter with `nil`.
+
+Evaluation order is strictly lexical: for a method, the receiver evaluates
+once first; then explicit named expressions evaluate once each, left to right
+as written, regardless of the formal parameter order. Each named expression
+contributes exactly one value (multi-return calls and spreads do not expand
+across named entries).
+
+Calls from Lua are always positional: in Lua, `module.f { x = 1 }` passes a
+single table as the first argument.
 
 ## Multiple return values
 
-A function may declare and return several values:
+A function may declare a parenthesized list of return types and return
+matching comma-separated expressions:
 
 ```titan
 function divmod(a: integer, b: integer): (integer, integer)
     return a // b, a % b
 end
+
+local function sum_three(a: integer, b: integer, c: integer): integer
+    return a + b + c
+end
+
+function multi_return_examples(): (integer, {integer})
+    local quotient, remainder = divmod(17, 5)     -- 3, 2
+    local first_only = (divmod(17, 5))            -- 3 (parentheses keep one result)
+    local combined = sum_three(10, divmod(17, 5)) -- 10 + 3 + 2 = 15
+    local list = { 10, divmod(17, 5) }            -- { 10, 3, 2 }
+    return quotient + remainder + first_only + combined, list
+end
 ```
 
-The `return` statement must fill every declared fixed result position —
-`returned 1 value(s) but function expected 2` remains the compile-time error
-for a deficit — and each delivered expression is checked (and implicitly
-coerced, where legal) against the corresponding declared type. Surplus
-expressions are evaluated and discarded. A declared flexible tail instead
-forms an open sink and receives every consistently typed trailing result that
-actually exists under the checker-recorded element adjustment.
+Only the **last expression** of a positional expression list expands—in
+multiple declarations and assignments, `return` statements, call argument
+lists, positional Array or exact `{integer: V}` Map constructors, and generic
+`for ... in` tuples. Earlier calls contribute only their first result, and
+scalar positions (computed Map entries, record fields, named arguments,
+conditions, operands) always request one value.
 
-### Consuming multiple values
+Finite consumers ignore surplus results and report a compile-time error if a
+fixed-only producer supplies too few. Wrapping any call in parentheses,
+`(f())`, adjusts it to exactly one value—truncating multiple results to the
+first, or adjusting a zero-return call to `nil`. Multiple returns cross the
+Lua boundary unchanged as ordinary Lua multiple results.
 
-A call to a multi-return function produces an *expression list*, and the
-contexts that consume one are the same as in Lua. A multiple declaration or
-assignment requests one value per name. Surplus producer values are ignored;
-if an ordinary fixed-only producer supplies too few, the checker reports
-`left-hand side expects N value(s) but the expression list produces M`:
+## Variadic parameters
+
+A function may accept a trailing homogeneous run of extra arguments by ending
+its parameter list with `...: T`:
 
 ```titan
-function use(): integer
-    local q, r = divmod(13, 2)       -- ok: q = 6, r = 1
-    local q2 = divmod(13, 2)         -- ok: remainder is ignored
-    local q3 = (divmod(13, 2))       -- ok: parentheses adjust the call to one value
-    return q + r + q2 + q3
+function sum(base: integer, ...: integer): integer
+    local total = base
+    for i = 1, #... do
+        total = total + ...[i]
+    end
+    return total
 end
 
-function bad()
-    local a, b, c = divmod(13, 2)    -- compile-time error: left-hand side expects 3 value(s)
-end                                  --                     but the expression list produces 2 value(s)
+function first_or_nil(...: integer): integer?
+    return (...) -- single-value adjustment: integer?
+end
+
+function unpack_pair(...: integer): (integer, integer?)
+    local first: integer, second: integer? = ... -- first raises if empty; second nil-fills
+    return first, second
+end
+
+function forward_with_offset(offset: integer, ...: integer): integer
+    return sum(offset, ...)
+end
+
+function as_floats(...: integer): {float}
+    return {...} -- converts each integer element to float
+end
 ```
 
-Note that `_` is not special syntax — it is a regular variable name that
-Lua and Titan programmers conventionally use for values they intend to
-discard.
+The `: T` annotation is mandatory on named functions, methods, and Interface
+signatures; an anonymous function may write bare `...` when its expected
+function type supplies the element type (see [Chapter 5](closures.md)).
 
-### Expansion in the last position
+Inside a variadic function, four operations read `...`:
 
-Only the **last position** of an expression list can expand. Its producer may
-be a multiple- or flexible-return call, the current function's bare `...`, or
-a [spread expression](spread-expressions.md). A call in any earlier position
-is scalar, while bare `...` and a spread are restricted to the tail. How far
-the final producer expands is chosen by the consumer. A finite consumer
-requests only its remaining slots and ignores producer surplus. An open sink
-— a variadic argument tail, a flexible return tail, or the final positional
-field of an Array or exact integer-keyed Map constructor — consumes the
-complete visible run. Every delivered position is type-checked and coerced
-individually. Expansion applies to:
+- **`#...`** returns the number of supplied variadic arguments as an
+  `integer`.
+- **`...[i]`** reads the 1-based `i`-th variadic argument with the plain
+  element type `T` (not `T?`). Because a variadic run is dense, an index `< 1`
+  or `> #...` raises a runtime error instead of returning `nil`.
+- **`(...)`** adjusts the run to a single scalar value of type `T?` (the first
+  argument, or `nil` when empty; does not double-wrap `value` or an already
+  optional `T?`).
+- **Trailing `...`** expands the run in the final position of a call,
+  `return`, declaration, assignment, positional Array/integer-Map constructor,
+  or generic-`for` tuple:
+  - Into a **fixed-arity** context (local list, fixed call, fixed `return`),
+    the compiler expands one `...[k]` read per remaining slot. Optional slots
+    nil-fill when the run is short; required slots raise.
+  - Into a **variadic Titan callee** (`sum(offset, ...)`), the runtime count
+    is forwarded. If the static prefix leaves fixed parameters unfilled, the
+    leading elements of `...` fill them first (nil-filling optional ones,
+    raising on missing required ones). The two variadic element types must be
+    equal or gradually consistent (`integer` and `value` forward both ways;
+    `integer` into `float` or record `R` into Interface `I` is rejected).
+  - Into **`{...}`**, the run constructs an Array `{T}` (or `{integer: V}` in
+    an exact integer-Map context), applying any element conversion required by
+    the target context (such as `integer` to `float` in `as_floats`).
 
-* the right-hand side of multiple declarations and assignments (above);
-* `return` expression lists;
-* call argument lists — a trailing call fills the remaining parameters:
+Restrictions and limits:
 
-  ```lua
-  function add3(a: integer, b: integer, c: integer): integer
-      return a + b + c
-  end
+- `...` is not first-class and cannot be captured by an inner lambda or used
+  as a standalone operand (`1 + ...` is rejected). A nested variadic lambda
+  accesses its own `...`. To keep the arguments around, copy them into an
+  Array with `{...}`.
+- `...: nil` and foreign C pointer element types are rejected. Use `...: T?`
+  or `...: value` when elements may be `nil`; `owned` C types are permitted.
+- A variadic run holds at most **200** elements; crossing 200 raises a runtime
+  error. Use an Array parameter `{T}` for unbounded collections.
 
-  function h(): integer
-      return add3(10, divmod(13, 2))   -- divmod fills parameters b and c
-  end
-  ```
+## Flexible return tails
 
-* positional Array and exact integer-keyed Map constructors —
-  `{ 10, divmod(13, 2) }` contributes `10, 6, 1`, while a non-final call
-  inside the constructor contributes only its first value;
-* generic `for ... in` iterator tuples — a helper returning
-  `(next, state, init, close)` can be used directly after `in`, and a
-  trailing `...` or spread can fill the remaining tuple slots.
+A function can return a runtime-sized trailing run of values by ending a
+parenthesized return list with `...: T` (for example, `(...: string)` or
+`(boolean, ...: integer)`). The parentheses are mandatory, the tail must be
+last, and the element type obeys the same rules and 200-element limit as
+variadic parameters. A function with only a flexible tail may fall off the end
+or use bare `return` to produce zero values; a fixed prefix keeps normal
+return checking.
 
-Computed Map and record fields, named arguments, conditions, and other scalar
-positions request one value. For example, `[k] = divmod(13, 2)` keeps only the
-first.
-Calls with a flexible tail project `T?` into finite positions and preserve the
-whole run only in an open sink; see [Flexible returns](flexible-returns.md).
-Array, integer-keyed Map, and ranged-vararg producers are detailed under
-[Spread expressions](spread-expressions.md).
+How callers observe a flexible return depends on the context:
 
-### Adjusting to one value
-
-Wrapping a call in parentheses truncates it to exactly one value, again
-as in Lua. `(divmod(a, b))` is a single `integer` and can go anywhere a
-single value is expected. The related exact input-vararg form `(...)` also
-contributes one value—the first argument, with intrinsic type `T?` so absence
-is represented by nil; see
-[Variadic parameters](variadic-parameters.md#explicit-one-value-adjustment).
+- **Finite consumers** (declarations, assignments, fixed calls and returns,
+  generic-`for` tuples, scalar positions) project every requested position
+  past the fixed prefix as `T?` (or `value` for `...: value`). Assigning a
+  projected `T?` to a required `T` inserts the usual checked nil unwrap.
+- **Open sinks** consume every value that actually exists as raw `T` (absent
+  values add nothing). The three open sinks are:
+  1. the trailing argument run of a variadic Titan call;
+  2. the flexible tail of a `return` statement; and
+  3. the final positional entry of an Array or exact `{integer: V}` Map
+     constructor.
 
 ```titan
-function just_div(a: integer, b: integer): integer
-    return (divmod(a, b))    -- ok: adjusted to one value
+function measurements(short: boolean): (...: integer)
+    if short then
+        return 10
+    end
+    return 10, 20, 30
 end
 
-function first_only(a: integer, b: integer): integer
-    return divmod(a, b)      -- quotient delivered; remainder ignored
+local function count_all(...: integer): integer
+    return #...
+end
+
+function inspect_measurements(short: boolean): (integer?, {integer}, integer)
+    local first?, second? = measurements(short)       -- finite projections: integer?
+    local collected = { 0, measurements(short) }      -- open sink: preserves actual run
+    local total_count = count_all(measurements(short)) -- open sink
+    return second or first, collected, total_count
+end
+
+function call_dynamic(callback: value): (integer, {integer})
+    local one: integer = callback()         -- contextual call: function (): integer
+    local many: {integer} = { callback() }  -- contextual call: function (): (...: integer)
+    return one, many
 end
 ```
 
-Multiple return values cross the Lua boundary unchanged: Lua code
-calling `divmod` receives two values, as from any Lua function (see
-[Lua interoperability](lua-interop.md)).
+Storing a flexible function in a narrower static function slot (such as
+`function (): (integer)`) hides its extra results even inside an open sink.
 
-## Functions as values
+When calling a `value` directly (`callback()` above), Titan synthesizes a
+temporary positional function type from the supplied arguments and the
+consumer's result demand—using an expected type where present, `value` for an
+unannotated finite slot, and `(...: T)` for an open sink—then checks
+callability and types at run time. Finite calls through function values or
+`value` are bounded by Lua's 250-result VM limit.
 
-Titan functions are first-class values. A **function name** used where a
-value is expected yields a function value you can store, pass, return, and
-call indirectly. The name can be a top-level function, a `local` function,
-an imported module's function (`mod.f`), a record function (`Rec.new` or
-`Rec.make`), or a union constructor/function (`Message.write`):
+## Spread expressions
+
+A spread expression expands an Array, an exact `{integer: T}` Map, or a
+subrange of the current function's `...` into the final position of a
+positional expression list:
+
+```text
+...subject
+...subject[, last]
+...subject[first,]
+...subject[first, last]
+
+...[, last]
+...[first,]
+...[first, last]
+```
+
+Container subjects may be `{T}`, `const { T }`, `const? { T }`,
+`{integer: T}`, or any of their Option types (auto-unwrapped once with a
+runtime nil check). Other Map key types, `value`, and C arrays require an
+explicit cast to an accepted container type first.
+
+Ranges are 1-based, closed, and inclusive: an omitted lower bound defaults to
+`1`, an omitted upper bound defaults to the subject's length, and a range with
+`first > last` is empty. Evaluation proceeds left to right—subject once, lower
+bound once, upper bound (or length) once, then elements in increasing order—even
+if the consumer requests zero elements. Map spreads use ordinary `__len` and
+`__index` semantics.
 
 ```titan
-function double(x: integer): integer
-    return x * 2
+function first_two(items: {integer}): (integer, integer?)
+    local first: integer, second: integer? = ...items
+    return first, second
 end
 
-function apply(f: function (integer): (integer), x: integer): integer
-    return f(x)                            -- call through a function value
+function middle(words: {string}): {string}
+    return { ...words[2, #words - 1] }
 end
 
-function use(): integer
-    local f: function (integer): (integer) = double -- store a function in a variable
-    return apply(f, 21)                    -- pass it as an argument  --> 42
-end
-```
-
-A **function type** is written `function (P1, …, Pn): R` for one result,
-`function (P1, …, Pn): (R1, …, Rm)` for several, and `function (): R` for no
-parameters. `function (P1, …, Pn)` or an explicit `: ()` returns zero values.
-Parameter parentheses are mandatory. An input tail uses `...: P`; a flexible
-result tail uses `(...: R)` or `(R1, ...: R)`.
-
-Higher-order types nest with the same syntax:
-`function (function (integer): integer, integer): integer`. Parenthesize the
-complete type before an outer `?` to make the function itself optional.
-
-Function values may be assigned into function-typed locals, parameters and
-record fields, stored in arrays (`{function (integer): (integer)}`) and maps,
-returned, and passed across the Lua boundary in both directions. (Indexing
-an array or map of functions yields an option `T?`; calling it directly,
-`fns[i](x)`, auto-unwraps with a runtime nil-check.)
-
-Parameter names are not part of a function value's type. Named-call syntax is
-therefore available only while the callee is reached as a direct declaration;
-storing the same function in a variable keeps it callable positionally but
-does not carry its formal names with the value.
-
-**Calling a function value** still has three run-time dispatch branches, but a
-statically known non-exact Function-to-Function edge may first realize a target
-wrapper:
-
-1. A Titan value whose exact function tag matches the call's static type goes
-   straight to its native entry with no Lua-stack round trip. For an ordinary
-   source closure this is the declaration body; for a realized adjustment
-   wrapper it is the checker-frozen target adapter.
-2. A Titan-branded value whose tag differs uses its strict Titan-generic entry.
-   An ordinary closure uses its declaration entry; a realized wrapper uses its
-   consumer-local target relay and then its adapter. Arguments and observed
-   results follow strict gradual guards and the static arity/tail demand;
-   ordinary numeric, Option, C, or Interface-wrapper coercions are not lifted
-   through the function type.
-3. A genuine Lua function, C function, or `__call` object uses the ordinary
-   Lua call path. Results entering Titan use the shared dynamic coercion, and
-   attempting to call a non-callable value raises a normal Lua error.
-
-A non-exact static callable adjustment evaluates its operand once. When the
-value is an exact branded closure of the source type and has one free upvalue,
-it creates a fresh closure tagged with the target type; otherwise the value is
-unchanged and branches 2 or 3 provide the generic fallback. A dynamic
-`value -> Function` projection has no known source Function type and never
-creates this wrapper. See
-[Closure adjustment wrappers](closure-adjustment-wrappers.md) for the complete
-conditional rule.
-
-Lua calls a source closure's coercive entry. A realized wrapper deliberately
-copies `source->f`, preserving whatever Lua surface the immediate source value
-already carries—ultimately the original declaration's arity, dynamic
-conversions, and results—rather than synthesizing a target Lua contract. The dispatch branches are summarized in the type system's
-[normative boundary matrix](types.md#normative-boundary-matrix). Passing a Lua
-closure to a function-typed parameter remains the normal way for Titan to
-**call Lua code**; see [Lua interoperability](lua-interop.md).
-
-**Exact source identity is stable.** Each referenced function has one canonical
-source value, so `m.f == m.f` and an in-module reference equals the exported
-module entry seen from Lua. Lambdas and bound-method expressions retain their
-separately documented fresh-evaluation rules.
-
-That unadjusted source value is one Lua `CClosure`. Its ordinary callable entry
-is the coercive genuine-Lua entry. Private upvalues 0 through 3 retain,
-respectively, the owning module, exact function-type tag, native entry pointer,
-and an opaque Titan-closure brand. Lambda captures or a bound receiver begin at
-upvalue 4. The final upvalue is a light C function for the declaration's strict
-Titan-generic entry. When that strict entry runs, the caller also supplies the
-hidden original closure, and the native body uses it as `_fn`, preserving all
-captures and bound receivers.
-
-A realized non-exact adjustment is the deliberate identity exception. It is a
-fresh target-tagged `CClosure`, unequal to its source and to a wrapper from a
-separate evaluation. Wrapper chains get one fresh identity per realized edge;
-Titan does not cache, intern, flatten, or equality-unwrap them. An ineligible
-fallback allocates nothing and preserves the operand identity.
-
-Function-type tags are exact identities, not compatibility tokens. After an
-exact-tag mismatch, a generic caller recognizes a Titan closure by the fixed
-opaque 64-bit brand in upvalue 3. An unrelated C closure would need both the
-minimum Titan upvalue count and that exact sentinel in that exact slot, so
-accidental recognition is astronomically unlikely. The brand selects a strict
-trailer only; it never treats two type tags as equal. Debug/C extraction or
-mutation of the closure's private upvalues is programmer-responsible and
-outside Titan's supported trust boundary.
-
-**`value` and function types convert both ways.** A function value flows
-into a `value` implicitly, and a `value` flows into a function type
-implicitly as well — the check that it is callable is deferred to the
-moment of the call (so a `value` holding a non-callable raises only when
-you try to call it). A `value` may also be called directly without first
-storing it in a function-typed slot: Titan derives a temporary positional
-function type from the arguments and the surrounding result demand. These
-dynamic Function projections preserve the boxed value rather than realizing
-an adjustment wrapper. See
-[Contextual calls through `value`](flexible-returns.md#contextual-calls-through-value).
-
-**Callable adjustment is directional.** An actual function may ignore
-inputs that callers through the expected slot are allowed to supply, and the
-expected slot may hide surplus results that the actual function produces. An
-additional actual input must accept a missing nil. If the actual has no
-corresponding fixed or flexible result, an expected result may likewise be
-nil-filled only when its type accepts a missing nil. Input and output tails
-participate in the same directional rule. Exact identity remains stricter and
-allocates no wrapper. The full rules and examples are in
-[Flexible returns](flexible-returns.md#callable-adjustment-is-directional) and
-[Closure adjustment wrappers](closure-adjustment-wrappers.md).
-
-This directional shape operation is not subtyping and does not lift a direct
-component conversion. For example, neither `function (): (integer)` to `function (): (float)`
-nor `function (): (integer)` to `function (): (integer?)` is accepted. A `value` hole or
-consistent compound component is enforced by the frozen adapter when a wrapper
-is realized and by the strict generic path on fallback.
-
-**Anonymous functions are values too.** A `function (...) ... end`
-expression evaluates to a function value of the same kind, and it can
-capture the enclosing function's locals — see
-[anonymous functions and closures](closures.md). A concrete or Interface
-instance method named
-but not called, `obj:method`, is also a value: a *bound method reference*,
-the method's type with the implicit `self` bound to the receiver (see
-[bound method references](closures.md#bound-method-references)).
-
-What is **still not** a Titan function value: a foreign/FFI function — it can
-be called by name or converted to a compatible C function pointer, but not
-stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
-*to* a function name (`double = bad`) also remains an error.
-
-Lua 5.5 permits at most 255 upvalues in a C closure. The four fixed header
-slots and the strict-entry trailer leave 250 slots for captures or a bound
-receiver. Titan diagnoses the first source closure that would exceed that
-budget instead of emitting an invalid C closure. Adjustment wrappers need one
-additional traced source-closure link, but Titan does not lower the source
-capture limit: an already-full closure (or a wrapper chain that becomes full)
-uses the generic fallback at the next edge. The fixed brand and strict trailer
-are part of ABI 2 and the matched Lua runtime is 5.5.1. Adjustment wrappers change no fixed
-slot or native signature and require no further ABI bump. A prior-ABI provider
-is rejected before function values can be exchanged.
-
-## Recursion and declaration order
-
-Before checking function bodies, the compiler has collected the declarations
-of the whole module. A function body therefore sees *all* top-level
-declarations of its module — functions, methods, record/union functions,
-records, unions, Interfaces,
-aliases, variables, and imports — regardless of their written order. Callable
-signatures are also order-independent: they may use a later nominal type,
-alias, or import, and a method or nominal function may be written before its
-owner. Recursion needs no forward declarations, and mutual recursion just
-works:
-
-```titan
-function is_even(n: integer): boolean
-    if n == 0 then return true else return is_odd(n - 1) end
+function prepend_zero(sink: function (...: integer): (), values: {integer}?)
+    sink(0, ...values)
 end
 
-function is_odd(n: integer): boolean
-    if n == 0 then return false else return is_even(n - 1) end
+function forward_tail(...: string): (...: string)
+    return ...[2,]
 end
 ```
 
-The one visibility frontier is a top-level *module-variable declaration*: it
-sees only ordinary Titan imports and other module variables written earlier, while seeing all
-record/union owners, Interfaces, aliases, and callable declarations wherever
-they appear. Visibility does not permit an initializer to reference its own
-module's functions or to call its methods. Calls to visible imported members
-and foreign functions are allowed. See the
-[initializer dependency rule](modules.md#initializer-dependencies) and
-[declaration order and visibility](modules.md#declaration-order-and-visibility).
+Spread rules mirror flexible returns:
 
-## Methods and nominal functions
-
-Records and unions may declare methods
-(`function Point:move(dx: float, dy: float)`), and methods may be `local` to
-the defining module. They may also declare owner functions
-(`function Point.polar(r: float, t: float): Point` or
-`function Message.default(): Message`), likewise with optional `local`
-visibility. These functions have no implicit `self`; `Point.new` and each
-union-variant constructor are synthesized by the parser.
-
-Methods and nominal functions are top-level declarations like the functions in
-this chapter and follow the same rules for parameters, return values, adjustment
-(method diagnostics read `method 'test.Point:move' called with ...`) and
-multiple returns. Either kind may precede the written owner declaration. What
-differs — implicit `self`, nominal name resolution, and member visibility — is
-described in [Records](records.md) and [Unions](unions.md).
-
-Interface declarations contain method *signatures*, not implementations:
-`function read(n: integer): string` has neither a receiver colon nor a body.
-Calling `x:read(...)` where `x` has Interface type uses the Interface's names
-and callable shape, while its wrapper dispatches to the concrete record or
-union method selected when the wrapper was constructed. Taking `x:read`
-produces the ordinary bound method value. Structural satisfaction, exact and
-adjusted method entries, and the prohibition on lifting wrapper coercions
-through callable components are specified in
-[Interfaces](interfaces.md#structural-satisfaction-at-the-coercion-site).
+- **Finite consumers** observe each requested position as `T?` (optional slots
+  receive `nil`; required slots raise if absent).
+- **Open sinks** preserve the selected runtime length as `T`. A hole in an
+  Array or Map raises when `T` excludes `nil`, or delivers `nil` when `T`
+  admits it (`value`, `U?`). An out-of-range variadic slice always raises.
+- **Placement and disambiguation:** Only the last positional item may expand
+  (`sink(...values, 0)` is a compile-time error). Parentheses adjust a spread
+  to one optional value (`(...xs)`, `(...xs[2, 4])`, or `(...[2, 4])`).
+  Because `...` followed by an expression starts a collection spread,
+  `... -1` attempts to spread `-1`; write `(...) - 1` to subtract from the
+  first variadic argument.
+- **C calls and limits:** A non-variadic C call can consume a spread through
+  its fixed parameters, but a Titan spread never supplies C `...` varargs.
+  Oversized spreads are checked against the destination's remaining capacity
+  (200 for variadic/flexible tails; container limit for Arrays/Maps) before
+  any elements are read or written. At most 100 explicit expressions may
+  precede a trailing spread in a call, `return`, assignment, declaration, or
+  `for ... in` tuple.
 
 ## Standalone programs: `main`
 
-A Titan module is normally compiled into a paired shared/static provider. Lua
-loads the DSO through the module's logical entry, while another Titan module
-may select either provider form. A module that declares a function with this
-exact signature instead marks the program entry point:
-
-```text
-function main(args: {string}): integer
-```
-
-When `titanc` is given a set of modules and exactly one of them has such
-a `main`, it produces a standalone executable instead of a library provider
-pair. A flat module's executable is named after the module (dots in the
-module name become directory separators). A
-[folder module](folder-modules.md#generated-artifacts) adds `__main` to that
-path so the executable cannot collide with the source directory. Both forms
-statically embed all the requested modules plus every imported module selected
-from source or a static provider. Imports selected from compiled `.so` files
-are loaded dynamically at startup, from the run-time
-[Titan path](modules.md#the-titan-path); both compiled forms recover the same
-public interface metadata.
-
-The executable initially places only its main module in `package.preload`.
-Requiring it performs the normal Titan import initialization before `main`
-runs. After each generated module initializes successfully, it publishes its
-own loader under its logical name in that same preload table. Consequently all
-initialized imports—including private dependencies from a static provider—are
-available to Lua's ordinary `require` and to
-[`titan.lua.require`](standard-library-lua.md#loading-modules), without a
-separate provider DSO when they are linked statically. Publishing is a
-consequence of successful initialization, not a second initialization step. A
-linked module outside the initialized import closure and an unused archive
-sibling publish no preload entry. See
-[Modules](modules.md) for the compilation model.
-
-```sh
-./titanc answer        # answer.titan declares main -> executable ./answer
-./titanc pkg.foo pkg.bar # neither has main -> one pkg.so/pkg.a provider pair
-```
-
-Library roots must share at least one dotted component; use separate compiler
-invocations for unrelated providers. Executable roots need no common prefix,
-because program mode keeps its existing one-executable link. See
-[Multi-module libraries](multi-module-libraries.md).
-
-The rules:
-
-* **The resolved signature must match exactly**: one fixed parameter of type
-  `{string}`, no input-variadic tail, one fixed return of type `integer`, and no
-  flexible return tail. Transparent aliases of either type are accepted. The
-  parameter must be the mutable Array: `const { string }` and
-  `const? { string }` are different types. A top-level function named `main`
-  with any other signature is an ordinary function, and the module compiles to
-  a shared library as usual.
-* **Only one `main` per program.** If more than one module given on the
-  `titanc` command line has a qualifying `main`, compilation fails with
-  `<module>: multiple main functions found (already declared in
-  <other module>)`.
-* `main` should not be declared `local`: a `local main` still selects
-  executable mode, but the generated program starts by requiring the
-  module and looking up `main` as a member of the module value, where a
-  `local` function never appears, so the program fails at startup with
-  `attempt to call a nil value (field 'main')`.
-
-At run time, `args` holds only the user-supplied command-line arguments:
-`args[1]` through the last argument. Index 0 is absent, so `args[0]` is nil;
-the executable's own name is not stored in the Array. The standalone bootstrap
-constructs this canonical Array with the same fixed `{string}` Lua-writer
-policy as an ordinary Titan `{string}` constructor. The integer returned by
-`main` becomes the process exit status:
+A module compiles into a standalone executable (rather than a library) when it
+exports a top-level function with this exact signature:
 
 ```titan
--- answer.titan
+local io = import "io"
+
 function main(args: {string}): integer
-    return 42
+    if #args == 0 then
+        io.print("no arguments")
+        return 0
+    end
+    for i = 1, #args do
+        io.print(i .. ": " .. args[i])
+    end
+    return 0
 end
 ```
 
-```sh
-$ ./titanc answer
-$ ./answer; echo $?
-42
-```
+- **Exact signature:** One mutable `{string}` parameter (transparent aliases
+  are accepted, while `const { string }` and `const? { string }` are distinct
+  types), no variadic input tail, one `integer` return, and no flexible return
+  tail. Any other `main` signature compiles as an ordinary library function.
+- **Exported and unique:** Declare `main` without `local` (a `local main` is
+  not exposed on the module and fails at startup), and include at most one
+  qualifying `main` per `titanc` invocation.
+- **Arguments and exit status:** `args[1]` through `args[#args]` hold the
+  user-supplied command-line arguments (`args[0]` is `nil`; the executable
+  name is omitted). The returned `integer` becomes the process exit code. An
+  uncaught error prints `<program>: <message>` and a stack traceback to
+  standard error and exits nonzero.
 
-If a run-time error escapes `main` (or the module fails to load), the
-program prints `<program name>: <error message>` to standard error and
-exits with a failure status, without returning from `main`. The report
-also includes `stack traceback:` followed by tab-indented traceback
-frames through the Titan `main` frame; the synthetic Lua bootstrap is not
-shown. For what can raise run-time errors and how to handle them, see
-[Error handling](error-handling.md).
+Flat modules produce an executable named after the module (`titanc -o out app`
+builds `out/app`); folder modules append `__main` (`out/pkg/app__main`). For
+`--exe`, static vs shared dependencies, and multi-module library bundling, see
+[Modules and Program Structure](modules.md) and
+[Appendix B: The `titanc` Toolchain](toolchain.md).

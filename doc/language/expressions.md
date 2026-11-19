@@ -1,616 +1,472 @@
-# Expressions
+# Lexical Structure, Values, and Expressions
 
-Titan's expressions look like Lua's: the same literals, the same
-operators with the same precedences, the same `and`/`or`/`not`, the same
-table-constructor syntax. The differences are the ones static typing
-demands — every expression has a type, a few operators are restricted to
-the types where they make sense, and Titan adds the related `as` cast and
-`is` type-test operators. Where this chapter says an operation "matches
-Lua", it means bit-for-bit (upstream PR #216): reproducing Lua's
-arithmetic exactly, even where C's operators disagree, is a stated
-design principle (see [the design philosophy](philosophy.md)).
+Titan's lexical rules and expression operators match Lua closely: the same
+literals, the same operator precedences, the same short-circuiting `and` and
+`or`, and bit-for-bit identical arithmetic. Static typing restricts each
+operator to the types it meaningfully supports and adds explicit `as` casts
+and `is` type tests.
 
-That guarantee describes Titan operands. When at least one operand is a
-supported C scalar, pointer, or array imported through `foreign import`, the
-expression may instead enter
-[C operator mode](c-ffi-expressions.md#c-operator-mode): target C promotions
-and direct C behavior apply, and unsupported combinations are compile-time
-errors rather than Titan fallbacks.
+When an operand is a C value imported through `foreign import`, the expression
+follows C promotion and operator rules instead; see
+[Calling C](ffi.md).
 
-## Literals
+## Lexical structure
 
-### nil and booleans
+Comments follow Lua's two forms: `--` runs to the end of the line, and long
+comments `--[[ ... ]]` or `--[=[ ... ]=]` (with any matching count of `=`
+signs) span multiple lines.
 
-`nil` is the sole value of type `nil`; `true` and `false` are the
-`boolean` literals. As in Lua, `nil` and `false` are the only falsy
-values — `0`, `0.0` and `""` are all true in conditions.
+Identifiers match ASCII `[A-Za-z_][A-Za-z0-9_]*`. Titan reserves 38 keywords:
+
+```text
+and      as       break    case     catch    const    defer    do
+else     elseif   end      false    finally  for      foreign  function
+goto     if       import   in       interface is      local    nil
+not      or       owned    raise    record   repeat   return   then
+true     type     union    until    when     while
+```
+
+The five primitive type names—`boolean`, `integer`, `float`, `string`, and
+`value`—are contextual identifiers, not reserved keywords. They name types in
+type annotations and remain usable as ordinary variable, parameter, or field
+names.
+
+> **Reserved words as member names:** Local variables, parameters, `import`
+> bindings, `for` binders, `case` local bindings, and bare expression names
+> must not be reserved words. Top-level module declarations, record fields,
+> union variants and payload parts, Interface members, dot and colon selectors
+> (`entry.type`, `stream:end()`), named-call keys, and record constructor
+> fields accept any ASCII identifier, including reserved words. For example,
+> `response.type` and `range.end` are valid, whereas `local type = "http"` is
+> a syntax error.
+
+The complete lexical and syntactic grammar appears in
+[Appendix C](grammar.md).
+
+## Literals and basic types
+
+Titan's six basic static types correspond directly to Lua's primitive values
+plus `value` for dynamically typed slots:
+
+| Type | Values | Notes |
+| --- | --- | --- |
+| `nil` | `nil` | Sole value of its type; represents absence |
+| `boolean` | `true`, `false` | Only `nil` and `false` are falsy |
+| `integer` | 64-bit signed integers | Exact two's-complement arithmetic |
+| `float` | IEEE-754 64-bit floats | Distinct static type from `integer` |
+| `string` | Immutable byte sequences | Byte-indexed; may contain embedded NULs |
+| `value` | Any Lua-representable value | Checked dynamic slot; includes `nil` |
+
+As in Lua, `nil` and `false` are the only falsy values; `0`, `0.0`, and `""`
+are all truthy.
 
 ### Numbers
 
-Numeric literals follow Lua's syntax, including hexadecimal integers and
-hexadecimal floats. A literal is an `integer` if its value is an integer
-in Lua's sense, and a `float` otherwise — a decimal point or an exponent
-makes it a float:
+Numeric literals follow Lua's decimal and hexadecimal forms. A literal without
+a decimal point or exponent is an `integer`; a decimal point or exponent makes
+it a `float`:
 
 ```titan
 function numbers(): float
-    local a: integer = 0x1abcdef    -- hexadecimal integer
-    local b: float = 3.0
-    local c: float = .5             -- digits optional on either side: .5, 4.
-    local d: float = 1.0e-1         -- decimal exponent
-    local e: float = 0x1ap2         -- hex float: 26 * 2^2 = 104.0
-    return b + c + d + e
+    local mask = 0x1abcdef    -- hexadecimal integer
+    local whole = 3.0         -- decimal float
+    local half = .5           -- digits optional on either side: .5, 4.
+    local tenth = 1.0e-1      -- decimal exponent
+    local scaled = 0x1ap2     -- hexadecimal float: 26 * 2^2 = 104.0
+    return (mask & 0xff) + whole + half + tenth + scaled
 end
 ```
 
-`10` is always an `integer`; it becomes a float only through implicit
-coercion where the context expects one (see [the type system](types.md)).
-A numeral must end where the digits end: like Lua, Titan rejects
-`1337require`, `1e2e3` and `1.2.3.4`, with the syntax error
-`Malformed number.`
+`10` has type `integer`; it converts to `float` implicitly only where a
+`float` is expected (see [Type Aliases, Options, and Dynamic `value`](types.md)).
+A numeric literal must end cleanly at a non-alphanumeric boundary:
+`1337require`, `1e2e3`, and `1.2.3.4` are syntax errors.
 
 ### Strings
 
-Short string literals are delimited by `"` or `'`; either kind may
-contain the other quote freely. A literal newline inside a short string
-is a syntax error (use an escape or a long string). The full escape list:
+Short string literals are enclosed in `"` or `'`; either quote may appear
+unescaped inside the other. A raw line break inside a short string is a syntax
+error. Supported escape sequences are:
 
 | Escape | Meaning |
 | --- | --- |
-| `\a` `\b` `\f` `\n` `\r` `\t` `\v` | bell, backspace, form feed, newline, carriage return, tab, vertical tab |
-| `\\` `\"` `\'` | backslash, double quote, single quote |
-| `\` followed by a real line break | a newline in the string |
-| `\ddd` | the byte with decimal value `ddd` — up to three digits, value < 256, taken greedily: `"\12340"` is `{` followed by `40` |
-| `\xXX` | the byte with hexadecimal value `XX` (exactly two digits) |
-| `\u{XXX}` | the UTF-8 encoding of code point `XXX` (one or more hex digits, at most `10FFFF`) |
-| `\z` | skips the following run of whitespace, including line breaks |
+| `\a` `\b` `\f` `\n` `\r` `\t` `\v` | Bell, backspace, form feed, newline, carriage return, tab, vertical tab |
+| `\\` `\"` `\'` | Backslash, double quote, single quote |
+| `\` followed by a line break | A newline character |
+| `\ddd` | Byte with decimal value `ddd` (up to three digits, `< 256`, greedy: `"\12340"` is `"{"` then `"40"`) |
+| `\xXX` | Byte with hexadecimal value `XX` (exactly two hex digits) |
+| `\u{XXX}` | UTF-8 bytes for Unicode code point `XXX` (one or more hex digits, at most `0x10FFFF`) |
+| `\z` | Skips the following run of whitespace, including line breaks |
 
-Any malformed escape is a compile-time syntax error: a decimal escape of
-256 or more (`Decimal escape too large`), a `\x` without exactly two hex
-digits, a `\u` naming a code point above `0x10FFFF` (Titan enforces the
-real Unicode range, where Lua 5.5 accepts up to `0x7FFFFFFF`), or an
-unknown escape character (`Invalid escape character in string.`).
+Malformed escapes—decimal values of 256 or greater, `\x` without two hex
+digits, `\u` above `0x10FFFF`, or unknown escape letters—are compile-time
+syntax errors.
 
-Long strings work exactly as in Lua: `[[ ... ]]`, or `[=[ ... ]=]` with
-any matching count of `=` signs to allow `]]` inside. No escape
-processing happens inside a long string, and one line break immediately
-after the opening bracket is skipped.
+Long strings use `[[ ... ]]` or `[=[ ... ]=]` with any matching number of `=`
+signs. Long strings perform no escape processing and discard one line break
+immediately following the opening bracket:
 
 ```titan
 function escapes(): string
-    local s1: string = "col1\tcol2\n"
-    local s2: string = "\65\66\67" .. "\x41"   -- "ABCA"
-    local s3: string = "\u{2603}"              -- a snowman, three UTF-8 bytes
-    local s4: string = "one \z
-                        line"                  -- \z eats the break and indent
-    local s5: string = [[verbatim: no \escapes, "quotes" fine]]
-    return s1 .. s2 .. s3 .. s4 .. s5
+    local tabbed = "col1\tcol2\n"
+    local bytes = "\65\66\67" .. "\x41"        -- "ABCA"
+    local snowman = "\u{2603}"                 -- three UTF-8 bytes
+    local joined = "one \z
+                    line"                      -- \z skips break and spaces
+    local raw = [[verbatim: no \escapes, "quotes" fine]]
+    return tabbed .. bytes .. snowman .. joined .. raw
 end
 ```
 
 ## Operators and precedence
 
-Titan implements Lua's operator set with Lua's precedences and
-associativities, plus the cast and type-test operators `as` and `is`, which
-form one non-chaining level between multiplication and unary operators:
+Operators follow Lua's precedences and associativities, with `as` and `is`
+occupying one non-chaining level between multiplication and unary operators:
 
 | Precedence | Operators | Associativity |
 | --- | --- | --- |
-| 1 (lowest) | `or` | left |
-| 2 | `and` | left |
-| 3 | `<` `>` `<=` `>=` `~=` `==` | left |
-| 4 | `\|` | left |
-| 5 | `~` (binary, exclusive or) | left |
-| 6 | `&` | left |
-| 7 | `<<` `>>` | left |
-| 8 | `..` | right |
-| 9 | `+` `-` | left |
-| 10 | `*` `/` `//` `%` | left |
-| 11 | `as` `is` | postfix on one unary expression; does not chain |
-| 12 | `not` `#` `-` `~` (unary) | prefix |
-| 13 (highest) | `^` | right |
+| 1 (lowest) | `or` | Left |
+| 2 | `and` | Left |
+| 3 | `<` `>` `<=` `>=` `~=` `==` | Left |
+| 4 | `\|` | Left |
+| 5 | `~` (binary XOR) | Left |
+| 6 | `&` | Left |
+| 7 | `<<` `>>` | Left |
+| 8 | `..` | Right |
+| 9 | `+` `-` | Left |
+| 10 | `*` `/` `//` `%` | Left |
+| 11 | `as` `is` | Postfix on one unary expression; does not chain |
+| 12 | `not` `#` `-` `~` (unary) | Prefix |
+| 13 (highest) | `^` | Right |
 
-As in Lua, `^` binds tighter than the unary operators on its *left*,
-its right operand may itself start with unary operators, and it
-associates to the right: `-2 ^ 2 ^ 3` means `-(2 ^ (2 ^ 3))`, that is
-`-256.0`, and `2 ^ -1` is legal (`0.5`).
+Exponentiation `^` binds tighter than unary operators on its left, permits
+unary operators on its right, and associates right-to-left: `-2 ^ 2 ^ 3`
+parses as `-(2 ^ (2 ^ 3))` (`-256.0`), and `2 ^ -1` parses as `2 ^ (-1)`
+(`0.5`).
 
-`as` and `is` apply to one unary expression on their left and consume a full
-type, so `2 + v is integer` means `2 + (v is integer)`, while
-`-v is integer` means `(-v) is integer`. They cannot be chained directly —
-`v as value is float` is a syntax error — but a parenthesized cast or test is
-an ordinary expression, so `(x as value) is float` parses (see
-[Explicit casts and type tests](#explicit-casts-and-type-tests-as-and-is)).
-Because exponentiation's right operand recurses through this level,
-`v ^ 2 as integer` means `v ^ (2 as integer)`; a cast/test cannot itself
-become the left operand of `^` without parentheses. To cast or test the whole
-power, write `(v ^ 2) as integer` or `(v ^ 2) is integer`. Conversely,
-`v is integer ^ 2` is a syntax error because a completed type cannot be
-followed directly by `^`.
+`as` and `is` sit below unary operators and `^`, and above `*`, `/`, `//`,
+and `%`; they attach to one expression on their left and parse a full type on
+their right:
 
-Parentheses group, as usual, with two adjustment forms: parentheses around a
-*call* truncate it to its first value (see
-[Calls in expressions](#calls-in-expressions)), while the exact variadic form
-`(...)` selects the first input argument or nil when absent (see
-[Variadic parameters](variadic-parameters.md#explicit-one-value-adjustment)).
-Around other valued expressions they change nothing. One syntax-sensitive
-exception is a direct `...[subset]` at an expression-list tail: parentheses
-prevent its promotion to a spread, leaving a subset expression that the
-checker rejects because slices have no standalone value.
+- `2 + v is integer` parses as `2 + (v is integer)`.
+- `-v is integer` parses as `(-v) is integer`.
+- `v ^ 2 as integer` parses as `(v ^ 2) as integer`, and `2 ^ -v as integer`
+  parses as `(2 ^ (-v)) as integer`. To cast only the exponent, write
+  `2 ^ (v as integer)`.
+- Chaining requires parentheses: `(x as value) is float` is valid, while
+  `x as value is float` and `v is integer ^ 2` are syntax errors.
 
-## Arithmetic
+Parentheses group subexpressions and perform single-value adjustment on calls,
+varargs, and spreads: `(f())` keeps only the first result of a call (or
+produces `nil` for a zero-return call), `(...)` selects the first variadic
+argument or `nil` when absent, and parenthesized spreads such as `(...xs)`,
+`(...xs[1, 2])`, and `(...[1, 2])` select their first element as `T?` or `nil`
+if empty (see [Functions, Arguments, and Results](functions.md)). A bare slice
+without `...`, such as `(xs[1, 2])`, is rejected because slices have no
+standalone value.
 
-The arithmetic operators are `+ - * / // % ^` and unary `-`; the bitwise
-operators are `& | ~ << >>` and unary `~`. Their typing rules:
+## Arithmetic and bitwise operators
 
-* `+`, `-`, `*`, `%`, `//`: if both operands are `integer`, the result
-  is `integer`; if either is `float`, the other is implicitly converted
-  and the result is `float`.
-* `/` and `^` are **always float**: integer operands are converted, and
-  the result is `float` even for `6 / 3`.
-* The bitwise operators and unary `~` are **always integer**: `float`
-  operands are converted to `integer` (a run-time check — the float must
-  have an exact integer value), and the result is `integer`.
-* Operands must be numbers. Using a `value` in arithmetic is a
-  compile-time error (`... is a value instead of a number`) — cast it
-  first. Option-typed operands are implicitly unwrapped, with a run-time
-  error if they are nil.
+The arithmetic operators are `+`, `-`, `*`, `/`, `//`, `%`, `^`, and unary
+`-`; the bitwise operators are `&`, `|`, `~`, `<<`, `>>`, and unary `~`:
 
-### Lua-faithful results
+- `+`, `-`, `*`, `//`, and `%` return `integer` when both operands are
+  `integer`; if either operand is `float`, the other converts to `float` and
+  the result is `float`.
+- `/` and `^` always return `float`, converting `integer` operands (`6 / 3` is
+  `2.0`).
+- Bitwise operators and unary `~` always return `integer`. A `float` operand
+  is checked at run time for an exact in-range integer value.
+- Operands must be numeric. A `value` operand is a compile-time error until
+  converted. Option-typed operands (`integer?`, `float?`) unwrap automatically
+  and raise at run time if `nil`.
 
-Titan guarantees exactly Lua's arithmetic results, including where C's
-native operators differ: integer overflow wraps around two's-complement
-style (`math.maxinteger + 1` is `math.mininteger`, and unary minus of
-`math.mininteger` is `math.mininteger`); floor division `//` rounds
-toward minus infinity, with `math.mininteger // -1` wrapping; `%` is
-Lua's modulo, taking the sign of the divisor and preserving
-`m == n * (m // n) + (m % n)`, with `math.mininteger % -1` equal to `0`;
-and shift amounts can be any integer — negative amounts shift the other
-way, amounts at or beyond the 64-bit width yield `0`, and shifts are
-logical (zero-fill), as in Lua. Exponentiation `^` reproduces Lua's
-`luai_numpow`, including that `x ^ 2.0` is computed as `x * x` (not
-`pow(x, 2)`), so its result matches Lua's to the last bit.
+All arithmetic matches Lua bit-for-bit, even where C behaves differently:
+
+- Integer overflow wraps in two's complement (`math.maxinteger + 1 ==
+  math.mininteger`, and `-math.mininteger == math.mininteger`).
+- Floor division `//` rounds toward negative infinity, with
+  `math.mininteger // -1` wrapping to `math.mininteger`.
+- Modulo `%` takes the sign of the divisor, preserving
+  `m == n * (m // n) + (m % n)`, with `math.mininteger % -1 == 0`.
+- Bitwise shifts are logical (zero-filling) and accept any integer count:
+  negative counts shift in the opposite direction, and counts of magnitude 64
+  or greater yield `0`.
+- Exponentiation matches Lua's power semantics, including `x ^ 2.0 == x * x`.
+- Integer `// 0` and `% 0` raise runtime errors; float division by zero
+  produces IEEE-754 infinities or `NaN`.
 
 ```titan
-function lua_not_c(): boolean
-    if -10 // 3 ~= -4 then return false end  -- C's '/' would give -3
-    if 10 % -3 ~= -2 then return false end   -- C's '%' would give 1
-    if 1 << 100 ~= 0 then return false end   -- C: undefined behavior
-    if 4 >> -1 ~= 8 then return false end    -- C: undefined behavior
+function lua_arithmetic(): boolean
+    if -10 // 3 ~= -4 then return false end
+    if 10 % -3 ~= -2 then return false end
+    if 1 << 100 ~= 0 then return false end
+    if 4 >> -1 ~= 8 then return false end
     return true
 end
 ```
 
-Integer `//` and `%` by zero raise run-time errors, as in Lua
-(`error at line N, divide by zero`, `error at line N, % by zero`).
-Float division by zero does not raise; it follows IEEE floating-point
-rules (infinities and NaN), as in Lua.
+## Relational and equality operators
 
-## Comparisons
+### Relational: `<`, `>`, `<=`, `>=`
+
+Relational operators accept either two numbers or two strings and return
+`boolean`:
+
+- **Numbers:** Mixed `integer` and `float` operands compare by **exact
+  mathematical value**, without rounding the integer to `float`. For instance,
+  `math.maxinteger < 2.0 ^ 63` is `true` and `(1 << 53) + 1 ~= 2.0 ^ 53` is
+  `true`. Any comparison involving `NaN` is `false`.
+- **Strings:** Byte-by-byte lexicographic order.
+
+Option operands unwrap automatically (raising on `nil`). Comparing booleans,
+`value`, containers, nominal types, or mismatched types with relational
+operators is a compile-time error.
+
+```titan
+function in_bounds(count: integer, low: float, high: float): boolean
+    return low <= count and count <= high
+end
+```
 
 ### Equality: `==` and `~=`
 
-Equality uses Titan's symmetric **comparable** relation; it is not derived
-from directional assignment, callable adjustment, or coercibility. It is
-defined between exact or gradually consistent operands, plus a few separately
-enumerated symmetric type pairs:
+Equality compares operands of compatible types without implicit numeric
+loss or container conversion:
 
-* **Numbers** compare across `integer`/`float` by **mathematical
-  value**, with *no* promotion of the integer to float — exactly Lua's
-  numeric equality. An `integer` and a `float` are equal only when they
-  denote the same mathematical value, so the float side never loses the
-  integer to rounding. In particular `math.maxinteger == 2.0^63` is
-  **false** (and `math.maxinteger < 2.0^63` is **true**), because
-  `math.maxinteger` (2^63 − 1) is *not* promoted to the float 2^63;
-  likewise `(1 << 53) + 1 ~= 2.0^53`. NaN follows IEEE 754, as in Lua:
-  any comparison with NaN is false, so `x ~= x` is true when `x` is NaN.
-* **Strings** compare by content (lexicographically for the relational
-  operators), exactly as in Lua.
-* **Arrays, records, unions, Interfaces, and function-typed values** compare by
-  identity. Consistent non-exact Array views share the same boxed object;
-  nominal records, unions, and Interfaces require their exact type. An exact
-  Function edge likewise preserves its source closure, but an eligible
-  non-exact callable edge may realize a fresh target wrapper. That wrapper is
-  unequal to its source and to a separately realized wrapper; an ineligible
-  fallback preserves the boxed identity.
-  Arrays use canonical proxy identities and nominal values compare their
-  userdata identities. A referenced Titan declaration has its stable canonical
-  **source** `CClosure`, while a non-Titan Lua function, C function, or `__call`
-  value retains its own boxed identity. Metamethods and wrapper unwrapping are
-  never involved on these paths.
-  Each record/union-to-Interface conversion makes a fresh wrapper, so wrapper
-  equality is the identity of that conversion result. An Interface and its
-  concrete implementer are incomparable, as are two distinct nominal
-  Interfaces, even when their member sets match.
-* **Maps** use ordinary Lua table equality. Identity is the fast result, but
-  distinct Map/Map operands can invoke the left table's `__eq`, or the right
-  table's when the left has none. The result follows Lua truthiness; see
-  [Map equality](arrays-maps.md#equality).
-* **Two `value`s** compare with Lua's *raw* equality, even when both happen to
-  contain tables with `__eq`. A `value` and a guardable type gradually
-  consistent with it also compare raw, except for the specific Map/`value`
-  case: after raw inequality, table `__eq` is available only when the dynamic
-  `value` is itself a table. Equality does not infer a separate directional
-  coercion merely because one exists; for example, explicitly box a raw C
-  pointer as `value` before comparing it with another `value`.
-* **An option and its base type** can be compared: `s1 == s2` works for
-  `s1: string?`, `s2: string`, and is false when `s1` is nil. See
-  [option types](option-types.md).
-* **An option and `nil`** can be compared in either order. Nil is lifted
-  directly to the other operand's option type, so `candidate == nil` tests
-  absence and `candidate ~= nil` tests presence. This distinction matters for
-  `boolean?`, whose present `false` value is also falsy.
+- **Numbers:** Exact mathematical comparison across `integer` and `float`
+  (no rounding). `x ~= x` is `true` when `x` is `NaN`.
+- **Strings:** Byte-for-byte content equality.
+- **Arrays, records, unions, Interfaces, and function values:** Object
+  identity. Two distinct nominal types—including an Interface and its
+  implementing record—are incomparable. Each conversion from a record or union
+  to an Interface allocates a fresh wrapper, and callable shape adjustment may
+  allocate a fresh wrapper (see
+  [First-Class Functions and Closures](closures.md) and
+  [Interfaces](interfaces.md)).
+- **Maps:** Identity first; for distinct tables, Lua's `__eq` metamethod on
+  the left operand (or the right if the left defines none) is called and
+  interpreted by Lua truthiness. The same rule applies when comparing a Map
+  with a `value` whose runtime value is a table.
+- **Two `value` operands:** Raw equality, without invoking `__eq` even if
+  both hold tables.
+- **Options:** `T?` compares with `T` (evaluating to `false` when the option
+  is `nil`) and with `nil` in either order. Comparing with `nil` distinguishes
+  an absent `boolean?` from a present `false`.
 
-Anything else is the compile-time error
-`trying to compare values of incomparable types: T1 and T2`. Truthiness is a
-compact presence test when every present value of the option is truthy:
+Any other pair of types is a compile-time error.
 
 ```titan
-function found(t: {integer}, i: integer): boolean
-    if t[i] then return true else return false end
+function has_explicit_false(flag: boolean?): boolean
+    return flag ~= nil and flag == false
+end
+
+function matches_name(names: {string}, index: integer, target: string): boolean
+    return names[index] == target -- false when names[index] is nil
 end
 ```
 
-The complete separation between comparability and the other type relations is
-summarized in the type system's
-[normative boundary matrix](types.md#normative-boundary-matrix).
+## `and`, `or`, and `not`
 
-### Relational: `<` `>` `<=` `>=`
+`not` accepts any type, applies Lua truthiness (only `nil`, `false`, and a C
+`NULL` pointer are falsy), and returns `boolean`.
 
-The relational operators accept two numbers (a mixed `integer`/`float`
-comparison compares mathematical values exactly, with *no* promotion of
-the integer to float — matching Lua) or two strings. Everything else — booleans,
-`value`, arrays, maps, records, unions, Interfaces, mixed types — is a compile-time error
-(`left/right hand side of relational expression is a ... instead of a
-number`, or `trying to use relational expression with ...`).
+`and` and `or` short-circuit left-to-right: `and` skips its right operand when
+the left is falsy, and `or` skips its right operand when the left is truthy.
+Their result type follows the operands and surrounding context:
+
+1. **Boolean context.** In an `if`/`while`/`repeat` condition, a `boolean`
+   return, or a `boolean`-annotated sink, both operands convert by truthiness
+   and the result is `boolean`.
+2. **Statically truthy or falsy left operand.** Numbers, strings, Arrays,
+   Maps, records, unions, and Interfaces are always truthy: `a and b` has the
+   type of `b`, and `a or b` has the type of `a` (except when the right
+   operand of `or` is `boolean`; see rule 6). A `nil` left operand flips both
+   rules.
+3. **Two `boolean` operands.** Both `a and b` and `a or b` have type `boolean`
+   with Lua's exact value, so boolean chains infer `boolean` without
+   annotations.
+4. **Option defaulting with `or`.** With `x: T?` and `d: T`, `x or d` has type
+   `T` (returning `x` if truthy, else `d`). With both operands of type `T?`,
+   `x or y` has type `T?`, and chains such as `x or y or 0` yield `integer`.
+   Because a present `false` in `boolean?` is falsy, `flag or true` returns
+   `true` for both `nil` and `false`; use `flag == nil` when `false` must be
+   preserved.
+5. **`value` in `or`.** When either operand is `value` (and the left is not
+   statically truthy), the result is `value`; with `b: boolean` and
+   `v: value`, `b or v` returns `true` when `b` is `true` and `v` when `b` is
+   `false`.
+6. **`boolean` beside another type in `or`.** When one operand is `boolean`
+   and the other is neither `boolean` nor `value`, both convert by truthiness
+   to `boolean`. For `b: boolean` and `n: integer?` holding `5`, `false or n`
+   produces `true`, and `1 or b` produces `true`.
+7. **`and` with a `boolean`, Option, or `value` left operand.** Apart from two
+   booleans, the result has the right operand's Option type (`T?`), and a
+   falsy left operand produces `nil` rather than `false` (`b and 1.0` yields
+   `nil` when `b` is `false`).
+8. **Mismatched `or` operands.** Any other combination—such as `integer?`
+   beside `string`—is a compile-time error.
+
+Because `cond and a` yields `T?` and `T? or T` yields `T`, the Lua ternary
+idiom `cond and a or b` works whenever `a` cannot be falsy:
 
 ```titan
-function in_range(x: integer, lo: float, hi: float): boolean
-    return lo <= x and x <= hi    -- x compared to each float bound by exact mathematical value (no promotion)
+function get_or_default(items: {integer}, index: integer, fallback: integer): integer
+    return items[index] or fallback
+end
+
+function pick(use_first: boolean, first: integer, second: integer): integer
+    return use_first and first or second
+end
+
+function is_alnum_byte(byte: integer): boolean
+    local is_lower = byte >= 97 and byte <= 122
+    local is_digit = byte >= 48 and byte <= 57
+    return is_lower or is_digit
 end
 ```
 
-String comparisons are by content: `==` and `~=` test byte-for-byte
-equality regardless of length, and `<` `<=` `>` `>=` order strings
-lexicographically, exactly as in Lua.
+## Concatenation and length
 
-## `and`, `or` and `not`
+### Concatenation: `..`
 
-`not` accepts an operand of any type and produces a `boolean`: the
-operand is tested for truthiness (only `nil` and `false` are false; an
-option is false when it is nil — and a `boolean?` also when it holds
-`false`; a foreign pointer is false when it is NULL).
+`..` joins strings and numbers (`integer` or `float`) into a `string`. Numbers
+format exactly as in Lua's `tostring`; in particular, integral floats keep
+`.0` (`"" .. 3.0 == "3.0"` and `1 .. 2 == "12"`). Chained `..` expressions
+flatten into a single allocation, and literal chains fold at compile time.
 
-`and` and `or` keep Lua's value-returning, short-circuiting semantics,
-and the static type of the result depends on what the checker knows:
+Option operands unwrap automatically (raising on `nil`). Booleans, `nil`,
+`value`, and compound types are rejected at compile time. Exceeding Lua's
+maximum string length raises a runtime error.
 
-* **Boolean context.** When the surrounding context expects a `boolean`
-  (a condition of `if`/`while`/`repeat`, a `boolean` return type, a
-  `boolean`-annotated variable), both operands are implicitly converted
-  by truthiness and the result is `boolean`, whatever the operand types.
-  A `value` holding a string, number (including zero), table, or other
-  non-nil, non-false value is true here. This logical operation is separate
-  from assigning a bare `value` to a `boolean`, which requires an actual
-  boolean value. Each evaluated operand runs once, left to right; `and`
-  skips the right operand when the left is false, and `or` skips it when
-  the left is true.
-* **Statically truthy/falsy left operand.** Integers, floats, strings,
-  arrays, maps, records, unions, and Interfaces can never be falsy, so for these `a and b`
-  has the type of `b`, and `a or b` the type of `a` (the right side is
-  dead); a `nil` left operand flips both rules. At run time this is
-  Lua's behavior: with two integers, `a and b` returns `b` and
-  `a or b` returns `a`.
-* **Two booleans.** `a and b` and `a or b` with two `boolean` operands
-  have type `boolean` and Lua's exact value. A false left operand of
-  `and` is itself the result (`false and true` is `false`), and `or`
-  yields its right operand when the left one is false. All-boolean
-  chains therefore stay `boolean` without an annotation:
-  `local keep = (a and b) or (a and c)` declares a `boolean`.
-* **`or` defaulting.** `x or d` where `x: t?` and `d: t` has type `t`:
-  the option is unwrapped if non-nil, the default used otherwise. This
-  is the main idiom for reading containers — see
-  [option types](option-types.md):
+### Length: `#`
 
-  ```lua
-  function get(t: {integer}, i: integer, default: integer): integer
-      return t[i] or default
-  end
-  ```
-* **The same option on both sides.** `x or y` where `x` and `y` have
-  the same option type `t?` has type `t?`: the left operand when it is
-  truthy, otherwise the right one. A `boolean?` holding `false` is falsy
-  here, as in Lua, so `x or y` then yields `y`. A chain can still end in
-  a default: with `x, y: integer?`, `x or y or 0` is an `integer`.
-* **`value` operands.** `x or v` and `v or x` where either side is a
-  `value` produce a `value`, unless the left operand is statically
-  truthy (see above). This includes a `boolean` beside a `value`: the
-  boolean is kept as it is, so with `b: boolean` and `v: value`,
-  `b or v` is `true` when `b` is true and `v` when `b` is false, exactly
-  as in Lua.
-* **A `boolean` beside any other type in `or`.** When one operand of
-  `or` is a `boolean` and the other is neither a `boolean` nor a
-  `value`, both operands are converted by truthiness and the result is
-  a `boolean`. Here Titan departs from Lua's value: with `b: boolean`
-  and `n: integer?`, `b or n` is `true` when `b` is false and `n` holds
-  a number, where Lua would return the number. The rule also applies
-  when the other operand is statically truthy: `1 or b` is `true`.
-* **`and` with an option result.** Apart from two booleans, an `and`
-  whose left operand is a `boolean`, an option, or a `value` has the
-  right operand's type marked optional (`b and f` with `f: float` has
-  type `float?`; `b and o` with `o: boolean?` stays `boolean?`). A falsy
-  left operand then makes the whole `and` evaluate to `nil` at run
-  time, even when the falsy value was `false`, where Lua would produce
-  `false`: with `b: boolean`, `b and f` returns `nil` when `b` is
-  false, and with `c: value`, `c and a` returns `nil`, not `false`, when
-  `c` holds `false`.
-* Any other combination in `or` is the compile-time error
-  `left hand side of 'or' is a T1 but right hand side is a T2`, for
-  example an option beside a type that is neither its base type, the
-  same option, a `boolean`, nor a `value` (`x or s` with `x: integer?`
-  and `s: string` or `s: string?`).
+`#` returns an `integer` for three operand families:
 
-The Lua ternary idiom `cond and a or b` works as expected when `a`
-cannot be falsy, including with a `boolean`-typed condition — a
-comparison, say:
+- **`string`:** length in bytes.
+- **Array (`{T}`, `const { T }`, `const? { T }`):** deterministically the
+  highest present positive index.
+- **Exact `{integer: V}` Map:** invokes `__len` if the table's metatable
+  defines one (requiring the metamethod to return an exact Lua integer), and
+  otherwise returns a Lua table border.
+
+Maps with other key types, `value`, and all other types are compile-time
+errors.
 
 ```titan
-function pick(use_first: boolean, a: integer, b: integer): integer
-    return use_first and a or b
-end
-```
-
-Long all-boolean `and`/`or` chains and `and`/`or` used for their value —
-`x == 1 and y == 2 and z == 3` as a condition, `return b and x` with
-`b: boolean`, `(a and b) or (a and c)` stored in an unannotated local —
-compile and run as expected.
-
-## Concatenation: `..`
-
-`..` produces a `string`. Operands may be strings, integers or floats;
-numbers are converted with exactly Lua's `tostring` formatting — in
-particular, integral floats keep their `.0`:
-
-```titan
-function describe(name: string, n: integer, x: float): string
-    return name .. ": " .. n .. " of " .. x
-end
--- "" .. 3.0  == "3.0"    (not "3")
--- 1 .. 2     == "12"
-```
-
-A chain of `..` is flattened into a single n-ary concatenation, so
-`a .. b .. c .. d` allocates one result string, not three; when all
-operands are literals the compiler folds them into a single string
-constant at parse time. Concatenating anything else — booleans, `nil`,
-arrays, maps, records, unions, Interfaces — is a compile-time error
-(`cannot concatenate with boolean value`, etc.), as is concatenating a
-`value` directly (`cannot concatenate with value of type 'value'` —
-cast it to `string` first). Option operands are implicitly unwrapped,
-with a run-time error if they are nil. A concatenation whose total length
-cannot fit in a Titan/Lua string raises `string length overflow`.
-
-## Length: `#`
-
-`#` accepts an array, an exact integer-keyed map, or a string and produces an
-`integer`. On a string it is the length in bytes. On an Array it is
-deterministically the highest present positive index, so deleting a middle
-element does not shorten it while deleting the last present element does. On
-an exact `{integer: V}` Map it follows Lua table length: `__len` is invoked
-when present, while the no-metamethod case uses the ordinary table border and
-may select any valid border for a holed Map. A Map `__len` result must be an
-exact Lua integer; Titan does not convert an integral float or another dynamic
-value to satisfy the static result type. See [arrays and maps](arrays-maps.md).
-Other Map key types and other values are compile-time errors even if their
-run-time metatable has `__len`.
-
-```titan
-function total_len(words: {string}): integer
-    local n: integer = 0
+function format_summary(label: string, words: {string}): string
+    local bytes = 0
     for i = 1, #words do
-        n = n + #(words[i] or "")
+        bytes = bytes + #(words[i] or "")
     end
-    return n
+    return label .. ": " .. #words .. " slots, " .. bytes .. " bytes"
 end
 ```
 
-## Explicit casts and type tests: `as` and `is`
+## Explicit casts and type tests
 
-The cast expression `exp as type` converts a value to another type. It
-binds tighter than multiplication and all looser binary operators and does
-not chain (parenthesize for two steps). It explicitly requests a conversion
-admitted by Titan's **written-castable** relation. That includes identity,
-the selected named direct conversions that the written relation reuses,
-gradual injection/projection, and the explicitly enumerated FFI-only
-operations. It does not automatically admit every implicit composite plan,
-does not make arbitrary types related, and never searches for a chain of
-conversions.
+`exp as T` explicitly converts `exp` to type `T`. `exp is T` evaluates `exp`
+once and returns `boolean` reporting whether the matching `as T` conversion
+would succeed, without raising on a type mismatch (errors raised while
+evaluating `exp` still propagate). Neither operator narrows the static type of
+a variable.
 
-| From | To | Can fail at run time? |
+Both operators accept the same pairs of source and target types; any other
+pair is a compile-time error. Core Titan casts include:
+
+| From | To | Runtime check |
 | --- | --- | --- |
-| a source/target pair admitted by the ordinary written direct-coercion table | that written target | as specified by the coercion; for example, `integer -> float` is total and `float -> integer` can fail |
-| satisfying record or union `R` | Interface `I` | never — constructs a fresh wrapper |
-| statically known Function `A` | non-exact callable-adjustable Function `B` | never — conditionally constructs a fresh target wrapper for an eligible exact Titan `A`; otherwise preserves the boxed fallback value |
-| Interface `I` | any visible concrete record or union `R` | yes — checks whether the wrapper retains that exact concrete type |
-| option `T?` | base `T` | yes — checked (raises on `nil`) |
-| any non-FFI type with a `TValue` representation (including options) | `value` | never |
-| `value` | any dynamically reifiable type (including options) | uses the broad dynamic rule; total for `boolean`, function, `value`, `boolean?`, and C `TValue` |
-| `value` | raw C pointer | explicitly unsafe: accepts the lightuserdata/nil representation but cannot establish the pointee type |
-| C integer | `integer` | yes — values outside the configured `lua_Integer` range are rejected |
-| C float | `float` | when narrowing is not profile-proven — non-finite and out-of-range values are rejected |
-| `integer` | C integer | yes — values outside the C target interval are rejected; `_Bool` accepts only 0 and 1 |
-| `integer` or `float` | C float | when the target profile cannot prove the range; floating narrowing rejects non-finite and out-of-range values |
-| C integer | another C integer | no cast error — this explicitly written conversion retains ordinary C semantics |
-| any other C numeric pair | another C numeric type | yes when the source value is not representable under the checked floating/integer rule |
-| C `char *` or `void *` (FFI) | `string` | yes — raises on `NULL` |
-| `string` | C `char *` or `void *` (FFI) | no |
-| non-function C pointer | C `void *` | no |
-| C function pointer | C `void *` | no — requires a written cast |
-| Array, Map, record, union, or Interface | C `void *` | no — exposes the native GC identity |
-| function | C `void *` | yes — raises if its boxed value is not collectable |
-| C integer or C float | `value` | yes when the exact C value does not fit its `lua_Integer` or `lua_Number` carrier |
-| ordinary C pointer or owned C userdata | `value` | never — ordinary pointers become lightuserdata; owned objects stay full userdata |
-| `value` | C integer, C float, or owned C userdata | yes — dynamically checked |
-| Lua-internal `Udata *` | `value` | never — non-NULL becomes that same full userdata; NULL becomes nil |
-| `value` | Lua-internal `Udata *` | yes — accepts full userdata or nil, not lightuserdata |
-| C `TValue` | `value` | no |
-| `value` | C `TValue` | no |
+| `integer` | `float` | Total (never fails) |
+| `float` | `integer` | Checked (must be an exact in-range integer) |
+| `T` or `nil` | `T?` | Total |
+| `T?` | `T` | Checked (`o is T` is `false` only when `o` is `nil`) |
+| Any Titan value | `value` | Total |
+| `value` | Concrete `T` or `T?` | Broad dynamic conversion (see below) |
+| Satisfying `R` | Interface `I` | Total (`r as I` makes a fresh wrapper; `r is I` allocates nothing) |
+| Interface `I` or `I?` | Concrete `R` | Checked exact concrete type inside the wrapper |
+| `{T}` | `const { T }` | Explicit shallow snapshot (or in-place freeze when unaliased) |
+| `const? { T }` | `{T}` or `const { T }` | Checked exact mutable/const Array qualifier |
+| Function `A` | Adjustable Function `B` | Total (`f as B` adjusts; `f is B` allocates nothing) |
 
-A C array or by-value C struct/union cannot cross through `value`; those
-source/target relations are rejected at compile time.
+Explicit `value as T` performs Lua-style **broad dynamic conversion**, which
+is wider than an implicit `value -> T` assignment (see
+[Type Aliases, Options, and Dynamic `value`](types.md)):
 
-A `value` cast to a concrete type is checked at run time and raises an
-error of the shape `file:line:col: type error, expected T but found U`
-on mismatch. Casting a `value` holding a float to `integer` accepts
-exact integral values and raises
-`... number '2.5' has no integer representation` otherwise. Casts *to*
-`value`, and from `value` *to* `boolean` or a function type, never fail — any
-boxed value converts (function callability is checked only when it is called).
-This is intentionally broader than an implicit `value -> T` projection or a
-typed Array/Map read, both of which use strict gradual guards and do not apply
-numeric conversion or truthiness. All boundary distinctions are normative in
-[the type-system matrix](types.md#normative-boundary-matrix).
-A written non-exact Function-to-Function cast uses the same conditional
-fresh-wrapper lowering as an implicit callable adjustment. A `value`-to-Function
-cast remains the distinct dynamic case: it stores the boxed value without
-checking callability and creates no wrapper. See
-[Closure adjustment wrappers](closure-adjustment-wrappers.md#implicit-adjustment-as-and-is).
-
-An Interface target is the deliberate exception where both strict projection
-and broad dynamic conversion use the same lookup condition. They accept
-an existing exact nominal wrapper, or bare full userdata whose metatable has a
-non-nil wrapper entry registered by an initialized module that compiled that
-concrete/Interface pair. The entry constructs a fresh wrapper; Titan does not
-search the erased value's methods. Written concrete/Interface casts have their
-own exact rows rather than
-inheriting every implicit Option composition. In particular, a satisfying
-`R as/is I` is admitted, but `R? as/is I`, `R as/is I?`, and `R? as/is I?`
-are not; `I? as/is R` is the explicit force-and-downcast/test, while target
-options such as `I as/is R?` and `I? as/is R?` are not admitted. See the
-complete [Interface Option matrix](interfaces.md#options).
-An option cast `o as T` unwraps the option, raising
-`expected T but found nil` when `o` is `nil` (the explicit form of the
-implicit option unwrap; see [option types](option-types.md)). The C rows belong
-to the FFI; see [the C FFI](ffi.md).
-
-The expression `exp is type` applies the non-raising acceptance predicate for
-the corresponding written `exp as type` operation. The checker admits exactly
-the same source/target relations for both forms; an inadmissible test is the
-same compile-time `cannot cast 'T1' to 'T2'` error. `is` evaluates `exp`
-exactly once and returns a `boolean`. A cast mismatch becomes `false` instead
-of raising, but an error raised while evaluating `exp` still propagates.
-The test does not narrow the static type of a variable in either branch.
-
-For ordinary admitted casts that can fail, the test uses the same checks as
-`as`. The deliberate trusted-protocol exception is an Interface witness: `is`
-checks only non-nil entry presence, while `as` subsequently calls that entry,
-so debug/native code can forge an entry for which `is` is true but `as` raises.
-
-* `value is integer` accepts Lua integers and exact integral floats within
-  Lua's integer range; `value is float` accepts either numeric representation.
-* C numeric tests use exactly the representability predicate of the
-  corresponding cast. This includes C target ranges, `_Bool`'s 0/1
-  restriction, finite/range checks for floating narrowing, and the same rule
-  recursively beneath an Option.
-* Checked primitive targets, Maps, Arrays, records, unions, and owned-C targets
-  use the same Lua tag or exact metatable identity as their casts. An
-  Interface test also accepts a non-nil compiler-witnessed entry on a bare
-  full userdata's metatable, but tests only presence and never calls the entry.
-  In particular, an ordinary Lua table is a Map, not an Array proxy, and
-  distinct record types do not match.
-* `r is I` for a statically satisfying concrete record or union is always true
-  and allocates no Interface wrapper. Likewise, an admitted non-exact
-  Function-to-Function `f is B` allocates no closure wrapper; it tests the
-  written relation rather than wrapper eligibility or callability. `i is R`
-  tests the exact concrete value retained by an Interface wrapper; distinct
-  concrete nominal types do not match.
-* `o is T` for `o: T?` is false only when `o` is nil.
-* A C `char *` or `void *` tested as `string` is false only when the pointer
-  is `NULL`.
-* A function value tested as C `void *` is true only when its boxed value
-  carries a collectable GC object.
-
-Every total admitted cast produces `true`. Two deliberately loose boundary
-casts are worth spelling out: `value as boolean` uses truthiness, and
-`value as <function type>` stores the boxed value without checking
-callability. Their `is` tests are therefore always true, even for nil or a
-non-callable value. A function-typed value that is not callable raises only
-when it is invoked. The same always-true rule applies to `value is value` and
-`value is C-TValue`. An Option target accepts nil first and otherwise applies
-the same dynamic conversion recursively. Consequently `value is boolean?` is
-also always true: nil is accepted as absent, and every present value can be
-truthiness-converted to `boolean`.
-
-A written `value as <raw C pointer>` is different. It is an explicit
-programmer assertion about a lightuserdata address (or nil), not a sound
-pointee-type test. Its `is` form can test only that outer representation.
-Implicit gradual projection, typed Array/Map reads, callable adjustment, and
-results from non-Titan Lua callables cannot use this operation.
-
-GC-identity pointers are borrowed internal addresses. The cast roots its
-operand during evaluation and later argument setup, but retaining the pointer
-does not retain the Array, Map, record, union, Interface, or function. See
-[the FFI lifetime rules](ffi.md#casts-and-coercions).
+- `value as integer` accepts both Lua integers and exact in-range integral
+  floats (`2.0`); `value is integer` returns `true` for both.
+- `value as float` accepts either numeric representation.
+- `value as boolean` applies Lua truthiness and never fails (`value is
+  boolean` is always `true`).
+- `value as function (...)` stores the boxed value and defers checking
+  callability until the value is called (`value is function (...)` is always
+  `true`).
+- `value as T?` accepts `nil` first and otherwise converts to `T` (`value is
+  boolean?` is always `true`).
+- `value as I` accepts an existing `I` wrapper or a bare concrete value whose
+  concrete-to-`I` conversion was compiled into an initialized module.
 
 ```titan
-function unbox(v: value): integer
-    return v as integer        -- run-time checked
+function unbox_integer(candidate: value): integer
+    return candidate as integer -- accepts integers and exact integral floats
 end
 
-function box(n: integer): value
-    return n as value          -- never fails
-end
-
-function unwrap(o: integer?): integer
-    return o as integer        -- unwraps; raises if o is nil
-end
-
-function maybe_integer(v: value): boolean
-    return v is integer        -- checked, but never raises for a mismatch
-end
-
-function present(o: integer?): boolean
-    return o is integer        -- false exactly when o is nil
+function inspect_value(candidate: value): string
+    if candidate is integer then
+        return "integer: " .. (candidate as integer)
+    elseif candidate is string then
+        return "string: " .. (candidate as string)
+    end
+    return "other"
 end
 ```
 
-Other casts are the compile-time error `cannot cast 'T1' to 'T2'`.
-In particular, a scalar conversion does not lift through a compound type:
+Scalar conversions do not lift through compound types, and number-to-string
+conversion happens only through `..`:
 
-```titan
-function rejected(xs: {integer}, f: function (): (integer))
-    local a = xs as {float}       -- cannot cast '{integer}' to '{float}'
-    local b = f as function (): (float)    -- cannot cast 'function (): integer' to 'function (): float'
-    local c = f as function (): (integer?) -- Option wrapping does not lift through Function
-end
+```text
+-- compile error: cannot cast '{integer}' to '{float}'
+local floats = ints as {float}
+
+-- compile error: cannot cast 'function (): integer' to 'function (): float'
+local g = f as function (): (float)
+
+-- compile error: cannot cast 'function (): integer' to 'function (): integer?'
+local h = f as function (): (integer?)
+
+-- compile error: cannot cast 'integer' to 'string' (use "" .. count)
+local text = count as string
 ```
 
-Direct written conversions remain legal: `i as float` converts an integer,
-`x as integer` performs checked narrowing, and `i as integer?` wraps. For an
-expression whose imported C type is, say, `c.size_t`, use the ordinary FFI
-cast `n as integer`. Identity casts and tests such as `i as integer` and
-`i is integer` are total no-ops.
+For C numeric, pointer, `owned`, and string casts, see [Calling C](ffi.md).
+The full type conversion table is collected in [Appendix C](grammar.md).
 
-## Constructor expressions
+## Constructors and calls
 
-The brace constructor `{ ... }` builds arrays, maps and records. Which
-one it builds is decided by the **context** — the type the surrounding
-position expects — and, failing that, by the shape of the first field:
+Brace constructors `{ ... }` build Arrays, Maps, and records according to the
+expected type and field syntax:
 
-* **Array**: positional fields only. With no context, a constructor with
-  positional fields is an array whose element type is inferred from the
-  first element, and the empty `{}` defaults to `{integer}`.
-* **Map**: computed entries write their key **in brackets** — `[k] = v`.
-  An exact integer-keyed Map may instead use an all-positional constructor;
-  its first value is stored at key 1, its second at key 2, and so on. The
-  two forms cannot be mixed. The `name = v` form is *never* a map entry,
-  even for string-keyed maps:
-  `{ x = 10 }` in a `{string: integer}` context is the compile-time
-  error `initializing field 'x' when expecting map`; write
-  `{ ["x"] = 10 }`.
-* **Record**: every field must be written as `name = v`, every field of
-  the record must be present, and the constructor must appear in a
-  context that names the record type (without one it is the compile-time
-  error `no context to provide type for record constructor`).
+- **Arrays** take positional elements (`{1, 2, 3}`). Without context, the
+  element type is inferred from the first element, and `{}` defaults to
+  `{integer}`.
+- **Maps** write keyed entries in brackets (`{ ["ana"] = 9.5 }`). An exact
+  `{integer: V}` context also accepts all-positional entries (`{10, 20, 30}`),
+  stored at keys `1`, `2`, `3`. The bare `name = value` syntax is for records,
+  never for string-keyed Maps.
+- **Records** write fields as `name = value` inside a context that names the
+  record type (`local p: Point = { x = 1.0, y = 2.0 }`); omitted fields
+  receive `nil` when their type accepts it. Fields may be separated by `,` or
+  `;`, with an optional trailing separator.
+
+Calls use parentheses (`f(a, b)`), single-string sugar (`greet "world"`), or
+bare braces for direct [named calls](functions.md#named-calls)
+(`clamp { upper = 10, number = 17, lower = 0 }`). To pass a brace constructor
+as a single positional argument, keep the call parentheses:
+`consume({ 1, 2 })` or `consume({ x = 1 })`.
+
+A call in an operand position contributes its first result, and parentheses
+`(f())` always request one value—including turning a zero-return call into a
+single `nil`. Calling a `value` directly synthesizes a temporary positional
+function signature from the supplied arguments and expected results:
 
 ```titan
 record Point
@@ -618,162 +474,19 @@ record Point
     y: float
 end
 
-function constructors(): float
-    local xs: {integer} = {1, 2, 3}
-    local empty = {}                                 -- {integer}
+local function log(message: string)
+end
+
+function constructor_and_call_examples(dynamic_fn: value): (float, value)
     local grades: {string: float} = { ["ana"] = 9.5, ["bia"] = 8.0 }
-    local counts: {integer: integer} = {10, 20, 30}
-    local p: Point = { x = 1.0, y = 2.0 }
-    return p.x + (grades["ana"] or 0.0)
+    local origin: Point = { x = 0.0, y = 0.0 }
+    local ignored: value = (log("started"))     -- adjusts zero results to nil
+    local doubled: float = dynamic_fn(2.5)      -- contextual call on value
+    return origin.x + (grades["ana"] or 0.0) + doubled, ignored
 end
 ```
 
-Fields are separated by `,` or `;` interchangeably, and a trailing
-separator is allowed. A call as the *last* positional element of an Array or
-exact integer-keyed Map constructor is an open result sink: it contributes all
-statically visible fixed results and, when declared, the complete run-time
-[flexible tail](flexible-returns.md). In any other position a call contributes
-one value, and in a computed Map or record field position surplus results are
-dropped. A final [spread expression](spread-expressions.md) can instead append
-all or a closed range of an Array, integer-keyed Map, or variadic run.
-See
-[arrays and maps](arrays-maps.md) and [records](records.md) for the full
-story on each constructor, including what `nil` elements mean.
-
-Union values do not use brace constructor expressions. Each variant has a
-generated function such as `Message.quit()` or `Message.write("hello")`.
-Variants with several parts support positional and named calls:
-`Message.move(1.0, 2.0)` and `Message.move { y = 2.0, x = 1.0 }` when the
-parts are declared `x: float, y: float`. An unnamed single payload has the
-name `value`, so `Message.write { value = "hello" }` is also valid. If a
-single payload is itself a record constructor, write
-`Message.move({ x = 1.0, y = 2.0 })` or
-`Message.move { value = { x = 1.0, y = 2.0 } }`; the record fields remain
-inside one argument.
-
-## Function values
-
-Functions are first-class values in Titan. **Referencing a function name
-is an expression** that yields a function value of the corresponding
-[function type](types.md#function-types): a top-level or `local`
-function name, an imported `mod.f`, a record function like `Rec.new`, and a
-union constructor/function like `Message.write`
-all denote values you can store in a variable, pass as an argument,
-return, and call. The conversion between a function value and `value` is
-implicit: a function flows into a `value` for free, and a `value` flows
-back into a function type with the callability check deferred to the
-actual call.
-
-```titan
-function inc(n: integer): integer return n + 1 end
-
-function apply(f: function (integer): (integer), x: integer): integer
-    return f(x)               -- call a function value
-end
-
-function use(): integer
-    local g: function (integer): (integer) = inc   -- a function name is a value
-    return apply(g, 41)                    -- pass it along: 42
-end
-```
-
-Indexing an array or map of functions yields an *option* (`T?`), like any
-container read, and that option is auto-unwrapped when the result is
-called directly — `arr[i](x)` works, raising cleanly if the slot is nil
-(see [option types](option-types.md)).
-
-## Calls in expressions
-
-Function calls, concrete or Interface method calls, and record/union-function
-calls are expressions, and
-so is calling a function value. The callable things are module-level
-functions (local or imported), record/union methods (`r:move(...)`), Interface
-methods (`reader:read(...)`), nominal
-functions (`Point.new(...)`, `Point.origin(...)`), and any function value held in a
-variable, parameter, field, or container slot.
-Function-value dispatch follows the paths defined in
-[Functions as values](functions.md#functions-as-values): exact Titan native
-(including a realized target wrapper's adapter), branded exact-tag-mismatch
-strict generic, and genuine Lua. A statically known non-exact callable edge may
-conditionally create the target wrapper before this dispatch; a dynamic
-Function projection does not. These paths use the single
-[normative boundary matrix](types.md#normative-boundary-matrix); generic stack
-representation alone does not turn a Titan call into a coercive Lua boundary.
-For Titan functions, too few positional arguments are padded with `nil` and
-then type-checked against the missing formals. Surplus argument expressions
-are evaluated, but a non-variadic Titan function ignores their values; a
-variadic one receives them in its tail. Direct C calls made with parentheses
-keep strict C arity. Calls coming *from* Lua are adjusted and checked at run
-time instead; see
-[Functions](functions.md#argument-adjustment) and
-[Lua interoperability](lua-interop.md).
-
-A bare string retains Lua-style one-argument call sugar:
-
-```titan
-function greet(name: string): string return "hello " .. name end
-function sugar(): string return greet "world" end
-```
-
-Bare braces instead select Titan's [named-argument](named-arguments.md) form:
-`move { dy = 2, dx = 1 }` maps labels to a direct declaration. To pass a
-constructor as one positional argument, enclose it in the call parentheses:
-`consume({ x = 1 })`, `consume({ 1, 2 })`, or `consume({})`.
-
-A call used as an operand contributes its **first requested** result. A call in
-the *last* position of an expression list may expand to fill the consumer's
-remaining finite slots. A variadic argument tail, flexible `return` tail, or
-final positional Array/exact integer-Map field is open and consumes the
-complete visible run instead. A final
-[spread expression](spread-expressions.md) participates in the same finite or
-open adjustment, using its selected subject range as the producer.
-Wrapping the call in parentheses always requests exactly one value, as in Lua:
-
-```titan
-function divmod(a: integer, b: integer): (integer, integer)
-    return a // b, a % b
-end
-
-function use(): integer
-    local q, r = divmod(7, 2)     -- both values: q = 3, r = 1
-    local just_q = (divmod(7, 2)) -- parentheses keep only the first
-    return q + r + just_q
-end
-```
-
-When a finite request reaches into a declared `...: T` result tail, each such
-position has type `T?`, because that result may be absent. Open sinks receive
-only the `T` values that actually exist. See
-[Flexible returns](flexible-returns.md) for projection, forwarding, and the
-last-position rule.
-
-A callee whose static type is `value` is also callable. Titan synthesizes a
-temporary positional function type from the supplied arguments and the results
-requested by the surrounding context, then performs the ordinary run-time
-callability and boundary checks. Named braces remain unavailable because a
-`value` carries no formal parameter names:
-
-```titan
-function apply_dynamic(f: value, x: integer): integer
-    return f(x)       -- context treats f as function (integer): integer
-end
-```
-
-The same parentheses-adjust rule rescues a **zero-return** call. An
-unannotated function returns nothing (its result list is empty; see
-[the type system](types.md#function-types)), and using such a call where
-a value is expected is a compile-time error — *except* when wrapped in
-parentheses, which adjust the empty result up to a single `nil`:
-
-```titan
-function log(s: string) end       -- returns nothing: function (string): ()
-
-function use_log(): value
-    -- local x = log("hi")        -- error: call returns no value
-    local x = (log("hi"))         -- (f()) adjusts up to a single nil
-    return x
-end
-```
-
-See [functions](functions.md) for multiple returns in full, and
-[statements](statements.md) for calls as statements.
+For the full rules on calls, multiple returns, variadics, and spreads, see
+[Chapter 4](functions.md); for first-class function values and lambdas, see
+[Chapter 5](closures.md); for Arrays, Maps, records, and unions, see
+[Chapters 6–8](arrays-maps.md).
