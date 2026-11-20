@@ -108,8 +108,14 @@ The states are deliberately strict:
   mismatch, malformed serialized type, or logical-name mismatch is terminal;
 * both valid symbols claim the logical module and end the search;
 * after that semantic claim, native compilation additionally requires a valid
-  `<mangled>_layouts` string; a missing/malformed physical layout is terminal.
-  Analysis-only queries retain the ABI/types pair and do not expose layouts;
+  `<mangled>_layouts` string (missing or malformed physical layouts are
+  terminal), whereas analysis-only queries skip `<mangled>_layouts` and do not
+  expose layouts;
+* after ABI/type validation (and, in native compilation, after layout
+  validation), both native and analysis-only queries probe optional
+  `<mangled>_source_requirements` (clean absence when omitted; open/call/decode
+  failure is terminal; no module initialization runs, and
+  `<mangled>_compatibility` is never a compiler query);
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 

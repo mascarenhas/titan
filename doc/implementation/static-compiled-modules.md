@@ -120,9 +120,11 @@ ordering remains bytewise deterministic.
 Validation compiles the chunk as text with an empty `_ENV`, protected-calls it
 while counting results, and accepts exactly one plain table containing one
 valid dotted module key. Its value must be a plain table with string
-fields `abi` and `types`, plus an optional string `layouts`. Native compilation
+fields `abi` and `types`, plus an optional string `layouts` (and optional
+`imports` / `source_requirements` lists). Native compilation
 requires `layouts` and validates its closed module-specific graph separately;
-analysis-only inventory readers may accept its absence and expose only ABI/types.
+analysis-only inventory readers may accept its absence and still retain
+ABI, types, and optional per-member `source_requirements`.
 Traversal uses `next` and `rawget` only after the
 metatable checks. The validator then re-renders the entry and requires exact
 payload equality.
@@ -463,7 +465,14 @@ nominal record:
 * if the exposing selected archive carries the owner, it reads that exact
   provider entry contextually and records a direct-carried constraint;
 * if an exposing DSO carries the owner protocol, it reads the same DSO and
-  records a dynamic-carried constraint; otherwise
+  records a dynamic-carried constraint;
+* in an unplanned open-world semantic check (without a build plan), if the
+  exposing compiled member carries recorded `source_requirements`, it lazily
+  checks that recorded source frontier on demand from actual source (authored
+  roots then `<root>/lib/titan/0.6`) and follows each loaded source's ordinary
+  imports to recover the owner's public interface
+  ([`driver.defaultloader`](driver.md#driverdefaultloaderstatic_deps-options));
+  otherwise
 * it uses compiled lookup in noncommitting type-only mode and records the
   dynamic fallback constraint.
 
