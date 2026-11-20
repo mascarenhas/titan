@@ -423,10 +423,11 @@ minicoro.o titan_path.o ltitanlib.o`); the standard provider does not carry
 LuaRocks runs the install pass (`install` with `INST_PREFIX` set, and the
 matching `Makefile.win` target) in the same source directory as the build
 pass; it copies without compiling. Compiler Lua modules go to `INST_LUADIR`,
-the support module to `INST_LIBDIR`, and `titanc` and `titan-uninstall` to
-`INST_BINDIR` (`install-rock-tools`); on Windows the compiler entry there is
-`titanc.exe` and the script goes to `INST_LUADIR` as
-`titan-compiler/titanc.lua`. The rockspec passes
+the support module to `INST_LIBDIR`, and `titanc`, `titan-install`, and
+`titan-uninstall` to `INST_BINDIR` (`install-rock-tools`); on Windows the
+compiler entry there is `titanc.exe` (with the script at
+`INST_LUADIR/titan-compiler/titanc.lua`), and LuaRocks generates `.bat`
+wrappers for `titan-install` and `titan-uninstall`. The rockspec passes
 `INST_LIBDIR = "$(LIBDIR)"`, so LuaRocks stages the support module in the rock's
 `lib` directory, deploys it to `<tree>/lib/lua/5.5/titan.so`, records it in
 `rock_manifest`, and removes it with the rock like any other native Lua module.
@@ -469,6 +470,66 @@ it then removes those files and prunes `lib/titan-browser/<ver>/` and
 `lib/titan-browser/` only when they are empty. It is the only target that
 edits an installation tree without installing; clean targets still never
 touch one.
+
+### Module rock publication and removal
+
+Third-party Titan library rocks publish into the installed Titan tree through
+`titan-install` and remove cleanly through `titan-uninstall ROCK [VERSION]`.
+The author-facing packaging guide and complete rockspec example live in
+[Packaging and distributing modules with LuaRocks](../language/modules.md#packaging-and-distributing-modules-with-luarocks).
+
+* **CLI contract:** `titan-install --path ROCK_VERSION_DIR` takes only the
+  installing rock's private LuaRocks version directory (`$(PREFIX)` in a format
+  `3.0` rockspec `post_install` hook; Windows overrides invoke
+  `titan-install.bat`). It rejects `--module`, a path outside the selected
+  tree, or the `titan` rock itself, and adds no public prefix, name, or release
+  flags: the installed Titan wrapper and its private location own the
+  destination tree.
+* **Retained payload layout:** `titan-install` reads regular files recursively
+  as plain data (never executing payload code for inventory) from up to three
+  namespaces under `<rock-version-dir>/dist/`: `dist/modules/` maps to
+  `<tree>/lib/titan/<Titan major.minor>/`, optional `dist/include/` maps to
+  `<tree>/include/`, and optional `dist/lib/` maps to `<tree>/lib/`. There is
+  no `dist/bin/`. Relative payload entry names must use unambiguous portable
+  ASCII ordinary file components (spaces are allowed; Windows reserved or
+  ambiguous spellings, symlinks, and path/case aliases are refused, and
+  ownership keys compare ASCII case-insensitively). This restriction applies
+  only to relative entries inside `dist/`, not to the absolute SDK, package, or
+  checkout root.
+* **Preflight and protected destinations:** Before writing or removing any
+  published file, `titan-install` validates every destination path and rejects
+  collisions with foreign files, Titan SDK-owned paths, protected `lib/`
+  subtrees (`lib/luarocks`, `lua`, `titan`, `titan-browser`, and similar
+  namespaces that would bypass the three staging roots), file/directory
+  conflicts, and symlinks—even when a previously owned file is missing on disk.
+  Unrelated existing files are never overwritten, even if their bytes match.
+* **SDK-side ownership inventory and upgrade lifecycle:** LuaRocks deletes an
+  existing installation of the same rock revision *before* rebuilding it
+  (`luarocks/build.lua`), and `luarocks remove` has no uninstall hook. Scanning
+  only the current `dist/` therefore loses stale entries on same-version
+  reinstall and loses all provenance after a plain `luarocks remove`. Titan
+  maintains an SDK-side ownership inventory independent of each rock's private
+  version directory, keyed at final relative-path granularity. Each rock has at
+  most one active published version: a new successful `titan-install` replaces
+  the rock's previous projection and retires only its own stale files, pruning
+  shared directories only when empty. Operations assume ordinary non-concurrent
+  installer invocations; there is no daemon, version fallback resolver, or
+  crash/power-loss rollback guarantee.
+* **Module removal (`titan-uninstall ROCK [VERSION]`):** With no positional
+  rock argument (`titan-uninstall [--luarocks PATH]`), `titan-uninstall` keeps
+  its historical whole-Titan removal behavior. With `ROCK [VERSION]`, an
+  unqualified `ROCK` selects the active published version and an explicit
+  `VERSION` selects exactly that version (never falling back to an unqualified
+  `luarocks remove`). `titan-uninstall` validates targets and captures
+  ownership first, then asks LuaRocks for the recorded tree and Lua prefix to
+  remove that exact rock/version before deleting published files, so a
+  dependency refusal leaves the published projection intact. After a plain
+  `luarocks remove`, running `titan-uninstall ROCK [VERSION]` cleans up the
+  surviving published files from the SDK-side inventory; repeated cleanup of an
+  absent rock is a no-op. Removing an older retained inactive version leaves
+  the active published version undisturbed with no automatic switch-back, and
+  unrelated ordinary Lua rocks are refused. On Windows, consumers holding a
+  mapped provider DLL must exit before replacing or removing it.
 
 ## Checks
 

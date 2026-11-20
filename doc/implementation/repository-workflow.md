@@ -191,8 +191,9 @@ grep -Eq '^Titan link hit ' /tmp/native-identical-reinstall.log
 selection, `--tree`, `--output`, incremental object reuse, `-c`, and test mode.
 Source-rock `all` uses the in-tree compiler and its support module; ordinary
 `stdlib` uses the installed compiler unless `STDLIB_USE_INSTALLED_RUNTIME=0`.
-Packaging, binary rocks, and uninstall are documented in [build and
-installation responsibilities](build-script-audit.md#installation-and-publication).
+Packaging, binary rocks, third-party module publication (`titan-install`), and
+uninstall are documented in [build and installation
+responsibilities](build-script-audit.md#installation-and-publication).
 
 ## Run checkout compiler Lua with Busted
 

@@ -15,6 +15,7 @@ TypeScript, Go, or C. Load every applicable peer cartridge as well:
 | Work | Skill |
 | --- | --- |
 | Application repository, build layout, executable delivery, browser application layout and deployment | [titan-application](.agents/skills/titan-application/SKILL.md) |
+| Packaging and distributing Titan library modules as LuaRocks rocks (`titan-install`, `titan-uninstall`, staging `dist/`, rockspecs, source-only vs compiled rocks) | [titan-package](.agents/skills/titan-package/SKILL.md) |
 | Native tests, fixtures, test-layer placement, filtering | [titan-tester](.agents/skills/titan-tester/SKILL.md) |
 | Tasks, timers, cross-state Receivers, cancellation, libuv callbacks, native ownership | [titan-async](.agents/skills/titan-async/SKILL.md) |
 | Cross-thread channels, thread handles, thread groups | [titan-thread](.agents/skills/titan-thread/SKILL.md) |
@@ -153,6 +154,7 @@ Read the matching workflow before executing commands or changing build policy:
 | Task | Read first |
 | --- | --- |
 | Bootstrap Lua/LuaRocks, choose SDK, build/install/package/uninstall | [Repository workflow](doc/implementation/repository-workflow.md), [build responsibilities](doc/implementation/build-script-audit.md) |
+| Third-party Titan module rocks (`titan-install`, `titan-uninstall ROCK [VERSION]`, `dist/` staging, SDK source fallback) | [Module rock publication](doc/implementation/build-script-audit.md#module-rock-publication-and-removal), [author packaging guide](doc/language/modules.md#packaging-and-distributing-modules-with-luarocks) |
 | Production vs validation inputs, prefix isolation, effective flags | [Build profiles](doc/language/toolchain.md#build-profiles) |
 | Test placement, shared helpers, fixture ownership, native aggregate | [Regression placement](doc/implementation/test-runner.md#regression-placement), [test-runner implementation](doc/implementation/test-runner.md), [repository workflow](doc/implementation/repository-workflow.md) |
 | Linux/macOS lanes, sharding, caches, sanitizer diagnostics | [Continuous integration](doc/implementation/continuous-integration.md) |

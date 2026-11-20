@@ -16,9 +16,9 @@ least one module name is required unless you pass `--print-root`,
 | Option | Meaning |
 | --- | --- |
 | `<module>...` | Dotted logical module names to compile as build roots. |
-| `-o`, `--output DIR` | Root directory for all generated files, created if missing. Required for `--target browser`. |
+| `-o`, `--output DIR` | Root directory for all generated files, created if missing. Required for `--target browser` and whenever a build selects an installed `.titan` source through the SDK fallback. |
 | `--exe PATH` | Exact destination for a standalone or `--test` executable, relative to the current directory. |
-| `-t`, `--tree PATH` | Semicolon-separated source root directories (default: `.`). |
+| `-t`, `--tree PATH` | Semicolon-separated authored source root directories (default: `.`). All authored roots are searched before the read-only installed module directory `<root>/lib/titan/0.6`. |
 | `-T`, `--target TGT` | Compilation target: host OS (`linux`, `darwin`, `windows`) or `browser` (default: `TITAN_TARGET` or host OS). |
 | `--static` | Prefer static `.a` Titan archive providers over `.so` providers. Unsupported on Windows. |
 | `--source-first` | Prefer available `.titan` source dependencies over compiled providers, with compiled fallback on miss. |
@@ -186,11 +186,17 @@ Paths relative to `out/` on Linux and macOS:
   `out/app/main.mjs`, `out/app/main.wasm`, `out/app/main.wasm.trace`, and
   `out/app/main.wasm.map` (see [Browser target](browser-target.md)).
 - Omitting `-o` writes generated C, objects, and headers beside each source
-  file and places final outputs relative to the working directory.
+  file and places final outputs relative to the working directory. However,
+  when a build actually selects an installed `.titan` source through the SDK
+  source fallback (`<root>/lib/titan/0.6`), `-o`/`--output` is required:
+  `titanc` refuses (naming the logical module) instead of writing or locking
+  inside the installed SDK. Builds that do not select an installed source keep
+  their existing behavior.
 
 `--output` selects write locations only; it does not add `out` to provider
 search paths. To consume a library built under `out`, add `out` to
-`TITAN_PATH_0_6`.
+`TITAN_PATH_0_6` (or install it into the SDK with `titan-install`; see
+[Packaging and distributing modules with LuaRocks](modules.md#packaging-and-distributing-modules-with-luarocks)).
 
 ### Choosing the executable path (`--exe`)
 
@@ -232,9 +238,20 @@ always resolve to source. Ordinary `import` statements resolve in this order:
 
 | Mode | Search order |
 | --- | --- |
-| Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix only) on the Titan path -> 3. Source (folder then flat) on `--tree` |
-| `--static` | 1. Static providers (`.a`) -> 2. Shared providers (`.so`) -> 3. Source |
-| `--source-first` or `--test` | 1. Source on `--tree` -> 2. Compiled providers (fallback on miss) |
+| Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix only) on the Titan path -> 3. Source (folder then flat) on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` |
+| `--static` | 1. Static providers (`.a`) -> 2. Shared providers (`.so`) -> 3. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` |
+| `--source-first` or `--test` | 1. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` -> 2. Compiled providers (fallback on miss) |
+
+Authored source roots come from `--tree` (default `.`). Passing `--tree`
+replaces the default `.` without disabling the read-only installed source
+fallback `<root>/lib/titan/0.6`. That fallback applies on both native targets
+and `--target browser` (where `<root>/lib/titan/0.6` is searched for `.titan`
+source only, selecting `.browser.titan` and shared `.titan` variants normally;
+native compiled providers there are never eligible for browser builds).
+`--test-dir` scans only the specified directory inside an authored `--tree`
+root and never scans the installed SDK automatically. Whenever a build selects
+an installed source through the fallback, `-o`/`--output` is required so all
+generated files land in the consumer's output directory by logical module name.
 
 Within each compiled format, lookup is **path-root first, shallowest prefix to
 exact module**. For logical module `a.b.c`, one directory is probed as:

@@ -305,7 +305,7 @@ All paths live under `ROCKS_TREE` (`PREFIX` in the default layout):
 
 | Path | Contents |
 | --- | --- |
-| `bin/titanc`, `bin/titan-uninstall` | Compiler and uninstaller. |
+| `bin/titanc`, `bin/titan-install`, `bin/titan-uninstall` | Compiler, module rock publisher, and uninstaller. |
 | `share/lua/5.5/titan-compiler/`, `share/lua/5.5/c-parser/` | Compiler Lua modules. |
 | `src/lua-5.5.1/`, `lib/liblua.a`, `include/` | Matching Lua 5.5.1 sources, static archive, and public headers. |
 | `lib/titan/0.6/libtitan.a` | Runtime archive (`titan`, `minicoro`, module path/searcher, support module). |
@@ -401,13 +401,17 @@ system OpenSSL 3.0+ and supports [Bundled OpenSSL](#bundled-openssl).
 
 ## Uninstalling
 
-Run `titan-uninstall` from the installation (plain `luarocks remove titan`
-leaves external SDK and provider files behind). It asks LuaRocks to remove all
-installed Titan rock versions in the tree and, on success, deletes Titan's
-SDK headers, providers, runtime archive, notices, build-profile marker, and
-`make browser-sdk` files—leaving Lua, LuaRocks, dependency rocks, user
-archives, and `lib/browser/` intact. Pass `--luarocks PATH` to select a
-specific LuaRocks executable.
+Run `titan-uninstall` with no arguments from the installation to remove Titan
+itself (plain `luarocks remove titan` leaves external SDK and provider files
+behind). It asks LuaRocks to remove all installed Titan rock versions in the
+tree and, on success, deletes Titan's SDK headers, providers, runtime archive,
+notices, build-profile marker, and `make browser-sdk` files—leaving Lua,
+LuaRocks, dependency rocks, user archives, and `lib/browser/` intact. Pass
+`--luarocks PATH` to select a specific LuaRocks executable.
+
+To remove a Titan module rock installed through `titan-install`, pass its rock
+name (and optional full rock version) as `titan-uninstall ROCK [VERSION]`; see
+[Uninstalling modules](modules.md#uninstalling).
 
 Run `make uninstall-browser-sdk PREFIX="$PREFIX"` from a checkout to remove
 only the browser SDK files in `lib/titan-browser/0.6/`.
@@ -424,6 +428,7 @@ dependency at a time with `clean-luarocks`, `clean-libbacktrace`,
 | Command | Removes |
 | --- | --- |
 | `titan-uninstall` | Titan rock, native SDK/provider files, and `make browser-sdk` files in `lib/titan-browser/<ver>/`. |
+| `titan-uninstall ROCK [VERSION]` | Selected Titan module rock and its `titan-install`-published files under `lib/titan/<ver>/`, `include/`, and `lib/` ([Uninstalling modules](modules.md#uninstalling)). |
 | `make uninstall-browser-sdk` | `make browser-sdk` files in `lib/titan-browser/0.6/` (and the directory when empty). |
 | `make clean` | Checkout `out/` tree (including browser SDK/stdlib builds) and generated build artifacts. |
 | `make distclean` | Everything `make clean` removes, plus downloaded dependency trees and checkout-local `.lua`. |
