@@ -1053,6 +1053,14 @@ end
         put_source("replacement/instruments/marker.titan", "const marker = true\n")
         built("replacement", replacement, "instruments.meter")
         built("replacement", bundle, "instruments.meter", "instruments.marker")
+        local separate_owner, separate_meter = build_dir .. "/separate-owner", build_dir .. "/separate-meter"
+        put_source("separate-meter/instruments/meter.titan", read(lib .. "/instruments/meter.titan"))
+        built("replacement", separate_owner, "units")
+        install(separate_owner, "units" .. SHARED_SUFFIX)
+        if not platform.windows then install(separate_owner, "units.a") end
+        built("separate-meter", separate_meter, "instruments.meter")
+        assert(os.remove(lib .. "/units" .. SHARED_SUFFIX))
+        if not platform.windows then assert(os.remove(lib .. "/units.a")) end
         local client = put_source("semantic/consumer.titan", [[
 local via = import "via"
 function inspect(): integer
@@ -1066,7 +1074,7 @@ local completion = require "titan-compiler.completion"
 local driver = require "titan-compiler.driver"
 local paths = require "titan-compiler.path"
 local types = require "titan-compiler.types"
-local source_root, installed, client, expected_provider = ...
+local source_root, installed, client, expected_provider, expected_owner, owner_artifact = ...
 local meter_name = "instruments.meter"
 local meter_file = installed .. "/instruments/meter.titan"
 local owner_file = installed .. "/units.titan"
@@ -1205,6 +1213,34 @@ assert(reselect(meter_name, true).kind == "error")
 if expected_provider then
     local units = read(owner_file)
     assert(os.remove(owner_file))
+    if expected_owner then
+        write(expected_owner, read(owner_artifact))
+        local prefer_static = expected_owner:sub(-2) == ".a"
+        local kind = prefer_static and "static" or "dynamic"
+        loader, context = start(true, { cached_source_entries = saved_sources }, { prefer_static = prefer_static })
+        clean("consumer", loader)
+        assert(driver.imported.via.kind == kind)
+        assert(driver.imported.units == nil)
+        finalize(context)
+        assert(driver.imported.units == nil)
+        for _, provider in ipairs(context.selected_static_providers) do
+            assert(paths.to_slash(provider.archive) ~= expected_owner)
+        end
+        local observation
+        for _, row in pairs(context.contextual_resolutions) do
+            if row.owner == "units" and row.exposer == "via" then observation = row end
+        end
+        assert(observation and observation.ordinary_lookup and observation.kind == kind)
+        assert(paths.to_slash(observation.provider_file) == expected_owner)
+        binaries = driver.completion_binary_catalog(context)
+        local captured = assert(binaries.units, "saved catalog omitted the contextual-only owner")
+        assert(captured.kind == kind and paths.to_slash(captured.filename) == expected_owner)
+        assert(driver.close_loader(loader))
+        assert_closed_completion(binaries, {})
+        write(meter_file, meter)
+        write(owner_file, units)
+        return
+    end
     local elected = reselect(meter_name, false)
     assert(elected.kind == "dynamic" and paths.to_slash(elected.provider_file) == expected_provider)
     for _, analysis in ipairs({ false, true }) do
@@ -1260,9 +1296,10 @@ finalize(context)
 assert(driver.close_loader(loader))
 ]=])
         local semantic_inputs = collect_artifacts(lib)
-        local function run_semantics(provider)
+        local function run_semantics(provider, nominal_owner, owner_artifact)
             local argv, env = compiler_argv({
-                frontend = api_fixture, args = { source_dir .. "/semantic", lib, client, provider },
+                frontend = api_fixture,
+                args = { source_dir .. "/semantic", lib, client, provider, nominal_owner, owner_artifact },
                 env = { TITAN_ROOT = sdk, PATH = tool_path },
                 init_code = collector:init_code(),
             })
@@ -1278,6 +1315,16 @@ assert(driver.close_loader(loader))
             run_semantics(lib .. "/" .. file)
             assert(os.remove(lib .. "/" .. file))
         end
+        local function separate_semantics(suffix)
+            local owner_file = "units" .. suffix
+            local provider_file = "instruments/meter" .. suffix
+            install(separate_meter, provider_file)
+            run_semantics(lib .. "/" .. provider_file, lib .. "/" .. owner_file, separate_owner .. "/" .. owner_file)
+            assert(os.remove(lib .. "/" .. owner_file))
+            assert(os.remove(lib .. "/" .. provider_file))
+        end
+        separate_semantics(SHARED_SUFFIX)
+        if not platform.windows then separate_semantics(".a") end
         assert.same(semantic_inputs, collect_artifacts(lib))
         assert.same({}, collect_artifacts(source_dir .. "/semantic"))
         assert.is_false(exists(lib .. "/.titan-build.lock"))

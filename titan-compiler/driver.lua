@@ -1580,7 +1580,7 @@ end
 -- Long-lived semantic clients still need the narrow physical provenance that
 -- supplied the recovered interface so they can invalidate cached consumers.
 local function remember_contextual_resolution(
-        context, owner, exposer, resolved, ordinary_lookup, exposer_file)
+        context, owner, exposer, resolved, ordinary_lookup, exposer_file, interface)
     local kind = resolved and resolved.kind
     local provider_file = resolved and
         (resolved.static_archive or resolved.filename)
@@ -1601,6 +1601,7 @@ local function remember_contextual_resolution(
         provider_file = provider_file,
         exposer_file = exposer_file,
         ordinary_lookup = ordinary_lookup == true,
+        interface = interface,
     }
 end
 
@@ -2174,15 +2175,31 @@ function driver.completion_binary_catalog(context)
                     documentation.copy(interface._documentation) }
         end
     end
-    for _, resolution in pairs(context.contextual_resolutions or {}) do
-        local owner = resolution.owner
-        if not resolution.ordinary_lookup and not result[owner] then
-            local key = resolution.exposer_file .. "\0" .. resolution.exposer .. "\0" .. owner
-            local view = context.contextual_types[key]
-            if view and view.type then
-                result[owner] = { serialized = types.serialize(view.type), kind = resolution.kind,
-                    filename = resolution.provider_file, documentation = view.type._documentation and
-                        documentation.copy(view.type._documentation) }
+    -- A contextual lookup can use ordinary provider discovery without making
+    -- the owner an ordinary import. Capture just the interface actually used,
+    -- not the inventory of an archive inspected only for that owner.
+    if context.finalized_selection then
+        local contextual = {}
+        for _, resolution in pairs(context.contextual_resolutions) do
+            local owner = resolution.owner
+            if resolution.interface and not result[owner] and not driver.imported[owner] and
+                    (context.analysis_only or not resolution.ordinary_lookup) then
+                local previous = contextual[owner]
+                if previous == nil then
+                    contextual[owner] = resolution
+                elseif previous and (previous.provider_file ~= resolution.provider_file or
+                        previous.kind ~= resolution.kind) then
+                    -- A name-only closed catalog cannot encode competing views.
+                    contextual[owner] = false
+                end
+            end
+        end
+        for owner, resolution in pairs(contextual) do
+            if resolution then
+                local interface = resolution.interface
+                result[owner] = { serialized = types.serialize(interface), kind = resolution.kind,
+                    filename = resolution.provider_file, documentation = interface._documentation and
+                        documentation.copy(interface._documentation) }
             end
         end
     end
@@ -6860,7 +6877,7 @@ function driver.defaultloader(static_deps, options)
                     selection.resolved.static_archive or selection.resolved.filename)
                 remember_used_compiled_interface(context, modname, modtype)
                 remember_contextual_resolution(context, modname, consumer_name,
-                    selection.resolved, selection.ordinary_lookup, consumer_file or consumer_name)
+                    selection.resolved, selection.ordinary_lookup, consumer_file or consumer_name, modtype)
             end
             if selection.resolved and not selection.ordinary_lookup and not exposing.dormant and
                     (semantic_source_recovery or context.planned_requirements or worker_plan) then
