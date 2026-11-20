@@ -689,7 +689,8 @@ monomorphic steps, in order:
 1. An optional carrier-to-container structural view. For a force, a raw
    `value` carrier can instead use a strict projection to the Option
    container. This checks the outer kind and Array qualifier, not contents.
-2. The admitted force or wrap with an unchanged Array or Map payload.
+2. The admitted force or wrap. It keeps the Array or Map carrier; the
+   payload type is unchanged or uses the ordinary maybe-const Array widening.
 3. An optional structural view from the container to the sink carrier. A
    forced container can also use the ordinary injection into a `value` slot.
 

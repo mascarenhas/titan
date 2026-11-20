@@ -1072,6 +1072,53 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("preserves checked maybe-const Array views in open Option adjustments",
+    function()
+        h.run_coder([[
+            local function optional(items: {value}?): (...: {value}?)
+                return items
+            end
+
+            local function generic_optional<|T|>(items: {T}?): (...: {T}?)
+                return items
+            end
+
+            local function required(items: {value}): (...: {value})
+                return items
+            end
+
+            local function head<|T|>(...: T): T return ...[1] end
+            local function wrap<|T|>(...: (const? { T })?): (const? { T })?
+                return ...[1]
+            end
+
+            function force(items: {value}?): const? { integer }
+                return head<|const? { integer }|>(optional(items))
+            end
+
+            function generic_force(items: {value}?): const? { integer }
+                return head<|const? { integer }|>(generic_optional<|value|>(items))
+            end
+
+            function wrapped(items: {value}): (const? { integer })?
+                return wrap<|integer|>(required(items))
+            end
+
+            function input(): {value} return {7} end
+        ]], [[
+            local items = test.input()
+            assert(rawequal(test.force(items), items))
+            assert(rawequal(test.generic_force(items), items))
+            assert(rawequal(test.wrapped(items), items))
+            items[1] = 11
+            assert(test.force(items)[1] == 11)
+            local ok, err = pcall(test.force, nil)
+            assert(not ok and err:find("found nil", 1, true), tostring(err))
+            ok, err = pcall(test.generic_force, nil)
+            assert(not ok and err:find("found nil", 1, true), tostring(err))
+        ]])
+    end)
+
     it("forces a generic container result in a generic-for setup tuple",
     function()
         h.run_coder([[

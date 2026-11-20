@@ -1444,10 +1444,12 @@ function coder._checked_adjustment_plan_impl(
         local option = assert(adjustment.option,
             use .. " lacks its surface Option step")
         local coercion = option.coercion
-        assert(option.kind == "direct_coercion" and coercion
+        local inner = coercion and coercion.inner
+        assert(option.kind == "direct_coercion" and inner
                and (coercion.op == "option_force" or coercion.op == "option_wrap")
-               and coercion.inner and coercion.inner.kind == "identity",
-            use .. " does not preserve the surface Option payload")
+               and (inner.kind == "identity"
+                    or (inner.kind == "gradual_view" and inner.op == "structural")),
+            use .. " does not preserve the Option payload carrier")
         local force = coercion.op == "option_force"
         local payload = force and option.target or option.source
         assert(type(payload) == "table"

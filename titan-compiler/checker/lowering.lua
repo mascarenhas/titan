@@ -232,11 +232,14 @@ end
 local function generic_open_container_option_plan(source, target, prior, state)
     -- An open run has no expression for each element. Retain the admitted
     -- surface presence change between ordinary views of the two carriers.
-    -- The surface plan must already have accepted an unchanged payload.
+    -- The surface plan must already preserve the Array or Map carrier.
     local coercion = prior and prior.coercion
-    if not coercion
+    local inner = coercion and coercion.inner
+    if not inner
        or (coercion.op ~= "option_force" and coercion.op ~= "option_wrap")
-       or coercion.inner.kind ~= "identity" then
+       or (inner.kind ~= "identity"
+           and not (inner.kind == "gradual_view" and inner.op == "structural"
+                    and types.is_gradual_array_view(inner.source, inner.target))) then
         return nil
     end
     local surface_source, surface_target =
