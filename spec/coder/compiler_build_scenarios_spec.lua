@@ -1445,6 +1445,8 @@ local facade = import "facade"
 function main(args: {string}): integer
   local first = 41
   if args[1] then first = 42 end
+  if args[1] == "own" then first = 43 end
+  if args[1] == "bundle" then first = 44 end
   if not facade.check(first) then return 1 end
   return 0
 end
@@ -1606,16 +1608,18 @@ function next(): integer return counter.serial end
             local competing = build_dir .. "/competing"
             built("other", competing, "other.live", "other.dormant")
             assert(uv.fs_copyfile(competing .. "/other.a", lib .. "/other.a"))
-            put_source("app/competing.titan", [[
+            put_source("competing-app/shared/counter.titan", "const serial = 0\n")
+            put_source("competing-app/competing.titan", [[
+local own = import "shared.counter.titan"
 local other = import "other.live"
 local facade = import "facade"
 
 function main(args: {string}): integer
-  if not facade.check(other.next()) then return 1 end
+  if not facade.check(other.next() + own.serial) then return 1 end
   return 0
 end
 ]])
-            local ok, diagnostic = compile("app", build_dir .. "/conflict", "--static", "competing")
+            local ok, diagnostic = compile("competing-app", build_dir .. "/conflict", "--static", "competing")
             assert.is_false(ok, diagnostic)
             assert.matches("shared.counter", diagnostic, 1, true)
             assert.matches("other.a", diagnostic, 1, true)
@@ -1670,19 +1674,116 @@ end
         assert.matches("cyclic source requirement: shared.counter -> facade -> shared.counter",
             cycle, 1, true)
         write(lib .. "/shared/counter.titan", original)
-        -- A later compiled replacement cannot satisfy a source obligation.
-        local replacement = build_dir .. "/replacement"
-        put_source("replacement/shared/counter.titan", "const unused = true\n")
-        built("replacement", replacement, "shared.counter")
-        assert(uv.fs_copyfile(replacement .. "/shared/counter" .. SHARED_SUFFIX,
-            lib .. "/shared/counter" .. SHARED_SUFFIX))
+        run(through, "through_facade", "changed")
         assert(os.remove(lib .. "/shared/counter.titan"))
         local ok, diagnostic = compile("app", through, "through_facade")
         assert.is_false(ok, diagnostic)
         assert.matches("shared.counter", diagnostic, 1, true)
         assert.matches("facade", diagnostic, 1, true)
-        assert.matches("--tree", diagnostic, 1, true)
         run(through, "through_facade", "changed")
+
+        local replacement = build_dir .. "/replacement"
+        local seed_output = build_dir .. "/replacement-seed"
+        put_source("replacement-seed/shared/seed.titan", read(lib .. "/shared/seed.titan"))
+        built("replacement-seed", seed_output, "shared.seed")
+        local function copy_provider(output, stem, suffix)
+            assert(uv.fs_copyfile(output .. "/" .. stem .. suffix, lib .. "/" .. stem .. suffix))
+        end
+        copy_provider(seed_output, "shared/seed", SHARED_SUFFIX)
+        if not platform.windows then copy_provider(seed_output, "shared/seed", ".a") end
+        local function replacement_source(extra)
+            return (original:gsub("serial = seed.start%(%)", "serial = seed.start() + " .. extra))
+        end
+        put_source("replacement/shared/counter.titan", replacement_source(1))
+        built("replacement", replacement, "shared.counter")
+        copy_provider(replacement, "shared/counter", SHARED_SUFFIX)
+        run(dynamic, "demo") -- the old app still provides A even when a binary exists
+        run(through, "through_facade", "changed")
+
+        local elected = build_dir .. "/elected"
+        -- No build-time traversal of the replacement DSO's private dependency.
+        local seed_image = "/shared/seed" .. SHARED_SUFFIX
+        assert(os.remove(lib .. seed_image))
+        assert(os.remove(lib .. "/shared/seed.titan"))
+        step = built("app", elected, "through_facade")
+        assert.equal(0, compile_count(step, "counter"), step.raw)
+        assert.is_false(exists(elected .. "/shared/counter.o"))
+        copy_provider(seed_output, "shared/seed", SHARED_SUFFIX)
+        run(elected, "through_facade", "own")
+        step = built("app", elected, "through_facade")
+        assert.truthy(next(step.link_hits), step.raw)
+        run(elected, "through_facade", "own")
+        built("app", build_dir .. "/print-binary", "--print-ast", "demo")
+
+        if not platform.windows then
+            local strict = build_dir .. "/strict-replacement"
+            ok, diagnostic = compile("app", strict, "--static", "through_facade")
+            assert.is_false(ok, diagnostic)
+            assert.matches("shared.counter", diagnostic, 1, true)
+            assert.matches("shared providers are not used", diagnostic, 1, true)
+            copy_provider(replacement, "shared/counter", ".a")
+            built("app", strict, "--static", "through_facade")
+            assert.is_false(exists(strict .. "/shared/counter.o"))
+            run(strict, "through_facade", "own")
+            assert(os.remove(lib .. "/shared/counter.a"))
+        end
+
+        local facade_source = source_dir .. "/facade/facade.titan"
+        write(facade_source, 'local counter = import "shared.counter"\n' ..
+            read(facade_source):gsub("right.check%(first, 1%)", "counter.serial == first and right.check(first, 1)"))
+        publish("facade", { "facade" }, "facade")
+        put_source("app/replacement_test.titan", [[
+local test = import "test"
+local facade = import "facade"
+
+function test_compiled_counter(context: test.Context)
+  test.assert(facade.check(43))
+end
+]])
+        local compiled_tests = build_dir .. "/test-compiled"
+        built("app", compiled_tests, "--test", "replacement_test")
+        assert.matches("[  PASSED  ] 1 test.", run(compiled_tests, "replacement_test"), 1, true)
+        write(lib .. "/shared/counter.titan", replacement_source(0))
+        built("app", build_dir .. "/prefer-source", "--source-first", "through_facade")
+        run(build_dir .. "/prefer-source", "through_facade", "changed")
+        assert(os.remove(lib .. "/shared/counter.titan"))
+
+        -- Keep B fixed across the two compiled selections. A's logical name
+        -- does not change, but the same output must publish a different row.
+        built("app", elected, "through_facade")
+        assert(os.remove(lib .. "/shared/counter" .. SHARED_SUFFIX))
+        local bundle = build_dir .. "/replacement-bundle"
+        put_source("replacement/shared/counter.titan", replacement_source(2))
+        put_source("replacement/shared/companion.titan", "const marker = true\n")
+        built("replacement", bundle, "shared.counter", "shared.companion")
+        copy_provider(bundle, "shared", SHARED_SUFFIX)
+        if not platform.windows then copy_provider(bundle, "shared", ".a") end
+        assert.is_false(exists(lib .. "/shared/counter" .. SHARED_SUFFIX))
+        step = built("app", elected, "through_facade")
+        assert.truthy(next(step.link_misses), step.raw)
+        assert.equal(0, compile_count(step, "counter"), step.raw)
+        run(elected, "through_facade", "bundle")
+        step = built("app", elected, "through_facade")
+        assert.truthy(next(step.link_hits), step.raw)
+        if not platform.windows then
+            local strict = build_dir .. "/strict-bundle"
+            built("app", strict, "--static", "through_facade")
+            run(strict, "through_facade", "bundle")
+            assert(os.remove(lib .. "/shared.a"))
+        end
+        assert(os.remove(lib .. "/shared" .. SHARED_SUFFIX))
+
+        local claimed = lib .. "/shared/counter" .. SHARED_SUFFIX
+        write(claimed, "invalid native image\n")
+        ok, diagnostic = compile("app", elected, "through_facade")
+        assert.is_false(ok, diagnostic)
+        assert.matches("shared/counter" .. SHARED_SUFFIX, diagnostic:gsub("\\", "/"), 1, true)
+        assert(os.remove(claimed))
+        put_source("replacement/shared/counter.titan",
+            (replacement_source(1):gsub("function next%(%)", "function next(delta: integer)")))
+        built("replacement", replacement, "shared.counter")
+        copy_provider(replacement, "shared/counter", SHARED_SUFFIX)
+        rejects_incompatible(build_dir .. "/incompatible-replacement")
 
         if not platform.windows then
             local deployment = workspace .. "/deployment"

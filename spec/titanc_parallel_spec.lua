@@ -787,7 +787,7 @@ describe("titanc command-line orchestration", function()
                         context.selected_static_providers[1] = {
                             archive = archive, entries = { ["pkg.dep"] = {} },
                         }
-                        context.linked_module_names = { "app.main", "pkg.dep" }
+                        context.linked_modules = { { name = "app.main" }, { name = "pkg.dep" } }
                     end
                     return built
                 end
@@ -831,7 +831,7 @@ describe("titanc command-line orchestration", function()
             assert.same({ "pkg.a" }, observed.archives)
             assert.same({
                 module = "app.main", no_uv_bootstrap = false,
-                linked_modules = { "app.main", "pkg.dep" },
+                linked_modules = { { name = "app.main" }, { name = "pkg.dep" } },
             }, observed.entry)
         end
     end)

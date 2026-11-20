@@ -1572,10 +1572,10 @@ static TitanModuleProvider titan_path_find_linked_module(lua_State *L,
             const TitanLinkedModule *entry = begin + (end - begin) / 2;
             int order = strcmp(module, entry->name);
             if (order == 0) {
-#if defined(_WIN32)
-                result.handle = loadlib(L, linked->provider);
-#else
                 result.symbols = entry->symbols;
+#if !defined(TITAN_TARGET_BROWSER)
+                if (entry->provider != NULL)
+                    result.handle = loadlib(L, entry->provider);
 #endif
                 break;
             }

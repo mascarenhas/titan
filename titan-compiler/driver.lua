@@ -8908,21 +8908,23 @@ function driver.finalize_resolver_context(context)
     context.native_static_names = native_static_names
     context.native_bindings = native_bindings
     context.physical_owner = physical_owner
-    context.linked_module_names = nil
+    context.linked_modules = nil
     if elect_linked or elect_app_sources then
-        local names = {}
+        local modules = {}
         for name in pairs(source_names) do
-            if linked_source(name) then names[#names + 1] = name end
+            if linked_source(name) then modules[#modules + 1] = { name = name } end
         end
         for name, mod in pairs(selected_static_modules) do
             -- Older archives need not provide a link-visible resolver.
             if elect_linked and mod.static_provider.entries[name].imports ~= nil then
-                names[#names + 1] = name
+                modules[#modules + 1] = { name = name }
             end
         end
-        if #names > 0 then
-            table.sort(names, util.bytewise_less)
-            context.linked_module_names = names
+        if #modules > 0 then
+            table.sort(modules, function(left, right)
+                return util.bytewise_less(left.name, right.name)
+            end)
+            context.linked_modules = modules
         end
     end
 
@@ -11320,17 +11322,20 @@ int main(int argc, char** argv) {
 
 ]]
 
-function perf.linked_module_catalog(names, provider)
-    local private_symbol = not provider and require("titan-compiler.coder.core").coder._private_symbol
+function perf.linked_module_catalog(modules, companion)
+    local private_symbol = not companion and require("titan-compiler.coder.core").coder._private_symbol
     local declarations, entries = {}, {}
-    for _, name in ipairs(names) do
-        local resolver = private_symbol and private_symbol(name, "native_symbol") or "NULL"
-        if private_symbol then
+    for _, module in ipairs(modules) do
+        local provider = module.provider or companion
+        local resolver = "NULL"
+        if not provider then
+            resolver = private_symbol(module.name, "native_symbol")
             declarations[#declarations + 1] =
                 "TITAN_SOURCE_LOCAL void *" .. resolver .. "(const char *symbol);"
         end
-        entries[#entries + 1] =
-            "    { \"" .. c_string_contents(name) .. "\", " .. resolver .. " },"
+        entries[#entries + 1] = string.format("    { \"%s\", %s, %s },",
+            c_string_contents(module.name), resolver,
+            provider and ('"' .. c_string_contents(provider) .. '"') or "NULL")
     end
     return util.render(require("titan-compiler.cpreamble").source_visibility .. "\n" ..
         table.concat(declarations, "\n") .. [[
@@ -11341,10 +11346,8 @@ $LINKED_MODULE_ENTRIES
 static const TitanLinkedModules titan_linked_modules = {
     titan_linked_entries,
     titan_linked_entries + sizeof(titan_linked_entries) / sizeof(*titan_linked_entries)
-$LINKED_MODULE_PROVIDER
 };]], {
         LINKED_MODULE_ENTRIES = table.concat(entries, "\n"),
-        LINKED_MODULE_PROVIDER = provider and ('    , "' .. provider .. '"') or "",
     })
 end
 
@@ -11371,17 +11374,13 @@ function driver.entrypoint_contents(modname, program_name, options)
         LINKED_MODULE_DECLARATIONS = "", LINKED_MODULE_INSTALL = "",
         ERROR_HELPERS = require("titan-compiler.browserentry").error_helpers,
     }
-    local names = options.context and options.context.linked_module_names
+    local modules = options.context and options.context.linked_modules
     if platform.windows then
         values.PROGNAME = c_string_contents(values.PROGNAME)
         values.ABI_FN = driver.mangle_module_name(modname) .. "_abi"
         values.PROVIDER = c_string_contents(assert(options.provider,
             "Windows entrypoint requires an explicit provider"))
         values.PRELOAD_FN = "titan_open_main"
-        if names then
-            values.LINKED_MODULE_DECLARATIONS = perf.linked_module_catalog(names, values.PROVIDER)
-            values.LINKED_MODULE_INSTALL = perf.catalog_install("&titan_linked_modules")
-        end
         values.PLATFORM_ALERTS = util.render(windows_entrypoint_alerts, values)
         values.ENTRYPOINT_DECLARATIONS =
             util.render(windows_entrypoint_declarations, values)
@@ -11390,10 +11389,11 @@ function driver.entrypoint_contents(modname, program_name, options)
         values.PLATFORM_ALERTS = util.render(unix_entrypoint_alerts, values)
         values.ENTRYPOINT_DECLARATIONS =
             "int " .. values.LUAOPEN_FN .. "(lua_State* L);"
-        if names then
-            values.LINKED_MODULE_DECLARATIONS = perf.linked_module_catalog(names)
-            values.LINKED_MODULE_INSTALL = perf.catalog_install("&titan_linked_modules")
-        end
+    end
+    if modules then
+        local companion = platform.windows and options.provider
+        values.LINKED_MODULE_DECLARATIONS = perf.linked_module_catalog(modules, companion)
+        values.LINKED_MODULE_INSTALL = perf.catalog_install("&titan_linked_modules")
     end
     if options.coverage_runtime then
         local runtime_path = assert(package.searchpath(
@@ -11524,16 +11524,16 @@ static int titan_browser_worker(lua_State *L) {
 }
 ]]
     local opener = "luaopen_" .. driver.mangle_module_name(modname)
-    local names = options.context and options.context.linked_module_names
+    local modules = options.context and options.context.linked_modules
     local declarations = "extern int luaopen_titan(lua_State *L);\nextern int " .. opener .. "(lua_State *L);"
-    if names then declarations = declarations .. "\n" .. perf.linked_module_catalog(names) end
+    if modules then declarations = declarations .. "\n" .. perf.linked_module_catalog(modules) end
     return driver.browser_c_image_contents(util.render(worker, {
         LUAOPEN = opener, MODNAME = c_string_contents(modname),
         SKIP = options.no_uv_bootstrap and "1" or "0",
     }), { declarations = declarations,
         initializer = util.render(initializer, {
             LUAOPEN = opener, MODNAME = c_string_contents(modname),
-            LINKED_MODULE_INSTALL = names and perf.catalog_install("&titan_linked_modules") or "",
+            LINKED_MODULE_INSTALL = modules and perf.catalog_install("&titan_linked_modules") or "",
         }),
         program_name = c_string_contents(program_name or modname:gsub(".*[.]", "")) })
 end
