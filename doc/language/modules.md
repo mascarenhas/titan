@@ -503,7 +503,7 @@ If any transitively imported module initializes `titan.async` (for example `asyn
 
 ### The Titan path
 
-Compiled providers (`.so`, `.a`, or `.dll`) are searched along a semicolon-separated list of directories taken from `TITAN_PATH_0_6` (or `TITAN_PATH`), where `;;` inserts the default path and `!` expands to the running executable's directory. At compile time the default is `.;<root>/lib/titan/0.6`; at run time it is `!;!/../lib/titan/0.6` followed by the SDK fallback (never the current working directory). Source imports search every authored root from `--tree` (default `.`) and then fall back to the read-only implicit SDK root `<root>/lib/titan/0.6` on both native and browser targets; selecting an installed source through that fallback requires `-o`/`--output` so generated files stay in the consumer's output tree.
+Compiled providers (`.so`, `.a`, or `.dll`) are searched along a semicolon-separated list of directories taken from `TITAN_PATH_0_6` (or `TITAN_PATH`), where `;;` inserts the default path and `!` expands to the running executable's directory. At compile time the default is `.;<root>/lib/titan/0.6`; at run time it is `!;!/../lib/titan/0.6` followed by the SDK fallback (never the current working directory). Positional `titanc` build roots resolve only from authored `--tree` roots (default `.`), never from the implicit installed source fallback; ordinary `import` statements inside an authored root search authored `--tree` roots first and then fall back to the read-only implicit SDK root `<root>/lib/titan/0.6` on both native and browser targets (requiring `-o`/`--output` if an installed source is selected).
 
 For complete `titanc` flags and environment variables, provider search rules, `--static` archive linking, multi-module bundling, shared-library binary compatibility, `--incremental` and `-c` separate compilation, build profiles, stock Lua hosting, and `--coverage`, see [Appendix B: The `titanc` Toolchain, Linking, and Coverage](toolchain.md). For Windows DLL providers and launchers, see [Appendix A.2: Installing and Using Titan on Windows](windows-build.md).
 
@@ -663,7 +663,7 @@ build = {
 }
 ```
 
-When compiling a consumer, `titanc` searches every authored root from `--tree` (default `.`) and then falls back to the read-only implicit SDK root `<root>/lib/titan/0.6` on both native and browser targets (on `--target browser`, `<root>/lib/titan/0.6` is searched for `.titan` source only, selecting `.browser.titan` or shared `.titan` variants normally; native providers there are never eligible):
+When compiling a consumer from an authored root (`main` below), positional `titanc` build roots—whether for a library, program, `-c`, explicit `--test`, or `--exe` build—resolve **only** from authored `--tree` roots (default `.`), never from the implicit installed source fallback (to compile a package itself, run from its source checkout with `--tree`, as the rockspec above does for `cui`, rather than naming an installed dependency as a positional root). Ordinary `import` statements inside a valid authored root search every authored root from `--tree` and then fall back to the read-only implicit SDK root `<root>/lib/titan/0.6` on both native and browser targets (on `--target browser`, `<root>/lib/titan/0.6` is searched for `.titan` source only, selecting `.browser.titan` or shared `.titan` variants normally; native providers there are never eligible):
 
 ```sh
 titanc --output build --exe build/demo main

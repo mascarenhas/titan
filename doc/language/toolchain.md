@@ -15,10 +15,10 @@ least one module name is required unless you pass `--print-root`,
 
 | Option | Meaning |
 | --- | --- |
-| `<module>...` | Dotted logical module names to compile as build roots. |
+| `<module>...` | Dotted logical module names to compile as build roots (resolved only from authored `--tree` roots, never the implicit SDK source fallback). |
 | `-o`, `--output DIR` | Root directory for all generated files, created if missing. Required for `--target browser` and whenever a build selects an installed `.titan` source through the SDK fallback. |
 | `--exe PATH` | Exact destination for a standalone or `--test` executable, relative to the current directory. |
-| `-t`, `--tree PATH` | Semicolon-separated authored source root directories (default: `.`). All authored roots are searched before the read-only installed module directory `<root>/lib/titan/0.6`. |
+| `-t`, `--tree PATH` | Semicolon-separated authored source root directories (default: `.`). Positional roots and `--test-dir` use only these authored roots; ordinary imports search authored roots before the read-only implicit SDK root `<root>/lib/titan/0.6`. |
 | `-T`, `--target TGT` | Compilation target: host OS (`linux`, `darwin`, `windows`) or `browser` (default: `TITAN_TARGET` or host OS). |
 | `--static` | Prefer static `.a` Titan archive providers over `.so` providers. Unsupported on Windows. |
 | `--source-first` | Prefer available `.titan` source dependencies over compiled providers, with compiled fallback on miss. |
@@ -233,8 +233,14 @@ refuses to overwrite authored files occupying reserved paths.
 
 ### Source versus compiled lookup order
 
-Explicit command-line roots and explicit source imports (`import "pkg.mod.titan"`)
-always resolve to source. Ordinary `import` statements resolve in this order:
+Explicit positional command-line roots—for a library, program, `-c`, explicit
+`--test`, or `--exe` build—always resolve to source **only** under the authored
+`--tree` roots (default `.`), never through the implicit installed source
+fallback `<root>/lib/titan/0.6`. If a requested root exists only as installed
+source, `titanc` rejects it and directs you to compile from a source checkout
+with `--tree`. Explicit source imports (`import "pkg.mod.titan"`) also require
+source. Ordinary `import` statements inside a valid authored root resolve in
+this order:
 
 | Mode | Search order |
 | --- | --- |
@@ -243,15 +249,16 @@ always resolve to source. Ordinary `import` statements resolve in this order:
 | `--source-first` or `--test` | 1. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` -> 2. Compiled providers (fallback on miss) |
 
 Authored source roots come from `--tree` (default `.`). Passing `--tree`
-replaces the default `.` without disabling the read-only installed source
-fallback `<root>/lib/titan/0.6`. That fallback applies on both native targets
-and `--target browser` (where `<root>/lib/titan/0.6` is searched for `.titan`
-source only, selecting `.browser.titan` and shared `.titan` variants normally;
-native compiled providers there are never eligible for browser builds).
-`--test-dir` scans only the specified directory inside an authored `--tree`
-root and never scans the installed SDK automatically. Whenever a build selects
-an installed source through the fallback, `-o`/`--output` is required so all
-generated files land in the consumer's output directory by logical module name.
+replaces the default `.` without disabling the read-only implicit SDK fallback
+`<root>/lib/titan/0.6` for ordinary imports. That fallback applies on both
+native targets and `--target browser` (where `<root>/lib/titan/0.6` is searched
+for `.titan` source only, selecting `.browser.titan` and shared `.titan`
+variants normally; native compiled providers there are never eligible for
+browser builds). `--test-dir` scans only the specified directory inside an
+authored `--tree` root and never scans the installed SDK automatically.
+Whenever a build selects an installed source through the fallback,
+`-o`/`--output` is required so all generated files land in the consumer's
+output directory by logical module name.
 
 Within each compiled format, lookup is **path-root first, shallowest prefix to
 exact module**. For logical module `a.b.c`, one directory is probed as:
