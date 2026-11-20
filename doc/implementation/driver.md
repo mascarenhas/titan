@@ -760,58 +760,42 @@ are `source_roots` and the shared resolver `context`.
 
 #### Contextual source-requirement recovery
 
-* **How sources are chosen.** Semantic source-requirement recovery is active
-  only in unplanned open-world `defaultloader` calls (`not plan_mode`, no
-  `worker_plan`, not `incremental`, not `coverage`, no
-  `context.authored_source_roots`, and `not context.completion_closed_world`).
-  `recover_contextual_owner` enters `check_source_frontier` lazily—only when
-  the exposing compiled member carries `source_requirements` and the requested
-  owner is directly listed in `source_requirements`, is already present in
-  `driver.imported` as `"source"`, or missed cleanly after
-  `find_dependency_interface`. Raw provider loading, unrelated imports,
-  independently recoverable compiled owners not listed in `source_requirements`,
-  and private-only requirements with no unresolved nominal demand do not enter
-  the frontier; dormant archive siblings impose nothing. Each directly recorded
-  requirement is loaded through `perf.load_source_requirement` (shared with
-  `plan.load_sources`): it requires actual source—rejecting any conflicting
-  compiled provider—and accepts cached or imported source entries only when
-  their `filename` and ordered `source_files` still match the freshly selected
-  source (`matches_required_source`). While walking a frontier
-  (`source_requirement_depth > 0`), `resolve_source` appends
-  `perf.semantic_source_root(context)`—`<handle-prefix>/lib/titan/0.6` from
-  `context.browser_semantics.paths.root` on browser analysis (never native host
-  globals or `lib/titan-browser`) and otherwise `driver.INSTALL_PATHS.titan_bin`—and
-  skips `relocate_source_output` and source certificates, so check-only
-  recovery writes no compiled/publication outputs and nothing into the
-  installed SDK tree (semantic FFI header checks and host caches still use
-  their own private temporaries and storage). Each loaded required source's own
-  ordinary imports (`Ast.TopLevelImport` or retained `entry.deps`) follow
-  ordinary source/binary resolver policy—so an unmarked transitive owner such
-  as `units` uses an eligible compiled provider when ordinary lookup selects
-  one, or source when it does not—and recovery never performs an unrestricted
-  disk source search for an arbitrary owner name. Obligation failures (missing
-  or invalid required source, conflicting compiled provider, or cycles) set
-  `request.source_requirement_error` so `checker/imports.lua` surfaces the
-  obligation error rather than masking it into a use-site `type '...' not found`
-  diagnostic.
-* **What the host retains and finalizes.** Checking a frontier publishes only
-  the reached external source entries in `driver.imported` (with their real
-  ordered `source_files` and observations) and records the required names on
-  the selected compiled member's `.deps` (`publish_requirement_edges`, targeting
-  `exposing.requirement_consumer or exposing`—never the consuming authored
-  source module). A reached source owner returns its `public_source_interface`
-  projection with `kind = "external_source"` and `nominal_exposer = modname`,
-  adding no binary `context.contextual_resolutions` row and no producer-dynamic
-  `native_constraints` entry; a reached compiled owner returns through the
-  ordinary contextual binary path. Carried static and DSO members propagate
-  their own `source_requirements` with `requirement_consumer` pointing back to
-  the selected member. At `finalize_resolver_context`, selected dynamic and
-  static entries replay with their `source_requirements` intact, while dormant
-  archive siblings carrying `source_requirements` are skipped during semantic
-  recovery (their physical ownership is still validated).
-* **How freshness works.** One loader memoizes checked frontiers
-  (`source_frontiers`) and per-requirement outcomes (`checked_requirements`)
-  within a single attempt, with no filesystem watcher, cross-attempt miss
+* **How sources are chosen.** Active only in unplanned open-world
+  `defaultloader` calls (outside `plan_mode`, `worker_plan`, `incremental`,
+  `coverage`, `context.authored_source_roots`, and `completion_closed_world`),
+  this path enters an exposing member's recorded `source_requirements` lazily
+  on demand—never on raw provider loads, unrelated imports, private-only
+  requirements with no nominal demand, or dormant archive siblings. Each
+  directly recorded requirement demands actual source (sharing the strict
+  conflict/missing-source rule with `plan.load_sources`, and reusing a cached
+  or imported source entry only when its main and ordered `source_files` still
+  match the freshly selected source). Within that frontier, source lookup
+  appends `perf.semantic_source_root(context)`—`<handle-prefix>/lib/titan/0.6`
+  from `context.browser_semantics.paths.root` on browser analysis (never native
+  host globals or `lib/titan-browser`) and otherwise
+  `driver.INSTALL_PATHS.titan_bin`—and skips `--output` relocation and source
+  certificates, writing no compiled/publication outputs or installed-SDK files
+  (semantic FFI header checks and host caches still use their own private
+  temporaries and storage). Loaded required sources resolve their own ordinary
+  imports by normal source/binary precedence—so an unmarked transitive owner
+  such as `units` may resolve from an eligible compiled provider or from
+  source—and recovery never falls back to an unrestricted disk source search
+  for an arbitrary owner name. Obligation failures surface as checking errors
+  rather than being masked into a use-site `type '...' not found` diagnostic.
+* **What the host retains and finalizes.** Only reached frontiers publish
+  external `source` entries in `driver.imported` (with their real ordered
+  `source_files` and observations) and record the required names on the
+  selected compiled member's `.deps` (never on the consuming authored source).
+  A reached source owner returns its public projection without entering binary
+  `context.contextual_resolutions` or adding a producer-dynamic native
+  constraint; a reached compiled owner uses the ordinary contextual binary
+  path. Carried static/DSO members attribute their own requirements back to the
+  selected member, and `finalize_resolver_context` preserves selected members'
+  `source_requirements` while skipping dormant archive siblings that carry
+  `source_requirements` (still validating every archive member's physical
+  ownership).
+* **How freshness works.** Frontier and requirement outcomes are memoized for
+  one loader attempt only, with no filesystem watcher, cross-attempt miss
   cache, or live DSO unload guarantee. On a saved refresh, the host calls
   [`driver.resolve_external_modules`](#driverresolve_external_modulesrequests-known_sources-options),
   restores only clean retained entries, and rechecks dirty consumers;
