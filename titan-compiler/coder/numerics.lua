@@ -551,6 +551,28 @@ function coder._code_interface_discovery_predicate(ctx, target, source)
     }), result
 end
 
+local function array_predicate(ctx, target, source)
+    if target.isconst.tag == "maybe" then
+        return render([[
+            ((ttistable($SOURCE)
+                && titan_array_try_proxy_either(hvalue($SOURCE), $MUTABLE, $CONST) != NULL)
+             || titan_array_try_backing_either($SOURCE, $MUTABLE, $CONST) != NULL)
+        ]], {
+            SOURCE = source,
+            MUTABLE = array_metatable_kind(ctx, false),
+            CONST = array_metatable_kind(ctx, true),
+        })
+    end
+    return render([[
+        ((ttistable($SOURCE)
+            && titan_array_try_proxy(hvalue($SOURCE), $META) != NULL)
+         || titan_array_try_backing($SOURCE, $META) != NULL)
+    ]], {
+        SOURCE = source,
+        META = array_metatable(ctx, target),
+    })
+end
+
 -- Return setup statements and a C boolean expression for the non-raising form
 -- of one checker-owned DynamicCoercionPlan.  This is the predicate twin of
 -- `dynamiccheckandget`: in particular Option recurses through the embedded
@@ -583,14 +605,7 @@ function coder._code_dynamic_predicate(ctx, plan, target, source)
             META = c_integer_literal(owned_c_metatable(ctx, resolved)),
         })
     elseif op == "array" then
-        return "", render([[
-            ((ttistable($SOURCE)
-                && titan_array_try_proxy(hvalue($SOURCE), $META) != NULL)
-             || titan_array_try_backing($SOURCE, $META) != NULL)
-        ]], {
-            SOURCE = source,
-            META = array_metatable(ctx, resolved),
-        })
+        return "", array_predicate(ctx, resolved, source)
     elseif op == "nil" then
         return "", render("ttisnil($SOURCE)", { SOURCE = source })
     elseif op == "string" then
@@ -667,14 +682,7 @@ function coder._code_strict_predicate(ctx, plan, target, source)
            or op == "c_tvalue" then
         return "", "1"
     elseif op == "array" then
-        return "", render([[
-            ((ttistable($SOURCE)
-                && titan_array_try_proxy(hvalue($SOURCE), $META) != NULL)
-             || titan_array_try_backing($SOURCE, $META) != NULL)
-        ]], {
-            SOURCE = source,
-            META = array_metatable(ctx, resolved),
-        })
+        return "", array_predicate(ctx, resolved, source)
     elseif op == "map" then
         return "", render("ttistable($SOURCE)", { SOURCE = source })
     elseif op == "nominal" then
@@ -904,10 +912,11 @@ function coder._codeis(ctx, node)
     -- Freeze the operand before inspecting it. This both enforces exactly-once
     -- evaluation and roots GC values while metatable/Array checks run.
     local original_source_type = node.exp._type
-    coder._checked_written_cast_plan(
-        maybe3.get_checked(node._written_cast, "written cast"), original_source_type, node.target,
+    local cast = coder._checked_written_cast_plan(
+        maybe3.get_checked(node._written_cast, "written cast"),
+        original_source_type, node.target,
         "written type test")
-    if maybe3.get_checked(node._written_cast, "written cast").op == "current_module" then
+    if cast.op == "current_module" then
         return "", "1"
     end
     local source_type = coder._resolve_cast_type(node.exp._type)
@@ -924,9 +933,13 @@ function coder._codeis(ctx, node)
     end
     local predicate_stats, predicate
 
-    if source_type._tag == "Type.Value" then
-        local cast = assert(maybe3.get_checked(node._written_cast, "written cast"),
-            "value type test is missing its checker written-cast plan")
+    if cast.op == "maybe_array_cast_mutable" or cast.op == "maybe_array_cast_const" then
+        predicate_stats = ""
+        predicate = render("(titan_array_try_proxy($SOURCE, $META) != NULL)", {
+            SOURCE = source,
+            META = array_metatable(ctx, target_type),
+        })
+    elseif source_type._tag == "Type.Value" then
         if cast.op == "identity" then
             predicate_stats = render("(void)($SOURCE);", { SOURCE = source })
             predicate = "1"

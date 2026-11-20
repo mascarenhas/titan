@@ -122,8 +122,8 @@ function coder._validate_interface_frozen_guard(
     local tag = target._tag
     if tag == "Type.Array" then
         assert(guard.op == "array"
+               and types.valid_array_constness(guard.isconst)
                and guard.isconst.tag == target.isconst.tag
-               and (types.valid_array_constness(guard.isconst) and guard.isconst.tag ~= "maybe")
                and guard.element
                and guard.key == nil and guard.value == nil
                and guard.inner == nil and guard.name == nil,

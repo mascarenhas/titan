@@ -398,7 +398,7 @@ describe("dense Array and positional integer-Map checking", function()
         ]])
     end)
 
-    it("propagates const? array subtyping through Option types", function()
+    it("propagates maybe-const Array widening through Option types", function()
         assert_type_check([[
             function process(opt: const? {integer}?): integer
                 if not opt then
@@ -442,6 +442,70 @@ describe("dense Array and positional integer-Map checking", function()
                 return nil
             end
         ]])
+    end)
+
+    it("does not lift maybe-const Array widening through other types", function()
+        local errs = check_errs([[
+            record Box<|T|>
+                item: T
+            end
+
+            function invariant(
+                arrays: {{integer}}, map: {string: {integer}},
+                box: Box<|{integer}|>
+            )
+                local a: {const? {integer}} = arrays
+                local m: {string: const? {integer}} = map
+                local b: Box<|const? {integer}|> = box
+            end
+
+            function fixed(_: const? {integer}): {integer}
+                return {1}
+            end
+
+            function callable()
+                local input: function ({integer}): {integer} = fixed
+                local output: function (const? {integer}): (const? {integer}) =
+                    fixed
+            end
+
+            function invalid_optional(
+                view: (const? {integer})?, mutable: {integer}?,
+                floats: {float}, dynamic: {value}, optional_dynamic: {value}?
+            )
+                local a: {integer}? = view
+                local b: (const {integer})? = view
+                local frozen: (const {integer})? = mutable
+                local wrong: (const? {integer})? = floats
+                local wrap: {integer}? = dynamic
+                local force: {integer} = optional_dynamic
+                local cast = mutable as (const? {integer})?
+                local introduce = floats as (const? {float})?
+                local require = mutable as const? {integer}
+                local test = mutable is (const? {integer})?
+            end
+        ]])
+        assert.same(15, #errs, table.concat(errs, "\n"))
+        for index = 1, 11 do
+            assert.match("do not match", errs[index])
+        end
+        for index = 12, 15 do
+            assert.match("cannot cast", errs[index])
+        end
+    end)
+
+    it("does not introduce Option presence in a forwarded vararg descriptor",
+    function()
+        local errs = check_errs([[
+            local function take(...: (const? {integer})?)
+            end
+
+            function forward(...: {integer})
+                take(...)
+            end
+        ]])
+        assert.same(1, #errs)
+        assert.match("element type .* is not compatible", errs[1])
     end)
 
     it("rejects assigning const? arrays to mutable or const arrays without cast",

@@ -1002,6 +1002,13 @@ function generic_positional_constructor_element_type(
     return generic_substitute_constructor_type(operation, etype, recover)
 end
 
+local function array_constructor_type(elem, expected_constness)
+    -- A read-only context constructs the const tag even when it admits
+    -- either tag for an existing Array.
+    local readonly = expected_constness and expected_constness.tag ~= "no"
+    return types.Array(elem, { tag = readonly and "yes" or "no" })
+end
+
 function generic_finish_positional_constructor(node, st, errors, container_tag,
                                                keytype, elem_context, adjusted,
                                                operation, array_isconst)
@@ -1016,7 +1023,7 @@ function generic_finish_positional_constructor(node, st, errors, container_tag,
         operation, keytype, true)
 
     if container_tag == "Type.Array" then
-        node._type = types.Array(etype, array_isconst or { tag = "no" })
+        node._type = array_constructor_type(etype, array_isconst)
         annotate_array_writer(node, etype, errors)
     else
         node._type = types.Map(assert(closed_keytype), etype)
@@ -1178,7 +1185,7 @@ function check_positional_constructor(node, st, errors, container_tag,
         local provisional_key = generic_substitute_constructor_type(
             operation, keytype, false)
         node._type = container_tag == "Type.Array"
-            and types.Array(etype, array_isconst or { tag = "no" })
+            and array_constructor_type(etype, array_isconst)
             or types.Map(assert(provisional_key), etype)
         node._positional_adjustment = adjusted
         generic_add_inference_finalizer(operation, function()
@@ -1842,7 +1849,7 @@ function generic_check_direct_positional_constructor(
         plan.container_tag = "Type.Array"
         plan.elem = candidate.elem
         plan.key = nil
-        node._type = candidate
+        node._type = array_constructor_type(candidate.elem, candidate.isconst)
         return true
     end
 
@@ -2000,7 +2007,7 @@ function generic_check_direct_positional_constructor(
             plan.elem = current_type(plan.elem, false)
             plan.key = current_type(plan.key, false)
             node._type = plan.container_tag == "Type.Array"
-                and types.Array(plan.elem, { tag = "no" })
+                and array_constructor_type(plan.elem, plan.context.isconst)
                 or types.Map(plan.key, plan.elem)
         else
             node._type = candidate

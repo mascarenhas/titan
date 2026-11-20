@@ -3860,6 +3860,26 @@ describe("Titan types", function()
             assert.falsy(types.assignment_adjustment(opt_maybe, opt_mutable))
             assert.falsy(types.assignment_adjustment(opt_maybe, opt_const))
         end)
+
+        it("admits representation-only Array widening without coercion",
+        function()
+            local mutable = types.Array(types.Integer(), { tag = "no" })
+            local view = types.Array(types.Integer(), { tag = "maybe" })
+            local optional_mutable = types.Option(mutable)
+            local optional_view = types.Option(view)
+            local policy = { allow_coercion = false }
+
+            assert.is_false(types.equals(mutable, view))
+            assert.is_false(types.consistent(mutable, view))
+            assert.equal("identity", assert(types.assignment_adjustment(
+                mutable, view, policy)).kind)
+            assert.equal("identity", assert(types.assignment_adjustment(
+                optional_mutable, optional_view, policy)).kind)
+            assert.is_nil(types.assignment_adjustment(
+                mutable, optional_view, policy))
+            assert.is_nil(types.assignment_adjustment(
+                optional_mutable, view, policy))
+        end)
     end)
 
 end)

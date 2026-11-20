@@ -1772,4 +1772,584 @@ describe("dense Array code generation and boundaries", function()
             assert(mapped_const[1] == 1000 and mapped_const[2] == 2000 and mapped_const[3] == 3000)
         ]])
     end)
+
+    it("constructs concrete const Arrays in maybe-const contexts", function()
+        h.run_coder([[
+            local module_items: const? {integer} = {1}
+
+            local record Cell
+                const items: const? {integer}
+            end
+
+            local union Payload
+                items(const? {integer})
+            end
+
+            local function view(xs: const? {integer}): const? {integer}
+                return xs
+            end
+
+            local function optional(xs: (const? {integer})?):
+                    (const? {integer})?
+                return xs
+            end
+
+            local function collect(...: integer): const? {integer}
+                return {...}
+            end
+
+            function spread_literal(xs: {integer}): const? {integer}
+                return {...xs}
+            end
+
+            function as_const(xs: const? {integer}): const {integer}
+                return xs as const {integer}
+            end
+
+            function as_mutable(xs: const? {integer}): {integer}
+                return xs as {integer}
+            end
+
+            function direct(): (
+                const? {integer}, const? {integer}, (const? {integer})?,
+                const? {integer}, const? {integer}, const? {integer},
+                const? {integer}, const? {integer}, const {integer}, {integer}
+            )
+                local empty: const? {integer} = {}
+                const captured: const? {integer} = {2}
+                local read = function(): const? {integer} return captured end
+                local create = function(): const? {integer} return {3} end
+                local source = {4, 5}
+                local written = {6} as const? {integer}
+                local fixed: const {integer} = {7}
+                return module_items, empty, optional({8}), read(), create(),
+                       view({9, 10}), collect(...source), written, fixed, source
+            end
+
+            function nested(): (
+                const? {integer}, const? {integer}, const? {integer},
+                const? {integer}, const? {integer}
+            )
+                local outer: {const? {integer}} = {{11}}
+                local mapped: {string: const? {integer}} = {["a"] = {12}}
+                local positional = Cell({13})
+                local named: Cell = {items = {14}}
+                local payload = Payload.items({15})
+                case payload
+                when items(items) then
+                    return outer[1], mapped["a"], positional.items,
+                           named.items, items
+                end
+            end
+        ]], [[
+            local function check_const(xs, expected)
+                assert(getmetatable(xs) == "Titan const array metatable")
+                assert(rawequal(test.as_const(xs), xs))
+                local ok, err = pcall(test.as_mutable, xs)
+                assert(not ok and tostring(err):find("expected", 1, true), err)
+                assert(#xs == #expected)
+                for i, item in ipairs(expected) do
+                    assert(xs[i] == item)
+                end
+            end
+
+            local global, empty, optional, captured, created, argument,
+                  collected, written, fixed, mutable = test.direct()
+            check_const(global, {1})
+            check_const(empty, {})
+            check_const(optional, {8})
+            check_const(captured, {2})
+            check_const(created, {3})
+            check_const(argument, {9, 10})
+            check_const(collected, {4, 5})
+            assert(getmetatable(mutable) == "Titan array metatable")
+            assert(rawequal(test.as_mutable(mutable), mutable))
+            check_const(test.spread_literal(mutable), {4, 5})
+            check_const(written, {6})
+            check_const(fixed, {7})
+
+            local nested, mapped, positional, named, payload = test.nested()
+            check_const(nested, {11})
+            check_const(mapped, {12})
+            check_const(positional, {13})
+            check_const(named, {14})
+            check_const(payload, {15})
+        ]])
+    end)
+
+    it("preserves Array identity and nil when widening through Option", function()
+        h.run_coder([[
+            local function optional(xs: (const? {string})?):
+                    (const? {string})?
+                return xs
+            end
+
+            local function required(xs: const? {string}): const? {string}
+                return xs
+            end
+
+            function mutable(xs: {string}): (
+                (const? {string})?, (const? {string})?, const? {string}
+            )
+                local opt: {string}? = xs
+                return optional(opt), optional(xs), required(opt)
+            end
+
+            function fixed(xs: const {string}): (
+                (const? {string})?, (const? {string})?, const? {string}
+            )
+                local opt: (const {string})? = xs
+                return optional(opt), optional(xs), required(opt)
+            end
+
+            function missing(xs: {string}?): (const? {string})?
+                return optional(xs)
+            end
+
+            function force(xs: {string}?): const? {string}
+                return required(xs)
+            end
+
+            function samples(): ({string}, const {string})
+                return {"mutable"}, {"const"}
+            end
+        ]], [[
+            local mutable, fixed = test.samples()
+            local function check_views(xs, mapped, wrapped, forced)
+                assert(rawequal(xs, mapped))
+                assert(rawequal(xs, wrapped))
+                assert(rawequal(xs, forced))
+            end
+            check_views(mutable, test.mutable(mutable))
+            check_views(fixed, test.fixed(fixed))
+            assert(getmetatable(mutable) == "Titan array metatable")
+            assert(getmetatable(fixed) == "Titan const array metatable")
+            assert(#mutable == 1 and mutable[1] == "mutable")
+            assert(#fixed == 1 and fixed[1] == "const")
+            assert(test.missing(nil) == nil)
+            local ok, err = pcall(test.force, nil)
+            assert(not ok and tostring(err):find("but found nil", 1, true), err)
+        ]])
+    end)
+
+    it("keeps guarded maybe-const Option views over gradual Array elements", function()
+        h.run_coder([[
+            function mutable(): {value}
+                return {24, "wrong"}
+            end
+
+            function fixed(): const {value}
+                return {25}
+            end
+
+            function read_mutable(xs: {value}, index: integer): integer
+                local view: const? {integer} = xs
+                return view[index]
+            end
+
+            function read_fixed(xs: const {value}): integer
+                local view: const? {integer} = xs
+                return view[1]
+            end
+
+            function widen(xs: {value}?): (const? {integer})?
+                return xs
+            end
+
+            function observe_alias(xs: {value}, updated: value): integer
+                local optional: {value}? = xs
+                local view: (const? {integer})? = optional
+                xs[1] = updated
+                return view[1]
+            end
+
+            function read_optional(xs: {value}?, index: integer): integer
+                local view: (const? {integer})? = xs
+                return view[index]
+            end
+        ]], [[
+            local mutable, fixed = test.mutable(), test.fixed()
+            assert(test.read_mutable(mutable, 1) == 24)
+            assert(test.read_fixed(fixed) == 25)
+            assert(rawequal(test.widen(mutable), mutable))
+            assert(test.widen(nil) == nil)
+            assert(test.read_optional(mutable, 1) == 24)
+            assert(test.observe_alias(mutable, 37) == 37)
+            assert(mutable[1] == 37)
+            local ok, err = pcall(test.read_optional, mutable, 2)
+            assert(not ok and tostring(err):find("integer", 1, true), err)
+        ]])
+    end)
+
+    it("wraps and forces gradual maybe-const views without converting elements",
+    function()
+        h.run_coder([[
+            function mutable(): {value}
+                return {24, "wrong"}
+            end
+
+            function fixed(): const {value}
+                return {25, "wrong"}
+            end
+
+            function wrap(xs: {value}): (const? {integer})?
+                return xs
+            end
+
+            function force(xs: (const {value})?): const? {integer}
+                return xs
+            end
+
+            function same_qualifier(xs: const? {value}):
+                    ((const? {integer})?, const? {integer})
+                local optional: (const? {value})? = xs
+                return xs, optional
+            end
+
+            function read(xs: (const? {integer})?, index: integer): integer
+                return xs[index]
+            end
+        ]], [[
+            local mutable, fixed = test.mutable(), test.fixed()
+            local wrapped, forced = test.wrap(mutable), test.force(fixed)
+            assert(rawequal(mutable, wrapped) and rawequal(fixed, forced))
+            local same_wrapped, same_forced = test.same_qualifier(mutable)
+            assert(rawequal(mutable, same_wrapped) and rawequal(mutable, same_forced))
+            mutable[1] = 37
+            assert(test.read(wrapped, 1) == 37 and test.read(forced, 1) == 25)
+            for _, view in ipairs({wrapped, forced, same_wrapped, same_forced}) do
+                local ok, err = pcall(test.read, view, 2)
+                assert(not ok and tostring(err):find("integer", 1, true), err)
+            end
+            local ok, err = pcall(test.force, nil)
+            assert(not ok and tostring(err):find("but found nil", 1, true), err)
+        ]])
+    end)
+
+    it("keeps maybe-const Option widening in forwarded and spread arguments", function()
+        h.run_coder([[
+            local function take(...: (const? {integer})?):
+                    ((const? {integer})?, (const? {integer})?)
+                return ...
+            end
+
+            function forward(...: {integer}?):
+                    ((const? {integer})?, (const? {integer})?)
+                return take(...)
+            end
+
+            function spread(first: {integer}, second: {integer}):
+                    ((const? {integer})?, (const? {integer})?)
+                local arrays = {first, second}
+                return take(...arrays)
+            end
+
+            function sample(n: integer): {integer}
+                return {n}
+            end
+        ]], [[
+            local first, second = test.sample(1), test.sample(2)
+            local a, b = test.forward(first, nil)
+            assert(rawequal(a, first) and b == nil)
+            local c, d = test.spread(first, second)
+            assert(rawequal(c, first) and rawequal(d, second))
+        ]])
+    end)
+
+    it("widens maybe-const Options in finite result and iterator slots",
+    function()
+        h.run_coder([[
+            local function pair(): ({integer}, (const {integer})?)
+                return {19}, {22}
+            end
+
+            local function step(_: nil, last: integer): (integer?, {integer}?)
+                if last == 0 then return 1, {40} end
+                return nil, nil
+            end
+
+            function run(): (integer, integer, integer, const {integer})
+                local a: (const? {integer})?, b: (const? {integer})? = pair()
+                local xs = {{23}}
+                local spread: (const? {integer})? = ...xs
+                local index = 0
+                for i, items: (const? {integer})? in step, nil, 0 do
+                    index = items[1] + i
+                end
+                local fresh: (const? {integer})? = {42}
+                local present: const? {integer} = fresh
+                return a[1] + b[1], spread[1], index, present as const {integer}
+            end
+
+            function entries(): {const? {integer}: integer}
+                return {[{7}] = 33}
+            end
+        ]], [[
+            local pair, spread, iterator, fresh = test.run()
+            assert(pair == 41 and spread == 23 and iterator == 41)
+            assert(getmetatable(fresh) == "Titan const array metatable")
+            assert(fresh[1] == 42)
+            local key, value = next(test.entries())
+            assert(getmetatable(key) == "Titan const array metatable")
+            assert(key[1] == 7 and value == 33)
+        ]])
+    end)
+
+    it("widening Interface field snapshots preserves their Array carriers", function()
+        h.run_coder([[
+            interface Views
+                bare: const? {integer}
+                gradual: const? {integer}
+                mapped: (const? {integer})?
+                wrapped: (const? {integer})?
+            end
+
+            local record Arrays
+                const bare: {integer}
+                const gradual: {value}
+                const mapped: {value}?
+                const wrapped: {integer}
+            end
+
+            function view(
+                item: {integer}, gradual: {value}, optional: {integer}?
+            ): (
+                const? {integer}, integer, (const? {integer})?,
+                (const? {integer})?
+            )
+                local mapped: {value}?
+                if optional ~= nil then mapped = optional end
+                local arrays = Arrays(item, gradual, mapped, item)
+                local views: Views = arrays
+                return views.bare, views.gradual[1], views.mapped, views.wrapped
+            end
+
+            function samples(): ({integer}, {value})
+                return {7}, {8}
+            end
+        ]], [[
+            local item, gradual = test.samples()
+            local bare, read, mapped, wrapped = test.view(item, gradual, item)
+            assert(rawequal(bare, item) and read == 8)
+            assert(rawequal(mapped, item) and rawequal(wrapped, item))
+            local _, _, missing = test.view(item, gradual, nil)
+            assert(missing == nil)
+        ]])
+    end)
+
+    it("constructs concrete Arrays at inferred and erased generic edges", function()
+        h.run_coder([[
+            local function count<|T|>(items: const? {T}): integer
+                return #items
+            end
+
+            local function first<|T|>(x: T, _: T): T
+                return x
+            end
+
+            local function id<|T|>(item: T): T
+                return item
+            end
+
+            function literals(): (
+                integer, integer, integer, const? {integer}, const? {integer},
+                const? {integer}, const {integer}
+            )
+                local known = {1, 2, 3}
+                local fixed: const {integer} = {11}
+                local view: const? {integer} = fixed
+                return count({1, 2}), count(known), count {items = {3}},
+                       id<|const? {integer}|>({4}), first({}, view),
+                       first({5}, view), first({}, fixed)
+            end
+
+            function mutable(): {integer}
+                return {12}
+            end
+
+            function erased<|T|>(xs: {T}?, ys: const {T}):
+                    ((const? {T})?, (const? {T})?, const? {T})
+                return xs, ys, xs
+            end
+
+            function replay(xs: {integer}, ys: const {integer}):
+                    ((const? {integer})?, (const? {integer})?, const? {integer})
+                return erased(xs, ys)
+            end
+        ]], [[
+            local inferred, named, literal, explicit, empty, positional, fixed =
+                test.literals()
+            assert(inferred == 2 and named == 3 and literal == 1)
+            assert(getmetatable(explicit) == "Titan const array metatable")
+            assert(getmetatable(empty) == "Titan const array metatable")
+            assert(getmetatable(positional) == "Titan const array metatable")
+            assert(getmetatable(fixed) == "Titan const array metatable")
+            assert(explicit[1] == 4 and #empty == 0 and positional[1] == 5)
+            local mutable = test.mutable()
+            local mapped, wrapped, forced = test.replay(mutable, fixed)
+            assert(rawequal(mapped, mutable) and rawequal(forced, mutable))
+            assert(rawequal(wrapped, fixed))
+        ]])
+    end)
+
+    it("tests either concrete Array tag through boxed and strict predicates", function()
+        h.run_coder([[
+            function boxed(xs: value): (boolean, boolean, boolean)
+                return xs is const? {integer}, xs is (const? {integer})?,
+                       xs is {integer}
+            end
+
+            function strict(xs: (const? {value})?): boolean
+                return xs is (const? {integer})?
+            end
+
+            function native(xs: const? {integer}): (boolean, boolean, integer)
+                local calls = 0
+                local get = function(): const? {integer}
+                    calls = calls + 1
+                    return xs
+                end
+                local mutable = get() is {integer}
+                local fixed = get() is const {integer}
+                return mutable, fixed, calls
+            end
+
+            function cast_mutable(xs: const? {integer}): {integer}
+                return xs as {integer}
+            end
+
+            function cast_fixed(xs: const? {integer}): const {integer}
+                return xs as const {integer}
+            end
+
+            function samples(): ({integer}, const {integer})
+                return {31}, {32}
+            end
+        ]], [[
+            local mutable, fixed = test.samples()
+            local function boxed(xs, view, optional, concrete)
+                local a, b, c = test.boxed(xs)
+                assert(a == view and b == optional and c == concrete)
+            end
+            boxed(mutable, true, true, true)
+            boxed(fixed, true, true, false)
+            boxed(nil, false, true, false)
+            boxed({}, false, false, false)
+            boxed(42, false, false, false)
+            assert(test.strict(mutable))
+            assert(test.strict(fixed))
+            assert(test.strict(nil))
+            local function check_native(xs, expected_mutable, expected_fixed)
+                local is_mutable, is_fixed, calls = test.native(xs)
+                assert(calls == 2)
+                assert(is_mutable == expected_mutable and is_fixed == expected_fixed)
+                local mutable_ok, mutable_result = pcall(test.cast_mutable, xs)
+                local fixed_ok, fixed_result = pcall(test.cast_fixed, xs)
+                assert(mutable_ok == is_mutable and fixed_ok == is_fixed)
+                assert(rawequal(is_mutable and mutable_result or fixed_result, xs))
+            end
+            check_native(mutable, true, false)
+            check_native(fixed, false, true)
+        ]])
+    end)
+
+    it("carries maybe-const Array guards through callable and Interface adapters",
+    function()
+        h.run_coder([[
+            interface View
+                function read(item: value): value
+                function give(item: value): (const? {integer})?
+            end
+
+            local record Cell
+            end
+
+            local function Cell:read(item: const? {integer}): value
+                return item
+            end
+
+            local function Cell:give(item: value): value
+                return item
+            end
+
+            local function accept(items: {string: const? {integer}}): integer
+                return items["item"][1]
+            end
+
+            local function identity(item: value): value
+                return item
+            end
+
+            local function length(items: (const? {integer})?): integer
+                if items == nil then return 64 end
+                return #items
+            end
+
+            function optional_argument(item: value): integer
+                local call: function (value): integer = length
+                return call(item)
+            end
+
+            function arguments(items: value): integer
+                local call: function (value): integer = accept
+                return call(items)
+            end
+
+            function results(item: value): const? {integer}
+                local call: function (value): (const? {integer}) = identity
+                return call(item)
+            end
+
+            function methods(item: value): (value, (const? {integer})?)
+                local view: View = Cell()
+                return view:read(item), view:give(item)
+            end
+
+            function method_result(item: value): (const? {integer})?
+                local view: View = Cell()
+                return view:give(item)
+            end
+
+            function samples(): ({integer}, const {integer})
+                return {41}, {42}
+            end
+        ]], [[
+            local mutable, fixed = test.samples()
+            for _, item in ipairs({mutable, fixed}) do
+                assert(test.arguments({item = item}) == item[1])
+                assert(test.optional_argument(item) == #item)
+                assert(rawequal(test.results(item), item))
+                local read, given = test.methods(item)
+                assert(rawequal(read, item) and rawequal(given, item))
+            end
+            assert(test.optional_argument(nil) == 64)
+            assert(test.method_result(nil) == nil)
+            assert(not pcall(test.arguments, {item = {41}}))
+            assert(not pcall(test.results, {41}))
+            assert(not pcall(test.methods, {41}))
+            assert(not pcall(test.method_result, {41}))
+        ]])
+    end)
+
+    it("uses sibling evidence for a generic literal with a dependent call", function()
+        h.run_coder([[
+            local function nested<|T|>(index: integer, items: {value}): T
+                return items[index] as T
+            end
+
+            local function first<|T|>(item: T, _: T): T
+                return item
+            end
+
+            function replay(): const? {integer}
+                local fixed: const {integer} = {1}
+                local witness: const? {integer} = fixed
+                return first({nested(1, {51})}, witness)
+            end
+        ]], [[
+            local items = test.replay()
+            assert(getmetatable(items) == "Titan const array metatable")
+            assert(#items == 1 and items[1] == 51)
+        ]])
+    end)
 end)
