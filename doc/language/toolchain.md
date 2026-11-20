@@ -331,8 +331,18 @@ and macOS, a program or test executable gives the library's imports the same
 module instance as its own imports when the dependency is linked into the
 executable. This includes a sibling that the native linker pulled in from
 the same archive as a directly imported module. A dependency that is not
-linked still needs its original shared provider; Titan does not pull in an
-unused archive member solely to replace a shared dependency.
+linked can still fall back to its shared provider. Titan does not pull in
+an unused archive member solely to avoid that fallback.
+
+If the fallback shared provider directly imports a sibling already linked
+into the executable, the two physical copies can conflict. Titan reports a
+`different physical provider` error rather than letting one copy's code
+use the other's private module state. To avoid this, explicitly import the
+private dependency in the executable so that `--static` can link it from an
+archive. For example, if a library privately imports `json` and the executable
+imports `io`, add `local json = import "json"` to the executable. See
+[titan#426](https://github.com/mascarenhas/titan/issues/426) for the proposal
+to accept provably compatible physical copies.
 
 Use `--static` when **building a library** only if you want to bundle the
 selected archives in both provider outputs. An executable cannot link such a

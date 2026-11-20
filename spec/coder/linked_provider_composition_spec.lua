@@ -113,7 +113,7 @@ describe("linked provider composition", function()
         return result.output
     end
 
-    local function run_dynamic(name)
+    local function run_with_providers(name)
         local executable = fixture.output .. "/" .. name
         local search = fixture.root .. "/package;" .. stdlib
         if platform.windows then
@@ -169,7 +169,7 @@ function main(args: {string}): integer
 end
 ]], first_serial, first_serial + 39, first_serial + 1, first_serial + 40))
             built("app", mode, "package", mode)
-            local result = run_dynamic(mode)
+            local result = run_with_providers(mode)
             assert.is_true(result.ok, mode .. ": " .. result.output)
         end
     end)
@@ -195,7 +195,7 @@ end
 ]])
         built("author", "package", nil, "rx")
         built("app", "dynamic", "package", "check")
-        local result = run_dynamic("check")
+        local result = run_with_providers("check")
         assert.is_true(result.ok, result.output)
     end)
 
@@ -206,7 +206,7 @@ end
         assert.equal("file", lfs.attributes(fixture.root .. "/package/cui" ..
             (platform.windows and ".dll" or ".so"), "mode"))
         built("app", "dynamic", "package", "demo")
-        local result = run_dynamic("demo")
+        local result = run_with_providers("demo")
         assert.is_true(result.ok, result.output)
         assert.equal("=========\n= Titan =\n=========\n", result.output)
         if platform.windows then
@@ -244,6 +244,42 @@ end
         result = run_deployed("suite-out/checks")
         assert.is_true(result.ok, result.output)
         assert.truthy(result.output:find("checks.test_compiled_library", 1, true), result.output)
+    end)
+
+    it("rejects an overlapping private DSO fallback and works with an explicit link", function()
+        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
+        file("author/jlib.titan", [[
+local json = import "json"
+
+function show(n: integer): string
+  return json.encode(n)
+end
+]])
+        built("author", "package", nil, "jlib")
+
+        local imports = 'local jlib = import "jlib"\nlocal io = import "io"\n'
+        local body = [[
+
+function main(args: {string}): integer
+  io.print(jlib.show(42))
+  return 0
+end
+]]
+        file("app/demo.titan", imports .. body)
+        built("app", "fallback", "package", "--static", "demo")
+        local result = run_with_providers("demo")
+        assert.is_false(result.ok, result.output)
+        assert.equal("exit", result.why, result.output)
+        assert.equal(1, result.status, result.output)
+        assert.truthy(result.output:find(
+            "source import 'titan.reflect' found canonical module state from a different physical provider",
+            1, true), result.output)
+
+        file("app/demo.titan", imports .. 'local json = import "json"\n' .. body)
+        built("app", "linked", "package", "--static", "demo")
+        result = run_deployed("linked/demo")
+        assert.is_true(result.ok, result.output)
+        assert.equal("42\n", result.output)
     end)
 
     it("shares a carried nominal owner in either import order without publishing it early", function()
@@ -447,7 +483,7 @@ function main(args: {string}): integer
 end
 ]])
         built("app", "same-handle", "package", "same_handle")
-        result = run_dynamic("same_handle")
+        result = run_with_providers("same_handle")
         assert.is_true(result.ok, result.output)
 
         file("other/external.titan", facade)

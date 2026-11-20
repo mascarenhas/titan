@@ -1309,6 +1309,16 @@ package searcher does not consult this set, and child states do not inherit
 it. Once initialized, a module registers its ordinary native preload as
 before, and that preload can be copied into children.
 
+On a linked-set miss the named import still opens its recorded DSO. That
+DSO can itself have direct imports of siblings physically carried in the
+same image. If one of those siblings is also linked into the executable,
+the existing direct producer-token check can refuse the two copies of
+the logical module. The linked provider set does not redirect direct
+calls. Explicitly importing the private dependency in the executable
+lets `--static` select its archive and avoid opening that DSO, if the
+archive is available. Accepting provably compatible physical copies is
+tracked separately in [titan#426](https://github.com/mascarenhas/titan/issues/426).
+
 Final-link certification includes the launcher's election policy plus the
 bytes of the input objects and archives from which the native linker assembles
 the section. DLL launchers on Windows and archive-only Wasm images on the
