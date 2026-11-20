@@ -419,6 +419,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             TITAN_EXTRA_CFLAGS = env.TITAN_EXTRA_CFLAGS or "-O0 -fno-lto",
             TITAN_EXTRA_LDFLAGS = env.TITAN_EXTRA_LDFLAGS or "-fno-lto",
         }
+        if env.PATH then env_table.PATH = env.PATH end
         if env.CC then env_table.CC = env.CC end
         if env.TITAN_C_PARTS then env_table.TITAN_C_PARTS = env.TITAN_C_PARTS end
         local argv = {
@@ -655,13 +656,23 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             end
         end
         copy("include")
+        copy("src/lua-5.5.1")
         copy("etc/titan/build-profile")
         copy("lib/libbacktrace.a")
         copy(platform.windows and "lib/liblua55.a" or "lib/liblua.a")
         copy(release_dir .. "/libtitan.a")
         copy(release_dir .. "/titan" .. SHARED_SUFFIX)
-        if not platform.windows then
-            copy("src/lua-5.5.1")
+        local tool_path
+        if platform.windows then
+            -- Fresh image validation uses the selected SDK's lua.exe. Keep
+            -- its DLLs beside it and on PATH for the generated launchers too.
+            for _, name in ipairs({ "lua.exe", "lua55.dll", "libuv-1.dll",
+                    "libllhttp-9.4.dll", "libsqlite3-0.dll", "libssl-3-x64.dll",
+                    "libcrypto-3-x64.dll" }) do
+                copy("bin/" .. name)
+            end
+            tool_path = sdk .. "/bin;" .. (os.getenv("PATH") or "")
+        else
             copy(release_dir .. "/titan.a")
         end
         local module = lib .. "/fruit/pick/pick.titan"
@@ -686,9 +697,18 @@ end
         local init_code = collector:init_code()
         local function compile(cwd, ...)
             local argv, env = compiler_argv({
-                args = { "-v", "--incremental", ... }, env = { TITAN_ROOT = sdk }, init_code = init_code,
+                args = { "-v", "--incremental", ... },
+                env = { TITAN_ROOT = sdk, PATH = tool_path }, init_code = init_code,
             })
             return run_command(argv, cwd, env)
+        end
+        local function run_program(output, name)
+            local executable = platform.windows and
+                assert(driver.windows_program_paths(name, nil, nil, output)).executable or
+                output .. "/" .. name
+            return run_executable(executable, nil, {
+                TITAN_PATH_0_6 = lib .. ";;", PATH = tool_path,
+            })
         end
         local ok, output = compile(source_dir, "consumer")
         assert.is_false(ok, output)
@@ -715,8 +735,7 @@ end
         ok, output = compile(source_dir, "-o", build_dir, "consumer")
         assert.is_true(ok, output)
         assert.is_true(exists(build_dir .. "/fruit/pick/pick.o"))
-        local app = executable_path(build_dir .. "/consumer")
-        local ran, result = run_executable(app)
+        local ran, result = run_program(build_dir, "consumer")
         assert.is_true(ran, result)
         ok, output = compile(workspace, "--tree", source_dir, "-o", build_dir, "consumer")
         assert.is_true(ok, output)
@@ -728,7 +747,7 @@ end
         ok, output = compile(workspace, "--tree", source_dir, "-o", build_dir, "consumer")
         assert.is_true(ok, output)
         assert.matches("Titan object miss fruit.pick", output, 1, true)
-        local _, _, reason, status = run_executable(app)
+        local _, _, reason, status = run_program(build_dir, "consumer")
         assert.equal("exit", reason)
         assert.equal(1, status)
 
@@ -737,8 +756,7 @@ end
         ok, output = compile(workspace, "--tree", source_dir .. ";" .. second,
             "--test", "--test-dir", source_dir, "-o", build_dir .. "/test")
         assert.is_true(ok, output)
-        local tests = executable_path(build_dir .. "/test/fixture_test")
-        ran, result = run_executable(tests)
+        ran, result = run_program(build_dir .. "/test", "fixture_test")
         assert.is_true(ran, result)
         assert.matches("[  PASSED  ] 1 test.", result, 1, true)
         assert.is_false(exists(lib .. "/fruit/pick/pick.o"))
