@@ -494,8 +494,8 @@ The author-facing packaging guide and complete rockspec example live in
   provider pair in ordinary library mode with explicit logical roots (`.so`/`.a`
   on Unix, `.dll` only on Windows) and declare package dependencies rather than
   incorporating the standard library or other external Titan dependencies (and
-  compiling a binary library fails if a dependency resolves only through the
-  implicit installed source fallback; see
+  compiling a binary library fails if a dependency is selected from the
+  implicit installed source fallback, including under `--source-first`; see
   [Source-only modules](../language/modules.md#source-only-modules)).
   `--static` is rejected on every final no-main library output, including
   canonical bundles (`-c --static` remains available for individual objects
@@ -503,9 +503,10 @@ The author-facing packaging guide and complete rockspec example live in
   an archive-only dependency or compile source, while Unix `--static`
   standalone and `--test` executables embed the full reached Titan dependency
   closure from `.a` archives alongside source compiled in the application (with
-  no fallback to shared Titan providers and a link-time diagnostic on a missing
-  archive; `--static` governs Titan modules and does not force `libc` or
-  external native libraries to link statically). Relative payload entry names must use unambiguous portable
+  no fallback to shared Titan providers and a link-time diagnostic when an
+  external prebuilt dependency lacks an archive and is not satisfied by
+  application-compiled source; `--static` governs Titan modules and does not
+  force `libc` or external native libraries to link statically). Relative payload entry names must use unambiguous portable
   ASCII ordinary file components (spaces are allowed; Windows reserved or
   ambiguous spellings, symlinks, and path/case aliases are refused, and
   ownership keys compare ASCII case-insensitively). This restriction applies

@@ -245,7 +245,7 @@ this order:
 | Mode | Search order |
 | --- | --- |
 | Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix only) on the Titan path -> 3. Source (folder then flat) on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` |
-| `--static` | 1. Static providers (`.a`) -> 2. Shared providers (`.so`) -> 3. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` |
+| `--static` *(executables/`-c`, Unix only)* | 1. Static providers (`.a`) -> 2. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` (no shared `.so` fallback; rejected on final no-main library outputs) |
 | `--source-first` or `--test` | 1. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` -> 2. Compiled providers (fallback on miss) |
 
 Authored source roots come from `--tree` (default `.`). Passing `--tree`
@@ -259,12 +259,16 @@ authored `--tree` root and never scans the installed SDK automatically.
 Whenever a build selects an installed source through the fallback,
 `-o`/`--output` is required so all generated files land in the consumer's
 output directory by logical module name. Separately from the positional-root
-rule above, compiling an ordinary binary library fails if a dependency resolves
-only through the implicit installed source fallback (avoiding silently copying
-another rock's module into the library's provider; install that dependency's
-compiled provider or publish the library as source-only—see
+rule above, compiling an ordinary binary library fails if a dependency is
+selected from the implicit installed source fallback (including under
+`--source-first` when a paired compiled provider is also installed) rather than
+copying another rock's module into the library's provider; install or use its
+compiled provider (building without `--source-first` if one is already
+installed) or publish the library as source-only—see
 [Source-only modules](modules.md#source-only-modules) and
-[titan#427](https://github.com/mascarenhas/titan/issues/427)). Same-repo
+[titan#427](https://github.com/mascarenhas/titan/issues/427). (Without `-o`,
+the generic missing-`--output` diagnostic can appear first; adding `-o` does
+not permit vendoring an installed source into a library.) Same-repo
 authored sources under `--tree` still build together into a library, and
 standalone (ordinary or `--static`) applications and `--test` builds still
 compile installed fallback sources into `--output`.

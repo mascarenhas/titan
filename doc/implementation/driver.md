@@ -73,12 +73,26 @@ All modules, including the standard library, use the same two path strings:
   writes nor locks in the implicit fallback root; builds that do not select an
   installed source keep their existing behavior. Separately from the
   positional-root restriction, compiling an ordinary binary library rejects a
-  dependency that resolves only through the implicit installed source fallback
-  rather than copying another rock's module into the library's provider
-  (same-repo authored `--tree` sources still build into a library together,
-  and ordinary/`--static` executables and `--test` builds still compile
-  installed fallback sources into `--output`; see
-  [titan#427](https://github.com/mascarenhas/titan/issues/427)). Explicit
+  dependency selected from the implicit installed source fallback (including
+  under `--source-first` when a paired provider is also installed) rather than
+  copying another rock's module into the library's provider (same-repo authored
+  `--tree` sources still build into a library together, and
+  ordinary/`--static` executables and `--test` builds still compile installed
+  fallback sources into `--output`; see
+  [titan#427](https://github.com/mascarenhas/titan/issues/427)). Without `-o`,
+  source output relocation can report the generic missing-`--output` diagnostic
+  first, and passing `-o` still does not permit vendoring an installed source
+  into a binary library. Mechanically, `titanc` sets
+  `context.authored_source_roots` to the positional plus `--test-dir` roots;
+  `resolve_source` checks it only after every authored root misses and the
+  implicit SDK fallback would match, returning the named `--tree` diagnostic
+  (workers receive planned or overridden descriptors and never resolve roots,
+  and language-server/analysis contexts leave the field unset). In library
+  mode, `preflight_build_outputs` inspects planned source descriptors for the
+  `installed` origin, records the installed-source library refusal, and rejects
+  no-main non-compile-only builds before provider planning or worker dispatch,
+  and `titanc` repeats the check after the checker's final `main`
+  classification to guard against shape-based preflight detection. Explicit
   `driver.resolve_source(context, modname, source_path)` calls, closed-world
   and explicit analysis roots, and `--test-dir` remain exact and never scan the
   installed SDK automatically.
