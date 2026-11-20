@@ -5,7 +5,10 @@ if #arg == 1 and arg[1] == "--help" then
     print(usage .. "\nPublish the retained dist of a LuaRocks package in this Titan installation tree.")
     return
 end
-if #arg ~= 2 or arg[1] ~= "--path" or arg[2] == "" then error(usage, 0) end
+if #arg ~= 2 or arg[1] ~= "--path" or arg[2] == "" then
+    io.stderr:write(usage, "\n")
+    os.exit(2)
+end
 local script = arg[0]
 if package.config:sub(1, 1) == "\\" then script = script:gsub("\\", "/") end
 local private = assert(script:match("^(.*)/bin/[^/]+$"),

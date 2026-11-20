@@ -559,6 +559,7 @@ describe("Titan module publication preflight", function()
 
     for _, path in ipairs({
         "include/Titan.h", "include/titan/ffi.h/config", "include/OpenSSL/local.h",
+        "include/titan/not-currently-shipped.h",
         "include/uv.h", "include/sqlite3.h", "include/lua.h", "include/titan",
         "modules/TITAN.so", "modules/titan.so.dSYM/file", "modules/libtitan.a",
         "modules/sdk-digests", "modules/_titan_browser/windows_job.dll",
@@ -646,7 +647,7 @@ describe("Titan module publication preflight", function()
         assert(lfs.rmdir(staged) or os.remove(staged))
     end)
 
-    it("keeps an ownership record after an interrupted publication", function()
+    local function interrupt_publication()
         local uv = require "luv"
         local private = stage("first", "include/a.h")
         stage("first", "include/z.h")
@@ -661,9 +662,22 @@ describe("Titan module publication preflight", function()
         assert.matches("injected read failure", message, 1, true)
         assert.equal("payload", read(prefix .. "/include/a.h"))
         assert.is_nil(uv.fs_stat(prefix .. "/include/z.h"))
-        -- Retry publication without leaving an unowned already copied file.
+        return private
+    end
+
+    it("retries a publication with an interrupted ownership record", function()
+        local private = interrupt_publication()
         assert(installer.publish_module(sdk, private))
         assert.equal("payload", read(prefix .. "/include/a.h"))
         assert.equal("payload", read(prefix .. "/include/z.h"))
+    end)
+
+    it("removes pending-only files after LuaRocks rolls back the first publication", function()
+        remove_tree(interrupt_publication())
+        local removed, message = installer.uninstall_module(sdk, "first")
+        assert.is_true(removed, message)
+        assert.equal("Cleaned published files for first 1.0-1.", message)
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/include/a.h"))
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/lib/titan/.module-rocks"))
     end)
 end)

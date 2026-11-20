@@ -697,6 +697,10 @@ end
         assert.is_true(ok, output)
         assert.is_true(exists(source_dir .. "/plain.o"))
         assert.is_false(exists(lib .. "/.titan-build.lock"))
+        ok, output = compile(workspace, "--tree", source_dir, "--test",
+            "--test-dir", lib, "-o", build_dir)
+        assert.is_false(ok, output)
+        assert.matches("is outside every --tree source root", output, 1, true)
         if not platform.windows then
             -- This SDK has no bin/lua, and the invoking Lua has options before
             -- the script name. Fresh validation must use that interpreter.

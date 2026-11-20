@@ -12,7 +12,8 @@ if #arg == 2 and arg[1] == "--luarocks" and arg[2] ~= "" then
 elseif #arg > 0 and #arg <= 2 and arg[1]:match("^[A-Za-z0-9]") then
     rock, version = arg[1], arg[2]
 elseif #arg > 0 then
-    error(usage, 0)
+    io.stderr:write(usage, "\n")
+    os.exit(2)
 end
 local script = arg[0]
 if package.config:sub(1, 1) == "\\" then script = script:gsub("\\", "/") end
@@ -29,4 +30,4 @@ if not called or not removed then
     io.stderr:write(tostring(called and message or removed), "\n")
     os.exit(1)
 end
-if not rock then print("Titan was removed. Lua and shared dependencies were preserved.") end
+print(message or "Titan was removed. Lua and shared dependencies were preserved.")

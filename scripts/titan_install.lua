@@ -491,7 +491,7 @@ local function rock_name(name)
     assert(type(name) == "string" and name:match("^[A-Za-z0-9][A-Za-z0-9_.-]*$") and
         portable_component(name), "invalid rock name: " .. tostring(name))
     name = fold(name)
-    assert(name ~= "titan", "use titan-uninstall without a rock name to remove Titan itself")
+    assert(name ~= "titan", "the Titan rock is reserved; expected a Titan module rock name")
     assert(not name:match("%.rock$") and not name:match("%.rockspec$"),
         "expected a rock name, not a rock filename: " .. name)
     return name
@@ -507,7 +507,8 @@ end
 -- Includes targets the SDK may create or retire even when absent from this
 -- installation (e.g. bundled OpenSSL headers and Windows import libraries).
 local reserved = {
-    ["include/openssl"] = true, ["include/uv"] = true, ["include/uv.h"] = true,
+    ["include/titan"] = true, ["include/openssl"] = true, ["include/uv"] = true,
+    ["include/uv.h"] = true,
     ["include/llhttp.h"] = true, ["include/sqlite3.h"] = true,
     ["include/backtrace.h"] = true, ["include/backtrace-supported.h"] = true,
     ["include/titan_longjmp.h"] = true,
@@ -539,11 +540,6 @@ local function module_path(relative)
                 "reserved SDK path: " .. relative)
             path = parent(path)
         end
-        -- The SDK's header directory may be shared, but not renamed or
-        -- replaced with a file even if one side has no children yet.
-        assert(key ~= "include/titan" and
-            (not key:match("^include/titan/") or relative:match("^include/titan/")),
-            "reserved SDK path: " .. relative)
     end
 end
 
@@ -766,7 +762,9 @@ function installer.publish_module(package_dir, private_rock)
     end
     ctx.inspect(relative .. "/" .. module_marker, "file")
     local record = ctx.inventory .. "/" .. rock .. ".paths"
-    ctx.inspect(module_inventory .. "/" .. rock .. ".paths", "file")
+    -- Existing records were checked while loading the inventory. For a new
+    -- name, also reject platform aliases not listed under the exact spelling.
+    if not previous then ctx.inspect(module_inventory .. "/" .. rock .. ".paths", "file") end
     mkdir(ctx.inventory)
     write_record(ctx.uv, record, previous and previous.active or "", version, combined)
     for _, path in ipairs(paths) do
@@ -813,7 +811,7 @@ function installer.uninstall_module(package_dir, name, version)
     if not version then
         assert(not ctx.inspect(rocks_directory .. "/" .. rock, "directory"),
             "no active Titan module publication for " .. rock)
-        return true
+        return true, "No published files to remove for " .. rock .. "."
     end
     local relative = rocks_directory .. "/" .. rock .. "/" .. version
     local installed = ctx.inspect(relative, "directory")
@@ -839,8 +837,10 @@ function installer.uninstall_module(package_dir, name, version)
         cleanup_files(ctx, record.paths)
         assert(ctx.uv.fs_unlink(ctx.inventory .. "/" .. rock .. ".paths"))
         lfs.rmdir(ctx.inventory)
+        return true, "Cleaned published files for " .. rock .. " " .. version .. "."
     end
-    return true
+    if installed then return true, "Removed " .. rock .. " " .. version .. "." end
+    return true, "Nothing to remove for " .. rock .. " " .. version .. "."
 end
 
 -- `make uninstall-browser-sdk`: removes one release's browser SDK files from

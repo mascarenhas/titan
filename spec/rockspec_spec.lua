@@ -552,7 +552,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             local accepted, outcome, status = os.execute(launch .. " --module invalid")
             assert.is_nil(accepted)
             assert.equal("exit", outcome)
-            assert.equal(1, status)
+            assert.equal(2, status)
         end
         -- LuaRocks owns the compiler entry: the native program on Windows,
         -- which runs the rock's Lua copy of the titanc script.
@@ -1969,10 +1969,21 @@ build = { type = "builtin", modules = { [%q] = %q } }
         end
         assert.truthy(module_tool("install", "--help"))
         assert.truthy(module_tool("uninstall", "--help"))
-        assert.falsy(module_tool("install", "--module", private(tree)))
+        for _, tool in ipairs({ "install", "uninstall" }) do
+            local accepted, usage, _, status = module_tool(tool, "--module", private(tree))
+            assert.falsy(accepted, usage)
+            assert.equal(2, status, usage)
+            assert.truthy(usage:find("Usage: titan-" .. tool, 1, true), usage)
+            assert.falsy(usage:find("stack traceback", 1, true), usage)
+        end
         assert.falsy(module_tool("install", "--path", private(trees[1])))
-        assert.falsy(module_tool("install", "--path", private(tree)))
+        ok, output = module_tool("install", "--path", private(tree))
+        assert.falsy(ok, output)
+        assert.truthy(output:find("the Titan rock is reserved", 1, true), output)
         assert.falsy(module_tool("uninstall", "titan-install-test-keep", "1.0-1"))
+        ok, output = module_tool("uninstall", "titan-install-test-keep")
+        assert.falsy(ok, output)
+        assert.truthy(output:find("no active Titan module publication", 1, true), output)
         assert.falsy(module_tool("uninstall", "titan", "0.6.0-1"))
         local function module_rock(name, version, payload, expected_error)
             local base = workspace .. "/" .. name .. "-" .. version
@@ -2052,8 +2063,14 @@ build = { type = "builtin", modules = {}, copy_directories = { "dist" } }
         luarocks(tree, "remove", module_name, "2.0-1")
         assert_absent(active)
         assert_file(module_lib .. "/fixture/current.titan")
-        assert.truthy(module_tool("uninstall", module_name, "2.0-1"))
+        ok, output = module_tool("uninstall", module_name, "2.0-1")
+        assert.truthy(ok, output)
+        assert.truthy(output:find("Cleaned published files for " .. module_name .. " 2.0-1", 1, true), output)
+        ok, output = module_tool("uninstall", module_name, "2.0-1")
+        assert.truthy(ok, output)
+        assert.truthy(output:find("Nothing to remove for " .. module_name .. " 2.0-1", 1, true), output)
         assert.truthy(module_tool("uninstall", module_name))
+        assert.truthy(module_tool("uninstall", other_name, "9.0-1"))
         assert_absent(module_lib .. "/fixture/current.titan")
         assert.equal("second source", read_file(module_lib .. "/fixture/second.titan"))
         assert.equal("second header", read_file(tree .. "/include/shared/other.h"))
