@@ -155,8 +155,9 @@ provider afterward. Deduplication is by logical module, not provider filename,
 so two logical imports from one provider reuse one runtime handle while
 resolving different mangled symbols.
 
-Registry-first selection, copied provider descriptors, `loadlib`, and per-state
-bindings are described in [Static vs dynamic dependency
+Registry-first selection, native preloads, the executable's linked provider
+set, the `loadlib` fallback, and per-state bindings are described in
+[Static vs dynamic dependency
 wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring); the
 compatibility checks are in [Generated exports and runtime
 verification](binary-compatibility.md#generated-exports-and-runtime-verification).

@@ -709,23 +709,12 @@ if #extra_objects == 0 then extra_objects = nil end
 -- archive probe, validation link and final link. A hit changes nothing.
 local browser_assets, browser_profile, browser_probe, browser_library_error
 local link_ticket, program_path, windows_paths, coverage_runtime, dsymutil
-local linked_modules
-local function elect_linked_modules()
-    if target ~= "linux" and target ~= "darwin" then return false end
-    if args.test or next(resolver_context.physical_owner) ~= nil then return true end
-    -- With no archives and only the root linked, there is no second owner
-    -- for any provider import to elect.
-    local sources = resolver_context.source_names
-    return next(resolver_context.dynamic_names) ~= nil and
-        next(sources, next(sources)) ~= nil
-end
 local link_record_committed
 -- The final link's output basename, reported as the progress step.
 local link_name
 if not args.compile_only and not args.print_ast then
     local planned, plan_errors = driver.finalize_resolver_context(resolver_context)
     if not planned then exit(table.concat(plan_errors, "\n")) end
-    linked_modules = builds_program and elect_linked_modules() or nil
     local root = args.test and requested_modules[1] or main_module
     local outputs, kind = {}, "library"
     if builds_program then
@@ -883,7 +872,7 @@ if not args.compile_only and not args.print_ast then
         entry = {
             module = args.test and test_runner.MODULE_NAME or main_module,
             no_uv_bootstrap = args.no_uv_bootstrap == true,
-            linked_modules = linked_modules,
+            linked_modules = resolver_context.linked_provider_election,
         },
         no_uv_bootstrap = args.no_uv_bootstrap == true,
         argv = driver.link_extra_flags(),
@@ -1011,9 +1000,6 @@ local finalized, finalize_errors =
     driver.finalize_resolver_context(resolver_context)
 if not finalized then
     exit(table.concat(finalize_errors, "\n"))
-end
-if main_module and args.print_ast then
-    linked_modules = elect_linked_modules()
 end
 local selected_static_archives = {}
 if target == "windows" and #resolver_context.selected_static_providers > 0 then
@@ -1339,7 +1325,6 @@ if main_module then
             {
                 context = resolver_context,
                 no_uv_bootstrap = args.no_uv_bootstrap,
-                linked_modules = linked_modules,
                 pretty_print = args.pretty_print,
                 exe = args.exe,
                 final_link_flags = link_ticket and link_ticket.dependency_argv,

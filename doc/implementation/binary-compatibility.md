@@ -232,8 +232,9 @@ initialization.
 
 `require` from Lua does not use the private linked provider set. The [Titan
 package searcher](driver.md#the-titan-package-searcher) tries the canonical
-module before looking for a file. A claimed candidate's ABI is
-checked with `titan_check_abi_entry` (`titan-runtime/titan_path.c`, which the
+module and then a matching native preload before looking for a file. It
+checks a claimed candidate's ABI with `titan_check_abi_entry`
+(`titan-runtime/titan_path.c`, which the
 searcher shares with generated imports; on Windows through `_abi_value`) before
 the searcher returns `luaopen_<mangled>`, and that opener's [file-load
 name guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)

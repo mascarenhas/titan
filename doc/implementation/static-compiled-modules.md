@@ -414,13 +414,15 @@ adds an archive link input. Before repackaging, the same walk runs over every
 physical interface in each selected archive, including unused carried
 facades.
 
-Finalization rejects overlapping logical membership, conflicting physical
-providers, independent resolution of a producer-dynamic owner, mangled-prefix
-collisions, and known native protocol/member collisions. A native program or
-test can satisfy a non-carried dynamic constraint with a direct owner already
-in the link plan; this does not allow it to replace an owner claimed by a
-different DSO. Library-mode repackaging retains its physical
-ownership checks.
+Finalization rejects overlapping logical membership, mangled-prefix and
+native symbol collisions, and incompatible physical owner constraints.
+Without a qualifying owner, combinations of direct and dynamic identity
+claims, dynamic exposures from different providers, and independent
+resolution of a producer-dynamic owner are still errors. A native program
+or test can satisfy a non-carried dynamic constraint with a direct owner
+already in the link plan; this does not replace an owner claimed by a
+different DSO. Preflight never changes which provider won ordinary lookup.
+Library-mode repackaging retains its physical ownership checks.
 
 Public `Type.Module` metadata does not expose private imports. An object's
 producer-chosen lowering remains in place; when it elects a dynamic provider,

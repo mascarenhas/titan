@@ -7918,6 +7918,7 @@ function perf.resolver_selection(context, previous)
     if previous and
        (previous.loader ~= context.loader or
         previous.analysis_only ~= context.analysis_only or
+        previous.link_kind ~= context.link_kind or
         previous.embedded_provider ~= context.embedded_interface_provider or
         previous.embedded_rejected ~= context.embedded_interface_provider_rejected or
         previous.embedded_overlap ~= context.embedded_interface_provider_overlap) then
@@ -7926,6 +7927,7 @@ function perf.resolver_selection(context, previous)
     local snapshot = not previous and {
         modules = {}, resolutions = {},
         loader = context.loader, analysis_only = context.analysis_only,
+        link_kind = context.link_kind,
         embedded_provider = context.embedded_interface_provider,
         embedded_rejected = context.embedded_interface_provider_rejected,
         embedded_overlap = context.embedded_interface_provider_overlap,
@@ -8158,9 +8160,14 @@ function driver.finalize_resolver_context(context)
         end
     end
 
-    local elect_linked = (context.link_kind == "program" or
-        context.link_kind == "test") and
-        (context.target == "linux" or context.target == "darwin")
+    -- A test's synthetic main is not necessarily present at certification.
+    -- In an ordinary program with only a source root and DSOs, there is no
+    -- second linked owner to elect.
+    local elect_linked = (context.target == "linux" or context.target == "darwin") and
+        (context.link_kind == "test" or
+         context.link_kind == "program" and
+         (next(physical_owner) ~= nil or
+          next(dynamic_names) ~= nil and next(source_names, (next(source_names))) ~= nil))
     local rebound_owners
     for owner, keyed in pairs(context.native_constraints) do
         -- Only an executable can satisfy an external fallback from an
@@ -8275,6 +8282,7 @@ function driver.finalize_resolver_context(context)
     context.native_static_names = native_static_names
     context.native_bindings = native_bindings
     context.physical_owner = physical_owner
+    context.linked_provider_election = elect_linked or nil
 
     -- Simple recovered aliases may reuse a canonical registry owner while
     -- final interfaces are replayed, so contextual resolution callbacks are
@@ -10661,20 +10669,8 @@ function driver.entrypoint_contents(modname, program_name, options)
         values.PLATFORM_ALERTS = util.render(unix_entrypoint_alerts, values)
         values.ENTRYPOINT_DECLARATIONS =
             "int " .. values.LUAOPEN_FN .. "(lua_State* L);"
-        if options.linked_modules then
-            -- Split the Mach-O names so the template never sees $start/$end.
+        if options.context and options.context.linked_provider_election then
             values.LINKED_MODULE_DECLARATIONS = [[
-#if defined(__APPLE__)
-extern const TitanLinkedModule titan_linked_begin[]
-    __asm("section$" "start$" "__DATA_CONST$" "__titan_linked");
-extern const TitanLinkedModule titan_linked_end[]
-    __asm("section$" "end$" "__DATA_CONST$" "__titan_linked");
-#else
-extern const TitanLinkedModule titan_linked_begin[]
-    __asm("__start_titan_linked") __attribute__((visibility("hidden")));
-extern const TitanLinkedModule titan_linked_end[]
-    __asm("__stop_titan_linked") __attribute__((visibility("hidden")));
-#endif
 static const TitanLinkedModules titan_linked_modules = {
     titan_linked_begin, titan_linked_end
 };]]

@@ -1293,9 +1293,13 @@ The entry refers only to a resolver in that same object. Taking the bounds
 of the output section does not extract dormant archive members: the image
 gets entries only for modules the link actually included. The resolver
 remains static or hidden and the entries carry no provider paths.
+Clang's address sanitizer leaves the entries unpadded so the runtime can
+iterate them at their natural stride.
 
 The generated program or test launcher publishes the section bounds as one
 registry value inside its protected entry, before requiring the root.
+An ordinary executable with no provider archives and only one source module
+does not publish a set: there is no second linked owner to elect.
 `titan_module_provider` scans that set only on a canonical and native-preload
 miss for a named DSO. The set is image-lifetime data, not initialized module
 userdata; binding to it still goes through all normal ABI and

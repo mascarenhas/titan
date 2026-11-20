@@ -129,7 +129,6 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
             io = {},
             source_names = {},
             selected_static_providers = {},
-            physical_owner = {},
             dynamic_names = {},
             native_bindings = {},
             native_interface_types = {},
@@ -787,7 +786,7 @@ describe("titanc command-line orchestration", function()
                         context.selected_static_providers[1] = {
                             archive = archive, entries = { ["pkg.dep"] = {} },
                         }
-                        context.physical_owner["pkg.dep"] = archive
+                        context.linked_provider_election = true
                     end
                     return built
                 end

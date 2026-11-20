@@ -337,6 +337,8 @@ unused archive member solely to replace a shared dependency.
 Use `--static` when **building a library** only if you want to bundle the
 selected archives in both provider outputs. An executable cannot link such a
 bundle alongside a separate archive containing the same logical module.
+A default program can also encounter the duplicate at run time if it
+independently selects a shared provider for a module the bundle contains.
 
 If a library exposes another module's nominal type, the owner can be part of
 the same archive, separately linked into the executable, or loaded dynamically.
@@ -423,6 +425,9 @@ initialized module rather than opening a second copy—so a dynamically loaded
 plugin importing a module already embedded in its host uses the host's
 instance. Checks run at load time; replacing a file on disk never hot-reloads
 a running Lua state.
+On Linux and macOS, a standalone executable can also supply a linked copy
+before a dynamic import opens a provider file. Replacing that file cannot
+replace the linked copy.
 
 | Declaration used by consumer | Must stay identical in replacement |
 | --- | --- |
