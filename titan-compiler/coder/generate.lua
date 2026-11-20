@@ -197,6 +197,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         imported_nominal_layouts = options.nominal_layouts or {},
         application_nominal_layouts = options.application_nominal_layouts,
         check_only_sources = options.check_only_sources,
+        check_only_binaries = options.check_only_binaries,
         private_symbols = {},
         private_symbol_seen = {},
         upvalue = 0

@@ -859,8 +859,8 @@ end
                 read(published_paths.titan_bin .. "/" .. filename))
         end
         local selected_sources = selected_prefix .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION
-        write(selected_sources .. "/counter.native.titan", "not Titan for the browser\n")
-        write(selected_sources .. "/counter.browser.titan", read(source))
+        write(selected_sources .. "/measures/counter.native.titan", "not Titan for the browser\n")
+        write(selected_sources .. "/measures/counter.browser.titan", read(source))
         write(selected_sources .. "/units.browser.titan", [[
 record Ticket
   serial: integer
@@ -897,18 +897,18 @@ local finalized, diagnostics = driver.finalize_resolver_context(context)
 assert(finalized, diagnostics and table.concat(diagnostics, "\n"))
 local entries = driver.imported
 assert(entries.left.kind == "static" and entries.left.static_archive == %q)
-assert(entries.left.layout_inventory == nil and entries.left.deps.counter)
-assert(entries.counter.filename == %q and entries.counter.deps.units)
+assert(entries.left.layout_inventory == nil and entries.left.deps["measures.counter"])
+assert(entries["measures.counter"].filename == %q and entries["measures.counter"].deps.units)
 assert(entries.units.filename == %q and entries.units.ast._analysis_only)
 assert(types.registry["units.Ticket"].fields[1].name == "serial")
 assert(driver.close_loader(loader))
 ]=], selected_prefix, root .. "/semantic", root .. "/providers/left.a",
-            selected_sources .. "/counter.browser.titan", selected_sources .. "/units.browser.titan")
+            selected_sources .. "/measures/counter.browser.titan", selected_sources .. "/units.browser.titan")
         local argv = lua_argv()
         argv[#argv + 1], argv[#argv + 2] = "-e", snippet
         local checked = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
         assert.is_true(checked.ok, checked.output or checked.diagnostic)
-        for _, name in ipairs({ "counter", "units" }) do
+        for _, name in ipairs({ "measures/counter", "units" }) do
             assert.is_nil(lfs.attributes(selected_sources .. "/" .. name .. ".o"))
             assert.is_nil(lfs.attributes(selected_sources .. "/" .. name .. ".c"))
         end

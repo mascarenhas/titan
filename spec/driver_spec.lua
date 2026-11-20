@@ -5227,7 +5227,7 @@ describe("compiler module loader", function()
                     return nil, "undefined symbol: " .. symbol, "init"
                 end
             end
-            error("unexpected symbol " .. symbol)
+            return nil, "mock symbol absent: " .. symbol, "init"
         end
     end
 
@@ -9727,8 +9727,12 @@ function main(args: {string}): integer return 0 end
         assert.equal(rel, upgraded.type.file)
         assert.equal(empty_layouts(name), upgraded.layouts)
         assert.same({}, upgraded.layout_inventory.layouts)
+        local member_queries = {}
+        for _, symbol in ipairs(queries) do
+            if symbol:match("^provider_layer_") then member_queries[#member_queries + 1] = symbol end
+        end
         assert.same({ "provider_layer_abi", "provider_layer_types", "provider_layer_layouts",
-            "provider_layer_source_requirements" }, queries)
+            "provider_layer_source_requirements" }, member_queries)
         assert.same({ required }, upgraded.source_requirements)
         assert.same({ required }, library.requirements_by_module.wrap)
         assert.same({ "units", "meter", "wrap" }, library.order)
@@ -9790,7 +9794,7 @@ const broken: integer = "not an integer"
             for name, required in pairs({ [direct] = "leaf", [indirect] = "left" }) do
                 modtype, errors = checker.checkimport(name, loader)
                 assert.is_nil(modtype)
-                assert.matches("module '" .. name .. "' requires source for '" .. required .. "'",
+                assert.matches("module '" .. name .. "' requires module '" .. required .. "'",
                     errors, 1, true)
                 assert.matches("leaf.titan:", errors, 1, true)
             end
@@ -9798,31 +9802,35 @@ const broken: integer = "not an integer"
         end)
     end
 
-    it("rejects independent compiled selection of a required source in either import order", function()
+    it("elects the same compiled required module in either import order", function()
         local checker = require "titan-compiler.checker"
         local quantity = types.Nominal("meter.Quantity")
         local filename = binary .. "/meter.a"
-        write_file(source .. "/meter.titan", "record Quantity count: integer end\n")
+        local record = types.Record(quantity.fqtn, {
+            types.Field(quantity.fqtn, "count", types.Integer(), 0, false),
+        }, {}, {}, 1)
+        local meter = types.Module("meter", { types.ModuleMember("meter", "Quantity", record, nil) })
+        write_file(source .. "/meter.titan", "record Quantity alternative: integer end\n")
         write_file(source .. "/early.titan", 'local meter = import "meter"\nlocal via = import "via"\n')
         write_file(source .. "/late.titan", 'local via = import "via"\nlocal meter = import "meter"\n')
-        local diagnostics = {}
         for _, client in ipairs({ "early", "late" }) do
             driver.imported, types.registry = {}, {}
             local context = new_context({ analysis_only = true, prefer_static = true })
             cache_static_provider(context, binary .. "/via.a", { via = result_module("via", quantity) }, {
                 via = { source_requirements = { "meter" } },
             })
-            cache_static_provider(context, filename, { meter = types.Module("meter", {}, {}) })
+            cache_static_provider(context, filename, { meter = meter })
             local loader = driver.defaultloader({}, { context = context })
             local modtype, errors = checker.checkimport(client, loader)
             assert.truthy(modtype, errors)
-            assert.equal(1, #errors, table.concat(errors, "\n"))
-            local conflict = assert(errors[1]:match("(module 'via' requires source for 'meter'.*)"))
-            assert.matches("which also resolved to compiled provider '" .. filename .. "'", conflict, 1, true)
-            diagnostics[client] = conflict
+            assert.same({}, errors)
+            assert.equal("static", driver.imported.meter.kind)
+            assert.equal(filename, driver.imported.meter.static_archive)
+            assert.equal("count", types.registry[quantity.fqtn].fields[1].name)
+            assert.same({ meter = true }, driver.imported.via.deps)
+            assert(driver.finalize_resolver_context(context))
             assert(driver.close_loader(loader))
         end
-        assert.equal(diagnostics.early, diagnostics.late)
     end)
 
     it("recovers only reached archive members' recorded source frontiers", function()
@@ -9853,7 +9861,7 @@ const broken: integer = "not an integer"
         assert.is_nil(driver.imported.orphan)
         local modtype, err = checker.checkimport(dormant, loader)
         assert.is_nil(modtype)
-        assert.matches("module 'front.dormant' requires source for 'absent'", err, 1, true)
+        assert.matches("module 'front.dormant' requires module 'absent'", err, 1, true)
         assert(driver.close_loader(loader))
     end)
 
