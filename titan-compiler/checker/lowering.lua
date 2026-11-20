@@ -173,6 +173,19 @@ function generic_interface_downcast_expression(
     return node
 end
 
+local function is_structural_container_view(plan)
+    if not plan or plan.kind ~= "gradual_view" or plan.op ~= "structural" then
+        return false
+    end
+    local source, target = plan.source, plan.target
+    if target._tag == "Type.Option" then
+        source, target = source.base, target.base
+    end
+    return source._tag == target._tag
+        and (target._tag == "Type.Map"
+            or (target._tag == "Type.Array" and source.isconst.tag == target.isconst.tag))
+end
+
 -- Implementation notes: doc/implementation/generics.md#focused-cast-and-adapter-insertion
 function generic_erased_boundary_expression(
         exp, target, state, subject)
@@ -191,6 +204,16 @@ function generic_erased_boundary_expression(
         error(string.format(
             "generic erased boundary for %s has no ordinary adjustment from %s to %s",
             subject, types.tostring(source), types.tostring(target)), 0)
+    end
+    if is_structural_container_view(adjustment) then
+        -- A sink view normally leaves the producer type unchanged. A generic
+        -- boundary supplies the type delivered by that view to the next
+        -- operation without retagging the shared producer.
+        local view = ast.ExpCast(exp.loc, exp, target, nil)
+        view._type = target
+        view._implicit_coercion = true
+        view._adjustment = adjustment
+        return view
     end
     local lowered, accepted = trycoerce(
         exp, target, state.errors, subject, maybe3.from_optional(adjustment))
@@ -214,13 +237,47 @@ function generic_open_descriptor(source)
     return nil
 end
 
-function generic_reclassify_open_adjustment(
-        adjusted, state, subject, mirror)
+local function generic_open_option_view(source, target, prior, state)
+    -- An open run has no expression for each element. Retain the admitted
+    -- surface presence change between ordinary views of the two carriers.
+    -- The surface plan must already have accepted an unchanged payload.
+    local coercion = prior and prior.coercion
+    if not coercion
+       or (coercion.op ~= "option_force" and coercion.op ~= "option_wrap")
+       or coercion.inner.kind ~= "identity" then
+        return nil
+    end
+    local surface_source, surface_target =
+        types.erase(prior.source), types.erase(prior.target)
+    local from_carrier, to_carrier
+    if not types.equals(source, surface_source) then
+        from_carrier = generic_ordinary_assignment(source, surface_source, state)
+        if not is_structural_container_view(from_carrier) then return nil end
+    end
+    if not types.equals(surface_target, target) then
+        to_carrier = generic_ordinary_assignment(surface_target, target, state)
+        if not is_structural_container_view(to_carrier) then return nil end
+    end
+    if not from_carrier and not to_carrier then return nil end
+    local option = assert(generic_ordinary_assignment(
+        surface_source, surface_target, state))
+    return {
+        kind = "erased_option_view",
+        source = source,
+        target = target,
+        from_carrier = from_carrier,
+        option = option,
+        to_carrier = to_carrier,
+    }
+end
+
+local function generic_reclassify_open_adjustment(
+        adjusted, state, subject, mirror, erased_target)
     if not adjusted or not adjusted.open_source then return end
     local open = generic_open_descriptor(adjusted.open_source)
     local source = types.erase(open and open.source_type
         or adjusted.open_type)
-    local target = types.erase(adjusted.open_target
+    local target = erased_target or types.erase(adjusted.open_target
         or (open and open.target_type) or source)
     local prior = adjusted.open_adjustment
     local prior_source = prior and prior.source
@@ -234,8 +291,9 @@ function generic_reclassify_open_adjustment(
         or not types.equals(types.erase(prior_target), target)
     if not stale then return end
 
-    local plan = generic_ordinary_assignment(
-        source, target, state, { allow_coercion = true })
+    local plan = generic_open_option_view(source, target, prior, state)
+        or generic_ordinary_assignment(
+            source, target, state, { allow_coercion = true })
     if not plan then
         error(string.format(
             "%s has no ordinary open adjustment from %s to %s",
@@ -386,34 +444,8 @@ function generic_lower_call_arguments(
                 generic_replace_argument_reference(
                     node, exp, lowered)
             end
-            if adjusted.open_source then
-                local open = generic_open_descriptor(adjusted.open_source)
-                local source = open and open.source_type
-                    or types.erase(adjusted.open_type)
-                local target = signature.varargtype
-                source, target = types.erase(source), types.erase(target)
-                local plan = generic_ordinary_assignment(
-                    source, target, state)
-                if not plan then
-                    error(string.format(
-                        "generic open argument has no ordinary adjustment from %s to %s",
-                        types.tostring(source), types.tostring(target)), 0)
-                end
-                adjusted.open_type = source
-                adjusted.open_target = target
-                adjusted.open_adjustment = plan
-                adjusted.open_callable_adapter = plan.kind == "callable"
-                    and checker.freeze_callable_adapter(
-                        plan, source, target, adjusted.open_source.loc)
-                    or nil
-                adjusted.open_interface_conversion =
-                    plan.interface_conversion or nil
-                if open then
-                    open.target_type = target
-                    open.adjustment = plan
-                    open.callable_adapter = adjusted.open_callable_adapter
-                end
-            end
+            generic_reclassify_open_adjustment(adjusted, state,
+                "erased variadic argument", node._open_args, signature.varargtype)
         end
     else
         local values = node.args.args or {}
@@ -498,9 +530,6 @@ function generic_lower_call_in_place(node, state)
     for index, typ in ipairs(node._visible_types or node._types or {}) do
         info.surface_visible[index] = typ
     end
-    info.surface_flex = node._flexrettype or nil
-    info.surface_open_target = node._open_results
-        and node._open_results.target_type or nil
 
     generic_lower_call_arguments(
         node, signature, surface_signature, state)
@@ -557,21 +586,9 @@ function generic_lower_call_in_place(node, state)
     if node._open_results then
         local source = assert(signature.flexrettype,
             "generic open result lost its erased flexible tail")
-        local target = types.erase(info.surface_open_target or source)
-        local plan = generic_ordinary_assignment(
-            source, target, state, { allow_coercion = true })
-        if not plan then
-            error(string.format(
-                "generic open result has no ordinary adjustment from %s to %s",
-                types.tostring(source), types.tostring(target)), 0)
-        end
+        -- The producer only changes the carrier. The adjusted expression
+        -- list owns conversion to the selected sink, including open varargs.
         node._open_results.source_type = source
-        node._open_results.target_type = target
-        node._open_results.adjustment = plan
-        node._open_results.callable_adapter = plan.kind == "callable"
-            and checker.freeze_callable_adapter(
-                plan, source, target, node.loc)
-            or nil
         node._lua_open_result_dynamic_plan =
             maybe3.from_optional(types.dynamic_coercion(source))
         node._strict_open_result_guard_plan =
@@ -910,46 +927,6 @@ function generic_lower_spread_in_place(node, state)
     return node
 end
 
--- A checked spread force around a structural generic result needs two erased
--- operations: force the erased Option container, then apply the ordinary
--- same-kind element view selected by the precise surface type. Lowering the
--- child call through its usual surface projection first would instead ask for
--- one unsupported Option(structural-view)-plus-force edge.
-function generic_lower_spread_subject_force(node, state)
-    if not node._spread_subject_force then return nil end
-    local written = node.exp
-    local adjusted = nil
-    local call = written
-    if written._tag == "Ast.ExpAdjust" then
-        adjusted = written
-        call = written.exp
-    end
-    if not call or call._tag ~= "Ast.ExpCall" then return nil end
-
-    local surface_target = types.erase(node._type)
-    local target_kind = spread_subject_container(surface_target)
-    if not target_kind then return nil end
-    local info = generic_lower_call_in_place(call, state)
-    if not info.generic then return nil end
-
-    local source = call
-    if adjusted then
-        adjusted.exp = call
-        adjusted._type = call._type
-        adjusted._assignment_adjustment = nil
-        source = adjusted
-    end
-    local source_type = types.normalize(source._type)
-    if not source_type or source_type._tag ~= "Type.Option" then return nil end
-    local source_kind = spread_subject_container(source_type.base)
-    if source_kind ~= target_kind then return nil end
-
-    local forced = tryforce(source)
-    return generic_erased_boundary_expression(
-        forced, surface_target, state,
-        "forced spread subject from erased generic call")
-end
-
 function generic_lower_expression(node, state)
     if type(node) ~= "table" or type(node._tag) ~= "string" then return node end
     local tag = node._tag
@@ -1011,8 +988,6 @@ function generic_lower_expression(node, state)
             and types.contains_generic(node._adjustment)
         local generic_written = node._written_cast.tag == "just"
             and types.contains_generic(maybe3.get_checked(node._written_cast, "written cast"))
-        local spread_force = generic_lower_spread_subject_force(node, state)
-        if spread_force then return spread_force end
         local lowered = generic_lower_expression(node.exp, state)
         local carrier = state.reverse_wrappers[lowered]
         if carrier and types.equals(

@@ -2861,13 +2861,14 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"
            and ((node._adjustment
-                    and node._adjustment.kind == "callable")
+                    and (node._adjustment.kind == "callable"
+                        or (node._adjustment.kind == "gradual_view"
+                            and node._adjustment.op == "structural")))
                 or (node._written_cast.tag == "just"
                     and (maybe3.get_checked(node._written_cast, "written cast").op == "gradual"
                         or maybe3.get_checked(node._written_cast, "written cast").op == "callable"))) then
-        -- A finite callable edge is an allocating target view; a written
-        -- structural gradual cast remains the existing representation view.
-        -- Both consume only the checker-owned plan attached to this cast.
+        -- Callable edges can allocate; structural Array and Map views
+        -- retain the backing object. Consume the attached checker plan.
         local adjustment
         if node._adjustment then
             adjustment = node._adjustment

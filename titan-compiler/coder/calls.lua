@@ -47,6 +47,12 @@ local function cast_has_stable_root(ctx, node)
     if adjustment and adjustment.kind == "callable" then
         return not adjustment.exact or has_stable_root(ctx, node.exp)
     end
+    if adjustment and adjustment.kind == "gradual_view"
+       and adjustment.op == "structural" then
+        -- Implicit structural casts carry an Array or Map across erasure.
+        -- The view retains its backing object, even through an Option.
+        return has_stable_root(ctx, node.exp)
+    end
     if node._written_cast and node._written_cast.tag == "just" then
         return false
     end
@@ -1289,6 +1295,21 @@ function coder._code_adjustment_value(
         return coder._emit_callable_adapter_value(
             ctx, adapter, raw, loc, "value callable adjustment",
             result_root)
+    end
+    if adjustment.kind == "erased_option_view" then
+        local stats, value = "", raw
+        local function apply(step)
+            if step then
+                local stepstats
+                stepstats, value = coder._code_adjustment_value(
+                    ctx, step, step.source, step.target, value, loc)
+                stats = stats .. stepstats
+            end
+        end
+        apply(adjustment.from_carrier)
+        apply(adjustment.option)
+        apply(adjustment.to_carrier)
+        return stats, value
     end
     if adjustment.kind == "gradual_view"
         and adjustment.op == "structural" then

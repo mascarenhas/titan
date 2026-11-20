@@ -625,17 +625,15 @@ AST:
    surface application where direction is needed; then
 2. insert ordinary casts, guards, and callable/Interface adjustment annotations
    for those boundaries. `generic_erased_boundary_expression` asks for the
-   ordinary assignment adjustment between the two erased types and applies it
-   through `trycoerce`; when none exists it tries
-   `generic_interface_downcast_expression`, and otherwise raises an internal
-   compiler error.
+   ordinary assignment adjustment between the two erased types. It applies a
+   structural Array or Map view as a typed cast (also through Option), and
+   otherwise uses `trycoerce`. If no ordinary adjustment exists, it tries
+   `generic_interface_downcast_expression` before reporting an internal error.
 
 This is not a second semantic typecheck. It performs no inference, constraint
-search, or body recheck. It sees the exact types coder will see and emits only
-the `CoercionPlan`, `GuardPlan`, callable adapter, Interface conversion,
-written-cast, comparison, and AST cast forms codegen already consumes. It
-does not ask an ordinary relation to rediscover an edge involving a
-`Parameter` that has already disappeared.
+search, or body recheck. It sees the exact types coder will see. It does not
+ask an ordinary relation to rediscover an edge involving a `Parameter` that
+has already disappeared.
 
 For a closed use, the pass implements the selected direction rules:
 
@@ -667,6 +665,27 @@ an existing adjustment would otherwise reference it more than once.
 Any missing temporary boundary link, unknown adjustment, generic-only plan, or
 remaining generic annotation is an internal compiler error at this phase—not a
 relation for coder to infer.
+
+### Container views and presence
+
+Ordinary structural sink adjustments leave the producer's type unchanged.
+At a generic boundary the view is itself the input to subsequent operations.
+The typed cast exposes the closed Array or Map type without changing the
+shared producer or its result slots. A following force still checks nil,
+wrap still introduces an Option, and typed element reads still use their
+normal guards. Array constness and backing identity do not change.
+
+This also replaces the call-shaped spread special case: spread forces the
+closed subject before evaluating its bounds. A failing force now reports the
+closed type, for example `{ integer }`, instead of the erased `{ value }`.
+
+For open runs, the producer updates the physical element descriptor and the
+adjusted expression list owns the sink plan. When an already accepted
+surface force or wrap preserves its payload type, the open sink can retain
+that operation between ordinary structural container views on the producer
+and consumer sides. This is a bounded composition of checked operations,
+not a new assignment relation. The sink applies the operations once to each
+consumed element, in the original order; empty runs do not force a value.
 
 ### Concrete callback wrappers
 
