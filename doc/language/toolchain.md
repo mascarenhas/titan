@@ -588,6 +588,12 @@ titanc -o out --static -c --incremental app.main
 titanc -o out --static --incremental --exe out/bin/app app.main
 ```
 
+Compile-only builds of a root with `main`, or of `--test` roots, use the same
+provider composition rules as the executable build. They write only objects
+and headers: the launcher and executable are generated at the final link.
+Pass the same provider-selection and compile options in both steps, including
+`--test` and `--coverage` when applicable.
+
 ## Build profiles, parallelism, and build output
 
 ### Build profiles

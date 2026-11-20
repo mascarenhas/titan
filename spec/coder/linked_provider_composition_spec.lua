@@ -113,6 +113,20 @@ describe("linked provider composition", function()
         return result.output
     end
 
+    local function precompile_then_link(tree, output, name, ...)
+        local options = { ... }
+        options[#options + 1] = name
+        built(tree, output, "package", "-c", table.unpack(options))
+        assert.equal("file", lfs.attributes(fixture.output .. "/" .. name .. ".o", "mode"))
+        local log = built(tree, output, "package", "-c", "--incremental", "-v", table.unpack(options))
+        assert.truthy(log:find("Titan object hit " .. name .. ":", 1, true), log)
+        assert.is_nil(lfs.attributes(fixture.output .. "/.titan-links", "mode"))
+        assert.is_nil(lfs.attributes(fixture.output .. "/" .. name, "mode"))
+        assert.is_nil(lfs.attributes(fixture.output .. "/bin/" .. name .. ".exe", "mode"))
+        log = built(tree, output, "package", "--incremental", "-v", table.unpack(options))
+        assert.truthy(log:find("Titan object hit " .. name .. ":", 1, true), log)
+    end
+
     local function run_with_providers(name)
         local executable = fixture.output .. "/" .. name
         local search = fixture.root .. "/package;" .. stdlib
@@ -168,13 +182,17 @@ function main(args: {string}): integer
   return 0
 end
 ]], first_serial, first_serial + 39, first_serial + 1, first_serial + 40))
-            built("app", mode, "package", mode)
+            if mode == "facade_first" then
+                precompile_then_link("app", mode, mode)
+            else
+                built("app", mode, "package", mode)
+            end
             local result = run_with_providers(mode)
             assert.is_true(result.ok, mode .. ": " .. result.output)
         end
     end)
 
-    it("shares an independently imported standard nominal owner in a default program", function()
+    it("shares a standard nominal owner in a default program and test runner", function()
         file("author/rx.titan", [[
 local strings = import "string"
 
@@ -194,9 +212,37 @@ function main(args: {string}): integer
 end
 ]])
         built("author", "package", nil, "rx")
-        built("app", "dynamic", "package", "check")
+        precompile_then_link("app", "dynamic", "check")
         local result = run_with_providers("check")
         assert.is_true(result.ok, result.output)
+
+        file("suite/checks.titan", [[
+local rx = import "rx"
+local strings = import "string"
+local test = import "test"
+
+function test_composition(context: test.Context)
+  local found = rx.digits():match("ab42")
+  test.assert(found:whole() == strings.rep("42", 1))
+end
+]])
+        precompile_then_link("suite", "suite-out", "checks", "--test")
+        result = run_with_providers("checks")
+        assert.is_true(result.ok, result.output)
+        assert.truthy(result.output:find("checks.test_composition", 1, true), result.output)
+
+        file("suite/partial.titan", [[
+local rx = import "rx"
+local strings = import "string"
+
+function digits(): strings.Regex
+  return rx.digits()
+end
+]])
+        result = compile("suite", "partial-out", "package", "-c", "partial")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find("requires its producer-chosen dynamic identity",
+            1, true), result.output)
     end)
 
     it("consumes the same stock-stdlib provider pair in native applications and tests", function()
@@ -272,7 +318,7 @@ end
         assert.equal("exit", result.why, result.output)
         assert.equal(1, result.status, result.output)
         assert.truthy(result.output:find(
-            "source import 'titan.reflect' found canonical module state from a different physical provider",
+            "found canonical module state from a different physical provider",
             1, true), result.output)
 
         file("app/demo.titan", imports .. 'local json = import "json"\n' .. body)
@@ -301,7 +347,11 @@ end
             if order == "owner_first" then imports[1], imports[2] = imports[2], imports[1] end
             file("app/" .. order .. ".titan", 'local witness = import "witness"\n' ..
                 'local lua = import "lua"\n' .. table.concat(imports) .. "\n" .. nominal_checks)
-            built("app", order, "package", "--static", "--incremental", order)
+            if order == "facade_first" then
+                precompile_then_link("app", order, order, "--static")
+            else
+                built("app", order, "package", "--static", "--incremental", order)
+            end
             local output = built("app", order, "package", "--static", "--incremental", "-v", order)
             assert.truthy(output:find("Titan link hit", 1, true), output)
             local result = run_deployed(order .. "/" .. order)

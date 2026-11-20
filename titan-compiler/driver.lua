@@ -13571,14 +13571,18 @@ function driver.preflight_build_outputs(context, plan, options)
                 end
             end
         end
-        if not options.test and info and info.has_main and not options.compile_only then
-            if main then
+        if not options.test and info and info.has_main then
+            if not main then
+                main = name
+            elseif not options.compile_only then
                 return nil, name .. ": multiple main functions found (already declared in " .. main .. ")"
             end
-            main = name
         end
     end
-    local builds_program = not options.compile_only and (options.test or main ~= nil)
+    -- Compile-only still checks provider composition for these executable
+    -- roots, but reserves no executable outputs.
+    local link_kind = options.test and "test" or main and "program"
+    local builds_program = not options.compile_only and link_kind ~= nil
     if options.exe and not builds_program then
         return nil, "--exe is only valid when compiling a standalone or test executable"
     elseif options.no_uv_bootstrap and not builds_program then
@@ -13688,10 +13692,7 @@ function driver.preflight_build_outputs(context, plan, options)
     end
     -- Stale-staging retirement protects the same accepted inputs.
     plan.reservations, plan.inputs = reservations, inputs
-    if not options.compile_only then
-        plan.link_kind = builds_program and (options.test and "test" or "program")
-            or "library"
-    end
+    plan.link_kind = link_kind or (not options.compile_only and "library" or nil)
     return true
 end
 
