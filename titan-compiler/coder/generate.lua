@@ -195,6 +195,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         nominal_plans = {},
         nominal_plan_list = {},
         imported_nominal_layouts = options.nominal_layouts or {},
+        application_nominal_layouts = options.application_nominal_layouts,
+        check_only_sources = options.check_only_sources,
         private_symbols = {},
         private_symbol_seen = {},
         upvalue = 0
@@ -272,6 +274,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         }))
     end
 
+    if options.application_nominal_layouts then
+        local trusted = { [modname] = true }
+        for _, node in ipairs(ast) do
+            if not node._ignore and node._tag == "Ast.TopLevelImport" and node._source_import then
+                trusted[node.modname] = true
+            end
+        end
+        tlcontext.private_layout_owners = trusted
+    end
     local initctx = newcontext(tlcontext)
 
     allocate_upvalues(tlcontext, ast)
@@ -879,22 +890,11 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     local metadata_type = rawget(ast, "_declared_type")
     if metadata_type == nil then metadata_type = ast._type end
     local serialized_type = types.serialize(metadata_type)
-    local own_layouts = {}
-    for _, node in ipairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
-            own_layouts[node._type.name] = coder._nominal_plan(initctx, node._type)
-        elseif not node._ignore and node._tag == "Ast.TopLevelUnion" then
-            for _, variant in ipairs(node._type.variants) do
-                own_layouts[node._type.name .. "." .. variant.name] =
-                    coder._nominal_plan(initctx, node._type, variant)
-            end
-        end
-    end
-    local encoded_layouts = assert(require("titan-compiler.nominallayout")
-        .encode(modname, own_layouts))
+    local encoded_layouts = assert(coder._own_nominal_layouts(modname, ast, initctx))
     local metadata, metadata_err =
         staticmetadata.render(modname, abi, serialized_type, encoded_layouts,
-            not tlcontext.browser_trace and coder._sorted_keys(mprefixes) or nil)
+            not tlcontext.browser_trace and coder._sorted_keys(mprefixes) or nil,
+            options.source_requirements)
     assert(metadata, metadata_err)
     local initializer, initializer_err =
         staticmetadata.c_initializer(metadata)
@@ -921,6 +921,13 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         TYPESNAME = tlcontext.prefix .. "layouts",
         TYPES = c_string_literal(encoded_layouts),
     }))
+    if options.source_requirements then
+        emit_item("pinned", render(modtypes, {
+            DEFLINE = definitionline(),
+            TYPESNAME = tlcontext.prefix .. "source_requirements",
+            TYPES = c_string_literal(table.concat(options.source_requirements, "\n")),
+        }))
+    end
 
     emit_item("pinned", render(modabi, {
         DEFLINE = definitionline(),

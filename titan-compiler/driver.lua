@@ -4679,7 +4679,7 @@ local function probe_compiled_interface(modname, binf, options)
             "' has invalid metadata for module '" .. modname .. "': " ..
             validation_err
     end
-    local serialized_layouts, layout_inventory
+    local serialized_layouts, layout_inventory, source_requirements
     if not (options and options.analysis_only) then
         local layoutsname = prefix .. "_layouts"
         local layoutsf, layoutserr = loadlib(binf, layoutsname)
@@ -4701,6 +4701,16 @@ local function probe_compiled_interface(modname, binf, options)
                 "' has invalid nominal layout metadata for module '" ..
                 modname .. "': " .. tostring(layout_err)
         end
+        local symbol = prefix .. "_source_requirements"
+        local fn, load_error, stage = loadlib(binf, symbol)
+        if fn then
+            local bytes, err = one_metadata_result(fn, "compiled module '" .. symbol .. "'")
+            if not bytes then return "error", err end
+            source_requirements, err = staticmetadata.decode_source_requirements(modname, bytes)
+            if not source_requirements then return "error", binf .. ":" .. symbol .. ": " .. err end
+        elseif stage ~= nil and stage ~= "init" then
+            return "error", "cannot inspect '" .. symbol .. "' in '" .. binf .. "': " .. tostring(load_error)
+        end
     end
     -- Provider-relative binding lives on the module view. Keep it separate
     -- from the shared decoded graph, including when two paths name one inode.
@@ -4712,6 +4722,7 @@ local function probe_compiled_interface(modname, binf, options)
         types = types_or_err,
         layouts = serialized_layouts,
         layout_inventory = layout_inventory,
+        source_requirements = source_requirements,
         type = module_view,
         origin = binf,
     }
@@ -5043,6 +5054,7 @@ function driver.find_dependency_interface(paths, modname, context)
                     relative = relative,
                     layouts = metadata.layouts,
                     layout_inventory = metadata.layout_inventory,
+                    source_requirements = metadata.source_requirements,
                 }
             elseif filename then
                 return nil, filename
@@ -5062,6 +5074,7 @@ function driver.find_dependency_interface(paths, modname, context)
                     static_provider = provider,
                     layouts = metadata.layouts,
                     layout_inventory = metadata.layout_inventory,
+                    source_requirements = metadata.source_requirements,
                 }
             elseif filename then
                 return nil, filename
@@ -5356,6 +5369,9 @@ local function resolver_plan(context, linked_names)
     end
     function plan.provider_file(name)
         driver.assert_target_context(context)
+        if context.check_only_sources and context.check_only_sources[name] then
+            return ""
+        end
         local mod = driver.imported[name]
         if not mod or mod == CIRCULAR_MARK or mod.kind ~= "dynamic" then
             return nil
@@ -6026,14 +6042,15 @@ function driver.defaultloader(static_deps, options)
             modname, source, record, active_loader, published)
         local entry = record
         local native = type(entry) == "table" and entry.object_metadata
-        if type(native) ~= "table" or type(native.parts) ~= "table"
-           or type(native.imports) ~= "table" then
+        local check_only = context.check_only_sources and context.check_only_sources[modname]
+        if type(native) ~= "table" or type(native.imports) ~= "table" or
+           (not check_only and type(native.parts) ~= "table") then
             return nil, "record-unreadable", "record has no object metadata"
         end
         local native_output = source.native_output or source.main
         local stem = driver.module_output_stem(native_output, modname)
         local compiled_objects = {}
-        for index, part in ipairs(native.parts) do
+        for index, part in ipairs(not check_only and native.parts or {}) do
             compiled_objects[index] = stem .. part.object_suffix
         end
         local deps = {}
@@ -6091,15 +6108,15 @@ function driver.defaultloader(static_deps, options)
         entry.native_output = native_output
         entry.program_output = source.program_output
         entry.compiled = compiled_objects[1]
-        entry.compiled_objects = compiled_objects
+        entry.compiled_objects = not check_only and compiled_objects or nil
         entry.has_main = native.has_main
         entry.test_functions = native.test_functions
         entry.external_symbols = native.external_symbols
         entry.private_symbols = native.private_symbols or {}
         entry.native_references = native.native_references
         entry.deps = deps
-        entry.interface_digests = native.certificate
-            and native.certificate.interface or nil
+        entry.interface_digests = native.interface or
+            (native.certificate and native.certificate.interface or nil)
         if restored_descriptor then
             entry.ffi_header_descriptor = restored_descriptor
             entry.ffi_header = normalized_absolute_filename(
@@ -6117,7 +6134,7 @@ function driver.defaultloader(static_deps, options)
         end
         driver.imported[modname] = entry
         object_loaded[modname] = true
-        static_deps[modname] = true
+        if not check_only then static_deps[modname] = true end
         local registered, register_error = checker.register_module_interface(
             modname, entry.type, active_loader, modname, {}, true, {},
             source_import_permissions(entry))
@@ -6262,19 +6279,24 @@ function driver.defaultloader(static_deps, options)
     -- Worker: restore a parent-certified dependency from its published record
     -- without recertifying it, after restoring its own recorded imports.
     local function restore_planned_source(modname, item, loader)
-        local object = item.object
-        if type(object) ~= "string" then
-            return false, "build plan divergence: module '" .. modname ..
-                "' has no accepted object"
+        local record, record_error
+        if item.interface then
+            record, record_error = objectmetadata.decode(item.interface, modname)
+        else
+            local object = item.object
+            if type(object) ~= "string" then
+                return false, "build plan divergence: module '" .. modname ..
+                    "' has no accepted object"
+            end
+            local bytes, read_error = perf.compiler_file_contents(context, object)
+            if not bytes then
+                return false, "cannot read planned object for module '" ..
+                    modname .. "': " .. tostring(read_error)
+            end
+            record, record_error = objectmetadata.read(bytes, object)
         end
-        local bytes, read_error = perf.compiler_file_contents(context, object)
-        if not bytes then
-            return false, "cannot read planned object for module '" ..
-                modname .. "': " .. tostring(read_error)
-        end
-        local record, record_error = objectmetadata.read(bytes, object)
         if not record or type(record.object_metadata) ~= "table" then
-            return false, "cannot decode planned object for module '" ..
+            return false, "cannot decode planned source for module '" ..
                 modname .. "': " .. tostring(record_error)
         end
         driver.imported[modname] = CIRCULAR_MARK
@@ -6324,6 +6346,7 @@ function driver.defaultloader(static_deps, options)
                 kind = "dynamic", type = value, filename = item.file,
                 relative = item.relative, layouts = metadata.layouts,
                 layout_inventory = metadata.layout_inventory,
+                source_requirements = metadata.source_requirements,
             }
         elseif item.kind == "static" then
             local provider, provider_error = inspect_static_provider(
@@ -6341,6 +6364,7 @@ function driver.defaultloader(static_deps, options)
                 relative = item.relative, static_archive = item.archive,
                 static_provider = provider, layouts = metadata.layouts,
                 layout_inventory = metadata.layout_inventory,
+                source_requirements = metadata.source_requirements,
             }
             static_deps[modname] = true
         else
@@ -6561,7 +6585,17 @@ function driver.defaultloader(static_deps, options)
         return ok, modtype, errors, info
     end
 
-    local function recover_contextual_owner(modname, request)
+    local function public_source_interface(modname, entry)
+        if not entry.public_type then
+            local modtype, err = driver.decode_module_interface(
+                types.serialize(entry.type), modname, entry.filename)
+            if not modtype then return nil, err end
+            entry.public_type = modtype
+        end
+        return entry.public_type
+    end
+
+    local function recover_contextual_owner(modname, request, active_loader)
         local exposer = request and request.exposer
         local exposing_name = type(exposer) == "table" and exposer.name or
             exposer
@@ -6659,9 +6693,14 @@ function driver.defaultloader(static_deps, options)
 
         local ordinary = driver.imported[modname]
         local planned = worker_plan and worker_plan.modules[modname]
-        if not ordinary and planned and planned.kind == "static" then
-            local loaded, err = load_planned_binary(modname, planned)
-            if not loaded then return false, err end
+        if not ordinary and planned then
+            local loaded, err
+            if planned.kind == "source" and (planned.object or planned.interface) then
+                loaded, err = restore_planned_source(modname, planned, active_loader)
+            elseif planned.kind == "static" then
+                loaded, err = load_planned_binary(modname, planned)
+            end
+            if loaded == false then return false, err end
             ordinary = driver.imported[modname]
         end
         if ordinary and ordinary ~= CIRCULAR_MARK then
@@ -6671,7 +6710,14 @@ function driver.defaultloader(static_deps, options)
                 add_native_constraint(context, modname, "dynamic-global",
                     exposing.static_archive or exposing.filename, exposing_name)
             end
-            return remember_type(ordinary.type, ordinary, true)
+            local modtype = ordinary.type
+            if ordinary.kind == "source" and context.check_only_sources and
+                    context.check_only_sources[modname] then
+                local err
+                modtype, err = public_source_interface(modname, ordinary)
+                if not modtype then return false, err end
+            end
+            return remember_type(modtype, ordinary, true)
         end
 
         -- The exposing compiled object already chose how to bind this owner.
@@ -6694,7 +6740,8 @@ function driver.defaultloader(static_deps, options)
             resolved.layouts, false)
     end
 
-    local function loader(modname, request)
+    local loader
+    local function load(modname, request)
         driver.assert_target_context(context)
         if not staticmetadata.valid_module_name(modname) then
             return false, "invalid logical Titan module name " ..
@@ -6749,7 +6796,7 @@ function driver.defaultloader(static_deps, options)
         end
         if not context.completion_closed_world and request and request.kind == "nominal-owner" then
             local contextual_ok, contextual_type, contextual_errors =
-                recover_contextual_owner(modname, request)
+                recover_contextual_owner(modname, request, loader)
             if contextual_ok ~= nil then
                 return contextual_ok, contextual_type, contextual_errors
             end
@@ -7000,6 +7047,19 @@ function driver.defaultloader(static_deps, options)
         end
         return load_source(source)
     end
+    loader = function(modname, request)
+        if not (context.check_only_sources and context.check_only_sources[modname])
+                or (request and request.kind == "source-import") then
+            return load(modname, request)
+        end
+        local ok, modtype, errors, info = load(modname, request)
+        if ok and modtype and info and info.kind == "source" and #errors == 0 then
+            local projected, err = public_source_interface(modname, driver.imported[modname])
+            if not projected then return false, err end
+            return true, projected, errors, { kind = "external_source" }
+        end
+        return ok, modtype, errors, info
+    end
     context.loader = loader
     loader_contexts[loader] = {
         context = context,
@@ -7121,96 +7181,121 @@ function driver.resolution_plan(context)
     planning.open = false
 
     local modules, linked, archives = {}, {}, {}
-    for name, mod in pairs(driver.imported) do
-        if mod ~= CIRCULAR_MARK then
-            local node = mod._planned and planning.nodes[name]
-            if node then
-                modules[name] = {
-                    kind = "source", source = node.source,
-                    certified = node.certified, imports = node.imports,
-                    failed = node.failed,
-                }
-                linked[name] = true
-            elseif mod.kind == "dynamic" then
-                modules[name] = {
-                    kind = "dynamic", file = mod.filename,
-                    relative = mod.relative,
-                    provider_file = mod.type and mod.type.file,
-                }
-            elseif mod.kind == "static" then
-                modules[name] = {
-                    kind = "static", archive = mod.static_archive,
-                    relative = mod.relative,
-                }
-                linked[name] = true
-                for carried in pairs(mod.static_provider and
-                        mod.static_provider.entries or {}) do
-                    linked[carried] = true
-                end
-                local archive = mod.static_archive
-                if archives[archive] == nil then
-                    archives[archive] = planned_archive_metadata(context, mod)
+    local plan = { modules = modules, archives = archives }
+    local function capture_selection()
+        for name in pairs(modules) do modules[name] = nil end
+        for name in pairs(linked) do linked[name] = nil end
+        for archive in pairs(archives) do archives[archive] = nil end
+        for name, mod in pairs(driver.imported) do
+            if mod ~= CIRCULAR_MARK then
+                local node = mod._planned and planning.nodes[name]
+                if node then
+                    node.kind = "source"
+                    modules[name], linked[name] = node, true
+                elseif mod.kind == "dynamic" then
+                    modules[name] = {
+                        kind = "dynamic", file = mod.filename, relative = mod.relative,
+                        provider_file = mod.type and mod.type.file,
+                        source_requirements = mod.source_requirements,
+                    }
+                elseif mod.kind == "static" then
+                    plan.add_static(name, mod)
+                    for carried in pairs(mod.static_provider.entries) do linked[carried] = true end
                 end
             end
         end
-    end
-    for name, text in pairs(planning.unavailable) do
-        if not modules[name] then
-            modules[name] = { kind = "unavailable", error = text }
+        for name, text in pairs(planning.unavailable) do
+            if not modules[name] then
+                modules[name] = { kind = "unavailable", error = text }
+            end
         end
+    end
+    function plan.load_sources(requirements)
+        planning.open = true
+        local names = require("titan-compiler.coder.core").coder._sorted_keys(requirements)
+        for _, name in ipairs(names) do
+            local selected = modules[name]
+            if selected and (selected.kind == "dynamic" or selected.kind == "static") then
+                planning.open = false
+                return nil, "module '" .. requirements[name] .. "' requires source for '" ..
+                    name .. "', which also resolved to compiled provider '" ..
+                    (selected.archive or selected.file) .. "'; remove the conflicting provider " ..
+                    "or rebuild the referring library against it"
+            end
+            local ok, err = context.loader(name, { kind = "source-import" })
+            if not ok then
+                planning.open = false
+                return nil, "module '" .. requirements[name] ..
+                    "' requires source for '" .. name ..
+                    "': install its source package, add its checkout to --tree, " ..
+                    "or rebuild the referring library against its compiled provider (" ..
+                    tostring(err) .. ")"
+            end
+        end
+        planning.open = false
+        capture_selection()
+        return true
     end
 
-    local names = {}
-    for name, module in pairs(modules) do
-        if module.kind == "source" then names[#names + 1] = name end
-    end
-    table.sort(names, util.bytewise_less)
-    local waiting, dependents = {}, {}
-    for _, name in ipairs(names) do
-        local count, seen = 0, {}
-        for _, import in ipairs(modules[name].imports) do
-            local dependency = import.name
-            if dependency == name then
-                modules[name].cyclic = true
-            elseif modules[dependency] and modules[dependency].kind == "source"
-                   and not seen[dependency] then
-                seen[dependency] = true
-                count = count + 1
-                dependents[dependency] = dependents[dependency] or {}
-                table.insert(dependents[dependency], name)
+    function plan.order_sources()
+        local names = {}
+        for name, module in pairs(modules) do
+            if module.kind == "source" then
+                module.cyclic = nil
+                names[#names + 1] = name
             end
         end
-        waiting[name] = count
-    end
-    local order, ready = {}, {}
-    for _, name in ipairs(names) do
-        if waiting[name] == 0 and not modules[name].cyclic then
-            ready[#ready + 1] = name
+        table.sort(names, util.bytewise_less)
+        local waiting, dependents = {}, {}
+        for _, name in ipairs(names) do
+            local count, seen = 0, {}
+            local function add_dependency(dependency)
+                if dependency == name then
+                    modules[name].cyclic = true
+                elseif modules[dependency] and modules[dependency].kind == "source"
+                       and not seen[dependency] then
+                    seen[dependency] = true
+                    count = count + 1
+                    dependents[dependency] = dependents[dependency] or {}
+                    table.insert(dependents[dependency], name)
+                end
+            end
+            for _, import in ipairs(modules[name].imports) do add_dependency(import.name) end
+            for _, dependency in ipairs(modules[name].semantic_dependencies or {}) do
+                add_dependency(dependency)
+            end
+            waiting[name] = count
         end
-    end
-    while #ready > 0 do
-        table.sort(ready, util.bytewise_less)
-        local name = table.remove(ready, 1)
-        order[#order + 1] = name
-        for _, dependent in ipairs(dependents[name] or {}) do
-            waiting[dependent] = waiting[dependent] - 1
-            if waiting[dependent] == 0 and not modules[dependent].cyclic then
-                ready[#ready + 1] = dependent
+        local order, ready = {}, {}
+        for _, name in ipairs(names) do
+            if waiting[name] == 0 and not modules[name].cyclic then
+                ready[#ready + 1] = name
             end
         end
-    end
-    for _, name in ipairs(names) do
-        if waiting[name] > 0 or modules[name].cyclic then
-            modules[name].cyclic = true
+        while #ready > 0 do
+            table.sort(ready, util.bytewise_less)
+            local name = table.remove(ready, 1)
             order[#order + 1] = name
+            for _, dependent in ipairs(dependents[name] or {}) do
+                waiting[dependent] = waiting[dependent] - 1
+                if waiting[dependent] == 0 and not modules[dependent].cyclic then
+                    ready[#ready + 1] = dependent
+                end
+            end
         end
+        for _, name in ipairs(names) do
+            if waiting[name] > 0 or modules[name].cyclic then
+                modules[name].cyclic = true
+                order[#order + 1] = name
+            end
+        end
+        plan.order = order
     end
 
     local accepted = {}
-    local plan = { modules = modules, order = order, archives = archives }
     function plan.add_static(name, mod)
         modules[name] = { kind = "static", archive = mod.static_archive,
-            relative = mod.relative }
+            relative = mod.relative, source_requirements = mod.source_requirements }
         linked[name] = true
         if archives[mod.static_archive] == nil then
             archives[mod.static_archive] = planned_archive_metadata(context, mod)
@@ -7218,6 +7303,9 @@ function driver.resolution_plan(context)
     end
     function plan.linked(name)
         driver.assert_target_context(context)
+        if context.check_only_sources and context.check_only_sources[name] then
+            return false
+        end
         local module = modules[name]
         if module and module.kind == "unavailable" then return nil end
         local mod, is_linked = certificate_dependency(context, name, linked)
@@ -7227,6 +7315,7 @@ function driver.resolution_plan(context)
     function plan.provider_file(name)
         driver.assert_target_context(context)
         local module = modules[name]
+        if module and module.kind == "source" and module.check_only then return "" end
         return module and module.kind == "dynamic" and module.provider_file or nil
     end
     function plan.path(filename)
@@ -7260,6 +7349,8 @@ function driver.resolution_plan(context)
         driver.assert_target_context(context)
         return accepted[name]
     end
+    capture_selection()
+    plan.order_sources()
     return plan
 end
 
@@ -7273,14 +7364,31 @@ function driver.plan_descriptor(plan, modname)
         error("the build plan has no source module '" .. tostring(modname) ..
             "'", 2)
     end
+    local needed
+    if plan.check_only_sources then
+        needed = {}
+        local function visit(name)
+            if needed[name] then return end
+            needed[name] = true
+            local module = plan.modules[name]
+            if not module then return end
+            for _, import in ipairs(module.imports or {}) do visit(import.name) end
+            for _, dependency in ipairs(module.semantic_dependencies or {}) do visit(dependency) end
+        end
+        visit(modname)
+    end
     local modules = {}
     for name, module in pairs(plan.modules) do
         local item = { kind = module.kind, linked = plan.linked(name) == true }
+        item.check_only = module.check_only
         if module.kind == "source" then
             item.source = copy_source_descriptor(module.source)
             if name ~= modname then
                 local certified = plan.accepted(name)
                 item.object = certified and certified.object or nil
+                if needed and needed[name] then
+                    item.interface = certified and certified.interface
+                end
             end
         elseif module.kind == "dynamic" then
             item.file, item.relative = module.file, module.relative
@@ -7300,6 +7408,8 @@ function driver.plan_descriptor(plan, modname)
         link_kind = plan.link_kind,
         strict_static = plan.strict_static,
         reservations = plan.reservations,
+        source_requirements = plan.requirements_by_module and plan.requirements_by_module[modname],
+        application_source_requirements = plan.application_source_requirements,
     }
 end
 
@@ -7555,6 +7665,16 @@ function driver.compile_planned_module(context, modname, options)
         plan.archives or nil
     context.link_kind = plan.link_kind
     context.strict_static = plan.strict_static
+    context.application_source_requirements = plan.application_source_requirements
+    if plan.source_requirements then
+        context.requirements_by_module = { [modname] = plan.source_requirements }
+    end
+    for name, item in pairs(plan.modules) do
+        if item.check_only then
+            context.check_only_sources = context.check_only_sources or {}
+            context.check_only_sources[name] = true
+        end
+    end
     local loader = driver.defaultloader({}, {
         context = context,
         worker_plan = plan,
@@ -7582,6 +7702,29 @@ function driver.compile_planned_module(context, modname, options)
     local reserved_ok, reserved_error = driver.validate_reserved_output_inputs(
         plan.reservations, header_inputs)
     if not reserved_ok then return nil, reserved_error end
+    if plan.modules[modname].check_only then
+        local layouts = assert(require("titan-compiler.coder.core").coder
+            ._own_nominal_layouts(modname, mod.ast))
+        local recipe
+        if driver.ast_has_foreign_functions(mod.ast) then
+            local header = driver.plan_foreign_header(modname, mod.ast, mod.native_output,
+                false, driver.header_policy(false))
+            recipe = header.recipe
+        end
+        local imports = {}
+        for _, node in ipairs(mod.ast) do
+            if not node._ignore and node._tag == "Ast.TopLevelImport" then
+                imports[#imports + 1] = { name = node.modname,
+                    source_required = node._source_import == true }
+            end
+        end
+        local payload, err = objectmetadata.encode(mod, {
+            imports = imports, layouts = layouts, foreign_header = recipe,
+            interface = incremental.producer_digests(context, mod, layouts, recipe),
+        })
+        if not payload then return nil, err end
+        return { modname = modname, interface = payload, source_snapshot = mod.source_certificate }
+    end
     local finalized, finalize_errors = driver.finalize_resolver_context(context)
     if not finalized then return nil, table.concat(finalize_errors, "\n") end
     for name, planned in pairs(plan.modules) do
@@ -7739,6 +7882,21 @@ end
 function driver.publish_staged_module(context, result)
     driver.assert_target_context(context)
     if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
+    if result.interface then
+        local modname = result.modname
+        local record, err = objectmetadata.decode(result.interface, modname)
+        if not record then return nil, err end
+        local source
+        source, err = current_source_descriptor(context, modname)
+        if not source then return nil, err end
+        local valid, input_error = revalidate_uncertified_module(
+            context, modname, source, record, result.source_snapshot)
+        if not valid then
+            return nil, "inputs of module '" .. modname ..
+                "' changed during the build: " .. tostring(input_error)
+        end
+        return { record = record, interface = result.interface }
+    end
     local modname = result.modname
     local primary, parts = nil, {}
     for _, staged in ipairs(result.staged or {}) do
@@ -8003,7 +8161,7 @@ end
 -- Complete the archive portion of a native executable plan before any
 -- worker or final-link certificate consumes it. In default mode only
 -- already chosen archives can satisfy an indirect edge.
-function perf.demand_archive_modules(context, plan)
+function perf.demand_archive_modules(context, plan, requirements)
     local owners, roots = {}, {}
     local function claim(provider)
         for _, name in ipairs(provider.key_order) do
@@ -8011,6 +8169,11 @@ function perf.demand_archive_modules(context, plan)
             if previous and previous ~= provider then
                 return nil, "static providers '" .. previous.archive .. "' and '" ..
                     provider.archive .. "' both contain logical module '" .. name .. "'"
+            end
+            if requirements[name] or (context.application_source_requirements and
+                    context.application_source_requirements[name]) then
+                return nil, "static provider '" .. provider.archive ..
+                    "' physically contains required source module '" .. name .. "'"
             end
             owners[name] = provider
         end
@@ -8030,11 +8193,13 @@ function perf.demand_archive_modules(context, plan)
     end
 
     local colors, demanded, chain = {}, {}, {}
+    local missing
     local function visit(name, importer)
         if colors[name] == "done" then return true end
         if colors[name] == "visiting" then
             return nil, "cyclic archive import: " .. table.concat(chain, " -> ") .. " -> " .. name
         end
+        if not driver.imported[name] and requirements[name] then return true end
         local selected = driver.imported[name]
         local owner = owners[name]
         local provider = selected and selected.static_provider or
@@ -8049,9 +8214,10 @@ function perf.demand_archive_modules(context, plan)
             local _, filename, _, found = driver.find_static_interface(
                 driver.TITAN_BIN_PATH, name, context)
             if not found then
-                return nil, "--static requires an archive (.a) for '" .. name ..
+                missing = missing or ("--static requires an archive (.a) for '" .. name ..
                     "' imported by " .. table.concat(chain, " -> ") ..
-                    (filename and (": " .. filename) or "; shared providers are not used")
+                    (filename and (": " .. filename) or "; shared providers are not used"))
+                return true
             end
             local ok, err = claim(found)
             if not ok then return nil, err end
@@ -8071,11 +8237,19 @@ function perf.demand_archive_modules(context, plan)
                 selected = { kind = "static", compiled = true, type = entry.type,
                     filename = provider.archive, relative = provider.relative_archive,
                     static_archive = provider.archive, static_provider = provider,
-                    layouts = entry.layouts, layout_inventory = entry.layout_inventory }
+                    layouts = entry.layouts, layout_inventory = entry.layout_inventory,
+                    source_requirements = entry.source_requirements }
                 driver.imported[name] = selected
                 plan.add_static(name, selected)
             end
             demanded[name] = selected
+            for _, dependency in ipairs(entry.source_requirements or {}) do
+                requirements[dependency] = requirements[dependency] or name
+                if owners[dependency] then
+                    return nil, "static provider '" .. owners[dependency].archive ..
+                        "' physically contains required source module '" .. dependency .. "'"
+                end
+            end
             for _, dependency in ipairs(entry.imports or {}) do
                 local ok, err = visit(dependency, provider)
                 if not ok then return nil, err end
@@ -8095,7 +8269,7 @@ function perf.demand_archive_modules(context, plan)
         local ok, err = visit(name)
         if not ok then return nil, err end
     end
-    return demanded
+    return demanded, nil, missing
 end
 
 function driver.finalize_resolver_context(context)
@@ -8113,8 +8287,9 @@ function driver.finalize_resolver_context(context)
     local embedded_providers_by_path = {}
     local providers_by_path = {}
 
+    local check_only_sources = context.check_only_sources
     for name, mod in pairs(driver.imported) do
-        if mod ~= CIRCULAR_MARK then
+        if mod ~= CIRCULAR_MARK and not (check_only_sources and check_only_sources[name]) then
             if mod.kind == "static" then
                 selected_static_modules[name] = mod
                 providers_by_path[mod.static_archive] = mod.static_provider
@@ -8237,6 +8412,11 @@ function driver.finalize_resolver_context(context)
     local native_bindings = {}
     for name in pairs(source_names) do native_bindings[name] = "direct" end
     for name in pairs(dynamic_names) do native_bindings[name] = "handle" end
+    for name in pairs(check_only_sources or {}) do
+        if driver.imported[name] and driver.imported[name].kind == "source" then
+            native_bindings[name] = "handle"
+        end
+    end
     local physical_owner = {}
     local errors = {}
 
@@ -8288,12 +8468,14 @@ function driver.finalize_resolver_context(context)
         end
     end
 
-    local native_executable = not context.analysis_only and context.target ~= "browser" and
+    local executable = not context.analysis_only and
         (context.link_kind == "program" or context.link_kind == "test")
+    local app_sources = executable and context.application_source_requirements
     -- A test's synthetic main is not necessarily present at certification.
     -- In an ordinary program with only a source root and DSOs, there is no
     -- second linked owner to elect.
-    local elect_linked = native_executable and context.target ~= "windows" and
+    local elect_linked = executable and
+        (context.target == "linux" or context.target == "darwin") and
         (context.strict_static or context.link_kind == "test" or next(physical_owner) ~= nil or
          next(dynamic_names) ~= nil and next(source_names, (next(source_names))) ~= nil)
     local rebound_owners
@@ -8302,6 +8484,7 @@ function driver.finalize_resolver_context(context)
         local linked_owner = elect_linked and
             (selected_static_modules[owner] or source_names[owner] or
              context.strict_static and direct_provider)
+        linked_owner = linked_owner or (app_sources and app_sources[owner] and source_names[owner])
         local shared_dynamic_owner = not context.analysis_only and
             context.target ~= "browser" and not direct_provider and not source_names[owner]
         -- Keep an exposure from any actual carrying DSO exclusive.
@@ -8325,7 +8508,8 @@ function driver.finalize_resolver_context(context)
                         tostring(constraint.provider) .. "'"
                 end
                 direct_provider = constraint.provider
-            elseif (linked_owner or shared_dynamic_owner) and
+            elseif (linked_owner or shared_dynamic_owner or
+                    (not direct_provider and check_only_sources and check_only_sources[owner])) and
                    constraint.binding == "dynamic-global" then
                 -- The fallback reaches the same checked canonical owner.
                 -- Only linked owners can change a unit's binding to direct.
@@ -8371,7 +8555,7 @@ function driver.finalize_resolver_context(context)
             end
         end
         if (dynamic_provider or external_owner) and not direct_provider and
-                not source_names[owner] then
+                not source_names[owner] and not (check_only_sources and check_only_sources[owner]) then
             native_bindings[owner] = "global"
         elseif direct_provider then
             native_bindings[owner] = "direct"
@@ -8430,15 +8614,17 @@ function driver.finalize_resolver_context(context)
     context.native_bindings = native_bindings
     context.physical_owner = physical_owner
     context.linked_module_names = nil
-    if elect_linked then
+    if elect_linked or app_sources then
         local runner = require("titan-compiler.test_runner").MODULE_NAME
         local names = {}
         for name in pairs(source_names) do
-            if name ~= runner then names[#names + 1] = name end
+            if name ~= runner and (elect_linked or app_sources[name]) then
+                names[#names + 1] = name
+            end
         end
         for name, mod in pairs(selected_static_modules) do
             -- Older archives need not provide a link-visible resolver.
-            if mod.static_provider.entries[name].imports ~= nil then
+            if elect_linked and mod.static_provider.entries[name].imports ~= nil then
                 names[#names + 1] = name
             end
         end
@@ -8483,9 +8669,38 @@ function driver.finalize_resolver_context(context)
     for _, mod in pairs(dynamic_names) do
         remember_nominal_layouts(context, mod.layout_inventory)
     end
+    for name in pairs(check_only_sources or {}) do
+        local mod = driver.imported[name]
+        if mod and mod.kind == "source" then
+            local inventory = mod.layout_inventory
+            if not inventory and mod.ast then
+                local encoded = assert(require("titan-compiler.coder.core").coder
+                    ._own_nominal_layouts(name, mod.ast))
+                inventory = assert(decode_nominal_layouts(name, encoded))
+            end
+            remember_nominal_layouts(context, inventory, mod.filename)
+        end
+    end
     for _, resolution in pairs(contextual_resolutions) do
         local provider = context.nominal_layout_inventories[resolution.provider_file]
         remember_nominal_layouts(context, provider and provider[resolution.owner])
+    end
+    context.application_nominal_layouts = nil
+    for name in pairs(app_sources or {}) do
+        local mod = driver.imported[name]
+        if mod and mod.kind == "source" then
+            local inventory = mod.layout_inventory
+            if not inventory and mod.ast then
+                local encoded = assert(require("titan-compiler.coder.core").coder
+                    ._own_nominal_layouts(name, mod.ast))
+                inventory = assert(decode_nominal_layouts(name, encoded))
+            end
+            if inventory then
+                local layouts = context.application_nominal_layouts or {}
+                context.application_nominal_layouts = layouts
+                for fqtn, layout in pairs(inventory.layouts) do layouts[fqtn] = layout end
+            end
+        end
     end
 
     if #errors ~= 0 then return nil, errors end
@@ -9487,11 +9702,16 @@ local function prepare_compile(
             end
         end
     end
+    local requirements = context and context.requirements_by_module and
+        context.requirements_by_module[modname]
     local generated = coder.generate(
         modname, ast, static_deps, driver.TITAN_ABI_VERSION,
         driver.EMIT_LINE_DIRECTIVES, {
             target = context and context.target,
+            check_only_sources = context and context.check_only_sources,
+            source_requirements = requirements,
             nominal_layouts = imported_layouts,
+            application_nominal_layouts = context and context.application_nominal_layouts,
             coverage = options and options.coverage == true,
             coverage_backend = options and options.coverage_backend,
             c_parts = effective_c_parts,
@@ -9539,7 +9759,10 @@ local function prepare_compile(
                 name = node.modname, source_required = node._source_import == true,
             }
             if static_deps[node.modname] then deps[node.modname] = true
-            else providers[node.modname] = node._type.file end
+            else
+                providers[node.modname] = context and context.check_only_sources and
+                    context.check_only_sources[node.modname] and "" or node._type.file
+            end
         end
     end
     local entry = {
@@ -9564,6 +9787,7 @@ local function prepare_compile(
     local coverage = require("titan-compiler.coverage")
     local native = {
         imports = imports, bindings = native_bindings, providers = providers,
+        source_requirements = requirements,
         has_main = checker.has_main(ast) and true or false,
         test_functions = test_functions,
         coverage_test_functions = coverage.test_functions(ast),
@@ -10526,7 +10750,7 @@ end
 -- uses the already generated canonical callback; collision inventories also
 -- contain hidden and source-only names and are not PE export inventories.
 -- Implementation notes: doc/implementation/windows-build.md#windows-application-launchers
-function driver.windows_provider_exports(module_names, interfaces, library_name)
+function driver.windows_provider_exports(module_names, interfaces, library_name, requirements)
     local names, seen = {}, {}
     for _, modname in ipairs(module_names) do
         local mangled = driver.mangle_module_name(modname)
@@ -10537,6 +10761,11 @@ function driver.windows_provider_exports(module_names, interfaces, library_name)
             seen[name], names[#names + 1] = true, name
         end
         names[#names + 1] = "luaopen_" .. mangled
+        if requirements and requirements[modname] then
+            local name = mangled .. "_source_requirements"
+            assert(not seen[name], "duplicate Windows module export " .. name)
+            seen[name], names[#names + 1] = true, name
+        end
         local interface = interfaces and interfaces[modname]
         for _, symbol in ipairs(interface and
                 coder.foreign_external_symbols(modname, interface) or {}) do
@@ -10807,6 +11036,45 @@ int main(int argc, char** argv) {
 
 ]]
 
+function perf.linked_module_catalog(names, provider)
+    local private_symbol = not provider and require("titan-compiler.coder.core").coder._private_symbol
+    local declarations, entries = {}, {}
+    for _, name in ipairs(names) do
+        local resolver = private_symbol and private_symbol(name, "native_symbol") or "NULL"
+        if private_symbol then
+            declarations[#declarations + 1] =
+                "TITAN_SOURCE_LOCAL void *" .. resolver .. "(const char *symbol);"
+        end
+        entries[#entries + 1] =
+            "    { \"" .. c_string_contents(name) .. "\", " .. resolver .. " },"
+    end
+    return util.render(require("titan-compiler.cpreamble").source_visibility .. "\n" ..
+        table.concat(declarations, "\n") .. [[
+
+static const TitanLinkedModule titan_linked_entries[] = {
+$LINKED_MODULE_ENTRIES
+};
+static const TitanLinkedModules titan_linked_modules = {
+    titan_linked_entries,
+    titan_linked_entries + sizeof(titan_linked_entries) / sizeof(*titan_linked_entries)
+$LINKED_MODULE_PROVIDER
+};]], {
+        LINKED_MODULE_ENTRIES = table.concat(entries, "\n"),
+        LINKED_MODULE_PROVIDER = provider and ('    , "' .. provider .. '"') or "",
+    })
+end
+
+perf.install_linked_module_catalog = [[
+    lua_pushliteral(L, TITAN_LINKED_MODULES_KEY);
+    lua_pushlightuserdata(L, (void *)$LINKED_MODULE_CATALOG);
+    lua_rawset(L, LUA_REGISTRYINDEX);]]
+
+function perf.catalog_install(catalog)
+    return util.render(perf.install_linked_module_catalog, {
+        LINKED_MODULE_CATALOG = catalog,
+    })
+end
+
 -- Implementation notes: doc/implementation/driver.md#linking-a-standalone-program-drivercompile_program
 function driver.entrypoint_contents(modname, program_name, options)
     options = options or {}
@@ -10819,12 +11087,17 @@ function driver.entrypoint_contents(modname, program_name, options)
         LINKED_MODULE_DECLARATIONS = "", LINKED_MODULE_INSTALL = "",
         ERROR_HELPERS = require("titan-compiler.browserentry").error_helpers,
     }
+    local names = options.context and options.context.linked_module_names
     if platform.windows then
         values.PROGNAME = c_string_contents(values.PROGNAME)
         values.ABI_FN = driver.mangle_module_name(modname) .. "_abi"
         values.PROVIDER = c_string_contents(assert(options.provider,
             "Windows entrypoint requires an explicit provider"))
         values.PRELOAD_FN = "titan_open_main"
+        if names then
+            values.LINKED_MODULE_DECLARATIONS = perf.linked_module_catalog(names, values.PROVIDER)
+            values.LINKED_MODULE_INSTALL = perf.catalog_install("&titan_linked_modules")
+        end
         values.PLATFORM_ALERTS = util.render(windows_entrypoint_alerts, values)
         values.ENTRYPOINT_DECLARATIONS =
             util.render(windows_entrypoint_declarations, values)
@@ -10833,33 +11106,9 @@ function driver.entrypoint_contents(modname, program_name, options)
         values.PLATFORM_ALERTS = util.render(unix_entrypoint_alerts, values)
         values.ENTRYPOINT_DECLARATIONS =
             "int " .. values.LUAOPEN_FN .. "(lua_State* L);"
-        local names = options.context and options.context.linked_module_names
         if names then
-            local private_symbol = require("titan-compiler.coder.core").coder._private_symbol
-            local declarations, entries = {}, {}
-            for _, name in ipairs(names) do
-                local resolver = private_symbol(name, "native_symbol")
-                declarations[#declarations + 1] =
-                    "TITAN_SOURCE_LOCAL void *" .. resolver .. "(const char *symbol);"
-                entries[#entries + 1] =
-                    "    { \"" .. c_string_contents(name) .. "\", " .. resolver .. " },"
-            end
-            local source_visibility = require("titan-compiler.cpreamble").source_visibility
-            values.LINKED_MODULE_DECLARATIONS = source_visibility .. "\n" ..
-                table.concat(declarations, "\n") .. [[
-
-static const TitanLinkedModule titan_linked_entries[] = {
-$LINKED_MODULE_ENTRIES
-};
-static const TitanLinkedModules titan_linked_modules = {
-    titan_linked_entries,
-    titan_linked_entries + sizeof(titan_linked_entries) / sizeof(*titan_linked_entries)
-};]]
-            values.LINKED_MODULE_ENTRIES = table.concat(entries, "\n")
-            values.LINKED_MODULE_INSTALL = [[
-lua_pushliteral(L, TITAN_LINKED_MODULES_KEY);
-    lua_pushlightuserdata(L, (void *)&titan_linked_modules);
-    lua_rawset(L, LUA_REGISTRYINDEX);]]
+            values.LINKED_MODULE_DECLARATIONS = perf.linked_module_catalog(names)
+            values.LINKED_MODULE_INSTALL = perf.catalog_install("&titan_linked_modules")
         end
     end
     if options.coverage_runtime then
@@ -10936,6 +11185,7 @@ static int titan_browser_initialize_worker(lua_State *L) {
     lua_pushcfunction(L, $LUAOPEN);
     lua_setfield(L, -2, "$MODNAME");
     lua_settop(L, 0);
+    $LINKED_MODULE_INSTALL
     lua_getglobal(L, "require");
     lua_pushliteral(L, "$MODNAME");
     lua_call(L, 1, 0);
@@ -10990,12 +11240,16 @@ static int titan_browser_worker(lua_State *L) {
 }
 ]]
     local opener = "luaopen_" .. driver.mangle_module_name(modname)
+    local names = options.context and options.context.linked_module_names
+    local declarations = "extern int luaopen_titan(lua_State *L);\nextern int " .. opener .. "(lua_State *L);"
+    if names then declarations = declarations .. "\n" .. perf.linked_module_catalog(names) end
     return driver.browser_c_image_contents(util.render(worker, {
         LUAOPEN = opener, MODNAME = c_string_contents(modname),
         SKIP = options.no_uv_bootstrap and "1" or "0",
-    }), { declarations = "extern int luaopen_titan(lua_State *L);\nextern int " .. opener .. "(lua_State *L);",
+    }), { declarations = declarations,
         initializer = util.render(initializer, {
             LUAOPEN = opener, MODNAME = c_string_contents(modname),
+            LINKED_MODULE_INSTALL = names and perf.catalog_install("&titan_linked_modules") or "",
         }),
         program_name = c_string_contents(program_name or modname:gsub(".*[.]", "")) })
 end
@@ -11771,6 +12025,10 @@ function driver.compare_archive_entries(actual, expected, subject)
             return nil, subject .. " nominal layout metadata for module '" ..
                 name .. "' differs"
         end
+        if table.concat(found.source_requirements or {}, "\n") ~=
+           table.concat(wanted.source_requirements or {}, "\n") then
+            return nil, subject .. " source requirements for module '" .. name .. "' differ"
+        end
         if found.payload and wanted.payload and
            found.payload ~= wanted.payload then
             return nil, subject .. " canonical payload for module '" ..
@@ -11835,6 +12093,12 @@ function driver.validate_browser_provider(archive, expected_entries, generated_o
                     "%s: browser provider module %q requires global non-weak function %q",
                     primary and primary.origin or archive.origin, name, symbol)
             end
+        end
+        local symbol = prefix .. "_source_requirements"
+        if archive.entries[name].source_requirements and not defined[symbol] then
+            return nil, string.format(
+                "%s: browser provider module %q requires global non-weak function %q",
+                primary and primary.origin or archive.origin, name, symbol)
         end
     end
     for _, generated in ipairs(generated_objects or {}) do
@@ -12330,16 +12594,19 @@ local function windows_link_interfaces(libnames, extra_objects, ordered_payload)
     else
         append_argv(objects, extra_objects or {})
     end
-    local interfaces = {}
+    local interfaces, requirements = {}, {}
     for _, object in ipairs(objects) do
         if type(object) ~= "string"
            or not object:match("[.]part[1-9][0-9]*[.]o$") then
             local bytes = util.get_file_contents(object, "rb")
             local entry = bytes and objectmetadata.read(bytes, object)
-            if entry then interfaces[entry.type.name] = entry.type end
+            if entry then
+                interfaces[entry.type.name] = entry.type
+                requirements[entry.type.name] = entry.object_metadata.source_requirements
+            end
         end
     end
-    return interfaces
+    return interfaces, requirements
 end
 
 -- Provider link helpers stay block-scoped because the main chunk is near Lua's
@@ -12388,10 +12655,10 @@ local function prepare_library_link(soname, libnames, link, verbose,
     append_argv(args, { "-o", soname })
     local export_file
     if platform.windows then
-        local interfaces = windows_link_interfaces(
+        local interfaces, requirements = windows_link_interfaces(
             libnames, extra_objects, ordered_payload)
         local exports = driver.windows_provider_exports(
-            module_names, interfaces, install_name or soname)
+            module_names, interfaces, install_name or soname, requirements)
         export_file = soname .. ".def"
         local wrote, write_error = util.set_file_contents(export_file, exports)
         if not wrote then return nil, write_error end
@@ -12863,8 +13130,9 @@ function driver.validate_library_image_fresh(
         if expected_entries then
             local entry = assert(expected_entries[modname])
             expected[#expected + 1] = string.format(
-                "[%q] = { abi = %q, types = %q, layouts = %q }",
-                modname, entry.abi, entry.types, entry.layouts)
+                "[%q] = { abi = %q, types = %q, layouts = %q, source_requirements = %q }",
+                modname, entry.abi, entry.types, entry.layouts,
+                entry.source_requirements and table.concat(entry.source_requirements, "\n"))
         end
     end
     -- A source-rock build can select its private native support bootstrap.
@@ -12908,19 +13176,19 @@ for name, entry in pairs(expected) do
                 tostring(value or value_error))
         end
     end
-    for _, field in ipairs({ "abi", "types", "layouts" }) do
+    for _, field in ipairs({ "abi", "types", "layouts", "source_requirements" }) do
         local symbol = prefix .. "_" .. field
-        local fn, load_error = support._loadlib(image, symbol)
-        if not fn then
-            finish(false, "cannot resolve " .. symbol .. ": " ..
-                tostring(load_error))
-        end
-        local values = table.pack(pcall(fn))
-        if not values[1] then
-            finish(false, symbol .. " failed: " .. tostring(values[2]))
-        end
-        if values.n ~= 2 or values[2] ~= entry[field] then
-            finish(false, symbol .. " does not match embedded metadata")
+        local fn, load_error, stage = support._loadlib(image, symbol)
+        if fn then
+            local values = table.pack(pcall(fn))
+            if not values[1] then
+                finish(false, symbol .. " failed: " .. tostring(values[2]))
+            end
+            if values.n ~= 2 or values[2] ~= entry[field] then
+                finish(false, symbol .. " does not match embedded metadata")
+            end
+        elseif field ~= "source_requirements" or entry[field] ~= nil or stage ~= "init" then
+            finish(false, "cannot resolve " .. symbol .. ": " .. tostring(load_error))
         end
     end
     for _, symbol in ipairs({
@@ -13496,137 +13764,37 @@ function driver.validate_provider_output_paths(
     return true, public_archive, index.outputs
 end
 
--- Reserve the whole invocation before the scheduler invalidates any object.
--- The maximum split inventory is compiler-owned even if code generation later
--- chooses fewer parts. The coordinator reads Titan declarations and existing
--- ownership markers only; fresh C-header discovery belongs to the workers.
--- Success records `plan.reservations` and the validated `plan.inputs`.
-function driver.preflight_build_outputs(context, plan, options)
-    driver.assert_target_context(context)
-    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
-    if options.output_root then
-        local valid, target_error = driver.validate_output_target(
-            context, options.output_root, true)
-        if not valid then return nil, target_error end
+function perf.planned_source_declarations(context, selected)
+    local source, certified = selected.source, selected.certified
+    local saved = certified and certified.status == "hit" and certified.record
+    if saved then
+        return { source = source, saved = saved, type = saved.type,
+            has_main = saved.object_metadata.has_main }
     end
-    local inputs, input_seen, outputs, modules = {}, {}, {}, {}
-    local output_owners, c_outputs = {}, {}
-    local function input(filename)
-        if filename and not input_seen[filename] then
-            input_seen[filename] = true
-            inputs[#inputs + 1] = filename
+    local nodes, aliases, imports = {}, {}, {}
+    for _, filename in ipairs(source.files) do
+        local contents = source.contents and source.contents[filename] or
+            source.certified_contents and source.certified_contents[filename]
+        if not contents then
+            local read_error
+            contents, read_error = perf.compiler_file_contents(context, filename)
+            if not contents then return nil, read_error end
         end
-    end
-    local function output(filename, owner, mode, c_stem)
-        if output_owners[filename] ~= owner then
-            outputs[#outputs + 1] = { path = filename, owner = owner, mode = mode }
-            output_owners[filename] = owner
-        end
-        if c_stem then c_outputs[filename] = c_stem end
-    end
-    for _, filename in ipairs(options.native_inputs or {}) do input(filename) end
-    -- Coordination and metadata paths are invocation inputs, never legal
-    -- destinations. The shared index rejects spelling, physical-file and
-    -- hierarchy aliases before a worker invalidates any existing object.
-    for _, entry in ipairs(options.locks and options.locks.entries or {}) do
-        input(entry.path)
-        if entry.directory then
-            local valid, target_error = driver.validate_output_target(
-                context, entry.directory, false)
-            if not valid then return nil, target_error end
-            input(path.join(entry.directory, ".titan-target"))
-        end
-    end
-    if options.metadata_root then
-        for _, name in ipairs({ ".titan", ".titan-links", ".native", ".titan-target" }) do
-            input(path.join(options.metadata_root, name))
-        end
-    end
-    local max_parts, parts_error = driver.effective_c_parts(options.c_parts)
-    if not max_parts then return nil, parts_error end
-    for _, name in ipairs(plan.order) do
-        local selected = plan.modules[name]
-        if selected.kind == "source" then
-            local source, certified = selected.source, selected.certified
-            if source.installed and not plan.installed_source_library_error then
-                plan.installed_source_library_error = "cannot build a library with dependency '" ..
-                    name .. "' from installed SDK source; select its compiled provider or " ..
-                    "ship this library as source only (see Titan issue #427)"
-            end
-            local saved = certified and certified.status == "hit" and certified.record
-            local info = { source = source, aliases = {}, imports = {}, saved = saved }
-            modules[name] = info
-            local stem = driver.module_output_stem(source.native_output or source.main, name)
-            local owner = "logical module '" .. name .. "'"
-            for index = 0, max_parts - 1 do
-                output(driver.part_c_filename(stem, index), owner, nil, stem)
-                output(driver.part_object_filename(stem, index), owner)
-                local part_stem = driver.part_object_filename(stem, index):gsub("[.]o$", "")
-                output(part_stem .. ".gcno", owner)
-                output(part_stem .. ".gcda", owner)
-            end
-            -- A smaller new split policy can still retire the old inventory.
-            local prior = certified and certified.record
-            if not prior and context.io:lstat(stem .. ".o") then
-                local bytes, read_error = perf.compiler_file_contents(context, stem .. ".o")
-                if not bytes then return nil, read_error end
-                prior = objectmetadata.read(bytes, stem .. ".o")
-            end
-            local native = prior and prior.object_metadata
-            if native and native.parts and objectmetadata.validate_parts(native) then
-                for _, part in ipairs(native.parts) do
-                    output(stem .. part.c_suffix, owner, nil, stem)
-                    output(stem .. part.object_suffix, owner)
-                    local part_stem = (stem .. part.object_suffix):gsub("[.]o$", "")
-                    output(part_stem .. ".gcno", owner)
-                    output(part_stem .. ".gcda", owner)
-                end
-            end
-            for _, header in ipairs({
-                { suffix = ".priv.h", marker = driver.PRIVATE_HEADER_MARKER },
-                { suffix = ".titan.h", marker = ffiheaders.FOREIGN_MARKER },
-                { suffix = ".ffi.h", marker = ffiheaders.MARKER },
-            }) do
-                local filename = stem .. header.suffix
-                output(filename, owner)
-                local valid, header_error = validate_generated_header_entry({
-                    filename = filename, marker = header.marker, contents = "",
-                })
-                if not valid then return nil, header_error end
-            end
-            for _, filename in ipairs(source.files) do input(filename) end
-            if saved then
-                info.has_main = saved.object_metadata.has_main
-                info.type = saved.type
-                for _, dependency in ipairs(saved.c_header_dependencies or {}) do
-                    if dependency.kind ~= "search" then input(dependency.path) end
-                end
-            else
-                local nodes = {}
-                for _, filename in ipairs(source.files) do
-                    local contents = source.contents and source.contents[filename] or
-                        source.certified_contents and source.certified_contents[filename]
-                    if not contents then
-                        local read_error
-                        contents, read_error = perf.compiler_file_contents(context, filename)
-                        if not contents then return nil, read_error end
-                    end
-                    local parsed, parse_error = parser.parse(filename, contents)
-                    if not parsed then return nil, parser.error_to_string(parse_error, filename) end
-                    for _, node in ipairs(parsed) do
-                        nodes[#nodes + 1] = node
-                        if node._tag == "Ast.TopLevelTypeAlias" then
-                            info.aliases[node.name] = node.type
-                        elseif node._tag == "Ast.TopLevelImport" then
-                            info.imports[node.localname] = node
-                        end
-                    end
-                end
-                info.nodes = nodes
+        local parsed, parse_error = parser.parse(filename, contents)
+        if not parsed then return nil, parser.error_to_string(parse_error, filename) end
+        for _, node in ipairs(parsed) do
+            nodes[#nodes + 1] = node
+            if node._tag == "Ast.TopLevelTypeAlias" then
+                aliases[node.name] = node.type
+            elseif node._tag == "Ast.TopLevelImport" then
+                imports[node.localname] = node
             end
         end
     end
+    return { source = source, nodes = nodes, aliases = aliases, imports = imports }
+end
 
+function perf.planned_main(modules, options)
     -- Resolve just the transparent signature shapes needed for main selection,
     -- including local/imported aliases; the ordinary checker remains authority
     -- for all declaration validity and function bodies.
@@ -13679,10 +13847,313 @@ function driver.preflight_build_outputs(context, plan, options)
             end
         end
     end
-    -- Compile-only still checks provider composition for these executable
-    -- roots, but reserves no executable outputs.
+    return main
+end
+
+-- Compiled interfaces contain only public declarations. Discover which
+-- source obligations are also needed to recover the exposed nominals.
+function perf.exposed_source_owners(modtype, requirements)
+    local wanted, owners, seen = {}, {}, {}
+    for _, name in ipairs(requirements) do wanted[name] = true end
+    local function visit(node)
+        if type(node) ~= "table" or seen[node] then return end
+        seen[node] = true
+        local fqtn = node._tag == "Type.Nominal" and node.fqtn or
+            node._tag == "Type.GenericAlias" and node.target_owner_fqtn
+        local owner = fqtn and fqtn:match("^(.*)%.[^.]+$")
+        if owner and wanted[owner] then owners[owner] = true end
+        for _, child in pairs(node) do visit(child) end
+    end
+    visit(modtype)
+    return owners
+end
+
+function perf.plan_source_obligations(context, plan, link_kind, native)
+    local ordered = require("titan-compiler.coder.core").coder._sorted_keys
+    local demanded, missing
+    local all_requirements = {}
+    while true do
+        local requirements = {}
+        for _, name in ipairs(ordered(plan.modules)) do
+            local selected = plan.modules[name]
+            if selected.source_requirements then
+                local needed = link_kind and selected.source_requirements or
+                    ordered(perf.exposed_source_owners(driver.imported[name].type,
+                        selected.source_requirements))
+                for _, dependency in ipairs(needed) do
+                    requirements[dependency] = requirements[dependency] or name
+                end
+            end
+        end
+        if link_kind and native then
+            local err
+            demanded, err, missing = perf.demand_archive_modules(context, plan, requirements)
+            if not demanded then return nil, err end
+        end
+        local new = {}
+        for name, importer in pairs(requirements) do
+            all_requirements[name] = importer
+            local selected = plan.modules[name]
+            if not selected or selected.kind ~= "source" then new[name] = importer end
+        end
+        if next(new) == nil then break end
+        local ok, err = plan.load_sources(new)
+        if not ok then return nil, err end
+    end
+    if missing then return nil, missing end
+    plan.demanded_static = demanded
+    if next(all_requirements) == nil then return true end
+    plan.semantic_sources = all_requirements
+    if link_kind then
+        context.application_source_requirements = all_requirements
+        plan.application_source_requirements = all_requirements
+    end
+
+    -- Workers wait for owners of public types exposed by compiled imports.
+    -- These edges do not change the written import inventory.
+    for _, module in pairs(plan.modules) do
+        if module.kind == "source" then
+            local dependencies = {}
+            local written = {}
+            for _, import in ipairs(module.imports) do written[import.name] = true end
+            for _, import in ipairs(module.imports) do
+                local selected = plan.modules[import.name]
+                for _, dependency in ipairs(selected and selected.source_requirements or {}) do
+                    if all_requirements[dependency] and not written[dependency] then
+                        dependencies[dependency] = true
+                    end
+                end
+            end
+            if next(dependencies) then module.semantic_dependencies = ordered(dependencies) end
+        end
+    end
+    local visiting, visited, chain = {}, {}, {}
+    local function visit(name)
+        if visiting[name] then
+            return nil, "cyclic source requirement: " .. table.concat(chain, " -> ") .. " -> " .. name
+        end
+        local module = plan.modules[name]
+        if visited[name] or not module then return true end
+        visiting[name], chain[#chain + 1] = true, name
+        for _, import in ipairs(module.imports or {}) do
+            local ok, err = visit(import.name)
+            if not ok then return nil, err end
+        end
+        for _, dependency in ipairs(module.source_requirements or {}) do
+            local ok, err = visit(dependency)
+            if not ok then return nil, err end
+        end
+        visiting[name], chain[#chain + 1] = nil, nil
+        visited[name] = true
+        return true
+    end
+    for _, name in ipairs(ordered(all_requirements)) do
+        local ok, err = visit(name)
+        if not ok then return nil, err end
+    end
+    plan.order_sources()
+    return true
+end
+
+-- A package owns its authored closure, not the implementations used only
+-- while checking an installed dependency. Keep the latter in the graph for
+-- checking and certificate inputs, but out of the native composition.
+function perf.classify_library_sources(context, plan, roots)
+    local owned, external = {}, {}
+    local has_requirements
+    local function visit(name)
+        if owned[name] then return true end
+        owned[name] = true
+        local selected = plan.modules[name]
+        if not selected or selected.kind ~= "source" then return true end
+        for _, import in ipairs(selected.imports or {}) do
+            local dependency = plan.modules[import.name]
+            if dependency and dependency.kind == "source" and dependency.source.installed then
+                if import.source_required then
+                    return nil, ("library '%s' cannot collaborate with installed source via import %q; "
+                        .. "use import %q for the public interface, or add its authored tree to --tree")
+                        :format(name, import.name .. ".titan", import.name)
+                end
+                external[import.name] = true
+                has_requirements = true
+            else
+                if dependency and dependency.source_requirements then has_requirements = true end
+                local ok, err = visit(import.name)
+                if not ok then return nil, err end
+            end
+        end
+        return true
+    end
+    for _, root in ipairs(roots) do
+        local ok, err = visit(root)
+        if not ok then return nil, err end
+    end
+    if not has_requirements then return true end
+    local check_only = {}
+    for name, module in pairs(plan.modules) do
+        if not owned[name] then
+            check_only[name] = true
+            module.check_only = true
+        end
+    end
+    plan.check_only_sources = check_only
+    context.check_only_sources = check_only
+    local summaries = {}
+    local ordered = require("titan-compiler.coder.core").coder._sorted_keys
+    for _, name in ipairs(plan.order) do
+        local selected = plan.modules[name]
+        if owned[name] then
+            local required
+            for _, import in ipairs(selected.imports) do
+                local dependency = plan.modules[import.name]
+                if external[import.name] then
+                    required = required or {}
+                    required[import.name] = true
+                else
+                    local inherited = summaries[import.name] or
+                        dependency and dependency.source_requirements
+                    for _, source in ipairs(inherited or {}) do
+                        if owned[source] then
+                            return nil, "library '" .. name .. "' owns source module '" .. source ..
+                                "' also required externally by '" .. import.name .. "'"
+                        end
+                        required = required or {}
+                        required[source] = true
+                    end
+                end
+            end
+            if required then summaries[name] = ordered(required) end
+        end
+    end
+    plan.requirements_by_module = summaries
+    context.requirements_by_module = summaries
+    return true
+end
+
+-- Reserve the whole invocation before the scheduler invalidates any object.
+-- The maximum split inventory is compiler-owned even if code generation later
+-- chooses fewer parts. The coordinator reads Titan declarations and existing
+-- ownership markers only; fresh C-header discovery belongs to the workers.
+-- Success records `plan.reservations` and the validated `plan.inputs`.
+function driver.preflight_build_outputs(context, plan, options)
+    driver.assert_target_context(context)
+    if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
+    if options.output_root then
+        local valid, target_error = driver.validate_output_target(
+            context, options.output_root, true)
+        if not valid then return nil, target_error end
+    end
+    local inputs, input_seen, outputs, modules = {}, {}, {}, {}
+    local output_owners, c_outputs = {}, {}
+    local function input(filename)
+        if filename and not input_seen[filename] then
+            input_seen[filename] = true
+            inputs[#inputs + 1] = filename
+        end
+    end
+    local function output(filename, owner, mode, c_stem)
+        if output_owners[filename] ~= owner then
+            outputs[#outputs + 1] = { path = filename, owner = owner, mode = mode }
+            output_owners[filename] = owner
+        end
+        if c_stem then c_outputs[filename] = c_stem end
+    end
+    for _, filename in ipairs(options.native_inputs or {}) do input(filename) end
+    -- Coordination and metadata paths are invocation inputs, never legal
+    -- destinations. The shared index rejects spelling, physical-file and
+    -- hierarchy aliases before a worker invalidates any existing object.
+    for _, entry in ipairs(options.locks and options.locks.entries or {}) do
+        input(entry.path)
+        if entry.directory then
+            local valid, target_error = driver.validate_output_target(
+                context, entry.directory, false)
+            if not valid then return nil, target_error end
+            input(path.join(entry.directory, ".titan-target"))
+        end
+    end
+    if options.metadata_root then
+        for _, name in ipairs({ ".titan", ".titan-links", ".native", ".titan-target" }) do
+            input(path.join(options.metadata_root, name))
+        end
+    end
+    local max_parts, parts_error = driver.effective_c_parts(options.c_parts)
+    if not max_parts then return nil, parts_error end
+    for _, name in ipairs(plan.order) do
+        local selected = plan.modules[name]
+        if selected.kind == "source" then
+            local info, err = perf.planned_source_declarations(context, selected)
+            if not info then return nil, err end
+            modules[name] = info
+        end
+    end
+    local main, main_error = perf.planned_main(modules, options)
+    if main_error then return nil, main_error end
     local link_kind = options.test and "test" or
         (main or options.compile_only and context.strict_static) and "program"
+    local native = context.target == "linux" or context.target == "darwin"
+    local planned, planning_error = perf.plan_source_obligations(context, plan, link_kind, native)
+    if not planned then return nil, planning_error end
+    if not link_kind then
+        local ok, err = perf.classify_library_sources(context, plan, options.roots)
+        if not ok then return nil, err end
+    end
+    for _, name in ipairs(plan.order) do
+        local selected = plan.modules[name]
+        if selected.kind == "source" then
+            if not modules[name] then
+                local info, err = perf.planned_source_declarations(context, selected)
+                if not info then return nil, err end
+                modules[name] = info
+            end
+            local source, certified = selected.source, selected.certified
+            local saved = modules[name].saved
+            for _, filename in ipairs(source.files) do input(filename) end
+            for _, dependency in ipairs(saved and saved.c_header_dependencies or {}) do
+                if dependency.kind ~= "search" then input(dependency.path) end
+            end
+            if selected.check_only then goto continue end
+            local stem = driver.module_output_stem(source.native_output or source.main, name)
+            local owner = "logical module '" .. name .. "'"
+            for index = 0, max_parts - 1 do
+                output(driver.part_c_filename(stem, index), owner, nil, stem)
+                output(driver.part_object_filename(stem, index), owner)
+                local part_stem = driver.part_object_filename(stem, index):gsub("[.]o$", "")
+                output(part_stem .. ".gcno", owner)
+                output(part_stem .. ".gcda", owner)
+            end
+            -- A smaller new split policy can still retire the old inventory.
+            local prior = certified and certified.record
+            if not prior and context.io:lstat(stem .. ".o") then
+                local bytes, read_error = perf.compiler_file_contents(context, stem .. ".o")
+                if not bytes then return nil, read_error end
+                prior = objectmetadata.read(bytes, stem .. ".o")
+            end
+            local native = prior and prior.object_metadata
+            if native and native.parts and objectmetadata.validate_parts(native) then
+                for _, part in ipairs(native.parts) do
+                    output(stem .. part.c_suffix, owner, nil, stem)
+                    output(stem .. part.object_suffix, owner)
+                    local part_stem = (stem .. part.object_suffix):gsub("[.]o$", "")
+                    output(part_stem .. ".gcno", owner)
+                    output(part_stem .. ".gcda", owner)
+                end
+            end
+            for _, header in ipairs({
+                { suffix = ".priv.h", marker = driver.PRIVATE_HEADER_MARKER },
+                { suffix = ".titan.h", marker = ffiheaders.FOREIGN_MARKER },
+                { suffix = ".ffi.h", marker = ffiheaders.MARKER },
+            }) do
+                local filename = stem .. header.suffix
+                output(filename, owner)
+                local valid, header_error = validate_generated_header_entry({
+                    filename = filename, marker = header.marker, contents = "",
+                })
+                if not valid then return nil, header_error end
+            end
+        end
+        ::continue::
+    end
+
     local builds_program = not options.compile_only and link_kind ~= nil
     if options.exe and not builds_program then
         return nil, "--exe is only valid when compiling a standalone or test executable"
@@ -13691,7 +14162,6 @@ function driver.preflight_build_outputs(context, plan, options)
     elseif options.coverage and not options.compile_only and not builds_program then
         return nil, "--coverage requires a test or standalone executable; use -c for coverage objects"
     end
-    local native = context.target == "linux" or context.target == "darwin"
     if native then
         if context.strict_static and not options.compile_only and not builds_program then
             return nil, "--static is valid only for standalone/test executables and -c objects; " ..
@@ -13701,15 +14171,11 @@ function driver.preflight_build_outputs(context, plan, options)
             local names = require("titan-compiler.coder.core").coder._sorted_keys(plan.modules)
             for _, name in ipairs(names) do
                 local dependency = plan.modules[name]
-                if dependency.kind == "static" then
+                if dependency.kind == "static" and not dependency.check_only then
                     return nil, "library dependency '" .. name .. "' resolved to archive '" ..
                         dependency.archive .. "'; install its paired shared provider (.so)"
                 end
             end
-        elseif link_kind then
-            local demanded, err = perf.demand_archive_modules(context, plan)
-            if not demanded then return nil, err end
-            plan.demanded_static = demanded
         end
     end
     plan.strict_static = context.strict_static
@@ -13730,7 +14196,9 @@ function driver.preflight_build_outputs(context, plan, options)
     -- method/slot/private inventories still receive the final complete check.
     do
         local native_names, carried_types = {}, {}
-        for name in pairs(modules) do native_names[name] = true end
+        for name in pairs(modules) do
+            if not plan.modules[name].check_only then native_names[name] = true end
+        end
         for _, name in ipairs(binary_names) do
             native_names[name] = true
             local imported = driver.imported[name]
@@ -13815,7 +14283,6 @@ function driver.preflight_build_outputs(context, plan, options)
             if driver.IS_DARWIN then output(executable .. ".dSYM", "standalone dSYM", "directory") end
         end
     elseif not options.compile_only then
-        if plan.installed_source_library_error then return nil, plan.installed_source_library_error end
         local provider, _, left, right = driver.common_module_provider(options.roots)
         if not provider then
             return nil, "cannot link modules into one shared library: '" ..
@@ -13894,7 +14361,7 @@ function driver.preflight_build_outputs(context, plan, options)
     end
     -- Stale-staging retirement protects the same accepted inputs.
     plan.reservations, plan.inputs = reservations, inputs
-    plan.link_kind = link_kind or (not options.compile_only and "library" or nil)
+    plan.link_kind = link_kind or "library"
     return true
 end
 
@@ -14154,6 +14621,19 @@ static const unsigned char expected_layouts_%d[] = %s;
     if (length != %d || memcmp(value, expected_layouts_%d, length) != 0) return 26;
 ]], index, index, prefix, #entry.abi, index, prefix, #entry.types, index,
             prefix, #entry.layouts, index)
+        if entry.source_requirements then
+            local bytes = table.concat(entry.source_requirements, "\n")
+            declarations[#declarations + 1] = string.format([[
+extern int %s_source_requirements(lua_State *L);
+static const unsigned char expected_requirements_%d[] = %s;
+]], prefix, index, assert(staticmetadata.c_initializer(bytes)))
+            checks[#checks + 1] = string.format([[
+    lua_settop(L, 0);
+    if (%s_source_requirements(L) != 1 || lua_type(L, -1) != LUA_TSTRING) return 27;
+    value = lua_tolstring(L, -1, &length);
+    if (length != %d || memcmp(value, expected_requirements_%d, length) != 0) return 28;
+]], prefix, #bytes, index)
+        end
     end
     if browser then
         local worker = [[
@@ -14398,6 +14878,7 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
         no_uv_bootstrap = options.no_uv_bootstrap,
         provider = paths.relative_provider,
         coverage_runtime = options.coverage_runtime,
+        context = options.context,
     }
     local entrypoint_c
     entrypoint_c, err = write_entrypoint(modname, entrypoint_name,

@@ -163,36 +163,58 @@ local function diagnostic_value(value)
     return "<" .. type(value) .. ":" .. tostring(value) .. ">"
 end
 
-local function render_imports(modname, imports)
-    if type(imports) ~= "table" or getmetatable(imports) ~= nil then
-        return nil, "metadata imports must be a plain array"
+local function validate_module_list(modname, names, field)
+    if type(names) ~= "table" or getmetatable(names) ~= nil then
+        return nil, "metadata " .. field .. " must be a plain array"
     end
     local count, last = 0, 0
-    for key in next, imports do
+    for key in next, names do
         if math.type(key) ~= "integer" or key < 1 then
-            return nil, "metadata imports must be a dense array"
+            return nil, "metadata " .. field .. " must be a dense array"
         end
         count, last = count + 1, math.max(last, key)
     end
-    if last ~= count then return nil, "metadata imports must be a dense array" end
-    local lines = { "        imports = {\n" }
+    if last ~= count then return nil, "metadata " .. field .. " must be a dense array" end
     local previous
-    for _, name in ipairs(imports) do
+    for _, name in ipairs(names) do
         if not valid_module_name(name) or name == modname then
-            return nil, "invalid imported Titan module name " .. diagnostic_value(name)
+            return nil, "invalid Titan module name in " .. field .. ": " .. diagnostic_value(name)
         end
         if previous and not bytewise_less(previous, name) then
-            return nil, "metadata imports must be distinct and in bytewise order"
+            return nil, "metadata " .. field .. " must be distinct and in bytewise order"
         end
-        lines[#lines + 1] = "            " .. format("%q", name) .. ",\n"
         previous = name
+    end
+    return true
+end
+
+local function render_module_list(modname, names, field)
+    local ok, err = validate_module_list(modname, names, field)
+    if not ok then return nil, err end
+    if field == "source_requirements" and #names == 0 then
+        return nil, "metadata source_requirements must be omitted when empty"
+    end
+    local lines = { "        " .. field .. " = {\n" }
+    for _, name in ipairs(names) do
+        lines[#lines + 1] = "            " .. format("%q", name) .. ",\n"
     end
     lines[#lines + 1] = "        },\n"
     return table.concat(lines)
 end
 
+function staticmetadata.decode_source_requirements(modname, bytes)
+    local names = {}
+    for name in bytes:gmatch("[^\n]+") do names[#names + 1] = name end
+    local valid, err = validate_module_list(modname, names, "source_requirements")
+    if not valid then return nil, err end
+    if #names == 0 or table.concat(names, "\n") ~= bytes then
+        return nil, "source_requirements metadata must be a nonempty canonical list"
+    end
+    return names
+end
+
 -- Implementation notes: doc/implementation/static-compiled-modules.md#canonical-payload
-function staticmetadata.render(modname, abi, serialized_types, serialized_layouts, imports)
+function staticmetadata.render(modname, abi, serialized_types, serialized_layouts, imports, requirements)
     if not valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             diagnostic_value(modname)
@@ -209,8 +231,14 @@ function staticmetadata.render(modname, abi, serialized_types, serialized_layout
     local serialized_imports = ""
     if imports ~= nil then
         local err
-        serialized_imports, err = render_imports(modname, imports)
+        serialized_imports, err = render_module_list(modname, imports, "imports")
         if not serialized_imports then return nil, err end
+    end
+    local serialized_requirements = ""
+    if requirements ~= nil then
+        local err
+        serialized_requirements, err = render_module_list(modname, requirements, "source_requirements")
+        if not serialized_requirements then return nil, err end
     end
     return staticmetadata.BANNER ..
         "return {\n" ..
@@ -220,6 +248,7 @@ function staticmetadata.render(modname, abi, serialized_types, serialized_layout
         (serialized_layouts ~= nil and
             "        layouts = " .. format("%q", serialized_layouts) .. ",\n" or "") ..
         serialized_imports ..
+        serialized_requirements ..
         "    },\n" ..
         "}\n"
 end
@@ -353,7 +382,8 @@ function staticmetadata.validate(payload, origin, options)
     end
 
     for key in next, entry do
-        if key ~= "abi" and key ~= "types" and key ~= "layouts" and key ~= "imports" then
+        if key ~= "abi" and key ~= "types" and key ~= "layouts" and key ~= "imports"
+           and key ~= "source_requirements" then
             return payload_error(origin, "metadata entry for " ..
                 format("%q", module_name) .. " has unknown field " ..
                 diagnostic_value(key))
@@ -363,6 +393,7 @@ function staticmetadata.validate(payload, origin, options)
     local serialized_types = rawget(entry, "types")
     local serialized_layouts = rawget(entry, "layouts")
     local imports = rawget(entry, "imports")
+    local requirements = rawget(entry, "source_requirements")
     if type(abi) ~= "string" or type(serialized_types) ~= "string" or
        (serialized_layouts ~= nil and type(serialized_layouts) ~= "string") then
         return payload_error(origin, "metadata entry for " ..
@@ -380,7 +411,7 @@ function staticmetadata.validate(payload, origin, options)
     end
 
     local canonical, render_error =
-        staticmetadata.render(module_name, abi, serialized_types, serialized_layouts, imports)
+        staticmetadata.render(module_name, abi, serialized_types, serialized_layouts, imports, requirements)
     if not canonical then
         return payload_error(origin, render_error)
     end
@@ -432,6 +463,7 @@ function staticmetadata.validate(payload, origin, options)
         layouts = serialized_layouts,
         decoded_layouts = decoded_layouts,
         imports = imports,
+        source_requirements = requirements,
         payload = payload,
         origin = origin,
     }

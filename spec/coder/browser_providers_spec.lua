@@ -692,13 +692,16 @@ describe("browser providers real toolchain", function()
             info.lua, "-e",
             string.format("package.path=%q..package.path", repo .. "/?.lua;" .. repo .. "/?/init.lua;") }
     end
-    local function run_cli(corruption, ...)
+    local function run_at(tree, output, corruption, ...)
         local argv = lua_argv(corruption)
         for _, argument in ipairs({ repo .. "/titanc", "-q", "--target", "browser",
-                "--tree", root .. "/src", "-o", root .. "/out", ... }) do
+                "--tree", root .. "/" .. tree, "-o", root .. "/" .. output, ... }) do
             argv[#argv + 1] = argument
         end
         return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
+    end
+    local function run_cli(corruption, ...)
+        return run_at("src", "out", corruption, ...)
     end
     local function prepare(real_info)
         -- Only runtime/JS assets are bootstrap prerequisites; deliberately omit
@@ -769,6 +772,87 @@ describe("browser providers real toolchain", function()
         local source_record = assert(require("titan-compiler.objectmetadata").read(
             read(root .. "/out/consumer.o"), root .. "/out/consumer.o"))
         assert.equal("direct", source_record.object_metadata.bindings["pkg.left"])
+    end)
+    it("links one browser variant of an installed source used by two archives", function()
+        local real_info, why = toolchain.require({ node = true, sdk = true })
+        if not real_info then pending(why); return end
+        prepare(real_info)
+        stage_sdk()
+        local installed = prefix .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION
+        write(installed .. "/counter.native.titan", "const native_only = true\n")
+        local source = installed .. "/counter.browser.titan"
+        write(source, [[
+serial = 0
+
+function next(): integer
+  serial = serial + 1
+  return serial
+end
+
+do
+  serial = 40
+end
+]])
+        write(installed .. "/counter" .. (platform.windows and ".dll" or ".so"),
+            "not a browser input")
+        write(root .. "/producer/left.titan", [[
+local counter = import "counter"
+
+function next(): integer
+  return counter.next()
+end
+]])
+        write(root .. "/producer/right.titan", [[
+local counter = import "counter"
+
+function current(): integer
+  return counter.serial
+end
+]])
+        for _, name in ipairs({ "left", "right" }) do
+            local output = "built-" .. name
+            local result = run_at("producer", output, nil, name)
+            assert.is_true(result.ok, result.output)
+            local archive = read(root .. "/" .. output .. "/" .. name .. ".a")
+            local parsed = assert(staticmetadata.scan_bytes(archive, name, {
+                target = fixtures.fingerprint(),
+            }))
+            assert.same({ name }, parsed.key_order)
+            assert.same({ "counter" }, parsed.entries[name].source_requirements)
+            assert.is_nil(lfs.attributes(root .. "/" .. output .. "/counter.o"))
+            write(root .. "/providers/" .. name .. ".a", archive)
+        end
+        write(root .. "/app/demo.titan", [[
+local left = import "left"
+local right = import "right"
+
+function main(args: {string}): integer
+  if left.next() ~= 41 or right.current() ~= 41 then return 1 end
+  if left.next() ~= 42 or right.current() ~= 42 then return 2 end
+  return 0
+end
+]])
+        local function build_and_run()
+            local result = run_at("app", "application", nil, "--incremental", "demo")
+            assert.is_true(result.ok, result.output)
+            return compiler_io.new_sync():run(toolchain.runner(info, "--engine", "node",
+                "--grace", "0", root .. "/application/demo.mjs"), { stderr_to_stdout = true })
+        end
+        local result = build_and_run()
+        assert.is_true(result.ok, result.output)
+        assert.equal("file", lfs.attributes(root .. "/application/counter.o", "mode"))
+        assert.is_nil(lfs.attributes(installed .. "/counter.o"))
+        local original = read(source)
+        -- This alters the producer's slot numbering, not the used ABI.
+        write(source, "const extra = 0\n" .. original)
+        result = build_and_run()
+        assert.is_true(result.ok, result.output)
+
+        write(source, (original:gsub("function next%(%)", "function next(delta: integer)")))
+        result = build_and_run()
+        assert.is_false(result.ok, result.output)
+        assert.matches("binary compatibility mismatch", result.output, 1, true)
+        assert.matches("counter", result.output, 1, true)
     end)
     it("ignores a native profile in the real browser constructor and probe service", function()
         local info, why = toolchain.require(); if not info then pending(why) return end

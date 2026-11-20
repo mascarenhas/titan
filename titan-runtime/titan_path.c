@@ -1554,12 +1554,12 @@ void *loadlib(lua_State *L, const char *file) {
 #endif
 }
 
-#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 /* The protected launcher stores image-lifetime bounds, not Lua values. The
 ** registry is the only common owner before any Titan module initializes.
 ** This uses one of the slots reserved by the preceding canonical lookup. */
-static TitanModuleSymbols titan_path_find_linked_module(lua_State *L,
-                                                        const char *module) {
+static TitanModuleProvider titan_path_find_linked_module(lua_State *L,
+                                                       const char *module) {
+    TitanModuleProvider result = { NULL, NULL };
     const TitanLinkedModules *linked = NULL;
     lua_pushliteral(L, TITAN_LINKED_MODULES_KEY);
     if (lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TLIGHTUSERDATA)
@@ -1571,14 +1571,20 @@ static TitanModuleSymbols titan_path_find_linked_module(lua_State *L,
         while (begin < end) {
             const TitanLinkedModule *entry = begin + (end - begin) / 2;
             int order = strcmp(module, entry->name);
-            if (order == 0) return entry->symbols;
+            if (order == 0) {
+#if defined(_WIN32)
+                result.handle = loadlib(L, linked->provider);
+#else
+                result.symbols = entry->symbols;
+#endif
+                break;
+            }
             if (order < 0) end = entry;
             else begin = entry + 1;
         }
     }
-    return NULL;
+    return result;
 }
-#endif
 
 /* Implementation notes: doc/implementation/codegen-overview.md#static-vs-dynamic-dependency-wiring */
 TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
@@ -1604,10 +1610,10 @@ TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
         luaL_error(L, "Titan canonical module '%s' is unavailable", module);
     provider.symbols = titan_path_find_preload(L, module, length, NULL, NULL);
     if (provider.symbols != NULL) return provider;
-#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
-    provider.symbols = titan_path_find_linked_module(L, module);
-    if (provider.symbols != NULL) return provider;
-#endif
+    provider = titan_path_find_linked_module(L, module);
+    if (provider.symbols != NULL || provider.handle != NULL) return provider;
+    if (*file == '\0')
+        luaL_error(L, "Titan module '%s' is not supplied by the application", module);
 
     provider.handle = loadlib(L, file);
     return provider;
