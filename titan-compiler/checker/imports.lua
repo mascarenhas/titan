@@ -101,15 +101,14 @@ function checker._recover_referenced_module(
     -- Loader calls can suspend through the resolver's compiler I/O strategy.
     -- Ordinary lookup failures are already returned as nil/error; exceptions
     -- (in particular Titan Task cancellation) must continue unwinding.
-    local module, err = checker.checkimport(modname, loader, request)
+    local module, err, failure_kind = checker.checkimport(modname, loader, request)
     memo.pending = nil
     if module then
         memo.module = module
     else
-        memo.error = err
-        if request.source_requirement_error then
-            seen["\0source-requirement-error"] = err
-        end
+        memo.error = failure_kind == "source-requirement" and {
+            message = err, kind = failure_kind,
+        } or err
     end
     return memo
 end
@@ -120,8 +119,7 @@ function checker._recover_referenced_owner(
     if not modname or modname == "" then return nil, nil end
     local memo = checker._recover_referenced_module(
         modname, loader, seen, exposing_module, interface_seen)
-    local requirement_error = seen["\0source-requirement-error"]
-    if requirement_error then return nil, requirement_error, true end
+    if type(memo.error) == "table" then return nil, memo.error end
     local owner = checker._recovered_nominal_owner(memo.module, fqtn)
     if memo.module then
         if not owner then
@@ -269,9 +267,9 @@ function register_referenced_nominals(
 
     local ok, err = true, nil
     if tag == "Type.Nominal" then
-        local owner, recovery_error, requirement_failed = checker._recover_referenced_owner(
+        local owner, recovery_error = checker._recover_referenced_owner(
             t.fqtn, loader, seen, exposing_module, interface_seen)
-        if requirement_failed then
+        if type(recovery_error) == "table" then
             ok, err = nil, recovery_error
         elseif owner then
             local expected = #(owner.typeparams or {})
@@ -719,6 +717,10 @@ function checker.register_module_interface(
     end
 
     -- Prove the public projection before any permissive source traversal.
+    local function registration_failure(err)
+        if type(err) == "table" then return nil, err.message, err.kind end
+        return nil, err
+    end
     local registered, register_error = register_views(
         { type_or_error.members or {} }, { type_or_error.type_members or {} }, {
             visibility = modname,
@@ -726,7 +728,7 @@ function checker.register_module_interface(
             field_visible = function(field) return not field.islocal end,
             variant_visible = function(variant) return not variant.islocal end,
         })
-    if not registered then return nil, register_error end
+    if not registered then return registration_failure(register_error) end
     if trusted_source then
         -- Public owners also contain private fields, variants and signatures.
         -- Resolve their owners through the active loader rather than installing
@@ -738,20 +740,21 @@ function checker.register_module_interface(
             return not member.islocal or owner == modname
                 or source_permissions and source_permissions[owner] ~= nil
         end
-        return register_views(member_views, type_views, {
+        registered, register_error = register_views(member_views, type_views, {
             visibility = modname,
             method_visible = source_visible,
             field_visible = source_visible,
             variant_visible = source_visible,
         })
+        if not registered then return registration_failure(register_error) end
     end
     return true
 end
 
 function checker.checkimport(modname, loader, request)
     local ok, type_or_error, errors, import_info = loader(modname, request)
-    if not ok then return nil, type_or_error end
-    local registered, register_error = checker.register_module_interface(
+    if not ok then return nil, type_or_error, errors end
+    local registered, register_error, failure_kind = checker.register_module_interface(
         modname, type_or_error, loader,
         import_info and import_info.nominal_exposer or request and request.exposer,
         request and request.interface_seen,
@@ -759,7 +762,7 @@ function checker.checkimport(modname, loader, request)
             and type_or_error._source == true,
         request and request.reference_seen,
         import_info and import_info.source_permissions)
-    if not registered then return nil, register_error end
+    if not registered then return nil, register_error, failure_kind end
     binary_remember_module(type_or_error)
     return type_or_error, errors, import_info
 end

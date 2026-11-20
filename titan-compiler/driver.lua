@@ -3050,7 +3050,6 @@ function perf.source_requirement_error(exposer, name, err)
         tostring(err) .. ")"
 end
 
-perf.source_requirement_request = {}
 function perf.load_source_requirement(loader, exposer, name, selected, previous)
     if selected and (selected.kind == "dynamic" or selected.kind == "static") then
         local provider = selected.static_archive or selected.archive or selected.filename or selected.file
@@ -3059,7 +3058,7 @@ function perf.load_source_requirement(loader, exposer, name, selected, previous)
             "'; remove the conflicting provider or rebuild the referring library against it"
     end
     if previous then return nil, perf.source_requirement_error(exposer, name, previous) end
-    local ok, result, errors = loader(name, perf.source_requirement_request)
+    local ok, result, errors = loader(name, { kind = "source-requirement" })
     if not ok or #errors ~= 0 then
         local detail = ok and table.concat(errors, "\n") or result
         return nil, perf.source_requirement_error(exposer, name, detail), detail
@@ -6694,7 +6693,7 @@ function driver.defaultloader(static_deps, options)
                 local ok, failure, detail = perf.load_source_requirement(
                     active_loader, name, required, selected, checked and checked.error)
                 if ok then
-                    checked_requirements[required] = { entry = driver.imported[required] }
+                    checked_requirements[required] = { entry = driver.imported[required], exposer = name }
                 else
                     if detail then checked_requirements[required] = { error = detail } end
                     err = failure
@@ -6783,36 +6782,59 @@ function driver.defaultloader(static_deps, options)
             exposing.filename or exposing_name
         local cache_key = physical_identity .. "\0" .. exposing_name ..
             "\0" .. modname
+        -- The physical member owns the requirement, but the selected entry
+        -- that reached it owns the dependency observation.
+        local consumer = exposing.requirement_consumer or exposing
+        local consumer_name = exposing.requirement_consumer and
+            (consumer.name or consumer.type.name) or exposing_name
+        local consumer_file = consumer.static_archive or consumer.filename
+        local function publish_type(selection)
+            if selection.required_sources then
+                publish_requirement_edges(exposing)
+            end
+            local modtype = selection.type
+            if selection.resolved then
+                if selection.binding then
+                    add_native_constraint(context, modname, selection.binding,
+                        consumer_file, consumer_name)
+                end
+                context.native_interface_types[modname] = modtype
+                remember_nominal_layouts(context, selection.layout_inventory,
+                    selection.resolved.static_archive or selection.resolved.filename)
+                remember_used_compiled_interface(context, modname, modtype)
+                remember_contextual_resolution(context, modname, consumer_name,
+                    selection.resolved, selection.ordinary_lookup, consumer_file or consumer_name)
+            end
+            if semantic_source_recovery and not exposing.dormant and selection.carried_requirements then
+                return true, modtype, {}, { nominal_exposer = {
+                    name = modname, kind = exposing.kind, type = modtype,
+                    filename = exposing.filename, static_archive = exposing.static_archive,
+                    static_provider = exposing.static_provider,
+                    source_requirements = selection.carried_requirements,
+                    requirement_consumer = consumer,
+                } }
+            end
+            return true, modtype, {}, selection.info
+        end
+
         local cached = context.contextual_types[cache_key]
         if cached then
             if cached.error then return false, cached.error end
-            if cached.info and cached.info.kind == "external_source" then
-                publish_requirement_edges(exposing)
-                return true, cached.type, {}, cached.info
-            end
-            context.native_interface_types[modname] = cached.type
-            remember_nominal_layouts(context, cached.layout_inventory)
-            remember_used_compiled_interface(
-                context, modname, cached.type)
-            return true, cached.type, {}, cached.info
+            return publish_type(cached)
         end
 
         -- `layouts`/`linked` describe the recovered owner for object
         -- certificates: its provider's encoded layouts and whether the
         -- exposer carries it into the same image.
         local function remember_type(
-                modtype, resolved, ordinary_lookup, inventory, layouts, linked, info)
-            inventory = inventory or resolved.layout_inventory
-            context.contextual_types[cache_key] = {
-                type = modtype, layout_inventory = inventory, info = info,
+                modtype, resolved, ordinary_lookup, inventory, layouts, linked,
+                binding, carried_requirements, required_sources)
+            local selection = {
+                type = modtype, resolved = resolved, ordinary_lookup = ordinary_lookup,
+                layout_inventory = inventory or resolved.layout_inventory, binding = binding,
+                carried_requirements = carried_requirements, required_sources = required_sources,
             }
-            remember_nominal_layouts(context, inventory,
-                resolved.static_archive or resolved.filename)
-            context.native_interface_types[modname] = modtype
-            remember_used_compiled_interface(context, modname, modtype)
-            remember_contextual_resolution(
-                context, modname, exposing_name, resolved, ordinary_lookup,
-                physical_identity)
+            context.contextual_types[cache_key] = selection
             if layouts then
                 context.contextual_owner_entries =
                     context.contextual_owner_entries or {}
@@ -6825,19 +6847,7 @@ function driver.defaultloader(static_deps, options)
                     linked = linked,
                 }
             end
-            return true, modtype, {}, info
-        end
-
-        local function carried_member(resolved, modtype, metadata)
-            if semantic_source_recovery and not exposing.dormant and metadata.source_requirements then
-                return { nominal_exposer = {
-                    name = modname, kind = resolved.kind, type = modtype,
-                    filename = resolved.filename, static_archive = resolved.static_archive,
-                    static_provider = resolved.static_provider,
-                    source_requirements = metadata.source_requirements,
-                    requirement_consumer = exposing.requirement_consumer or exposing,
-                } }
-            end
+            return publish_type(selection)
         end
 
         if exposing.kind == "static" or exposing.kind == "embedded" then
@@ -6846,26 +6856,21 @@ function driver.defaultloader(static_deps, options)
             local entry = provider and provider.entries[modname]
             if entry then
                 local semantic_only = context.check_only_binaries and
-                    context.check_only_binaries[exposing_name]
-                if exposing.kind == "static" then
-                    add_native_constraint(context, modname,
-                        semantic_only and "dynamic-global" or "direct-carried",
-                        exposing.static_archive, exposing_name)
-                end
+                    context.check_only_binaries[consumer_name]
+                local binding = exposing.kind == "static" and
+                    (semantic_only and "dynamic-global" or "direct-carried")
                 return remember_type(entry.type, exposing, false,
                     entry.layout_inventory, entry.layouts,
                     exposing.kind == "static" and not semantic_only,
-                    carried_member(exposing, entry.type, entry))
+                    binding, entry.source_requirements)
             end
         elseif exposing.kind == "dynamic" then
             local status, value, metadata =
                 probe_compiled_interface(modname, exposing.filename, context)
             if status == "valid" then
-                add_native_constraint(context, modname, "dynamic-carried",
-                    exposing.filename, exposing_name)
                 return remember_type(value, exposing, false,
                     metadata.layout_inventory, metadata.layouts, false,
-                    carried_member(exposing, value, metadata))
+                    "dynamic-carried", metadata.source_requirements)
             elseif status == "error" then
                 context.contextual_types[cache_key] = { error = value }
                 return false, value
@@ -6909,34 +6914,31 @@ function driver.defaultloader(static_deps, options)
             local reached, err = check_source_frontier(
                 exposing, exposing_name, physical_identity, active_loader)
             if not reached then
-                request.source_requirement_error = true
-                return false, err
+                return false, err, "source-requirement"
             end
             local selected = reached[modname]
             if selected then
                 if selected.kind ~= "source" then
-                    return remember_type(selected.type, selected, true)
+                    return remember_type(selected.type, selected, true, nil, nil, false,
+                        nil, nil, true)
                 end
                 local modtype, projection_error = public_source_interface(modname, selected)
                 if not modtype then
-                    request.source_requirement_error = true
-                    return false, projection_error
+                    return false, projection_error, "source-requirement"
                 end
                 -- A checked source owner has no binary provenance or
                 -- producer-dynamic constraint. Its public references use
                 -- its own checked imports, not the binary exposer.
                 local info = { kind = "external_source", nominal_exposer = modname }
-                context.contextual_types[cache_key] = { type = modtype, info = info }
-                return true, modtype, {}, info
+                local selection = { type = modtype, info = info, required_sources = true }
+                context.contextual_types[cache_key] = selection
+                return publish_type(selection)
             end
         end
         if ordinary then
             -- Recover the independently known interface without changing its
             -- selection. The native constraint records the fallback edge.
-            if exposing.kind ~= "embedded" then
-                add_native_constraint(context, modname, "dynamic-global",
-                    exposing.static_archive or exposing.filename, exposing_name)
-            end
+            local binding = exposing.kind ~= "embedded" and "dynamic-global"
             local modtype = ordinary.type
             if ordinary.kind == "source" and context.check_only_sources and
                     context.check_only_sources[modname] then
@@ -6944,7 +6946,7 @@ function driver.defaultloader(static_deps, options)
                 modtype, err = public_source_interface(modname, ordinary)
                 if not modtype then return false, err end
             end
-            return remember_type(modtype, ordinary, true)
+            return remember_type(modtype, ordinary, true, nil, nil, false, binding)
         end
 
         if not resolved then
@@ -6954,12 +6956,9 @@ function driver.defaultloader(static_deps, options)
             context.contextual_types[cache_key] = { error = err }
             return false, err
         end
-        if exposing.kind ~= "embedded" then
-            add_native_constraint(context, modname, "dynamic-global",
-                exposing.static_archive or exposing.filename, exposing_name)
-        end
+        local binding = exposing.kind ~= "embedded" and "dynamic-global"
         return remember_type(resolved.type, resolved, true, nil,
-            resolved.layouts, false)
+            resolved.layouts, false, binding)
     end
 
     local loader
@@ -7056,7 +7055,7 @@ function driver.defaultloader(static_deps, options)
         -- source implementation. The latter is an edge-local request: it may
         -- replace an already cached binary selection, and a clean source miss
         -- is terminal instead of falling back to a provider.
-        local requirement_request = request == perf.source_requirement_request
+        local requirement_request = request and request.kind == "source-requirement"
         local recorded_requirement = semantic_source_recovery and requirement_request
         local source_required = source_roots[modname] == true or requirement_request or
             (request and request.kind == "source-import")
@@ -7082,14 +7081,15 @@ function driver.defaultloader(static_deps, options)
                     return source
                 end
             end
-            source, source_err = resolve_source(nil, modname, context, source_requirement_depth > 0)
+            source, source_err = resolve_source(nil, modname, context,
+                semantic_source_recovery and not source_roots[modname])
             return source, source_err
         end
         local function load_source(candidate)
             if candidate.kind == "blocked" then
                 return false, blocked_source_error(modname, candidate)
             end
-            if source_requirement_depth == 0 then
+            if source_requirement_depth == 0 and not (semantic_source_recovery and candidate.installed) then
                 local relocated, relocation_error = driver.relocate_source_output(
                     modname, candidate, options.output_root)
                 if not relocated then return false, relocation_error end
@@ -7120,16 +7120,38 @@ function driver.defaultloader(static_deps, options)
         end
 
         local allow_cached_source = true
-        if recorded_requirement then
+        local existing = driver.imported[modname]
+        if recorded_requirement or (semantic_source_recovery and source_roots[modname] and
+                existing and existing.kind == "source") then
             local candidate, candidate_error = find_source()
             if candidate_error then return false, candidate_error end
             if not candidate then return false, driver.missing_module_message(context, modname, true) end
             if candidate.kind == "blocked" then return false, blocked_source_error(modname, candidate) end
-            local existing = driver.imported[modname]
+            -- A retained check cannot replace the currently selected files,
+            -- and an earlier SDK fallback is not a requested project root.
             if existing and not matches_required_source(existing, candidate) then
                 driver.imported[modname] = nil
             end
-            allow_cached_source = matches_required_source(cached_source_entries[modname], candidate)
+            if recorded_requirement then
+                allow_cached_source = matches_required_source(cached_source_entries[modname], candidate)
+            end
+        elseif semantic_source_recovery and not request and not source_preferred then
+            local checked = checked_requirements[modname]
+            if checked and checked.entry == existing and not checked.ordinary then
+                -- The forced source is not an authored-project claim. Probe
+                -- as if this were the first ordinary selection of the name.
+                if not known_source_modules[modname] then context.source_modules[modname] = nil end
+                local resolved, compiled_error = driver.find_dependency_interface(
+                    driver.TITAN_BIN_PATH, modname, context)
+                context.source_modules[modname] = true
+                if compiled_error then return false, compiled_error end
+                if resolved then
+                    local _, conflict = perf.load_source_requirement(
+                        loader, checked.exposer, modname, resolved)
+                    return false, conflict
+                end
+                checked.ordinary = true
+            end
         end
 
         -- Analysis manifests retain the declared source interface. Raw entries
@@ -7243,7 +7265,9 @@ function driver.defaultloader(static_deps, options)
                 info.ffi_header_descriptor = mod.ffi_header_descriptor or mod.ast and mod.ast._ffi_header
                 info.source_permissions = source_import_permissions(mod)
             end
-            return true, mod.type, semantic_source_recovery and mod._check_errors or {}, info
+            -- Ordinary cache hits must not replay diagnostics along every
+            -- import path. A recorded edge must still prove its source clean.
+            return true, mod.type, recorded_requirement and mod._check_errors or {}, info
         end
 
         if source_preferred then
@@ -7286,8 +7310,7 @@ function driver.defaultloader(static_deps, options)
     end
     loader = function(modname, request)
         if not (context.check_only_sources and context.check_only_sources[modname])
-                or request == perf.source_requirement_request
-                or (request and request.kind == "source-import") then
+                or (request and (request.kind == "source-import" or request.kind == "source-requirement")) then
             return load(modname, request)
         end
         local ok, modtype, errors, info = load(modname, request)
