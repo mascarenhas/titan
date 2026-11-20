@@ -672,7 +672,7 @@ function Scheduler:worker_settled(worker)
     local reporter = self.options.progress
     if reporter then
         if node.state == "done" then
-            reporter:module_done(node.name)
+            reporter:module_done(node.name, node.module and node.module.check_only)
         elseif node.state == "failed" then
             reporter:module_failed(node.name)
         end
@@ -1037,6 +1037,10 @@ function build.run(context, request)
                 local dep = by_name[import.name]
                 if dep then node.deps[#node.deps + 1] = dep end
             end
+            for _, name in ipairs(node.module.semantic_dependencies or {}) do
+                local dep = by_name[name]
+                if dep then node.deps[#node.deps + 1] = dep end
+            end
         end
     end
 
@@ -1047,7 +1051,7 @@ function build.run(context, request)
     local function decide(node)
         local module = node.module
         if module.error then return "fail", module.error end
-        if not incremental or module.cyclic then return "build" end
+        if module.check_only or not incremental or module.cyclic then return "build" end
         local certified = module.certified
         if not certified or certified.status ~= "hit" then
             miss_line(context, node, certified and certified.reason, certified and certified.detail)
@@ -1080,9 +1084,11 @@ function build.run(context, request)
     -- Right before the worker starts: retire the committed object (primary
     -- first), then hand the worker the closed plan data.
     local function request_for(node, jobs_bound)
-        local invalidated, invalidate_err =
-            driver.invalidate_source_object(context, node.name, node.module.source)
-        if not invalidated then return nil, invalidate_err end
+        if not node.module.check_only then
+            local invalidated, invalidate_err =
+                driver.invalidate_source_object(context, node.name, node.module.source)
+            if not invalidated then return nil, invalidate_err end
+        end
         if not configuration then
             local configuration_err
             configuration, configuration_err = driver.worker_configuration(context)

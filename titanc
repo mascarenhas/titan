@@ -559,9 +559,24 @@ elseif args.print_ast then
     if not ready then exit(preflight_error) end
     -- Planning admits placeholders, not checked ASTs. Every source must still
     -- pass the ordinary in-process checker before its AST is printed.
+    local selected = driver.imported
     driver.imported = {}
-    for name, mod in pairs(plan.demanded_static or {}) do driver.imported[name] = mod end
+    for name, module in pairs(plan.modules) do
+        if module.kind == "dynamic" or module.kind == "static" then
+            driver.imported[name] = selected[name]
+        elseif module.kind == "source" and plan.semantic_sources and plan.semantic_sources[name] then
+            source_overrides[name] = module.source
+        end
+    end
     loader = driver.defaultloader({}, loader_options)
+    if plan.semantic_sources then
+        for _, name in ipairs(require("titan-compiler.coder.core").coder
+                ._sorted_keys(plan.semantic_sources)) do
+            local ok, errs = checker.checkimport(name, loader)
+            if not ok then exit(errs) end
+            if #errs > 0 then exit(table.concat(errs, "\n")) end
+        end
+    end
     for _, modname in ipairs(requested_modules) do
         local ok, errs = checker.checkimport(modname, loader)
         if not ok then
@@ -642,9 +657,6 @@ if args.test then
 end
 local builds_program = main_module ~= nil or
     (args.test and not args.compile_only)
-if not builds_program and not args.compile_only and preflight_plan.installed_source_library_error then
-    exit(preflight_plan.installed_source_library_error)
-end
 if args.exe and not builds_program then
     exit("--exe is only valid when compiling a standalone or test executable")
 end
@@ -1467,6 +1479,7 @@ else
                     abi = driver.TITAN_ABI_VERSION,
                     types = require("titan-compiler.types").serialize(mod.type),
                     layouts = native.layouts,
+                    source_requirements = native.source_requirements,
                 }
             end
         end

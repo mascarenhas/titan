@@ -14,6 +14,10 @@ function coder._nominal_plan(ctx, owner, variant)
     local plan = tl.nominal_plans[key]
     if not plan then
         plan = tl.imported_nominal_layouts[key]
+        if not plan and tl.application_nominal_layouts and
+                not tl.private_layout_owners[owner.name:match("^(.*)%.[^.]+$")] then
+            plan = tl.application_nominal_layouts[key]
+        end
         if not plan then
             plan = assert(variant and layout.variant(owner, variant)
                 or layout.record(owner))
@@ -22,6 +26,26 @@ function coder._nominal_plan(ctx, owner, variant)
         tl.nominal_plan_list[#tl.nominal_plan_list + 1] = plan
     end
     return plan
+end
+
+-- Use the same erased layout for an external source's checked interface
+-- and for the object that eventually implements that interface.
+function coder._own_nominal_layouts(modname, ast, ctx)
+    ctx = ctx or {
+        nominal_plans = {}, nominal_plan_list = {}, imported_nominal_layouts = {},
+    }
+    local own = {}
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
+            own[node._type.name] = coder._nominal_plan(ctx, node._type)
+        elseif not node._ignore and node._tag == "Ast.TopLevelUnion" then
+            for _, variant in ipairs(node._type.variants) do
+                own[node._type.name .. "." .. variant.name] =
+                    coder._nominal_plan(ctx, node._type, variant)
+            end
+        end
+    end
+    return layout.encode(modname, own)
 end
 
 function coder._nominal_member(plan, slot, object)

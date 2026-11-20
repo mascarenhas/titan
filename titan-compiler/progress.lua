@@ -568,10 +568,10 @@ local function lifetime(entry, now)
     return elapsed
 end
 
-function Reporter:module_done(name)
+function Reporter:module_done(name, check_only)
     if self.kind == progress.NULL then return end
     self.events = self.events + 1
-    self.compiled = self.compiled + 1
+    if not check_only then self.compiled = self.compiled + 1 end
     self.completed = self.completed + 1
     local entry = self:deactivate(name)
     if self.kind == progress.PLAIN then

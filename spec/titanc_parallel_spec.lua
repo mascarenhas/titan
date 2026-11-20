@@ -892,6 +892,42 @@ describe("titanc command-line orchestration", function()
         assert.equal("AST lib", printed)
     end)
 
+    it("checks demanded sources before printing their consuming root", function()
+        local diagnostics, observed, _, printed = run_titanc(arguments_with({
+            module = { "app" }, print_ast = true,
+        }), nil, function(fakes)
+            function fakes.build.plan()
+                return {
+                    order = { "shared.meter", "app" },
+                    modules = {
+                        ["shared.meter"] = { kind = "source", source = { main = "meter.titan" } },
+                    },
+                    semantic_sources = { ["shared.meter"] = "compiled_facade" },
+                }
+            end
+            fakes.modules["titan-compiler.coder.core"] = {
+                coder = { _sorted_keys = function(names)
+                    assert.same({ ["shared.meter"] = "compiled_facade" }, names)
+                    return { "shared.meter" }
+                end },
+            }
+            fakes.modules["titan-compiler.parser"].pretty_print_ast = function(ast)
+                return "AST " .. ast.name
+            end
+            local checked = {}
+            fakes.observed.checked = checked
+            function fakes.checker.checkimport(name)
+                checked[#checked + 1] = name
+                if name == "app" then return false, "app.titan:1:1: syntax error" end
+                fakes.driver.imported[name] = { ast = { name = name } }
+                return true, {}
+            end
+        end)
+        assert.same({ "shared.meter", "app" }, observed.checked)
+        assert.equal("app.titan:1:1: syntax error\n", diagnostics)
+        assert.equal("", printed)
+    end)
+
     it("plans a printed program's entrypoint beside its generated output", function()
         local diagnostics, observed, _, printed = run_titanc(arguments_with({
             module = { "app" }, print_ast = true,

@@ -2028,9 +2028,21 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
 * Browser inspection never accepts the coordinator's metadata-only view of a
   planned archive; it always rescans the bytes.
 * Binary-first, `--source-first`/`--test`, and explicit-source selection
-  policies apply identically. Binding is always `direct`: `handle` and `global`
-  bindings cannot arise without dynamic providers, and the logical `<path>.so`
-  filename inside `Type.Module` is an identity string only.
+  policies apply identically; source lookup searches authored `--tree` roots
+  and then the read-only installed SDK root `<root>/lib/titan/0.6` for `.titan`
+  source only (selecting `.browser.titan` and shared `.titan` variants; native
+  providers there are never eligible). Compiled browser archives and owned
+  sources use `direct` binding, whereas external installed-source dependencies
+  in a browser library archive use the ordinary checked external ABI
+  (`handle`/`global` with empty provider filename `""`) so the archive links
+  and validates alone and tolerates compatible edits to the installed source
+  without rebuilding; consuming browser images satisfy those obligations
+  through `perf.linked_module_catalog` installed in
+  `titan_browser_initialize_worker` ([The linked provider
+  set](codegen-overview.md#the-linked-provider-set)) only when
+  `context.application_source_requirements` is non-nil, with no disk loading or
+  host JavaScript changes. On browser, the logical `<path>.so` filename inside
+  `Type.Module` is an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
 twenty-one [browser stdlib](#the-browser-standard-library) modules resolve from it,
@@ -2062,15 +2074,19 @@ dispatches to `driver.stage_browser_provider`:
    indexing);
 3. verify the archive's member sequence byte for byte;
 4. check the exact key set;
-5. compare the embedded ABI, types, and layouts with the coordinator's
-   expected entries;
-6. run `driver.validate_browser_provider`; and
+5. compare the embedded ABI, types, layouts, and optional `source_requirements`
+   with the coordinator's expected entries (`driver.compare_archive_entries`);
+6. run `driver.validate_browser_provider` (requiring global non-weak
+   `<prefix>_source_requirements` whenever `archive.entries[name].source_requirements`
+   is present); and
 7. publish only `<provider>.a` through `driver.publish_provider_bundle`, which
    rescans the staged archive with the descriptor fingerprint, validates it
    structurally again, runs the [executing protocol
-   check](#the-executing-protocol-runner), and only then considers the
-   unchanged-archive shortcut or renames the staged archive over the
-   destination as the commit point.
+   check](#the-executing-protocol-runner) (`standalone_archive_probe_source`,
+   which checks `<prefix>_source_requirements` return shape and bytes, exit
+   codes `27` and `28`, when present without requiring the external source to
+   be linked), and only then considers the unchanged-archive shortcut or
+   renames the staged archive over the destination as the commit point.
 
 Before linking, `titanc` requires the SDK and a working Node 26+
 (`driver.browser_node_ready`, below) for every library build, and records the

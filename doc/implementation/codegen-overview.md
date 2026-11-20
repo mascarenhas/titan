@@ -30,10 +30,12 @@ coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
 - `modname` is the dot-separated logical module name.
 - `ast` is the module's AST *after* `checker.check` has decorated and
   rewritten it.
-- `static_deps` is the driver's finalized direct-native name set: every source
-  module compiled into the invocation plus every logical module physically
-  carried by a selected static provider. Imports selected from DSOs are
-  absent.
+- `static_deps` is the driver's finalized direct-native name set: every owned
+  source module compiled into the invocation plus every logical module
+  physically carried by a selected static provider. Imports selected from DSOs,
+  as well as external installed-source dependencies checked by a library (or
+  prospective library `-c`), are absent and use ordinary external `handle` or
+  `global` bindings.
 - `abi` is the required compiled-module ABI string.
 - `emit_line_directives` defaults to true when omitted.
 - `options` carries the coverage mode (`coverage`, `coverage_backend`), the
@@ -1247,11 +1249,16 @@ initializer early or add a check to each method invocation.
   `package.loadlib`.
 - If the module is absent, a matching native preload descriptor supplies its
   resolver.
-- Next, a native executable can supply the resolver of a module already linked
-  into that image. See [The linked provider set](#the-linked-provider-set).
-- The selected DSO filename is consulted only when no descriptor is available:
-  `loadlib` takes the first occupied `<entry>/<file>` along the state's
-  [run-time Titan path](driver.md#the-run-time-titan-path-and-sdk-fallback),
+- Next, an executable or test can supply the resolver (or, on Windows, the
+  companion application provider DLL) of a module already linked into that
+  application. See [The linked provider set](#the-linked-provider-set).
+- If `file` is the empty string `""`—emitted by `coder/module.lua` for external
+  installed-source dependencies (`check_only_sources`) compiled by a library—
+  `titan_module_provider` stops without opening any disk image and raises
+  `Titan module '<name>' is not supplied by the application`.
+- Otherwise, the selected DSO filename is consulted only when no descriptor is
+  available: `loadlib` takes the first occupied `<entry>/<file>` along the
+  state's [run-time Titan path](driver.md#the-run-time-titan-path-and-sdk-fallback),
   then the lazy SDK fallback.
 
 Descriptor lookup does not call a Lua preload loader or initialize the
@@ -1287,35 +1294,83 @@ is a separate `RTLD_LAZY | RTLD_LOCAL` operation.
 
 ### The linked provider set
 
-The native coordinator walks the written imports of demanded archive
-members. The generated launcher emits one sorted array of logical names
-and hidden native resolvers for the resulting members and linked sources.
-Each archive entry is a strong reference that retains its primary object;
-the table does not reference dormant siblings.
+Application and `--test` preflight walks reached archive `imports` and reached
+`source_requirements`. When an executable or test image activates private
+linked election (`elect_linked` on Unix, or `elect_app_sources` when
+`context.application_source_requirements` is non-nil on any target),
+`finalize_resolver_context` reconciles canonical owners (`linked_owner`) and
+builds `context.linked_module_names` using every actual application-owned
+source module in `source_names` (excluding the synthetic test runner
+`titan.test.runner`, via `linked_source(name)`), not only the frontier names
+recorded in `context.application_source_requirements`—while a published
+library's folded `source_requirements` still stops at its direct or forwarded
+installed source names and never consumes that source's transitive imports.
+`perf.linked_module_catalog(names, provider)` and `perf.catalog_install`
+(`driver.lua`) emit one sorted `TitanLinkedModule` array and
+`TitanLinkedModules` descriptor and install it under `TITAN_LINKED_MODULES_KEY`
+in the Lua registry inside the protected entrypoint before requiring the root:
 
-The launcher publishes the array bounds as one registry value inside its
-protected entry, before requiring the root. A default program containing
-only its source root and shared-provider imports needs no catalog.
-`titan_module_provider` binary-searches that array only after a canonical
-and native-preload miss on a named import. The table holds image-lifetime
-data, not initialized module userdata; binding to it still goes through
-the normal ABI and used-declaration checks. Modules still initialize in
+* **Linux and macOS:** Enabled when `elect_linked` holds (strict `--static`,
+  `--test`, physical archive owners, or dynamic imports with multiple linked
+  sources) or when `elect_app_sources` holds
+  (`context.application_source_requirements` is non-nil). The launcher emits
+  hidden `TITAN_SOURCE_LOCAL` native resolvers for all app-owned source modules
+  in `source_names` (excluding the synthetic test runner) plus, when
+  `elect_linked` holds, reached archive members (`selected_static_modules` with
+  `imports ~= nil`, which also retain strict `--static` `direct_provider`
+  reconciliation). Each archive entry is a strong reference that retains its
+  primary object; dormant siblings are never referenced. A default program with
+  only its source root and shared-provider imports carrying no source
+  obligations needs no catalog.
+* **Windows:** App-owned source modules live in the companion application
+  provider DLL, not the launcher EXE. Enabled only when `elect_app_sources`
+  holds (`context.application_source_requirements` is non-nil):
+  `entrypoint_contents` emits sorted entries for all app-owned source modules
+  in `source_names` (excluding the synthetic test runner) with `NULL` resolver
+  pointers and sets `TitanLinkedModules.provider` to the companion application
+  DLL (`$PROVIDER`). `titan_path_find_linked_module` opens that provider via
+  `loadlib`, so a loaded library DLL resolves the app-owned module's
+  already-exported `_abi_value`, `_compatibility`, and `_init` entries and then
+  switches to the initialized canonical in-memory resolver—without passing
+  hidden resolver pointers across the PE boundary or adding general PE exports
+  to the application DLL. Ordinary Windows builds without source obligations
+  omit the table.
+* **Browser (`--target browser`):** Enabled only when `elect_app_sources` holds
+  (`context.application_source_requirements` is non-nil):
+  `browser_entrypoint_contents` emits the sorted hidden-resolver table for all
+  app-owned source modules in `source_names` (excluding the synthetic test
+  runner) and installs it in `titan_browser_initialize_worker` before
+  `require("$MODNAME")`, anchoring those source objects under
+  `wasm-ld --gc-sections` with no new Wasm imports or host JavaScript/loader
+  changes. Ordinary browser builds without source obligations omit the table.
+
+When `elect_app_sources` holds (`context.application_source_requirements` is
+non-nil), `finalize_resolver_context` also populates
+`context.application_nominal_layouts` through `perf.public_source_layout(name,
+mod)` (backed by `coder._own_nominal_layouts`) across all compiled
+`source_names`, so non-collaborating consumers (without a direct explicit
+`.titan` import on that owner) use erased public nominal layouts
+(`coder/nominal.lua`)—including for installed sources reached transitively
+through another required source.
+
+`titan_module_provider` binary-searches the installed table only after a
+canonical and native-preload miss on a named import. The table holds
+image-lifetime data, not initialized module userdata; binding to it still goes
+through the normal ABI and used-declaration checks. Modules still initialize in
 written import order. The table adds nothing to `package.preload` or
 `package.loaded`. The Lua package searcher does not consult it, and child
-states do not inherit it.
-Once initialized, a module registers its ordinary native preload as
-before, and that preload can be copied into children.
+states do not inherit it. Once initialized, a module registers its ordinary
+native preload as before, and that preload can be copied into children.
 
-For `--static`, preflight verifies the complete written import closure and
-the table anchors its archive members. The runtime still opens a named
-DSO on a catalog miss: a plugin loaded explicitly through Lua `require`
-and its own dependencies are not part of the host's certified graph.
-The catalog never replaces an existing physical producer token or
-redirects direct calls.
-
-Final-link certification includes the sorted catalog names and the bytes
-of the input objects and archives. Windows DLL launchers and archive-only
-browser images do not install this catalog.
+For Unix `--static`, preflight verifies the complete written import closure and
+the table anchors its archive members. On native platforms the runtime still
+opens a named DSO on a catalog miss when `file` is non-empty (so a plugin
+loaded explicitly through Lua `require` and its own dependencies are not part
+of the host's certified graph), while an empty `file` (`""`) raises
+`Titan module '<name>' is not supplied by the application`.
+The catalog never replaces an existing physical producer token or redirects
+direct calls. Final-link certification includes the sorted catalog names and
+the bytes of the input objects and archives.
 
 ## User-value allocation
 

@@ -1851,7 +1851,9 @@ describe("independent nominal layout metadata", function()
         assert.equal(serialized, types.serialize(modtype))
         assert.equal(layouts, metadata.layouts)
         assert.same({}, metadata.layout_inventory.layouts)
-        assert.same({ "physical_abi", "physical_types", "physical_layouts" }, requested)
+        assert.is_nil(metadata.source_requirements)
+        assert.same({ "physical_abi", "physical_types", "physical_layouts",
+            "physical_source_requirements" }, requested)
         requested = {}
         layouts = nil
         status, modtype, metadata = driver.probe_compiled_interface(
@@ -1860,6 +1862,7 @@ describe("independent nominal layout metadata", function()
         assert.equal(serialized, types.serialize(modtype))
         assert.is_nil(metadata.layouts)
         assert.is_nil(metadata.layout_inventory)
+        assert.is_nil(metadata.source_requirements)
         assert.same({ "physical_abi", "physical_types" }, requested)
     end)
 
@@ -5111,7 +5114,7 @@ describe("compiler module loader", function()
         end
     end
 
-    local function cache_static_provider(context, filename, module_types)
+    local function cache_static_provider(context, filename, module_types, entry_options)
         write_file(filename, "mock static provider\n")
         local provider = {
             archive = filename,
@@ -5129,6 +5132,11 @@ describe("compiler module loader", function()
                     empty_layouts(name), name)),
                 origin = filename .. ":" .. name,
             }
+            local fields = entry_options and entry_options[name]
+            if fields then
+                provider.entries[name].imports = fields.imports
+                provider.entries[name].source_requirements = fields.source_requirements
+            end
             provider.key_order[#provider.key_order + 1] = name
         end
         table.sort(provider.key_order, util.bytewise_less)
@@ -5166,7 +5174,7 @@ describe("compiler module loader", function()
         return provider
     end
 
-    local function cache_dynamic_provider(filename, module_types)
+    local function cache_dynamic_provider(filename, module_types, source_requirements)
         write_file(filename, "mock dynamic provider\n")
         local abi_values = {}
         for name in pairs(module_types) do abi_values[name] = driver.TITAN_ABI_VERSION end
@@ -5182,6 +5190,10 @@ describe("compiler module loader", function()
                     return function() return serialized end
                 elseif symbol == prefix .. "_layouts" then
                     return function() return empty_layouts(name) end
+                elseif symbol == prefix .. "_source_requirements" then
+                    local names = source_requirements and source_requirements[name]
+                    if names then return function() return table.concat(names, "\n") end end
+                    return nil, "undefined symbol: " .. symbol, "init"
                 end
             end
             error("unexpected symbol " .. symbol)
@@ -6268,9 +6280,16 @@ describe("compiler module loader", function()
                     modules[middle].object = source .. "/missing.o"
                 end), 1, true)
             write_file(source .. "/not-an-object.o", "not an object")
-            assert.matches("cannot decode planned object for module '" .. middle .. "'",
+            local corrupt = diverged(top, function(modules)
+                modules[middle].object = source .. "/not-an-object.o"
+            end)
+            assert.matches("cannot decode planned object for module '" .. middle .. "'", corrupt, 1, true)
+            assert.matches("not-an-object.o", corrupt, 1, true)
+            assert.matches("cannot decode planned source interface for module '" .. middle .. "'",
                 diverged(top, function(modules)
-                    modules[middle].object = source .. "/not-an-object.o"
+                    modules[middle].object = nil
+                    modules[middle].check_only = true
+                    modules[middle].interface = "not a source record"
                 end), 1, true)
             assert.matches("build plan divergence: module '" .. middle ..
                 "' has unsupported planned kind 'archive'",
@@ -6565,8 +6584,8 @@ describe("compiler module loader", function()
             -- Like dlsym, the other provider has no symbols of the planned module.
             local load = titan._loadlib
             titan._loadlib = function(found, symbol)
-                local ok, value = pcall(load, found, symbol)
-                if ok then return value end
+                local ok, value, message, stage = pcall(load, found, symbol)
+                if ok then return value, message, stage end
                 return nil, "undefined symbol: " .. symbol, "init"
             end
             local _, unclaimed = compiled(function(item) item.file = other end)
@@ -9588,6 +9607,8 @@ end
                 return function() return "Module('titan.timer',{})" end
             elseif symbol == "titan_timer_layouts" then
                 return function() return empty_layouts("titan.timer") end
+            elseif symbol == "titan_timer_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             return nil, "unexpected symbol " .. symbol
         end
@@ -9597,7 +9618,8 @@ end
         assert.truthy(ok)
         assert.equal("Type.Module", modtype._tag)
         assert.equal(0, #errors)
-        assert.same({ "titan_timer_abi", "titan_timer_types", "titan_timer_layouts" }, symbols)
+        assert.same({ "titan_timer_abi", "titan_timer_types", "titan_timer_layouts",
+            "titan_timer_source_requirements" }, symbols)
         assert.is_nil(driver.imported["titan.timer"].ast)
 
         -- A later explicit build request replaces a cached binary interface
@@ -9614,6 +9636,160 @@ end
             paths.to_slash(driver.imported["titan.timer"].filename))
         assert.equal("titan/timer__main",
             driver.imported["titan.timer"].program_output)
+    end)
+
+    it("preserves source obligations when a native plan reuses an analysis-cached DSO", function()
+        local name, required = "provider.layer", "meter"
+        local rel = provider_path("provider.so")
+        local filename = binary .. "/" .. rel
+        cache_dynamic_provider(filename, { [name] = types.Module(name, {}, {}) },
+            { [name] = { required } })
+        local loadlib = titan._loadlib
+        local queries = {}
+        titan._loadlib = function(found, symbol)
+            queries[#queries + 1] = symbol
+            return loadlib(found, symbol)
+        end
+        local analysis = new_context({ analysis_only = true })
+        local analysis_loader = driver.defaultloader({}, { context = analysis })
+        local loaded, semantic, errors = analysis_loader(name)
+        assert.is_true(loaded, semantic)
+        assert.same({}, errors)
+        local cached = driver.imported[name]
+        assert.equal(rel, semantic.file)
+        assert.is_nil(cached.layouts)
+        assert.is_nil(cached.layout_inventory)
+        assert.is_nil(cached.source_requirements)
+        assert.same({ "provider_layer_abi", "provider_layer_types" }, queries)
+        assert(driver.close_loader(analysis_loader))
+
+        write_file(source .. "/wrap.titan", 'local layer = import "provider.layer"\n')
+        write_file(source .. "/app.titan", [[
+local layer = import "provider.layer"
+function main(args: {string}): integer return 0 end
+]])
+        write_file(source .. "/meter.titan", 'local units = import "units"\n')
+        write_file(source .. "/units.titan", "const scale = 42\n")
+        local build = require "titan-compiler.build"
+        local function plan(root_name)
+            local context = new_context()
+            local output = root .. "/out-" .. root_name
+            local roots = { root_name }
+            local planned, diagnostics = build.plan(context, {
+                roots = roots,
+                loader_options = { source_roots = { [root_name] = true }, output_root = output },
+            })
+            assert.truthy(planned, diagnostics and table.concat(diagnostics, "\n"))
+            assert(driver.preflight_build_outputs(context, planned, {
+                roots = roots, output_root = output, c_parts = 1,
+            }))
+            return planned
+        end
+        queries = {}
+        local library = plan("wrap")
+        local upgraded = driver.imported[name]
+        assert.equal(cached, upgraded)
+        assert.equal(semantic, upgraded.type)
+        assert.equal(filename, paths.to_slash(upgraded.filename))
+        assert.equal(rel, upgraded.type.file)
+        assert.equal(empty_layouts(name), upgraded.layouts)
+        assert.same({}, upgraded.layout_inventory.layouts)
+        assert.same({ "provider_layer_abi", "provider_layer_types", "provider_layer_layouts",
+            "provider_layer_source_requirements" }, queries)
+        assert.same({ required }, upgraded.source_requirements)
+        assert.same({ required }, library.requirements_by_module.wrap)
+        assert.same({ "units", "meter", "wrap" }, library.order)
+        assert.is_true(library.modules.meter.check_only)
+        assert.is_true(library.modules.units.check_only)
+
+        driver.imported, types.registry = { [name] = upgraded }, {}
+        local promoted_app = plan("app")
+        assert.same({ "units", "meter", "app" }, promoted_app.order)
+        assert.is_nil(promoted_app.modules.meter.check_only)
+        assert.is_nil(promoted_app.modules.units.check_only)
+
+        driver.imported, types.registry = {}, {}
+        local app = plan("app")
+        local cold = driver.imported[name]
+        assert.equal(upgraded.filename, cold.filename)
+        assert.equal(upgraded.type.file, cold.type.file)
+        assert.equal(upgraded.layouts, cold.layouts)
+        assert.same(upgraded.layout_inventory, cold.layout_inventory)
+        assert.same(upgraded.source_requirements, cold.source_requirements)
+        assert.same({ "units", "meter", "app" }, app.order)
+        assert.is_nil(app.modules.meter.check_only)
+        assert.is_nil(app.modules.units.check_only)
+    end)
+
+    it("does not alter an analysis-cached DSO selection when native promotion fails", function()
+        local name = "provider"
+        local filename = binary .. provider_path("/provider.so")
+        local original = types.Module(name, {}, {})
+        cache_dynamic_provider(filename, { [name] = original })
+        local analysis = driver.defaultloader({}, resolver_options({ analysis_only = true }))
+        local loaded, semantic = analysis(name)
+        assert.is_true(loaded, semantic)
+        local cached = driver.imported[name]
+        assert(driver.close_loader(analysis))
+
+        local changed = types.Module(name, {
+            types.ModuleVariable(name, "changed", types.Integer(), true),
+        }, {})
+        cache_dynamic_provider(filename, { [name] = changed }, { [name] = { "meter" } })
+        local native = driver.defaultloader({}, resolver_options())
+        local accepted, err = native(name)
+        assert.is_false(accepted, err)
+        assert.matches("cached compiled interface for module 'provider' changed", err, 1, true)
+        assert.equal(cached, driver.imported[name])
+        assert.equal(semantic, cached.type)
+        assert.is_nil(cached.layouts)
+        assert.is_nil(cached.layout_inventory)
+        assert.is_nil(cached.source_requirements)
+
+        -- A matching provider with no optional export is still a valid
+        -- promotion, and layout availability distinguishes it from analysis.
+        cache_dynamic_provider(filename, { [name] = original })
+        local ok, promoted = native(name)
+        assert.is_true(ok, promoted)
+        assert.equal(semantic, promoted)
+        assert.equal(empty_layouts(name), cached.layouts)
+        assert.is_table(cached.layout_inventory)
+        assert.is_nil(cached.source_requirements)
+        assert(driver.close_loader(native))
+    end)
+
+    it("retains archive import metadata when upgrading its analysis-cached selection", function()
+        local name, required = "archive_provider", "meter"
+        local file = binary .. "/archive_provider.a"
+        local analysis = new_context({ analysis_only = true, prefer_static = true })
+        cache_static_provider(analysis, file, { [name] = types.Module(name, {}, {}) }, {
+            [name] = { imports = { required }, source_requirements = { required } },
+        })
+        analysis.provider_cache[file] = nil
+        local analysis_loader = driver.defaultloader({}, { context = analysis })
+        local ok, semantic = analysis_loader(name)
+        assert.is_true(ok, semantic)
+        local cached = driver.imported[name]
+        assert.equal("static", cached.kind)
+        assert.is_nil(cached.layout_inventory)
+        assert.same({ required }, cached.source_requirements)
+        local semantic_provider = cached.static_provider
+        assert.same({ required }, semantic_provider.entries[name].imports)
+        assert(driver.close_loader(analysis_loader))
+
+        local native = new_context({ prefer_static = true })
+        local native_loader = driver.defaultloader({}, { context = native })
+        local loaded, promoted = native_loader(name)
+        assert.is_true(loaded, promoted)
+        assert.equal(semantic, promoted)
+        assert.equal(cached, driver.imported[name])
+        assert.not_equal(semantic_provider, cached.static_provider)
+        local entry = cached.static_provider.entries[name]
+        assert.equal(cached.layouts, entry.layouts)
+        assert.equal(cached.layout_inventory, entry.layout_inventory)
+        assert.equal(cached.source_requirements, entry.source_requirements)
+        assert.same({ required }, entry.imports)
+        assert(driver.close_loader(native_loader))
     end)
 
     it("canonically resolves explicit-source imports to flat and folder source",
@@ -9795,6 +9971,8 @@ end
                 return function() return serialized end
             elseif symbol == "provider_layouts" then
                 return function() return empty_layouts("provider") end
+            elseif symbol == "provider_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
         end
@@ -9980,6 +10158,8 @@ end
                 return function() return "Module('fallback',{})" end
             elseif symbol == "fallback_layouts" then
                 return function() return empty_layouts("fallback") end
+            elseif symbol == "fallback_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
         end
@@ -10036,6 +10216,8 @@ end
                 end
             elseif symbol == "fallback_static_layouts" then
                 return function() return empty_layouts("fallback_static") end
+            elseif symbol == "fallback_static_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
         end
@@ -10111,7 +10293,7 @@ end
         })
         cache_dynamic_provider(binary .. provider_path("/bundle.so"), {
             ["bundle.fallback"] = fallback_type,
-        })
+        }, { ["bundle.fallback"] = { "meter" } })
 
         local static_deps = {}
         local ok, _, errors = driver.defaultloader(static_deps, {
@@ -10120,8 +10302,12 @@ end
         })("root")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal("dynamic", driver.imported["bundle.fallback"].kind)
-        assert.equal(provider_path("bundle.so"), driver.imported["bundle.fallback"].type.file)
+        local rebound = driver.imported["bundle.fallback"]
+        assert.equal("dynamic", rebound.kind)
+        assert.equal(provider_path("bundle.so"), rebound.type.file)
+        assert.equal(empty_layouts("bundle.fallback"), rebound.layouts)
+        assert.same({}, rebound.layout_inventory.layouts)
+        assert.same({ "meter" }, rebound.source_requirements)
         assert.equal("source", driver.imported["bundle.later"].kind)
         assert.is_nil(static_deps["bundle.fallback"])
         local finalized, finalize_errors =
@@ -11198,6 +11384,8 @@ typedef double titan_driver_symlink_value;
                 return function() return "Module('choice',{})" end
             elseif symbol == "choice_layouts" then
                 return function() return empty_layouts("choice") end
+            elseif symbol == "choice_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected metadata symbol " .. symbol)
         end
@@ -11768,6 +11956,8 @@ typedef double titan_driver_symlink_value;
                 return function() return "Module('dup.item',{})" end
             elseif symbol == "dup_item_layouts" then
                 return function() return empty_layouts("dup.item") end
+            elseif symbol == "dup_item_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected metadata symbol " .. symbol)
         end
@@ -11778,7 +11968,8 @@ typedef double titan_driver_symlink_value;
         assert.equal(provider_path("dup.so"), modtype.file)
         assert.equal(binary .. provider_path("/dup.so"),
             driver.imported["dup.item"].filename)
-        assert.same({ "dup_item_abi", "dup_item_types", "dup_item_layouts" }, symbols)
+        assert.same({ "dup_item_abi", "dup_item_types", "dup_item_layouts",
+            "dup_item_source_requirements" }, symbols)
     end)
 
     it("caches two logical interfaces from one physical container separately",
@@ -11790,6 +11981,7 @@ typedef double titan_driver_symlink_value;
                 return "Module('bundle.left',{})"
             end,
             bundle_left_layouts = function() return empty_layouts("bundle.left") end,
+            bundle_left_source_requirements = function() return "shared.meter\nshared.startup" end,
             bundle_right_abi = function() return driver.TITAN_ABI_VERSION end,
             bundle_right_types = function()
                 return "Module('bundle.right',{})"
@@ -11801,6 +11993,9 @@ typedef double titan_driver_symlink_value;
         titan._loadlib = function(filename, symbol)
             assert.equal(binary .. provider_path("/bundle.so"), filename)
             table.insert(symbols, symbol)
+            if symbol == "bundle_right_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
+            end
             return assert(functions[symbol], "unexpected metadata symbol")
         end
 
@@ -11814,6 +12009,9 @@ typedef double titan_driver_symlink_value;
         assert.not_equal(left, right)
         assert.not_equal(driver.imported["bundle.left"],
             driver.imported["bundle.right"])
+        assert.same({ "shared.meter", "shared.startup" },
+            driver.imported["bundle.left"].source_requirements)
+        assert.is_nil(driver.imported["bundle.right"].source_requirements)
         assert.equal(provider_path("bundle.so"), left.file)
         assert.equal(provider_path("bundle.so"), right.file)
         assert.equal(binary .. provider_path("/bundle.so"),
@@ -11822,7 +12020,9 @@ typedef double titan_driver_symlink_value;
             driver.imported["bundle.right"].filename)
         assert.same({
             "bundle_left_abi", "bundle_left_types", "bundle_left_layouts",
+            "bundle_left_source_requirements",
             "bundle_right_abi", "bundle_right_types", "bundle_right_layouts",
+            "bundle_right_source_requirements",
         }, symbols)
         local call_count = #symbols
         local cached_ok, cached_left, cached_errors = loader("bundle.left")
@@ -12138,6 +12338,8 @@ typedef double titan_driver_symlink_value;
                 end
             elseif symbol == "titan_sample_child_layouts" then
                 return function() return empty_layouts("titan.sample.child") end
+            elseif symbol == "titan_sample_child_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             return nil, "unexpected symbol " .. symbol
         end

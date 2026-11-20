@@ -1446,6 +1446,7 @@ function incremental.make_certificate(context, entry, native, inputs)
         roots = context.relocation_roots or {}, generated = native.generated_inputs or {},
         codegen = inputs.codegen, imports = {}, owners = {},
         bindings = native.bindings or {}, providers = providers,
+        source_requirements = native.source_requirements,
         interface = entry.interface_digests
             or incremental.producer_digests(context, entry, native.layouts, native.foreign_header) }
     local direct = {}
@@ -1983,6 +1984,11 @@ function incremental.verdict(record, plan)
     local cert = record.object_metadata and record.object_metadata.certificate
     local modname = record.type and record.type.name
     if not valid_certificate(cert, modname) then return miss("record-schema", "missing or invalid certificate") end
+    local expected = plan.requirements_by_module and plan.requirements_by_module[modname]
+    local recorded = cert.source_requirements
+    if recorded ~= expected and table.concat(recorded or {}, "\n") ~= table.concat(expected or {}, "\n") then
+        return miss("source-requirements", modname)
+    end
     local direct, pending, pending_set, known = {}, {}, {}, {}
     if modname then direct[modname], known[modname] = true, true end
     local function dependency(item, owner)

@@ -1096,6 +1096,27 @@ describe("static compiled-module metadata", function()
             assert.matches("imports must be distinct", err, 1, true)
         end)
 
+        it("keeps source requirements independent of written archive imports", function()
+            local required = { "a.source", "z.source" }
+            local payload = assert(staticmetadata.render("pkg.mod", ABI, TYPES, nil,
+                { "pkg.helper" }, required))
+            local entry = assert(staticmetadata.validate(payload, "archive"))
+            assert.same({ "pkg.helper" }, entry.imports)
+            assert.same(required, entry.source_requirements)
+            assert.is_nil(assert(staticmetadata.validate(PAYLOAD, "legacy")).source_requirements)
+            assert.same(required,
+                assert(staticmetadata.decode_source_requirements("pkg.mod", "a.source\nz.source")))
+            for _, malformed in ipairs({
+                "", "\na.source", "a.source\n", "a.source\n\nz.source",
+                "z.source\na.source", "a.source\na.source", "pkg.mod", "path/file.so",
+            }) do
+                assert.is_nil(staticmetadata.decode_source_requirements("pkg.mod", malformed))
+            end
+            assert.is_nil(staticmetadata.render("pkg.mod", ABI, TYPES, nil, nil, {}))
+            assert.is_nil(staticmetadata.validate(
+                (payload:gsub('"z.source"', '"a.source"')), "archive"))
+        end)
+
         it("keeps physical layouts independent from semantic-only readers", function()
             local payload = assert(staticmetadata.render("pkg.mod", ABI, TYPES, "layout-bytes"))
             local semantic = assert(staticmetadata.validate(payload, "analysis", {

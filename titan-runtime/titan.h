@@ -375,7 +375,6 @@ typedef struct TitanModuleProvider {
 
 /* Immutable image-local catalog and archive anchors, published only in the
 ** launcher's state. Entries name native resolvers, not Lua loaders. */
-#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 typedef struct TitanLinkedModule {
   const char *name;
   TitanModuleSymbols symbols;
@@ -384,15 +383,18 @@ typedef struct TitanLinkedModule {
 typedef struct TitanLinkedModules {
   const TitanLinkedModule *begin;
   const TitanLinkedModule *end;
+#if defined(_WIN32)
+  const char *provider;
+#endif
 } TitanLinkedModules;
 
 #define TITAN_LINKED_MODULES_KEY "Titan linked module providers"
-#endif
 
 /* Prefer initialized state, a matching native preload descriptor, and the
 ** launcher's private linked-module set, in that order, before opening an
-** image. A NULL file permits only the initialized canonical lookup. All
-** successful lookups and checks preserve the Lua stack. */
+** image. A NULL file permits only the initialized canonical lookup; an empty
+** file permits lookup without opening any image. All successful lookups and
+** checks preserve the Lua stack. */
 TITAN_RUNTIME_FUNC TitanModuleProvider titan_module_provider(lua_State *L,
     const char *module, const char *file);
 TITAN_RUNTIME_FUNC void *titan_module_symbol(lua_State *L,

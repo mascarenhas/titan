@@ -493,10 +493,11 @@ The author-facing packaging guide and complete rockspec example live in
   no `dist/bin/`. Normal native module packages and canonical multi-root bundles build their own
   provider pair in ordinary library mode with explicit logical roots (`.so`/`.a`
   on Unix, `.dll` only on Windows) and declare package dependencies rather than
-  incorporating the standard library or other external Titan dependencies (and
-  compiling a binary library fails if a dependency is selected from the
-  implicit installed source fallback, including under `--source-first`; see
-  [Source-only modules](../language/modules.md#source-only-modules)).
+  incorporating the standard library or other external Titan dependencies. A
+  compiled library may import an installed source-only module without owning or
+  embedding it (see [Source-only modules](../language/modules.md#source-only-modules));
+  each consuming application or `--test` executable compiles required
+  source-only dependencies once into `--output`.
   `--static` is rejected on every final no-main library output, including
   canonical bundles (`-c --static` remains available for individual objects
   targeting a later executable). Dynamic/default applications may fall back to

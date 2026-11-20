@@ -7,9 +7,15 @@ current compiler and frontend inventory, runtime preamble closure, native
 toolchain and compile options, own-source bytes and folder membership, split
 and coverage code-generation options, split-part artifacts, transitive C header
 file/search/origin closures, direct-import public or source-private interface
-digests, contextually exposed nominal-owner digests, and resolved native
-bindings. Plain `-c` without `--incremental` forces a fresh compile of every
-selected source module.
+digests, contextually exposed nominal-owner digests, resolved native
+bindings, and folded `source_requirements` obligations. Under `--incremental`,
+external installed-source dependencies of a library build (`check_only`
+sources) have no persisted `.o` or separate source-interface cache and are
+rechecked in memory on each invocation while owned library objects and the
+final provider still hit their certificates. Plain `-c` without `--incremental`
+forces a fresh compile of every owned source module (treating non-`main`,
+non-`--test`, non-`--static` invocations as prospective libraries whose
+`check_only` external sources are checked without writing `.o` files).
 
 The user-facing contract, `-v` diagnostics, and build-tool examples are in
 [Incremental and separate compilation](../language/toolchain.md#incremental-and-separate-compilation).
@@ -987,12 +993,26 @@ provider file bytes and timestamps never enter consumer module certificates.
   return or field types (`recover_contextual_owner` in `driver.lua`).
 * `certificate.bindings` and `certificate.providers`: the coder's native
   binding map (`"direct"`, `"handle"`, or `"global"`) and selected dynamic
-  provider map (`provider_file` for direct dynamic imports).
+  provider map (`provider_file` for direct dynamic imports, or `""` for
+  `check_only_sources` in library or prospective-library `-c` builds, which
+  bind externally as `"handle"` or `"global"` rather than `"direct"`).
+* `certificate.source_requirements` (omitted when nil): the module's folded
+  external source-only obligations (`native.source_requirements`), computed
+  from direct external installed-source imports plus obligations forwarded from
+  owned authored helpers and imported compiled members, stopping at each
+  external source.
 
 In stage 2, `incremental.verdict(record, plan)` (`incremental.lua`)
 checks the decoded certificate against the final resolution `plan`:
 
-1. For every entry in `cert.imports` (using `item.view`) and `cert.owners`
+1. It compares `cert.source_requirements` against
+   `plan.requirements_by_module[modname]`, returning
+   `miss("source-requirements", modname)` whenever an owned helper or imported
+   compiled provider changed which external source-only modules are required
+   (even if public types and layouts did not change), while keeping library
+   objects as hits across compatible implementation-only edits to an external
+   installed source.
+2. For every entry in `cert.imports` (using `item.view`) and `cert.owners`
    (using `"public"`), it queries `plan.digest(name, view)`. If the dependency
    is not yet available in the plan (`status == "pending"`), `name` is added to
    the pending list; if it is unavailable, `verdict` returns
@@ -1000,11 +1020,15 @@ checks the decoded certificate against the final resolution `plan`:
    `item.interface`, `verdict` returns
    `miss("import-interface", "<name> (<view>)")` or
    `miss("owner-interface", name)`.
-2. For every module name in `keys(cert.bindings) ∪ keys(cert.providers)`, sorted
+3. For every module name in `keys(cert.bindings) ∪ keys(cert.providers)`, sorted
    bytewise, `verdict` computes the expected binding from the plan:
-   * `linked = (name == modname) or plan.linked(name)` (true when `name` is a
-     source module in the build or carried by a selected static archive);
-   * `provider = (name ~= modname) and plan.provider_file(name) or nil`;
+   * `linked = (name == modname) or plan.linked(name)` (true when `name` is an
+     owned source module compiled into the build or carried by a selected
+     static archive; false for `module.check_only` entries—both
+     `check_only_sources` and `check_only_binaries`—in library mode);
+   * `provider = (name ~= modname) and plan.provider_file(name) or nil`
+     (`""` for `check_only` sources; `nil` for `check_only_binaries`, which
+     receive verified `"global"` bindings when owned code uses their types);
    * `expected = linked and "direct" or (direct[name] and provider and "handle" or "global")`;
    * `expected_provider = (not linked and direct[name]) and provider or nil`.
 
@@ -1013,7 +1037,7 @@ checks the decoded certificate against the final resolution `plan`:
    `miss("import-binding", "<name>: <before> -> <after>")` for a direct import
    or `miss("owner-binding", "<name>: <before> -> <after>")` for a contextual
    owner.
-3. If any dependency was pending and no earlier check missed, `verdict` returns
+4. If any dependency was pending and no earlier check missed, `verdict` returns
    `{ status = "pending", names = pending }`; otherwise it returns
    `{ status = "hit" }`.
 

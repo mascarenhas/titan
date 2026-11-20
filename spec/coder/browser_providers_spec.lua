@@ -692,13 +692,16 @@ describe("browser providers real toolchain", function()
             info.lua, "-e",
             string.format("package.path=%q..package.path", repo .. "/?.lua;" .. repo .. "/?/init.lua;") }
     end
-    local function run_cli(corruption, ...)
+    local function run_at(tree, output, corruption, ...)
         local argv = lua_argv(corruption)
-        for _, argument in ipairs({ repo .. "/titanc", "-q", "--target", "browser",
-                "--tree", root .. "/src", "-o", root .. "/out", ... }) do
+        for _, argument in ipairs({ repo .. "/titanc", "--target", "browser",
+                "--tree", root .. "/" .. tree, "-o", root .. "/" .. output, ... }) do
             argv[#argv + 1] = argument
         end
         return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
+    end
+    local function run_cli(corruption, ...)
+        return run_at("src", "out", corruption, "-q", ...)
     end
     local function prepare(real_info)
         -- Only runtime/JS assets are bootstrap prerequisites; deliberately omit
@@ -769,6 +772,154 @@ describe("browser providers real toolchain", function()
         local source_record = assert(require("titan-compiler.objectmetadata").read(
             read(root .. "/out/consumer.o"), root .. "/out/consumer.o"))
         assert.equal("direct", source_record.object_metadata.bindings["pkg.left"])
+    end)
+    it("links one browser variant and its exposed source nominal through two archives", function()
+        local real_info, why = toolchain.require({ node = true, sdk = true })
+        if not real_info then pending(why); return end
+        prepare(real_info)
+        stage_sdk()
+        local installed = prefix .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION
+        write(installed .. "/counter.native.titan", "const native_only = true\n")
+        write(installed .. "/units.h", "typedef struct ticket_data { int unused; } ticket_data;\n")
+        write(installed .. "/units.titan", [[
+foreign import "units.h"
+
+record Ticket
+  serial: integer
+  local data: foreign ticket_data
+end
+
+function Ticket.new(serial: integer): Ticket
+  local data = foreign ticket_data.new()
+  return { serial = serial, data = data }
+end
+
+function Ticket:code(): integer
+  return self.serial + 100
+end
+]])
+        local source = installed .. "/counter.browser.titan"
+        write(source, [[
+local units = import "units"
+
+type Ticket = units.Ticket
+
+serial = 0
+
+function next(): Ticket
+  serial = serial + 1
+  return units.Ticket(serial)
+end
+
+do
+  serial = 40
+end
+]])
+        write(installed .. "/counter" .. (platform.windows and ".dll" or ".so"),
+            "not a browser input")
+        write(root .. "/producer/left.titan", [[
+local counter = import "counter"
+
+type Ticket = counter.Ticket
+
+function next(): Ticket
+  return counter.next()
+end
+]])
+        write(root .. "/producer/right.titan", [[
+local counter = import "counter"
+
+function current(): integer
+  return counter.serial
+end
+]])
+        for _, name in ipairs({ "left", "right" }) do
+            local output = "built-" .. name
+            local result = run_at("producer", output, nil, "-q", name)
+            assert.is_true(result.ok, result.output)
+            local archive = read(root .. "/" .. output .. "/" .. name .. ".a")
+            local parsed = assert(staticmetadata.scan_bytes(archive, name, {
+                target = fixtures.fingerprint(),
+            }))
+            assert.same({ name }, parsed.key_order)
+            assert.same({ "counter" }, parsed.entries[name].source_requirements)
+            assert.is_nil(lfs.attributes(root .. "/" .. output .. "/counter.o"))
+            assert.is_nil(lfs.attributes(root .. "/" .. output .. "/units.o"))
+            write(root .. "/providers/" .. name .. ".a", archive)
+        end
+        write(root .. "/wrapper/wrap.titan", [[
+local left = import "left"
+
+type Ticket = left.Ticket
+
+function next(): Ticket
+  return left.next()
+end
+
+function code(ticket: Ticket): integer
+  return ticket:code()
+end
+]])
+        local wrapper = run_at("wrapper", "built-wrap", nil, "--incremental", "-v", "wrap")
+        assert.is_true(wrapper.ok, wrapper.output)
+        local wrapped = read(root .. "/built-wrap/wrap.a")
+        local archive = assert(staticmetadata.scan_bytes(wrapped, "wrap", {
+            target = fixtures.fingerprint(),
+        }))
+        -- Browser archives retain compiled dependencies, but not the
+        -- installed sources behind the checked requirement.
+        assert.same({ "left", "wrap" }, archive.key_order)
+        assert.same({ "counter" }, archive.entries.wrap.source_requirements)
+        for _, name in ipairs({ "counter", "units" }) do
+            assert.is_nil(lfs.attributes(root .. "/built-wrap/" .. name .. ".o"))
+        end
+        wrapper = run_at("wrapper", "built-wrap", nil, "--incremental", "-v", "wrap")
+        assert.is_true(wrapper.ok, wrapper.output)
+        assert.matches("Titan object hit wrap:", wrapper.output, 1, true)
+        assert.matches("Titan link hit", wrapper.output, 1, true)
+        write(root .. "/providers/wrap.a", wrapped)
+        assert(os.remove(root .. "/providers/left.a"))
+        write(root .. "/app/demo.titan", [[
+local wrap = import "wrap"
+local right = import "right"
+
+function main(args: {string}): integer
+  local first = wrap.next()
+  if first.serial ~= 41 or wrap.code(first) ~= 141 or right.current() ~= 41 then return 1 end
+  local second = wrap.next()
+  if second.serial ~= 42 or second:code() ~= 142 or right.current() ~= 42 then return 2 end
+  return 0
+end
+]])
+        local function build_and_run()
+            local result = run_at("app", "application", nil, "--incremental", "-v", "demo")
+            assert.is_true(result.ok, result.output)
+            return compiler_io.new_sync():run(toolchain.runner(info, "--engine", "node",
+                "--grace", "0", root .. "/application/demo.mjs"), { stderr_to_stdout = true }), result.output
+        end
+        local result = build_and_run()
+        assert.is_true(result.ok, result.output)
+        assert.equal("file", lfs.attributes(root .. "/application/counter.o", "mode"))
+        assert.equal("file", lfs.attributes(root .. "/application/units.o", "mode"))
+        assert.is_nil(lfs.attributes(installed .. "/counter.o"))
+        assert.is_nil(lfs.attributes(installed .. "/units.o"))
+        local warm
+        result, warm = build_and_run()
+        assert.is_true(result.ok, result.output)
+        assert.matches("Titan object hit units:", warm, 1, true)
+        assert.matches("Titan object hit counter:", warm, 1, true)
+        assert.matches("Titan link hit", warm, 1, true)
+        local original = read(source)
+        -- This alters the producer's slot numbering, not the used ABI.
+        write(source, "const extra = 0\n" .. original)
+        result = build_and_run()
+        assert.is_true(result.ok, result.output)
+
+        write(source, (original:gsub("function next%(%)", "function next(delta: integer)")))
+        result = build_and_run()
+        assert.is_false(result.ok, result.output)
+        assert.matches("binary compatibility mismatch", result.output, 1, true)
+        assert.matches("counter", result.output, 1, true)
     end)
     it("ignores a native profile in the real browser constructor and probe service", function()
         local info, why = toolchain.require(); if not info then pending(why) return end

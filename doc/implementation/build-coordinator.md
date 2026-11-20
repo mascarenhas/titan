@@ -175,8 +175,39 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    before any source byte is read. Selecting a later source module rebinds
    any overlapping static archive (`rebind_overlapping_static_providers`).
    Native executable preflight follows each selected archive member's
-   [declared imports](static-compiled-modules.md#demanded-archive-closure)
-   before workers start or the final link can certify.
+   [declared imports](static-compiled-modules.md#demanded-archive-closure-and-source-requirements)
+   through `perf.plan_source_obligations`, which also materializes reached
+   logical members' folded `source_requirements` (via `plan.load_sources`,
+   requiring actual source from authored `--tree` roots first, then
+   `<root>/lib/titan/0.6`) in the same fixed point before output reservation,
+   worker DAG scheduling, or final-link certification. It records
+   `module.semantic_dependencies` so `build.run` orders materialized source
+   owners ahead of consumers that import compiled providers exposing them, and
+   detects cross-boundary cycles (`cyclic source requirement: ...`) across all
+   targets. In a library or prospective-library `-c` build (non-`main`,
+   non-`--test`, non-`--static`, where preflight sets `plan.link_kind =
+   "library"`), `perf.plan_source_obligations` starts from the same reached
+   per-member `source_requirements` frontiers (without archive demand),
+   requiring actual source for each recorded obligation while resolving each
+   loaded source's own imports through ordinary lookup so transitive nominal
+   owners defined deeper than a compiled provider's folded frontier remain
+   available for typechecking; `perf.classify_library_sources` then marks
+   modules outside the owned authored closure with `module.check_only = true`
+   (separating `check_only_sources` from `check_only_binaries`, which stay out
+   of the library link while contributing verified `"global"` bindings and public
+   layouts when owned code uses their types), keeps the published folded
+   frontier unchanged, and rejects explicit `.titan` imports across the
+   installed-source library boundary.
+   `build.run` dispatches `check_only` source modules to workers without
+   invalidating `.o` files or reserving outputs; `compile_planned_module`
+   returns an in-memory encoded interface (`objectmetadata.encode` with erased
+   public layouts from `coder._own_nominal_layouts`) and writes no C, `.o`, or
+   `.titan.h` files, while `publish_staged_module` revalidates `source_snapshot`
+   in memory. Under `--incremental`, `build.run` rechecks `check_only` external
+   sources in memory on each library invocation (sharing results across workers
+   of that invocation) while owned library objects and the final provider still
+   hit their certificates; Titan writes no separate persisted source-interface
+   cache and no orphan `.o` for external sources.
    A browser `--test` link checks the SDK's runtime assets before planning
    the synthetic runner's implicit `titan.test` import. Compile-only builds
    do not add that import or require the final-link assets.
@@ -258,8 +289,10 @@ pass itself never runs the checker, code generator, or C preprocessor:
   (and, for a browser invocation, created in an empty root), and so is the
   marker of every held lock domain
   ([Output roots and the target marker](browser-target.md#output-roots-and-the-target-marker)).
-* **Reserved outputs.** Every planned source module, cached or fresh, reserves
-  `<stem>.c`/`.o` and every potential split part
+* **Reserved outputs.** Every owned planned source module (excluding external
+  installed-source dependencies checked by a library or prospective-library
+  `-c` build), cached or fresh, reserves `<stem>.c`/`.o` and every potential
+  split part
   `<stem>.part<k>.c`/`.part<k>.o` with `1 <= k < effective c_parts`, each
   unit's `.gcno` and `.gcda`, any parts recorded by a validated prior primary
   object (so a smaller split policy can still retire them), and

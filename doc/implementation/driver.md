@@ -68,34 +68,73 @@ All modules, including the standard library, use the same two path strings:
   browser targets (browser builds search that directory for `.titan` source
   only, selecting `.browser.titan` and shared `.titan` variants normally;
   native providers there are never eligible for browser builds). Selecting an
-  installed source through that implicit fallback requires `-o`/`--output` so
-  generated files land under the consumer's output tree and `titanc` neither
-  writes nor locks in the implicit fallback root; builds that do not select an
-  installed source keep their existing behavior. Separately from the
-  positional-root restriction, compiling an ordinary binary library rejects a
-  dependency selected from the implicit installed source fallback (including
-  under `--source-first` when a paired provider is also installed) rather than
-  copying another rock's module into the library's provider (same-repo authored
-  `--tree` sources still build into a library together, and
-  ordinary/`--static` executables and `--test` builds still compile installed
-  fallback sources into `--output`; see
-  [titan#427](https://github.com/mascarenhas/titan/issues/427)). Without `-o`,
-  source output relocation can report the generic missing-`--output` diagnostic
-  first, and passing `-o` still does not permit vendoring an installed source
-  into a binary library. Mechanically, `titanc` sets
-  `context.authored_source_roots` to the positional plus `--test-dir` roots;
-  `resolve_source` checks it only after every authored root misses and the
-  implicit SDK fallback would match, returning the named `--tree` diagnostic
-  (workers receive planned or overridden descriptors and never resolve roots,
-  and language-server/analysis contexts leave the field unset). In library
-  mode, `preflight_build_outputs` inspects planned source descriptors for the
-  `installed` origin, records the installed-source library refusal, and rejects
-  no-main non-compile-only builds before provider planning or worker dispatch,
-  and `titanc` repeats the check after the checker's final `main`
-  classification to guard against shape-based preflight detection. Explicit
-  `driver.resolve_source(context, modname, source_path)` calls, closed-world
-  and explicit analysis roots, and `--test-dir` remain exact and never scan the
-  installed SDK automatically.
+  installed source through that implicit fallback—even when a library build
+  only checks it—requires `-o`/`--output` so generated files land under the
+  caller's output tree and `titanc` neither writes nor locks in the implicit
+  fallback root; builds that do not select an installed source keep their
+  existing behavior. In a library build (including plain non-`main`,
+  non-`--test`, non-`--static` `-c`, where `preflight_build_outputs` sets
+  `plan.link_kind = "library"`), `perf.classify_library_sources` partitions
+  owned authored sources from non-owned modules—keeping `check_only_sources`
+  (external installed sources) and `check_only_binaries` (compiled providers
+  reached solely while checking an external source) distinct while marking both
+  `module.check_only = true` in the plan transport—rejects explicit `.titan`
+  imports from an owned library module into the implicit installed source
+  fallback (`library '<name>' cannot collaborate with installed source via
+  import "<dep>.titan"; ...`) and library ownership conflicts (`library
+  '<name>' owns source module '<source>' also required externally by
+  '<importer>'`), and computes per-member folded `plan.requirements_by_module`
+  (stopping at the installed source boundary and forwarding obligations from
+  owned authored helpers and imported compiled members, omitted when empty).
+  `check_only` sources are checked in workers without emitting C, `.o`, or
+  `.titan.h` files (`driver.compile_planned_module` returns an in-memory
+  `objectmetadata.encode` payload with erased public layouts from
+  `coder._own_nominal_layouts`, validated by `driver.publish_staged_module`),
+  projected through `public_source_interface` with `info.kind ==
+  "external_source"`, and excluded from output reservations, `source_names`,
+  `dynamic_names`, and symbol collision sets. Compiled providers in
+  `check_only_binaries` likewise stay out of library link membership
+  (`dynamic_names`, `selected_static_modules`) and native-archive library
+  refusals, while any used public type they own receives a verified `"global"`
+  binding (`"dynamic-global"` on contextual static recovery) and registers its
+  `layout_inventory` in `finalize_resolver_context` (including for archive-only
+  providers and on browser). Under `--incremental`, `check_only` external
+  sources have no persisted `.o` or separate source-interface cache and are
+  rechecked in memory on each library invocation while owned objects and the
+  final provider still hit their certificates. In both library (including
+  prospective-library `-c`) and application/`--test` builds,
+  `perf.plan_source_obligations` starts from every reached logical member's
+  recorded `source_requirements` frontier and loads each recorded obligation
+  once per logical name via `plan.load_sources`—requiring actual source for
+  those recorded obligations (authored `--tree` roots first, then
+  `<root>/lib/titan/0.6`, with no silent binary substitution) while each loaded
+  source's own ordinary imports follow the invocation's normal lookup policy,
+  feeding any further reached `source_requirements` back into the fixed point. It diagnoses missing source
+  (`module '<importer>' requires source for '<name>': ...`), conflicting
+  compiled providers, archives physically containing a required source, and
+  cross-boundary cycles (`cyclic source requirement: ...`). Following the
+  loaded source's normal imports lets a library recover nominal owners defined
+  deeper than a compiled provider's folded frontier (for example, a transitive
+  nominal owner reached through a required installed source whose own name does
+  not appear in the provider's public type surface); ownership is classified
+  afterward, so applications and `--test` builds compile those materialized
+  sources into the application (setting
+  `context.application_source_requirements` and, on Unix targets `linux` and
+  `darwin`, running `perf.demand_archive_modules`), whereas libraries and
+  prospective-library `-c` builds classify non-owned sources and their reached
+  providers as `check_only`, neither emitting nor linking them and keeping the
+  published folded frontier unchanged (unselected siblings still impose
+  nothing).
+  `titanc --print-ast` preserves compiled `plan.modules` and pre-checks
+  `plan.semantic_sources` in-process after resetting `driver.imported`.
+  Mechanically, `titanc` sets `context.authored_source_roots` to the positional
+  plus `--test-dir` roots; `resolve_source` checks it only after every authored
+  root misses and the implicit SDK fallback would match, returning the named
+  `--tree` diagnostic (workers receive planned or overridden descriptors and
+  never resolve roots, and language-server/analysis contexts leave the field
+  unset). Explicit `driver.resolve_source(context, modname, source_path)`
+  calls, closed-world and explicit analysis roots, and `--test-dir` remain
+  exact and never scan the installed SDK automatically.
 * **`driver.TITAN_BIN_PATH`** — the configured Titan path for compiled
   provider `.so` and `.a` files: `TITAN_PATH_0_6` when set, otherwise
   `TITAN_PATH`, otherwise `nil`. `nil` selects
@@ -529,11 +568,22 @@ the argument and does nothing.
   reports an error, and object-backed entries ([Object-backed source
   modules](incremental-compilation.md)) add `compiled`, `has_main`,
   `test_functions`, and `external_symbols`. DSO entries carry
-  `{ kind = "dynamic", type, filename, relative, layouts, layout_inventory }`;
-  archive entries carry `{ kind = "static", type, filename, relative,
-  static_archive, static_provider, layouts, layout_inventory }`; trusted
-  host-inventory entries carry `{ kind = "embedded", type, filename,
-  embedded_provider }`. Tests and long-lived tools reset this cache together
+  `{ kind = "dynamic", type, filename, relative, layouts, layout_inventory,
+  source_requirements }` and archive entries carry
+  `{ kind = "static", type, filename, relative, static_archive,
+  static_provider, layouts, layout_inventory, source_requirements }` (where
+  `source_requirements` is optional, archive direct `imports` remain on
+  `static_provider.entries[modname]`, and semantic-only `analysis_only` DSO
+  probes skip `_layouts` and `_source_requirements`); trusted host-inventory
+  entries carry `{ kind = "embedded", type, filename, embedded_provider }`.
+  When a later native (`not context.analysis_only`) resolver reuses a cached
+  `dynamic` or `static` entry lacking `layout_inventory`, `defaultloader`
+  revalidates that same physical provider and checks that its serialized public
+  interface (`types.serialize_semantic`) still matches before attaching raw
+  `layouts`, decoded `layout_inventory`, and optional `source_requirements` via
+  `perf.attach_provider_metadata` (retaining the rescanned `static_provider`
+  for an archive, without mutating the entry on failure or reading runtime
+  `_compatibility`). Tests and long-lived tools reset this cache together
   with `types.registry`. Both belong to one target identity at a time. The
   first activation in a process adopts the pair a host installed before it, so
   an embedding host may install or restore its own `driver.imported` and
@@ -2255,8 +2305,8 @@ error alerts):
   the integer returned by the Titan `main` becomes the **process exit status**:
   `ret = lua_tointeger(L, -1); lua_close(L); return ret;`.
 * **`pmain`** first publishes the original `argc` integer and `argv` pointer
-  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`. On Linux and macOS a
-  program or test can also install its private
+  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`. When needed, a native
+  program or test (on Linux, macOS, and Windows) also installs its private
   [linked provider set](codegen-overview.md#the-linked-provider-set) here,
   without publishing Lua loaders. It then calls global
   `require("$MODNAME")` and retrieves and retains that module's `main`
