@@ -78,7 +78,7 @@ Windows output layout and limits:
 | Build kind | Outputs under `-o out` |
 | --- | --- |
 | Library (`titanc -o out a.b`) | Single DLL provider `out/a/b.dll` (no `.a` provider; `--static` is unsupported; external installed-source dependencies are checked without being embedded). |
-| Standalone or `--test` program | Launcher `out/bin/<logical-module>.exe` + application DLL `out/lib/titan/0.6/<module>.dll` (which also carries any source-only dependencies materialized for prebuilt library DLLs, shared lazily as one initialized instance across loaded DLLs without changing process-wide DLL search order). |
+| Standalone or `--test` program | Launcher `out/bin/<logical-module>.exe` + application DLL `out/lib/titan/0.6/<module>.dll` (which carries app-owned modules, including any dependencies compiled from source for prebuilt library DLLs, while external compiled DLLs selected for those obligations load lazily through the application so every loaded DLL shares one initialized instance without changing process-wide DLL search order). |
 | Program with `--exe PATH` | Launcher at `PATH` (`.exe` appended if missing); provider stays at `out/lib/titan/0.6/<module>.dll` on the same volume (named after the logical root module, not the `--exe` basename). |
 
 - **Split modules:** `--c-parts` defaults to `1` on Windows; pass `--c-parts N`

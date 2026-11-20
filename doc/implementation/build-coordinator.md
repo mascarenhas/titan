@@ -176,28 +176,30 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    any overlapping static archive (`rebind_overlapping_static_providers`).
    Native executable preflight follows each selected archive member's
    [declared imports](static-compiled-modules.md#demanded-archive-closure-and-source-requirements)
-   through `perf.plan_source_obligations`, which also materializes reached
-   logical members' folded `source_requirements` (via `plan.load_sources`,
-   requiring actual source from authored `--tree` roots first, then
-   `<root>/lib/titan/0.6`) in the same fixed point before output reservation,
-   worker DAG scheduling, or final-link certification. It records
-   `module.semantic_dependencies` so `build.run` orders materialized source
+   through `perf.plan_source_obligations`, which also resolves reached logical
+   members' folded `source_requirements` (via `plan.load_requirements`, using
+   ordinary single-owner election—already-carried providers via
+   `perf.carried_requirement`, standalone providers, canonical common-prefix
+   bundles, or authored/installed source) in the same fixed point before output
+   reservation, worker DAG scheduling, or final-link certification. It records
+   `module.semantic_dependencies` (traversing compiled requirement edges to
+   reach downstream `source` dependencies) so `build.run` orders required source
    owners ahead of consumers that import compiled providers exposing them, and
-   detects cross-boundary cycles (`cyclic source requirement: ...`) across all
-   targets. In a library or prospective-library `-c` build (non-`main`,
+   detects cross-boundary cycles (`cyclic source requirement: ...`) across
+   written imports, strict-static archive `imports`, and `source_requirements`
+   on all targets. In a library or prospective-library `-c` build (non-`main`,
    non-`--test`, non-`--static`, where preflight sets `plan.link_kind =
    "library"`), `perf.plan_source_obligations` starts from the same reached
    per-member `source_requirements` frontiers (without archive demand),
-   requiring actual source for each recorded obligation while resolving each
-   loaded source's own imports through ordinary lookup so transitive nominal
-   owners defined deeper than a compiled provider's folded frontier remain
-   available for typechecking; `perf.classify_library_sources` then marks
-   modules outside the owned authored closure with `module.check_only = true`
-   (separating `check_only_sources` from `check_only_binaries`, which stay out
-   of the library link while contributing verified `"global"` bindings and public
-   layouts when owned code uses their types), keeps the published folded
-   frontier unchanged, and rejects explicit `.titan` imports across the
-   installed-source library boundary.
+   converging on either source or compiled members so transitive nominal owners
+   remain available for typechecking; `perf.classify_library_sources` then marks
+   non-owned and forwarded modules with `module.check_only = true` (separating
+   `check_only_sources` from `check_only_binaries`, unless another ordinary
+   owned import retains that static archive; both stay out of the library link
+   and emit empty `""` fallback paths when directly imported while contributing
+   verified `"global"` bindings and public layouts when owned code uses their
+   types), keeps the published folded frontier unchanged, and rejects explicit
+   `.titan` imports across the installed-source library boundary.
    `build.run` dispatches `check_only` source modules to workers without
    invalidating `.o` files or reserving outputs; `compile_planned_module`
    returns an in-memory encoded interface (`objectmetadata.encode` with erased
@@ -1151,7 +1153,11 @@ are never part of `spec.outputs`. Each target owns
 `prepare` hashes `input` with tag `"final-link"` over:
 
 * `RECIPE_FIELDS` (`linkcertificate.lua`): `roots`, `entry` (`{ module,
-  no_uv_bootstrap }`), `kind` (`"program" | "test" | "library"`),
+  no_uv_bootstrap, linked_modules }`, where `linked_modules` is
+  `resolver_context.linked_modules` carrying each sorted `{ name, provider? }`
+  catalog row so replacing an external required provider's relative path
+  invalidates the launcher even when the module-name set is unchanged), `kind`
+  (`"program" | "test" | "library"`),
   `no_uv_bootstrap`, `argv` (`driver.link_extra_flags()`), `toolchain`
   (`{ compiler = toolchain_identity, output_tools }`, see below), `test_cases`
   (deterministically sorted descriptors from `test_runner.discover`),

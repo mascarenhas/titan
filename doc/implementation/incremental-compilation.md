@@ -994,8 +994,9 @@ provider file bytes and timestamps never enter consumer module certificates.
 * `certificate.bindings` and `certificate.providers`: the coder's native
   binding map (`"direct"`, `"handle"`, or `"global"`) and selected dynamic
   provider map (`provider_file` for direct dynamic imports, or `""` for
-  `check_only_sources` in library or prospective-library `-c` builds, which
-  bind externally as `"handle"` or `"global"` rather than `"direct"`).
+  `check_only_sources` and `check_only_binaries` in library or
+  prospective-library `-c` builds, which bind externally as `"handle"` or
+  `"global"` rather than `"direct"`).
 * `certificate.source_requirements` (omitted when nil): the module's folded
   external source-only obligations (`native.source_requirements`), computed
   from direct external installed-source imports plus obligations forwarded from
@@ -1027,8 +1028,10 @@ checks the decoded certificate against the final resolution `plan`:
      static archive; false for `module.check_only` entries—both
      `check_only_sources` and `check_only_binaries`—in library mode);
    * `provider = (name ~= modname) and plan.provider_file(name) or nil`
-     (`""` for `check_only` sources; `nil` for `check_only_binaries`, which
-     receive verified `"global"` bindings when owned code uses their types);
+     (`""` for `module.check_only` entries—both `check_only_sources` and
+     `check_only_binaries`—so forwarded direct imports certify an empty
+     fallback path while contextual owners receive verified `"global"`
+     bindings);
    * `expected = linked and "direct" or (direct[name] and provider and "handle" or "global")`;
    * `expected_provider = (not linked and direct[name]) and provider or nil`.
 

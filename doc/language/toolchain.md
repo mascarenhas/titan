@@ -272,16 +272,18 @@ installed sources outside the archive while retaining browser's preexisting
 separate archive composition for compiled browser dependencies.
 
 When a consumer application or `--test` executable imports prebuilt libraries
-whose reached logical members depend on installed source-only modules, `titanc`
-compiles each required source module once into the application (under
-`--output` whenever an installed fallback source is selected or on `--target
-browser`), with no redundant user `import`. Each obligation requires actual
-source—authored `--tree` roots first, then `<root>/lib/titan/0.6`, never
-silently satisfied by a later compiled binary—and diagnoses missing source,
-conflicting physical owners, and cross-boundary cycles at build time. Unreached
-siblings impose no source build, and bare Lua `require` hosts cannot compile
-`.titan` sources. For the full rules, diagnostics, and rebuild behavior, see
-[Source-only modules](modules.md#source-only-modules).
+whose reached logical members recorded dependencies from installed source,
+`titanc` satisfies each module once through ordinary single-owner lookup for
+the active target and build mode—with no redundant user `import`—either
+compiling authored or installed source once into the application (requiring
+`--output` only when installed fallback source is selected or on
+`--target browser`) or selecting a compatible standalone provider, canonical
+common-prefix bundle, or already-carried archive/bundle member without
+rebuilding the library. Explicit `.titan` imports remain strictly source-only;
+unreached siblings impose no additional logical build demand. Missing owners,
+incompatible interfaces, conflicting physical owners, and cross-boundary cycles
+are diagnosed at build time. For the full per-target, upgrade, editor, and
+bare-Lua rules, see [Source-only modules](modules.md#source-only-modules).
 
 Within each compiled format, lookup is **path-root first, shallowest prefix to
 exact module**. For logical module `a.b.c`, one directory is probed as:

@@ -496,8 +496,10 @@ The author-facing packaging guide and complete rockspec example live in
   incorporating the standard library or other external Titan dependencies. A
   compiled library may import an installed source-only module without owning or
   embedding it (see [Source-only modules](../language/modules.md#source-only-modules));
-  each consuming application or `--test` executable compiles required
-  source-only dependencies once into `--output`.
+  each consuming application or `--test` executable satisfies each recorded
+  dependency once through ordinary single-owner lookup (binding a compatible
+  compiled provider or canonical prefix bundle, or compiling source once into
+  `--output` when installed fallback source is selected).
   `--static` is rejected on every final no-main library output, including
   canonical bundles (`-c --static` remains available for individual objects
   targeting a later executable). Dynamic/default applications may fall back to

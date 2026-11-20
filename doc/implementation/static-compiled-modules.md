@@ -415,31 +415,39 @@ probe side effects.
 
 Application and `--test` preflight runs `perf.plan_source_obligations`, which
 iteratively resolves reached logical members' `source_requirements` (via
-`plan.load_sources`) alongside native archive `imports` (via
+`plan.load_requirements`) alongside native archive `imports` (via
 `perf.demand_archive_modules(context, plan, requirements)`) in one fixed point
 before output reservation, worker scheduling, and certification. Each recorded
-source requirement demands actual source—searched in authored `--tree` roots
-first, then the read-only installed SDK fallback `<root>/lib/titan/0.6`—never
-silently satisfied by a later installed compiled binary; an independently
-selected compiled provider or an archive physically carrying that module is
-rejected (`static provider '<archive>' physically contains required source
-module '<name>'`). Materialized sources enter the build as ordinary
-application-owned source dependencies whose own current imports feed the same
-fixed point. On native executables, `perf.demand_archive_modules` traverses
-written imports of reached archive members: it first honors the application's
-sources (including materialized source requirements) and already chosen
-archives; strict `--static` resolves other reached names through the archive
-pass and rejects missing inventories, missing owners, and `cyclic archive
-import` cycles. A default executable follows an ordinary private archive edge
-only when its dependency is already selected or belongs to the importing
+requirement resolves through ordinary single-owner lookup for the active target
+and build mode—first checking members already carried by selected providers
+(`perf.carried_requirement`, allowing a selected archive to satisfy its own
+name while rejecting an independent physical duplicate in another provider),
+then normal provider/source lookup (standalone provider, canonical common-prefix
+bundle, authored `--tree` source, or read-only `<root>/lib/titan/0.6` source;
+strict `--static` accepts only `.a` archives or source and rejects DSO-only
+providers; browser accepts only eligible Wasm archives or source). An archive
+physically carrying a source-selected module (`context.source_modules[name]`)
+or a module independently resolved as a different kind is still rejected
+(`static provider '<archive>' physically contains source-selected module
+'<name>'` / `... physically contains module '<name>', which also resolved
+independently as <kind>`). Materialized source requirements enter the build as
+ordinary application-owned source dependencies whose current imports feed the
+same fixed point, while compiled requirements feed their own recorded
+`source_requirements` (and under `--static`, archive `imports`) back into it.
+On native executables, `perf.demand_archive_modules` traverses written imports
+of reached archive members: it first honors the application's sources and
+already chosen archives; strict `--static` resolves other reached names through
+the archive pass and rejects missing inventories, missing owners, and `cyclic
+archive import` cycles. A default executable follows an ordinary private archive
+edge only when its dependency is already selected or belongs to the importing
 member's archive, keeping the recorded DSO fallback otherwise. Unified cycle
-detection checks cross-boundary cycles across sources, reached archive
+detection checks cross-boundary cycles across sources, strict-static archive
 `imports`, and reached `source_requirements` (`cyclic source requirement: ...`)
 on all targets. Reached names and archive observations feed worker selection,
 the standalone protocol check, and final-link certification. Dormant siblings
 supply physical collision information only: their `imports`,
-`source_requirements`, and nominal interfaces impose neither archive
-extraction nor source builds.
+`source_requirements`, and nominal interfaces impose no additional logical
+archive extraction or build demand.
 
 ## Resolver provenance versus native binding
 
@@ -471,10 +479,11 @@ nominal record:
   exposer's `source_requirements`, it tries compiled lookup
   (`find_dependency_interface`) first in noncommitting type-only mode,
   recording the dynamic fallback constraint on a hit;
-* in an unplanned open-world semantic check where the exposer carries
-  `source_requirements`, a directly required owner, an already-selected source
-  owner, or a clean compiled miss enters that recorded frontier lazily on
-  demand ([Contextual source-requirement
+* in an unplanned open-world semantic check (or planned/worker check) where the
+  exposing non-dormant member carries `source_requirements`, a directly
+  required owner, an already-selected source owner (in semantic recovery), or a
+  clean compiled miss enters that recorded frontier lazily on demand via
+  ordinary single-owner election ([Contextual source-requirement
   recovery](driver.md#contextual-source-requirement-recovery)).
 
 Type-only recovery never adds an archive link input. Native executable

@@ -130,7 +130,10 @@ source entries and registry). Saved indexing obtains the
 eligible embedded and already selected binary inventory through
 `driver.completion_binary_catalog(context)` after source/provider precedence is
 settled. Capture every module carried by each finalized selected static
-archive, including siblings that saved code never imported. Eligible embedded
+archive, including siblings that saved code never imported, as well as carried
+contextual binary interfaces (`not resolution.ordinary_lookup` in
+`context.contextual_resolutions`) so closed-world completion stays disk-free
+when a compiled requirement exposes a carried binary owner. Eligible embedded
 interfaces retain precedence over unimported static siblings; actual imported
 selections and source exclusions remain authoritative. Archives inspected only
 for contextual type recovery or displaced by source are not selected inventory.
