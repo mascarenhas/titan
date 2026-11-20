@@ -626,6 +626,8 @@ titan-uninstall titan-cui
 
 ### Staging layout (`dist/`)
 
+Build a normal native library module—or a collection of related modules compiled together—**without `--static`** so it publishes only its own provider pair (`.so` and `.a` on Linux/macOS; `.dll` only on Windows) and never embeds the standard library or other package dependencies. Declare dependencies in the rockspec instead (for example, a router package depends on and consumes the canonical standard library and its dependency rocks rather than embedding copies of them). Reserve native `--static` library builds for canonical bundles of related modules such as Titan's own standard library; other libraries never embed the standard library. On Linux and macOS, a `--static` standalone or `--test` executable embeds the complete transitive Titan dependency closure from `.a` archives alongside compiled authored project sources—with no fallback to shared Titan `.so` providers (a missing archive is a link-time error)—without statically linking `libc`, OS support, or external native libraries.
+
 `titan-install --path "$(PREFIX)"` publishes regular files recursively from three namespaces under `$(PREFIX)/dist/`:
 
 | Staged directory | Published destination | Contents |

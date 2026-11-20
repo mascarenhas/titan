@@ -490,7 +490,17 @@ The author-facing packaging guide and complete rockspec example live in
   namespaces under `<rock-version-dir>/dist/`: `dist/modules/` maps to
   `<tree>/lib/titan/<Titan major.minor>/`, optional `dist/include/` maps to
   `<tree>/include/`, and optional `dist/lib/` maps to `<tree>/lib/`. There is
-  no `dist/bin/`. Relative payload entry names must use unambiguous portable
+  no `dist/bin/`. Normal native module packages build their own provider pair
+  without `--static` (`.so`/`.a` on Unix, `.dll` only on Windows) and declare
+  package dependencies rather than embedding the standard library or other
+  dependencies; native `--static` library builds are reserved for canonical
+  bundles of related modules (such as the standard library, which other
+  packages never embed), while Unix `--static` standalone and `--test`
+  executables embed the complete transitive Titan dependency closure from `.a`
+  archives alongside compiled authored sources (with no fallback to shared
+  Titan providers and a link-time diagnostic on a missing archive, governing
+  Titan modules rather than static linkage of `libc` or external native
+  libraries). Relative payload entry names must use unambiguous portable
   ASCII ordinary file components (spaces are allowed; Windows reserved or
   ambiguous spellings, symlinks, and path/case aliases are refused, and
   ownership keys compare ASCII case-insensitively). This restriction applies
