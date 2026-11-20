@@ -216,8 +216,9 @@ function import_module(loadmods, initmods, sigs, mprefixes,
         -- The checker may have rehydrated this logical module from an ancestor
         -- container. Its transient file field records that physical provider;
         -- logical symbol names remain derived from modname below.
-        local file = tlcontext.check_only_sources and tlcontext.check_only_sources[modname]
-            and "" or node._type.file
+        local supplied = tlcontext.check_only_sources and tlcontext.check_only_sources[modname] or
+            tlcontext.check_only_binaries and tlcontext.check_only_binaries[modname]
+        local file = supplied and "" or node._type.file
         tlcontext.binary_modules[modname] = tlcontext.binary_modules[modname]
             or rawget(node, "_declared_type") or node._type
         -- Aliases keep separate module slots but share one canonical handle.

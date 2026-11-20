@@ -124,17 +124,26 @@ and running `completion_finish`
 The binary kind is `embedded`, `dynamic`, or `static`. The closed catalog rejects
 missing dependencies and source-required imports of captured binaries. It never
 falls back to newer filesystem source or providers, and never consults disk to
-re-acquire a captured binary's `source_requirements` frontier (any source-backed
-nominal owner exposed by a captured binary must come from the captured checked
-source entries and registry). Saved indexing obtains the
+re-acquire a captured binary's `source_requirements` frontier (any nominal owner
+exposed by a captured binary must come from the captured checked source entries,
+captured binary interfaces, and registry). Saved indexing obtains the
 eligible embedded and already selected binary inventory through
 `driver.completion_binary_catalog(context)` after source/provider precedence is
 settled. Capture every module carried by each finalized selected static
-archive, including siblings that saved code never imported. Eligible embedded
+archive, including siblings that saved code never imported. After finalization
+(`context.finalized_selection`), the catalog also captures finalized contextual
+binary owner views (`resolution.interface` from `context.contextual_resolutions`)
+for owners not already present in the catalog or `driver.imported`—under
+`analysis_only`, both carried and independently looked-up contextual binary
+owners (only the interface actually used, never the whole inventory of an
+archive inspected only for that owner), and outside `analysis_only` carried
+(`not resolution.ordinary_lookup`) owners only—omitting any owner with
+competing finalized contextual provider views. Eligible embedded
 interfaces retain precedence over unimported static siblings; actual imported
 selections and source exclusions remain authoritative. Archives inspected only
 for contextual type recovery or displaced by source are not selected inventory.
-That helper does not discover filesystem modules or import archive siblings.
+That helper does not discover filesystem modules, manufacture ordinary imports
+for contextual binary owners, or import archive siblings.
 
 `transient_caches` disables persistent native C-probe records per resolver; it
 never changes process environment. The host's private graph-cache adapter may

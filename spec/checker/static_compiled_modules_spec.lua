@@ -648,6 +648,8 @@ end
         local mid_record = public_record("chain.mid.Link", {
             types.Field("chain.mid.Link", "box",
                 types.Nominal("chain.leaf.Box"), 0, false),
+            types.Field("chain.mid.Link", "external",
+                types.Nominal("chain.external.Other"), 1, false),
         })
         local mid = types.Module("chain.mid", {
             types.ModuleMember("chain.mid", "Link", mid_record, nil),
@@ -689,6 +691,9 @@ end
         end
 
         local context = driver.new_resolver_context()
+        local external = cache_provider(context, "chain/external.a", {
+            ["chain.external"] = owner_interface("chain.external", "Other"),
+        })
         local loader = driver.defaultloader({}, { context = context })
         local modtype, errors = checker.checkimport("chain.api", loader)
         assert.truthy(modtype, table.concat(errors or {}, "\n"))
@@ -713,6 +718,15 @@ end
                 context.native_interface_types[owner].name)
             assert.is_nil(driver.imported[owner])
         end
+        assert.truthy(types.registry["chain.external.Other"])
+        assert.is_nil(driver.imported["chain.external"])
+        assert.same({}, context.selected_static_providers)
+        local observation
+        for _, row in ipairs(contextual_resolutions(context)) do
+            if row.owner == "chain.external" then observation = row end
+        end
+        assert.same({ owner = "chain.external", exposer = "chain.api", kind = "static",
+            provider_file = external.archive, ordinary_lookup = true }, observation)
     end)
 
     it("uses a visible owner archive only for producer-dynamic type recovery",

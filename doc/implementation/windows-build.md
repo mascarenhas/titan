@@ -411,16 +411,20 @@ from `compile_windows_program`) embeds the logical identity and
 callback resolves that provider relative to `<exe-dir>/../lib/titan/0.6`,
 checks the native ABI, and invokes its exact Lua opener inside the protected
 entrypoint. When `context.application_source_requirements` is non-nil,
-`perf.linked_module_catalog(names, values.PROVIDER)` emits a sorted
-`TitanLinkedModule` array with `NULL` resolver pointers and
-`TitanLinkedModules.provider` set to the companion application provider DLL,
-installed into `LUA_REGISTRYINDEX[TITAN_LINKED_MODULES_KEY]` in `pmain` before
-`require("$MODNAME")`. `titan_path_find_linked_module` returns
-`loadlib(L, linked->provider)`, so a loaded library DLL resolves the app-owned
-module's already-exported `_abi_value`, `_compatibility`, and `_init` entries
-and then switches to the initialized canonical in-memory resolver—without
-passing hidden resolver pointers across the PE boundary, adding general exports
-to the application DLL, or altering process-wide DLL search order. Argument
+`perf.linked_module_catalog(modules, options.provider)` emits a sorted
+`TitanLinkedModule` array with `NULL` resolver pointers and per-row `provider`
+paths—the companion application provider DLL for in-image source modules (never
+the launcher EXE basename) and the selected external relative DLL path
+(standalone or canonical prefix bundle) for external required DLLs—installed
+into `LUA_REGISTRYINDEX[TITAN_LINKED_MODULES_KEY]` in `pmain` before
+`require("$MODNAME")` ([The linked provider
+set](codegen-overview.md#the-linked-provider-set)). `titan_path_find_linked_module`
+opens `entry->provider` via `loadlib`, so a loaded library DLL resolves the
+selected module's already-exported `_abi_value`, `_compatibility`, and `_init`
+entries and then switches to the initialized canonical in-memory
+resolver—without passing hidden resolver pointers across the PE boundary,
+adding general exports to the application DLL, or altering process-wide DLL
+search order. Argument
 reconstruction, bootstrap hook selection, error handling, Lua-state closure,
 and exit status are shared with Unix; see [Linking a standalone
 program](driver.md#linking-a-standalone-program-drivercompile_program).

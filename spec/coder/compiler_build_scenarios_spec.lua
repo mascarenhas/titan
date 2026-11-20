@@ -909,7 +909,7 @@ function Quantity.new(count: integer): Quantity
   return { count = count, data = data }
 end
 ]])
-        write(lib .. "/meter.titan", [[
+        write(lib .. "/instruments/meter.titan", [[
 local strings = import "string"
 local model = import "model"
 local units = import "units"
@@ -929,7 +929,7 @@ function writer(): strings.StringWriter
 end
 ]])
         put_source("library/via.titan", [[
-local meter = import "meter"
+local meter = import "instruments.meter"
 
 type Quantity = meter.Quantity
 
@@ -1011,7 +1011,7 @@ end
             local step = built("library", output, "via")
             assert.matches("Finished in [^\n]+: 1 compiled, linked via", step.raw)
             assert.equal(1, #step.module_compiles, step.raw)
-            assert.is_false(exists(output .. "/meter.o"))
+            assert.is_false(exists(output .. "/instruments/meter.o"))
             assert.is_false(exists(output .. "/units.o"))
             local object = output .. "/via.o"
             local record = assert(objectmetadata.read(read(object), object))
@@ -1029,7 +1029,7 @@ end
                 local archive = output .. "/via.a"
                 local parsed = assert(staticmetadata.scan_archive(archive))
                 assert.same({ "via" }, parsed.key_order)
-                assert.same({ "meter" }, parsed.entries.via.source_requirements)
+                assert.same({ "instruments.meter" }, parsed.entries.via.source_requirements)
                 install(output, "via.a")
             end
         end
@@ -1044,14 +1044,23 @@ end
         run("model_only", control)
         publish(build_dir .. "/library")
 
-        -- The saved compiler API consumes the same published provider as the
-        -- executable below, without a planner, output directory or private SDK
-        -- lookup configuration. A later compiled meter cannot stand in for
-        -- the producer's recorded source edge.
-        put_source("replacement/meter.titan", "const binary_only = true\n")
-        local replacement = build_dir .. "/replacement"
-        built("replacement", replacement, "meter")
-        install(replacement, "meter" .. SHARED_SUFFIX)
+        -- Exercise the saved compiler API with the same published via, first
+        -- against source and then against two physically distinct binaries.
+        local replacement, bundle = build_dir .. "/replacement", build_dir .. "/bundle"
+        put_source("replacement/instruments/meter.titan", read(lib .. "/instruments/meter.titan"))
+        put_source("replacement/units.titan", read(lib .. "/units.titan"))
+        put_source("replacement/units.h", read(lib .. "/units.h"))
+        put_source("replacement/instruments/marker.titan", "const marker = true\n")
+        built("replacement", replacement, "instruments.meter")
+        built("replacement", bundle, "instruments.meter", "instruments.marker")
+        local separate_owner, separate_meter = build_dir .. "/separate-owner", build_dir .. "/separate-meter"
+        put_source("separate-meter/instruments/meter.titan", read(lib .. "/instruments/meter.titan"))
+        built("replacement", separate_owner, "units")
+        install(separate_owner, "units" .. SHARED_SUFFIX)
+        if not platform.windows then install(separate_owner, "units.a") end
+        built("separate-meter", separate_meter, "instruments.meter")
+        assert(os.remove(lib .. "/units" .. SHARED_SUFFIX))
+        if not platform.windows then assert(os.remove(lib .. "/units.a")) end
         local client = put_source("semantic/consumer.titan", [[
 local via = import "via"
 function inspect(): integer
@@ -1065,8 +1074,9 @@ local completion = require "titan-compiler.completion"
 local driver = require "titan-compiler.driver"
 local paths = require "titan-compiler.path"
 local types = require "titan-compiler.types"
-local source_root, installed, client = ...
-local meter_file = installed .. "/meter.titan"
+local source_root, installed, client, expected_provider, expected_owner, owner_artifact = ...
+local meter_name = "instruments.meter"
+local meter_file = installed .. "/instruments/meter.titan"
 local owner_file = installed .. "/units.titan"
 driver.TITAN_SOURCE_PATH, driver.TITAN_BIN_PATH = source_root, installed
 
@@ -1100,8 +1110,8 @@ local function finalize(context)
     assert(result, errors and table.concat(errors, "\n"))
 end
 local function verify_owner()
-    local provider, meter, units = driver.imported.via, driver.imported.meter, driver.imported.units
-    assert(provider.kind == "dynamic" and provider.source_requirements[1] == "meter"
+    local provider, meter, units = driver.imported.via, driver.imported[meter_name], driver.imported.units
+    assert(provider.kind == "dynamic" and provider.source_requirements[1] == meter_name
         and #provider.source_requirements == 1)
     assert(meter.ast and meter.deps.units and paths.to_slash(meter.filename) == meter_file)
     assert(units.ast and paths.to_slash(units.source_files[1]) == owner_file)
@@ -1110,58 +1120,61 @@ local function verify_owner()
     assert(quantity.fields[1].name == "count" and quantity.fields[1].type._tag == "Type.Integer")
 end
 
-local loader, context = start(false)
+local loader, context = start(false, nil, { source_first = expected_provider ~= nil })
 clean("via", loader)
 verify_owner()
 finalize(context)
 assert(driver.close_loader(loader))
 
-loader, context = start(true)
+loader, context = start(true, nil, { source_first = expected_provider ~= nil })
 local consumer = clean("consumer", loader)
 assert(consumer.members.inspect.type.rettypes[1]._tag == "Type.Integer")
 verify_owner()
 assert(driver.imported.consumer.ast._analysis_only)
-assert(driver.imported.via.deps.meter and not driver.imported.via.deps.units)
+assert(driver.imported.via.deps[meter_name] and not driver.imported.via.deps.units)
 finalize(context)
 for _, provenance in pairs(context.contextual_resolutions) do
     assert(provenance.owner ~= "units")
 end
 local binaries = driver.completion_binary_catalog(context)
 local saved_sources = {}
-for _, name in ipairs({ "meter", "units" }) do
+for _, name in ipairs({ meter_name, "units" }) do
     local payload = assert(driver.encode_project_entry(driver.imported[name]))
     saved_sources[name] = assert(driver.decode_project_entry(payload))
 end
 assert(driver.close_loader(loader))
 
-local text = read(client)
-local start_of_field = assert(text:find("count", 1, true))
-local prepared = assert(completion.prepare(client, text, start_of_field + 1))
-local io_strategy = require("titan-compiler.io").new_sync()
-local read_file = io_strategy.read_file
-function io_strategy:read_file(filename, ...)
-    assert(not filename:match("%.titan$"), "completion read " .. filename)
-    return read_file(self, filename, ...)
+local function assert_closed_completion(binaries, saved_sources)
+    local text = read(client)
+    local start_of_field = assert(text:find("count", 1, true))
+    local prepared = assert(completion.prepare(client, text, start_of_field + 1))
+    local io_strategy = require("titan-compiler.io").new_sync()
+    local read_file = io_strategy.read_file
+    function io_strategy:read_file(filename, ...)
+        assert(not filename:match("%.titan$"), "completion read " .. filename)
+        return read_file(self, filename, ...)
+    end
+    local native = require "titan"
+    local loadlib = native._loadlib
+    native._loadlib = function() error("completion inspected a DSO") end
+    local loader = start(true, {
+        cached_binary_interfaces = binaries, cached_source_entries = saved_sources,
+        source_roots = { consumer = true },
+        source_overrides = { consumer = { kind = "generated", main = client, files = { client },
+            contents = { [client] = prepared.text } } },
+    }, { completion_closed_world = true, completion = prepared.request, io = io_strategy })
+    assert(loader("consumer"))
+    local candidates = assert(driver.imported.consumer.completion).candidates
+    local found
+    for _, candidate in ipairs(candidates) do
+        if candidate.name == "count" then found = candidate end
+        assert(candidate.name ~= "data")
+    end
+    assert(found and found.detail == "integer")
+    assert(driver.close_loader(loader))
+    native._loadlib = loadlib
 end
-local native = require "titan"
-local loadlib = native._loadlib
-native._loadlib = function() error("completion inspected a DSO") end
-loader = start(true, {
-    cached_binary_interfaces = binaries, cached_source_entries = saved_sources,
-    source_roots = { consumer = true },
-    source_overrides = { consumer = { kind = "generated", main = client, files = { client },
-        contents = { [client] = prepared.text } } },
-}, { completion_closed_world = true, completion = prepared.request, io = io_strategy })
-assert(loader("consumer"))
-local candidates = assert(driver.imported.consumer.completion).candidates
-local found
-for _, candidate in ipairs(candidates) do
-    if candidate.name == "count" then found = candidate end
-    assert(candidate.name ~= "data")
-end
-assert(found and found.detail == "integer")
-assert(driver.close_loader(loader))
-native._loadlib = loadlib
+assert_closed_completion(binaries, saved_sources)
 
 local meter = read(meter_file)
 local function reselect(name, source_required)
@@ -1173,33 +1186,90 @@ end
 local function reject(detail)
     local attempt = start(true)
     assert(attempt("via"))
-    assert(driver.imported.meter == nil)
+    assert(driver.imported[meter_name] == nil)
     for _ = 1, 2 do
         local modtype, err = checker.checkimport("via", attempt)
-        assert(not modtype and err:find("module 'via' requires source for 'meter'", 1, true), err)
+        assert(not modtype and err:find("module 'via' requires module '" .. meter_name .. "'", 1, true), err)
         assert(err:find(detail, 1, true), err)
     end
     assert(driver.close_loader(attempt))
 end
 assert(paths.to_slash(reselect("units", false).main_file) == owner_file)
-assert(paths.to_slash(reselect("meter", true).main_file) == meter_file)
+assert(paths.to_slash(reselect(meter_name, true).main_file) == meter_file)
 
-for _, order in ipairs({ { "units", "via" }, { "via", "units" } }) do
-    loader, context = start(true)
-    for _, name in ipairs(order) do clean(name, loader) end
-    verify_owner()
-    finalize(context)
+if not expected_provider then
+    for _, order in ipairs({ { "units", "via" }, { "via", "units" } }) do
+        loader, context = start(true)
+        for _, name in ipairs(order) do clean(name, loader) end
+        verify_owner()
+        finalize(context)
+        assert(driver.close_loader(loader))
+    end
+    loader = start(true, { source_roots = { units = true } })
+    local ok, missing = loader("units")
+    assert(not ok and missing == "source module 'units' not found", missing)
     assert(driver.close_loader(loader))
 end
-loader = start(true, { source_roots = { units = true } })
-local ok, missing = loader("units")
-assert(not ok and missing == "source module 'units' not found", missing)
-assert(driver.close_loader(loader))
-
 assert(os.remove(meter_file))
-assert(reselect("meter", true).kind == "error")
-assert(reselect("meter", false).kind == "dynamic")
-reject("source module 'meter' not found")
+assert(reselect(meter_name, true).kind == "error")
+if expected_provider then
+    local units = read(owner_file)
+    assert(os.remove(owner_file))
+    if expected_owner then
+        write(expected_owner, read(owner_artifact))
+        local prefer_static = expected_owner:sub(-2) == ".a"
+        local kind = prefer_static and "static" or "dynamic"
+        loader, context = start(true, { cached_source_entries = saved_sources }, { prefer_static = prefer_static })
+        clean("consumer", loader)
+        assert(driver.imported.via.kind == kind)
+        assert(driver.imported.units == nil)
+        finalize(context)
+        assert(driver.imported.units == nil)
+        for _, provider in ipairs(context.selected_static_providers) do
+            assert(paths.to_slash(provider.archive) ~= expected_owner)
+        end
+        local observation
+        for _, row in pairs(context.contextual_resolutions) do
+            if row.owner == "units" and row.exposer == "via" then observation = row end
+        end
+        assert(observation and observation.ordinary_lookup and observation.kind == kind)
+        assert(paths.to_slash(observation.provider_file) == expected_owner)
+        binaries = driver.completion_binary_catalog(context)
+        local captured = assert(binaries.units, "saved catalog omitted the contextual-only owner")
+        assert(captured.kind == kind and paths.to_slash(captured.filename) == expected_owner)
+        assert(driver.close_loader(loader))
+        assert_closed_completion(binaries, {})
+        write(meter_file, meter)
+        write(owner_file, units)
+        return
+    end
+    local elected = reselect(meter_name, false)
+    assert(elected.kind == "dynamic" and paths.to_slash(elected.provider_file) == expected_provider)
+    for _, analysis in ipairs({ false, true }) do
+        loader, context = start(analysis, { cached_source_entries = saved_sources })
+        clean("consumer", loader)
+        local chosen = driver.imported[meter_name]
+        assert(chosen.kind == "dynamic" and paths.to_slash(chosen.filename) == expected_provider)
+        assert(driver.imported.via.deps[meter_name] and not driver.imported.via.deps.units)
+        assert(driver.imported.units == nil)
+        assert(types.registry["units.Quantity"].fields[1].name == "count")
+        finalize(context)
+        local carried
+        for _, row in pairs(context.contextual_resolutions) do
+            if row.owner == "units" and row.exposer == meter_name then carried = row end
+        end
+        assert(carried and not carried.ordinary_lookup and
+            paths.to_slash(carried.provider_file) == expected_provider)
+        binaries = driver.completion_binary_catalog(context)
+        assert(driver.close_loader(loader))
+        if analysis then assert_closed_completion(binaries, {}) end
+    end
+    write(meter_file, meter)
+    write(owner_file, units)
+    return
+end
+assert(reselect(meter_name, false).kind == "missing")
+reject("not found")
 write(meter_file, "record\n")
 reject("meter.titan:")
 write(meter_file, "const broken: integer = {}\n")
@@ -1208,13 +1278,14 @@ write(meter_file, 'local via = import "via"\n')
 reject("circular reference")
 write(meter_file, meter)
 
-local override = source_root .. "/meter.titan"
+assert(require("lfs").mkdir(source_root .. "/instruments"))
+local override = source_root .. "/instruments/meter.titan"
 write(override, meter .. "\nconst authored = true\n")
-assert(paths.to_slash(reselect("meter", true).main_file) == override)
+assert(paths.to_slash(reselect(meter_name, true).main_file) == override)
 loader, context = start(true, { cached_source_entries = saved_sources })
 clean("consumer", loader)
-assert(paths.to_slash(driver.imported.meter.filename) == override)
-assert(driver.imported.meter.type.members.authored and driver.imported.meter.ast)
+assert(paths.to_slash(driver.imported[meter_name].filename) == override)
+assert(driver.imported[meter_name].type.members.authored and driver.imported[meter_name].ast)
 finalize(context)
 assert(driver.close_loader(loader))
 assert(os.remove(override))
@@ -1227,31 +1298,52 @@ finalize(context)
 assert(driver.close_loader(loader))
 ]=])
         local semantic_inputs = collect_artifacts(lib)
-        local argv, env = compiler_argv({
-            frontend = api_fixture, args = { source_dir .. "/semantic", lib, client },
-            env = { TITAN_ROOT = sdk, PATH = tool_path },
-            init_code = collector:init_code(),
-        })
-        local ok, diagnostics = run_command(argv, workspace, env)
-        assert.is_true(ok, diagnostics)
+        local function run_semantics(provider, nominal_owner, owner_artifact)
+            local argv, env = compiler_argv({
+                frontend = api_fixture,
+                args = { source_dir .. "/semantic", lib, client, provider, nominal_owner, owner_artifact },
+                env = { TITAN_ROOT = sdk, PATH = tool_path },
+                init_code = collector:init_code(),
+            })
+            local ok, diagnostics = run_command(argv, workspace, env)
+            assert.is_true(ok, diagnostics)
+        end
+        run_semantics()
+        for _, selection in ipairs({
+            { replacement, "instruments/meter" }, { bundle, "instruments" },
+        }) do
+            local file = selection[2] .. SHARED_SUFFIX
+            install(selection[1], file)
+            run_semantics(lib .. "/" .. file)
+            assert(os.remove(lib .. "/" .. file))
+        end
+        local function separate_semantics(suffix)
+            local owner_file = "units" .. suffix
+            local provider_file = "instruments/meter" .. suffix
+            install(separate_meter, provider_file)
+            run_semantics(lib .. "/" .. provider_file, lib .. "/" .. owner_file, separate_owner .. "/" .. owner_file)
+            assert(os.remove(lib .. "/" .. owner_file))
+            assert(os.remove(lib .. "/" .. provider_file))
+        end
+        separate_semantics(SHARED_SUFFIX)
+        if not platform.windows then separate_semantics(".a") end
         assert.same(semantic_inputs, collect_artifacts(lib))
         assert.same({}, collect_artifacts(source_dir .. "/semantic"))
         assert.is_false(exists(lib .. "/.titan-build.lock"))
-        assert(os.remove(lib .. "/meter" .. SHARED_SUFFIX))
 
         local wrapper = build_dir .. "/wrapper"
         local objects = built("wrapper", wrapper, "-c", "wrap")
         assert.equal(1, #objects.module_compiles, objects.raw)
         assert.is_false(exists(wrapper .. "/wrap" .. SHARED_SUFFIX))
         assert.is_false(exists(wrapper .. "/wrap.a"))
-        for _, dependency in ipairs({ "meter", "units" }) do
+        for _, dependency in ipairs({ "instruments/meter", "units" }) do
             assert.is_false(exists(wrapper .. "/" .. dependency .. ".o"))
         end
         local object = wrapper .. "/wrap.o"
         local metadata = assert(objectmetadata.read(read(object), object)).object_metadata
-        assert.same({ "meter" }, metadata.source_requirements)
+        assert.same({ "instruments.meter" }, metadata.source_requirements)
         assert.equal("global", metadata.bindings.units)
-        assert.is_nil(metadata.bindings.meter)
+        assert.is_nil(metadata.bindings["instruments.meter"])
 
         local wrapped_library = built("wrapper", wrapper, "wrap")
         assert.truthy(wrapped_library.object_hits.wrap, wrapped_library.raw)
@@ -1265,14 +1357,14 @@ assert(driver.close_loader(loader))
             { "llvm-readobj", "--coff-exports", image } or { "nm", "-g", image }, workspace)
         assert.is_true(inspected, exports)
         assert.matches("wrap_init", exports, 1, true)
-        for _, dependency in ipairs({ "meter", "units", "via" }) do
+        for _, dependency in ipairs({ "instruments_meter", "units", "via" }) do
             assert.not_matches(dependency .. "_init", exports, 1, true)
         end
         install(wrapper, "wrap" .. SHARED_SUFFIX)
         if not platform.windows then
             local archive = assert(staticmetadata.scan_archive(wrapper .. "/wrap.a"))
             assert.same({ "wrap" }, archive.key_order)
-            assert.same({ "meter" }, archive.entries.wrap.source_requirements)
+            assert.same({ "instruments.meter" }, archive.entries.wrap.source_requirements)
             install(wrapper, "wrap.a")
         end
         local wrapped = build_dir .. "/wrapped"
@@ -1282,7 +1374,7 @@ assert(driver.close_loader(loader))
         local cold = built("app", dynamic, "nominal")
         assert.truthy(cold.object_misses.units, cold.raw)
         local launcher = launcher_source(dynamic, "nominal")
-        for _, name in ipairs({ "meter", "nominal", "units" }) do
+        for _, name in ipairs({ "instruments.meter", "nominal", "units" }) do
             local _, count = launcher:gsub('{ "' .. name .. '",', "")
             assert.equal(1, count, name .. " must have exactly one catalog entry")
         end
@@ -1298,7 +1390,7 @@ assert(driver.close_loader(loader))
         run("nominal", dynamic)
         local warm = built("app", dynamic, "nominal")
         assert.truthy(warm.object_hits.units, warm.raw)
-        assert.truthy(warm.object_hits.meter, warm.raw)
+        assert.truthy(warm.object_hits["instruments.meter"], warm.raw)
         assert.truthy(next(warm.link_hits), warm.raw)
         assert.same({}, warm.module_compiles)
         if not platform.windows then
@@ -1445,6 +1537,8 @@ local facade = import "facade"
 function main(args: {string}): integer
   local first = 41
   if args[1] then first = 42 end
+  if args[1] == "own" then first = 43 end
+  if args[1] == "bundle" then first = 44 end
   if not facade.check(first) then return 1 end
   return 0
 end
@@ -1606,16 +1700,18 @@ function next(): integer return counter.serial end
             local competing = build_dir .. "/competing"
             built("other", competing, "other.live", "other.dormant")
             assert(uv.fs_copyfile(competing .. "/other.a", lib .. "/other.a"))
-            put_source("app/competing.titan", [[
+            put_source("competing-app/shared/counter.titan", "const serial = 0\n")
+            put_source("competing-app/competing.titan", [[
 local other = import "other.live"
+local own = import "shared.counter.titan"
 local facade = import "facade"
 
 function main(args: {string}): integer
-  if not facade.check(other.next()) then return 1 end
+  if not facade.check(other.next() + own.serial) then return 1 end
   return 0
 end
 ]])
-            local ok, diagnostic = compile("app", build_dir .. "/conflict", "--static", "competing")
+            local ok, diagnostic = compile("competing-app", build_dir .. "/conflict", "--static", "competing")
             assert.is_false(ok, diagnostic)
             assert.matches("shared.counter", diagnostic, 1, true)
             assert.matches("other.a", diagnostic, 1, true)
@@ -1670,19 +1766,139 @@ end
         assert.matches("cyclic source requirement: shared.counter -> facade -> shared.counter",
             cycle, 1, true)
         write(lib .. "/shared/counter.titan", original)
-        -- A later compiled replacement cannot satisfy a source obligation.
-        local replacement = build_dir .. "/replacement"
-        put_source("replacement/shared/counter.titan", "const unused = true\n")
-        built("replacement", replacement, "shared.counter")
-        assert(uv.fs_copyfile(replacement .. "/shared/counter" .. SHARED_SUFFIX,
-            lib .. "/shared/counter" .. SHARED_SUFFIX))
+        run(through, "through_facade", "changed")
         assert(os.remove(lib .. "/shared/counter.titan"))
         local ok, diagnostic = compile("app", through, "through_facade")
         assert.is_false(ok, diagnostic)
         assert.matches("shared.counter", diagnostic, 1, true)
         assert.matches("facade", diagnostic, 1, true)
-        assert.matches("--tree", diagnostic, 1, true)
         run(through, "through_facade", "changed")
+
+        local replacement = build_dir .. "/replacement"
+        local seed_output = build_dir .. "/replacement-seed"
+        put_source("replacement-seed/shared/seed.titan", read(lib .. "/shared/seed.titan"))
+        built("replacement-seed", seed_output, "shared.seed")
+        local function copy_provider(output, stem, suffix)
+            assert(uv.fs_copyfile(output .. "/" .. stem .. suffix, lib .. "/" .. stem .. suffix))
+        end
+        copy_provider(seed_output, "shared/seed", SHARED_SUFFIX)
+        if not platform.windows then copy_provider(seed_output, "shared/seed", ".a") end
+        local function replacement_source(extra)
+            return (original:gsub("serial = seed.start%(%)", "serial = seed.start() + " .. extra))
+        end
+        put_source("replacement/shared/counter.h", read(lib .. "/shared/counter.h"))
+        put_source("replacement/shared/counter.titan", replacement_source(1))
+        built("replacement", replacement, "shared.counter")
+        copy_provider(replacement, "shared/counter", SHARED_SUFFIX)
+        run(dynamic, "demo") -- the old app still provides A even when a binary exists
+        run(through, "through_facade", "changed")
+
+        local elected = build_dir .. "/elected"
+        -- No build-time traversal of the replacement DSO's private dependency.
+        local seed_image = "/shared/seed" .. SHARED_SUFFIX
+        assert(os.remove(lib .. seed_image))
+        assert(os.remove(lib .. "/shared/seed.titan"))
+        step = built("app", elected, "through_facade")
+        assert.equal(0, compile_count(step, "counter"), step.raw)
+        assert.is_false(exists(elected .. "/shared/counter.o"))
+        copy_provider(seed_output, "shared/seed", SHARED_SUFFIX)
+        run(elected, "through_facade", "own")
+        local bare = workspace .. "/bare-requirement.lua"
+        write(bare, [[
+require "titan"
+if ... == "initialized" then
+    require "shared.counter"
+    assert(require("left.live").next().serial == 43)
+else
+    local ok, err = pcall(require, "left.live")
+    assert(not ok and err:find("Titan module 'shared.counter' is not supplied by the application", 1, true), err)
+end
+]])
+        for _, mode in ipairs({ "uninitialized", "initialized" }) do
+            local argv, env = compiler_argv({
+                frontend = bare, args = { mode }, env = { TITAN_ROOT = sdk, PATH = tool_path },
+            })
+            env.TITAN_PATH_0_6 = lib
+            local ran, output = run_command(argv, workspace, env)
+            assert.is_true(ran, output)
+        end
+        step = built("app", elected, "through_facade")
+        assert.truthy(next(step.link_hits), step.raw)
+        run(elected, "through_facade", "own")
+        built("app", build_dir .. "/print-binary", "--print-ast", "demo")
+
+        if not platform.windows then
+            local strict = build_dir .. "/strict-replacement"
+            ok, diagnostic = compile("app", strict, "--static", "through_facade")
+            assert.is_false(ok, diagnostic)
+            assert.matches("shared.counter", diagnostic, 1, true)
+            assert.matches("shared providers are not used", diagnostic, 1, true)
+            copy_provider(replacement, "shared/counter", ".a")
+            local paired = build_dir .. "/paired-replacement"
+            built("app", paired, "through_facade")
+            run(paired, "through_facade", "own")
+            built("app", strict, "--static", "through_facade")
+            assert.is_false(exists(strict .. "/shared/counter.o"))
+            run(strict, "through_facade", "own")
+            assert(os.remove(lib .. "/shared/counter.a"))
+        end
+
+        local facade_source = source_dir .. "/facade/facade.titan"
+        write(facade_source, 'local counter = import "shared.counter"\n' ..
+            read(facade_source):gsub("right.check%(first, 1%)", "counter.serial == first and right.check(first, 1)"))
+        publish("facade", { "facade" }, "facade")
+        put_source("app/replacement_test.titan", [[
+local test = import "test"
+local facade = import "facade"
+
+function test_compiled_counter(context: test.Context)
+  test.assert(facade.check(43))
+end
+]])
+        local compiled_tests = build_dir .. "/test-compiled"
+        built("app", compiled_tests, "--test", "replacement_test")
+        assert.matches("[  PASSED  ] 1 test.", run(compiled_tests, "replacement_test"), 1, true)
+        write(lib .. "/shared/counter.titan", replacement_source(0))
+        built("app", build_dir .. "/prefer-source", "--source-first", "through_facade")
+        run(build_dir .. "/prefer-source", "through_facade", "changed")
+        assert(os.remove(lib .. "/shared/counter.titan"))
+
+        -- Keep B fixed across the two compiled selections. A's logical name
+        -- does not change, but the same output must publish a different row.
+        built("app", elected, "through_facade")
+        assert(os.remove(lib .. "/shared/counter" .. SHARED_SUFFIX))
+        local bundle = build_dir .. "/replacement-bundle"
+        put_source("replacement/shared/counter.titan", replacement_source(2))
+        put_source("replacement/shared/companion.titan", "const marker = true\n")
+        built("replacement", bundle, "shared.counter", "shared.companion")
+        copy_provider(bundle, "shared", SHARED_SUFFIX)
+        if not platform.windows then copy_provider(bundle, "shared", ".a") end
+        assert.is_false(exists(lib .. "/shared/counter" .. SHARED_SUFFIX))
+        step = built("app", elected, "through_facade")
+        assert.truthy(next(step.link_misses), step.raw)
+        assert.equal(0, compile_count(step, "counter"), step.raw)
+        run(elected, "through_facade", "bundle")
+        step = built("app", elected, "through_facade")
+        assert.truthy(next(step.link_hits), step.raw)
+        if not platform.windows then
+            local strict = build_dir .. "/strict-bundle"
+            built("app", strict, "--static", "through_facade")
+            run(strict, "through_facade", "bundle")
+            assert(os.remove(lib .. "/shared.a"))
+        end
+        assert(os.remove(lib .. "/shared" .. SHARED_SUFFIX))
+
+        local claimed = lib .. "/shared/counter" .. SHARED_SUFFIX
+        write(claimed, "invalid native image\n")
+        ok, diagnostic = compile("app", elected, "through_facade")
+        assert.is_false(ok, diagnostic)
+        assert.matches("shared/counter" .. SHARED_SUFFIX, diagnostic:gsub("\\", "/"), 1, true)
+        assert(os.remove(claimed))
+        put_source("replacement/shared/counter.titan",
+            (replacement_source(1):gsub("function next%(%)", "function next(delta: integer)")))
+        built("replacement", replacement, "shared.counter")
+        copy_provider(replacement, "shared/counter", SHARED_SUFFIX)
+        rejects_incompatible(build_dir .. "/incompatible-replacement")
 
         if not platform.windows then
             local deployment = workspace .. "/deployment"

@@ -144,8 +144,12 @@ property of this lookup, not part of the module's public type interface.
 ## Runtime imports reuse canonical logical modules
 
 The coder uses `node._type.file` (the relative provider selected above) as the
-fallback provider filename; generated C never repeats candidate probing. An
-import of `a.b.c` selected from `a/b.so` emits:
+fallback provider filename—or `""` (empty string) when a library build emits a
+forwarded external obligation (`check_only_sources` or `check_only_binaries`),
+disabling the library's own fallback so the consuming application's
+[linked provider set](codegen-overview.md#the-linked-provider-set) supplies the
+selected owner; generated C never repeats candidate probing. An import of
+`a.b.c` selected from `a/b.so` emits:
 
 ```c
 TitanModuleProvider a_b_c_provider =

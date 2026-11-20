@@ -907,7 +907,7 @@ if not args.compile_only and not args.print_ast then
         entry = {
             module = args.test and test_runner.MODULE_NAME or main_module,
             no_uv_bootstrap = args.no_uv_bootstrap == true,
-            linked_modules = resolver_context.linked_module_names,
+            linked_modules = resolver_context.linked_modules,
         },
         no_uv_bootstrap = args.no_uv_bootstrap == true,
         argv = driver.link_extra_flags(),

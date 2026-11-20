@@ -1296,55 +1296,66 @@ is a separate `RTLD_LAZY | RTLD_LOCAL` operation.
 
 Application and `--test` preflight walks reached archive `imports` and reached
 `source_requirements`. When an executable or test image activates private
-linked election (`elect_linked` on Unix, or `elect_app_sources` when
+linked election (`elect_linked` on Unix, or `app_requirements` when
 `context.application_source_requirements` is non-nil on any target),
 `finalize_resolver_context` reconciles canonical owners (`linked_owner`) and
-builds `context.linked_module_names` using every actual application-owned
-source module in `source_names` (excluding the synthetic test runner
-`titan.test.runner`, via `linked_source(name)`), not only the frontier names
-recorded in `context.application_source_requirements`—while a published
-library's folded `source_requirements` still stops at its direct or forwarded
-installed source names and never consumes that source's transitive imports.
-`perf.linked_module_catalog(names, provider)` and `perf.catalog_install`
-(`driver.lua`) emit one sorted `TitanLinkedModule` array and
-`TitanLinkedModules` descriptor and install it under `TITAN_LINKED_MODULES_KEY`
-in the Lua registry inside the protected entrypoint before requiring the root:
+builds `context.linked_modules`, a bytewise-sorted array of `{ name }` (for
+in-image modules) and `{ name, provider = selected.relative }` (for required
+external dynamic providers) entries covering every application-owned source
+module in `source_names` (excluding `titan.test.runner`), every required or
+`elect_linked` archive member in `selected_static_modules`, and every required
+module in `dynamic_names`—while a published library's folded
+`source_requirements` still stops at its direct or forwarded recorded names and
+never consumes a dependency's transitive imports.
+`perf.linked_module_catalog(modules, companion)` and `perf.catalog_install`
+(`driver.lua`) emit one sorted `TitanLinkedModule` array—each row carrying
+`{ const char *name; TitanModuleSymbols symbols; const char *provider; }`—and
+one uniform `TitanLinkedModules` descriptor (`{ begin, end }`) installed under
+`TITAN_LINKED_MODULES_KEY` in the Lua registry inside the protected entrypoint
+before requiring the root:
 
 * **Linux and macOS:** Enabled when `elect_linked` holds (strict `--static`,
   `--test`, physical archive owners, or dynamic imports with multiple linked
-  sources) or when `elect_app_sources` holds
-  (`context.application_source_requirements` is non-nil). The launcher emits
-  hidden `TITAN_SOURCE_LOCAL` native resolvers for all app-owned source modules
-  in `source_names` (excluding the synthetic test runner) plus, when
-  `elect_linked` holds, reached archive members (`selected_static_modules` with
-  `imports ~= nil`, which also retain strict `--static` `direct_provider`
-  reconciliation). Each archive entry is a strong reference that retains its
-  primary object; dormant siblings are never referenced. A default program with
-  only its source root and shared-provider imports carrying no source
-  obligations needs no catalog.
+  sources) or when `app_requirements` holds
+  (`context.application_source_requirements` is non-nil). In-image rows
+  (`source_names` excluding the synthetic test runner, plus reached archive
+  members from `selected_static_modules` that are required or elected under
+  `elect_linked`) emit hidden `TITAN_SOURCE_LOCAL` native resolvers with
+  `provider = NULL`; each archive entry is a strong reference that retains its
+  primary object while dormant siblings are never referenced. Required external
+  dynamic providers (`dynamic_names[name]` in `app_requirements`) emit
+  `{ name, NULL, "<relative-provider>" }` with the exact elected provider path
+  (such as `"warehouse.so"` for `warehouse.counter`), never emitting a hidden
+  resolver reference for an external DSO; ordinary unmarked dynamic imports do
+  not become catalog rows. A default program with only its source root and
+  shared-provider imports carrying no recorded obligations needs no catalog.
 * **Windows:** App-owned source modules live in the companion application
-  provider DLL, not the launcher EXE. Enabled only when `elect_app_sources`
+  provider DLL, not the launcher EXE. Enabled only when `app_requirements`
   holds (`context.application_source_requirements` is non-nil):
-  `entrypoint_contents` emits sorted entries for all app-owned source modules
-  in `source_names` (excluding the synthetic test runner) with `NULL` resolver
-  pointers and sets `TitanLinkedModules.provider` to the companion application
-  DLL (`$PROVIDER`). `titan_path_find_linked_module` opens that provider via
-  `loadlib`, so a loaded library DLL resolves the app-owned module's
-  already-exported `_abi_value`, `_compatibility`, and `_init` entries and then
-  switches to the initialized canonical in-memory resolver—without passing
-  hidden resolver pointers across the PE boundary or adding general PE exports
-  to the application DLL. Ordinary Windows builds without source obligations
-  omit the table.
-* **Browser (`--target browser`):** Enabled only when `elect_app_sources` holds
+  `entrypoint_contents` passes `options.provider` as `companion` to
+  `perf.linked_module_catalog(modules, companion)`. In-image source rows emit
+  `{ name, NULL, "<companion-dll>" }` (never the EXE basename), while external
+  required DLL rows emit `{ name, NULL, "<selected-relative-dll>" }` (standalone
+  or canonical prefix bundle). On a catalog hit, `titan_path_find_linked_module`
+  opens `entry->provider` lazily via `loadlib`, so a loaded library DLL resolves
+  the selected module's already-exported `_abi_value`, `_compatibility`, and
+  `_init` entries and then switches to the initialized canonical in-memory
+  resolver—without passing hidden resolver pointers across the PE boundary or
+  adding general PE exports to the application DLL. Ordinary Windows builds
+  without recorded obligations omit the table.
+* **Browser (`--target browser`):** Enabled only when `app_requirements` holds
   (`context.application_source_requirements` is non-nil):
-  `browser_entrypoint_contents` emits the sorted hidden-resolver table for all
-  app-owned source modules in `source_names` (excluding the synthetic test
-  runner) and installs it in `titan_browser_initialize_worker` before
-  `require("$MODNAME")`, anchoring those source objects under
-  `wasm-ld --gc-sections` with no new Wasm imports or host JavaScript/loader
-  changes. Ordinary browser builds without source obligations omit the table.
+  `browser_entrypoint_contents` emits hidden `TITAN_SOURCE_LOCAL` resolver rows
+  (`provider = NULL`) for all app-owned source modules in `source_names`
+  (excluding the synthetic test runner) and required archive members, and
+  installs the table in `titan_browser_initialize_worker` before
+  `require("$MODNAME")`, anchoring those objects under `wasm-ld --gc-sections`.
+  Under `TITAN_TARGET_BROWSER`, `titan_path_find_linked_module` reads only
+  `entry->symbols`, with no dynamic opening, no new Wasm imports, and no host
+  JavaScript/loader changes. Ordinary browser builds without recorded
+  obligations omit the table.
 
-When `elect_app_sources` holds (`context.application_source_requirements` is
+When `app_requirements` holds (`context.application_source_requirements` is
 non-nil), `finalize_resolver_context` also populates
 `context.application_nominal_layouts` through `perf.public_source_layout(name,
 mod)` (backed by `coder._own_nominal_layouts`) across all compiled
@@ -1353,14 +1364,21 @@ mod)` (backed by `coder._own_nominal_layouts`) across all compiled
 (`coder/nominal.lua`)—including for installed sources reached transitively
 through another required source.
 
-`titan_module_provider` binary-searches the installed table only after a
-canonical and native-preload miss on a named import. The table holds
-image-lifetime data, not initialized module userdata; binding to it still goes
-through the normal ABI and used-declaration checks. Modules still initialize in
-written import order. The table adds nothing to `package.preload` or
-`package.loaded`. The Lua package searcher does not consult it, and child
-states do not inherit it. Once initialized, a module registers its ordinary
-native preload as before, and that preload can be copied into children.
+`titan_module_provider` preserves its four-step order: (1) initialized
+per-state canonical module, (2) matching native preload descriptor, (3) binary
+search of the installed `TITAN_LINKED_MODULES_KEY` catalog (returning
+`entry->symbols` or, on native targets when `entry->provider != NULL`, opening
+`entry->provider` lazily via `loadlib`), and (4) the caller's non-empty baked
+fallback `file` (`NULL` permits only initialized canonical lookup; `""` disables
+caller fallback, as emitted by `coder/module.lua` for both `check_only_sources`
+and `check_only_binaries` so libraries never rediscover forwarded dependencies
+on their own). The table holds image-lifetime data, not initialized module
+userdata; binding to it still goes through the normal ABI and used-declaration
+checks. Modules still initialize in written import order. The table adds
+nothing to `package.preload` or `package.loaded`. The Lua package searcher does
+not consult it, and child states do not inherit it. Once initialized, a module
+registers its ordinary native preload as before, and that preload can be copied
+into children.
 
 For Unix `--static`, preflight verifies the complete written import closure and
 the table anchors its archive members. On native platforms the runtime still
@@ -1369,8 +1387,9 @@ loaded explicitly through Lua `require` and its own dependencies are not part
 of the host's certified graph), while an empty `file` (`""`) raises
 `Titan module '<name>' is not supplied by the application`.
 The catalog never replaces an existing physical producer token or redirects
-direct calls. Final-link certification includes the sorted catalog names and
-the bytes of the input objects and archives.
+direct calls. Final-link certification includes the sorted catalog entries
+(names and selected relative provider paths) and the bytes of the input objects
+and archives.
 
 ## User-value allocation
 

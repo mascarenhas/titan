@@ -2036,12 +2036,14 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
   in a browser library archive use the ordinary checked external ABI
   (`handle`/`global` with empty provider filename `""`) so the archive links
   and validates alone and tolerates compatible edits to the installed source
-  without rebuilding; consuming browser images satisfy those obligations
-  through `perf.linked_module_catalog` installed in
+  without rebuilding; consuming browser images satisfy those obligations with
+  either an eligible WebAssembly archive or `.browser.titan`/shared `.titan`
+  source through `perf.linked_module_catalog` installed in
   `titan_browser_initialize_worker` ([The linked provider
   set](codegen-overview.md#the-linked-provider-set)) only when
-  `context.application_source_requirements` is non-nil, with no disk loading or
-  host JavaScript changes. On browser, the logical `<path>.so` filename inside
+  `context.application_source_requirements` is non-nil, reading only in-image
+  `symbols` resolver pointers with no dynamic loading, no new Wasm imports, and
+  no host JavaScript changes. On browser, the logical `<path>.so` filename inside
   `Type.Module` is an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
