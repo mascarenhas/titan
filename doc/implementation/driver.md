@@ -839,8 +839,9 @@ are `source_roots` and the shared resolver `context`.
   [`driver.resolve_external_modules`](#driverresolve_external_modulesrequests-known_sources-options),
   restores only clean retained entries, and rechecks dirty consumers;
   `completion_closed_world` consumes captured descriptors only (including
-  carried contextual binary interfaces captured by
-  `driver.completion_binary_catalog`) and never consults disk on a miss.
+  finalized contextual binary interfaces captured by
+  `driver.completion_binary_catalog`, without manufacturing ordinary imports)
+  and never consults disk on a miss.
 
 #### Interface recovery and the closed validator
 
@@ -1643,11 +1644,12 @@ kinds remain distinct: `true` (source-required) bypasses compiled providers and
 searches authored roots then that SDK source root, whereas `false` (ordinary)
 tries compiled providers first and falls back to source only on a clean binary
 miss. Because an unmodified language-server host submits remembered
-compiled-entry `.deps` as ordinary (`false`) edges, introducing a selectable
-compiled provider for a recorded requirement invalidates a previously cached
-source on refresh so the next open-world semantic check elects that compiled
-provider cleanly (while explicit `true` source-required edges still require
-actual source). An embedded result reports
+compiled-entry `.deps` as ordinary (`false`) edges, a topology change on
+refresh triggers revalidation and rechecks dirty consumers under the active
+lookup policy (for example, default ordinary lookup may elect a compatible
+compiled provider, while `source_first` still prefers source and an
+incompatible or malformed provider remains an error; explicit `true`
+source-required edges still require actual source). An embedded result reports
 `{ kind = "embedded", provider_file = <host executable> }` without opening that
 path.
 

@@ -185,9 +185,11 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    `module.semantic_dependencies` (traversing compiled requirement edges to
    reach downstream `source` dependencies) so `build.run` orders required source
    owners ahead of consumers that import compiled providers exposing them, and
-   detects cross-boundary cycles (`cyclic source requirement: ...`) across
-   written imports, strict-static archive `imports`, and `source_requirements`
-   on all targets. In a library or prospective-library `-c` build (non-`main`,
+   detects cross-boundary requirement cycles (`cyclic source requirement: ...`)
+   across written source imports and reached `source_requirements` on all
+   targets (also following reached archive `imports` when Unix `--static` is
+   active; Unix `--static` archive demand separately detects `cyclic archive
+   import` cycles in `perf.demand_archive_modules`). In a library or prospective-library `-c` build (non-`main`,
    non-`--test`, non-`--static`, where preflight sets `plan.link_kind =
    "library"`), `perf.plan_source_obligations` starts from the same reached
    per-member `source_requirements` frontiers (without archive demand),

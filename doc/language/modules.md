@@ -673,19 +673,77 @@ titanc --output build --exe build/demo main
 Whenever a build actually selects an installed `.titan` source through that implicit fallback—even when a library build only checks it—`-o`/`--output` is required so generated files stay under the caller's output tree and `titanc` neither writes nor locks inside the implicit SDK root; omitting `--output` fails with an error naming the module and asking for `--output DIR`. Builds that do not select an installed source keep their existing behavior.
 
 A compiled library can depend on an installed source-only module without owning
-it, and each consuming application supplies one chosen owner for that
-dependency without rebuilding the library when the dependency's distribution
-changes:
+it. Each consuming application supplies one chosen owner for that dependency,
+without rebuilding the library when the dependency's distribution changes:
 
-- **In a library build** (including plain non-`main`, non-`--test`, non-`--static` `-c` and `--source-first` when both a provider and an installed source exist): an ordinary public `import` resolved from `<root>/lib/titan/0.6` is checked for its public interface and public layouts and stays external—neither that module nor its private helpers or native dependencies enter the library provider. Native provider pairs and Windows DLLs carry only their authored `--tree` modules (plus any explicit non-Titan `-X` payloads); browser library archives likewise leave external installed sources outside the archive while retaining browser's preexisting separate archive composition for compiled browser dependencies. Even a private or initializer-only import of an installed source-only module is tracked automatically without adding it to the library's public API or requiring any extra manifest, config, or flag; wrapper libraries forward reached obligations without owning or baking a fallback path for forwarded binaries. Explicit `.titan` private collaboration (`import "dep.titan"`) remains strictly source-only and is rejected across that installed-source library boundary; use an ordinary public `import` or an authored `--tree` checkout instead.
-- **Ordinary single-owner selection in consuming applications and `--test` builds:** For each dependency recorded by a reached logical member of an imported prebuilt library, `titanc` resolves the module by logical name through ordinary single-owner lookup for the active target and build mode—with no redundant `import` in the application, no unrelated private DSO scan, and no baked leaf-name substitution. For example, the compiler resolves `warehouse.counter` by logical name; a compatible `warehouse.so` can supply it even when no `warehouse/counter.so` exists. Eligible owners are an authored `--tree` or installed `<root>/lib/titan/0.6` source (compiled once into the application, requiring `--output` only when installed fallback `.titan` source is actually selected or on `--target browser`), a standalone compiled provider, a canonical common-prefix bundle claiming that logical name, or a member already carried by a selected provider:
-  - **Default Unix** can elect a shared `.so` (loaded lazily through the application), an archive-only `.a` fallback (linked into the executable), or compile source once.
-  - **Unix `--static`** accepts only `.a` archives or compiled source and rejects a DSO-only provider.
-  - **Windows** elects a compiled `.dll` (loaded lazily through the application) or compiles source into the companion application provider DLL behind the launcher (no `--static`).
-  - **`--target browser`** accepts only eligible WebAssembly `.a` archives or `.browser.titan`/shared `.titan` source (never native host binaries or dynamic loading).
-  Every library shares the application's single chosen owner and its state lazily in written import order through the checked public ABI. Unreached siblings in a multi-module library impose no additional logical build demand. Missing all eligible owners fails the build naming both the referring library and the missing module; incompatible ABI or used public interfaces, malformed claimed providers, genuinely conflicting independent physical owners, and cross-boundary cycles remain build or load errors.
-- **In editors and semantic tools:** Suppose a compiled library `via` imports the source-only `meter`, which in turn imports `units`. If `via` exposes `units.Quantity`, the editor can resolve `meter` by ordinary lookup—from authored or installed source, a compatible standalone provider, or a canonical common-prefix bundle (browser analysis uses eligible browser archives or browser SDK sources, never native binaries)—and follow its imports on demand to provide type information for `Quantity`, with no `--output` required and without eagerly checking purely private requirements that no exposed type needs. If no compatible provider or source for `meter` exists, install a compatible provider or add its source checkout to the project's source search roots.
-- **Upgrades, existing applications, and bare Lua hosts:** An already-built application whose selected owner was compiled from source retains that app-compiled module and keeps running unchanged if the dependency on disk is later replaced by a compiled provider or removed. A later application rebuilt against the **same** prebuilt library can bind a compatible standalone or prefix-bundled compiled provider without rebuilding that library (within the same prerelease SDK/runtime family). Compatible implementation or private-dependency edits to an installed source require rebuilding only the consuming application; if a compiled intermediate library changes which external modules it requires, rebuild compiled libraries that forward those obligations (`--incremental` detects the change automatically). Ordinary prebuilt dependencies retain their normal compiled-provider fallback outside these recorded obligations. In a bare Lua `require` host (which has no Lua-side Titan compiler and no Titan application catalog), loading a prebuilt library **built against a dependency as installed source** first requires that dependency to be already initialized or natively preloaded in the Lua state; a Lua script can explicitly `require` an independently installed compiled provider first through the Titan searcher.
+- **Library builds:** In a library build (including plain non-`main`,
+  non-`--test`, non-`--static` `-c` and `--source-first`), an ordinary public
+  `import` resolved from `<root>/lib/titan/0.6` is checked for its public
+  interface and public layouts and stays external. Neither that module nor its
+  private helpers or native dependencies enter the library provider, even when
+  imported privately or only for its initializer. Wrapper libraries forward
+  reached obligations without owning or baking a fallback path for forwarded
+  binaries. Explicit `.titan` private collaboration (`import "dep.titan"`)
+  stays strictly source-only and is rejected across that installed-source
+  library boundary; use an ordinary public `import` or an authored `--tree`
+  checkout instead.
+- **Consuming applications and `--test` builds:** `titanc` resolves each
+  recorded dependency by logical name through ordinary single-owner lookup for
+  the active target and build mode, with no redundant `import` in the
+  application, no unrelated private DSO scan, and no baked leaf-name
+  substitution. For example, the compiler resolves `warehouse.counter` by
+  logical name: a compatible `warehouse.so` can supply it even when no
+  `warehouse/counter.so` exists. Eligible owners are an authored `--tree` or
+  installed `<root>/lib/titan/0.6` source, a standalone compiled provider, a
+  canonical common-prefix bundle claiming that logical name, or a member
+  already carried by a selected provider:
+  - **Default Unix** selects a shared `.so` (loaded lazily through the
+    application), an archive-only `.a` fallback (linked into the executable),
+    or compiles source once.
+  - **Unix `--static`** accepts only `.a` archives or compiled source and
+    rejects a DSO-only provider.
+  - **Windows** selects a compiled `.dll` (loaded lazily through the
+    application) or compiles source into the companion application provider DLL
+    behind the launcher (no `--static`).
+  - **`--target browser`** accepts only eligible WebAssembly `.a` archives or
+    `.browser.titan`/shared `.titan` source (never native host binaries or
+    dynamic loading).
+  `--output` is required for this lookup only when the build actually selects
+  installed fallback `.titan` source (or on `--target browser`). Referring
+  libraries in this application share the single chosen owner and its state
+  lazily in written import order through the checked public ABI. Unreached
+  siblings in a multi-module library impose no additional logical build demand.
+  Missing all eligible owners, malformed claimed providers, conflicting
+  independent physical owners, and cross-boundary cycles fail the build; ABI
+  and used-interface compatibility are also checked on binding and
+  initialization when a shared provider is replaced after linking.
+- **Editors and semantic tools:** Suppose a compiled library `via` imports
+  `meter` (recorded from installed source), which in turn imports `units`. If
+  `via` exposes `units.Quantity`, the editor resolves `meter` on demand by
+  ordinary lookup—from authored or installed source, a compatible standalone
+  provider, or a canonical common-prefix bundle (browser analysis uses eligible
+  browser archives or browser SDK sources, never native binaries)—and follows
+  its imports to typecheck `Quantity`, needing no `--output` and leaving purely
+  private requirements unchecked until a build runs. If no compatible provider
+  or source exists for `meter`, install a compatible provider or add its source
+  checkout to the project's source search roots.
+- **Upgrades, existing applications, and bare Lua hosts:** An already-built
+  application whose selected owner was compiled from source keeps that
+  app-compiled module and continues running unchanged if the dependency on disk
+  is later replaced by a compiled provider or removed. A later application
+  rebuilt against the **same** prebuilt library can select a compatible
+  standalone or prefix-bundled compiled provider without rebuilding that
+  library. Compatible implementation or private-dependency edits to an
+  installed source require rebuilding only the consuming application; if a
+  compiled intermediate library changes which external modules it requires,
+  rebuild libraries that forward those obligations (`--incremental` detects the
+  change). Ordinary prebuilt dependencies keep their normal compiled-provider
+  fallback outside these recorded obligations. In a bare Lua `require` host
+  (which has no Lua-side Titan compiler and no Titan application catalog),
+  loading a prebuilt library built against a dependency as installed source
+  first requires that dependency to be already initialized or natively
+  preloaded in the Lua state; a Lua script can explicitly `require` an
+  independently installed compiled provider first through the Titan searcher.
 
 #### Depending on an installed source-only module from a compiled library
 

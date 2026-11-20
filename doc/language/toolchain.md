@@ -276,14 +276,16 @@ whose reached logical members recorded dependencies from installed source,
 `titanc` satisfies each module once through ordinary single-owner lookup for
 the active target and build mode—with no redundant user `import`—either
 compiling authored or installed source once into the application (requiring
-`--output` only when installed fallback source is selected or on
-`--target browser`) or selecting a compatible standalone provider, canonical
+`--output` for this lookup only when installed fallback source is selected or
+on `--target browser`) or selecting a compatible standalone provider, canonical
 common-prefix bundle, or already-carried archive/bundle member without
 rebuilding the library. Explicit `.titan` imports remain strictly source-only;
 unreached siblings impose no additional logical build demand. Missing owners,
-incompatible interfaces, conflicting physical owners, and cross-boundary cycles
-are diagnosed at build time. For the full per-target, upgrade, editor, and
-bare-Lua rules, see [Source-only modules](modules.md#source-only-modules).
+malformed claimed providers, conflicting physical owners, and cross-boundary
+cycles are diagnosed at build time, while ABI and used-interface compatibility
+are also verified on binding/initialization when a shared provider is replaced
+after linking. For the full per-target, upgrade, editor, and bare-Lua rules,
+see [Source-only modules](modules.md#source-only-modules).
 
 Within each compiled format, lookup is **path-root first, shallowest prefix to
 exact module**. For logical module `a.b.c`, one directory is probed as:

@@ -440,10 +440,12 @@ already chosen archives; strict `--static` resolves other reached names through
 the archive pass and rejects missing inventories, missing owners, and `cyclic
 archive import` cycles. A default executable follows an ordinary private archive
 edge only when its dependency is already selected or belongs to the importing
-member's archive, keeping the recorded DSO fallback otherwise. Unified cycle
-detection checks cross-boundary cycles across sources, strict-static archive
-`imports`, and reached `source_requirements` (`cyclic source requirement: ...`)
-on all targets. Reached names and archive observations feed worker selection,
+member's archive, keeping the recorded DSO fallback otherwise. Requirement
+cycle detection (`cyclic source requirement: ...`) checks written source
+imports and reached `source_requirements` on all targets (also traversing
+reached archive `imports` when Unix `--static` is active, separate from
+`perf.demand_archive_modules`'s strict-static `cyclic archive import` check).
+Reached names and archive observations feed worker selection,
 the standalone protocol check, and final-link certification. Dormant siblings
 supply physical collision information only: their `imports`,
 `source_requirements`, and nominal interfaces impose no additional logical

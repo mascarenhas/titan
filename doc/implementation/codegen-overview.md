@@ -1378,10 +1378,7 @@ checks. Modules still initialize in written import order. The table adds
 nothing to `package.preload` or `package.loaded`. The Lua package searcher does
 not consult it, and child states do not inherit it. Once initialized, a module
 registers its ordinary native preload as before, and that preload can be copied
-into children. Because `TitanLinkedModule` / `TitanLinkedModules` is a private
-prerelease runtime/launcher layout (with frozen public versions), rebuild
-launchers and artifacts carrying their own runtime/resolver together whenever
-upgrading the compiler/runtime across a layout change.
+into children.
 
 For Unix `--static`, preflight verifies the complete written import closure and
 the table anchors its archive members. On native platforms the runtime still
@@ -1390,8 +1387,9 @@ loaded explicitly through Lua `require` and its own dependencies are not part
 of the host's certified graph), while an empty `file` (`""`) raises
 `Titan module '<name>' is not supplied by the application`.
 The catalog never replaces an existing physical producer token or redirects
-direct calls. Final-link certification includes the sorted catalog names and
-the bytes of the input objects and archives.
+direct calls. Final-link certification includes the sorted catalog entries
+(names and selected relative provider paths) and the bytes of the input objects
+and archives.
 
 ## User-value allocation
 
