@@ -1240,17 +1240,19 @@ supply the private state that direct native code expects.
 - An initialized module supplies its native export callback, even if its code
   is embedded in the executable or was opened locally through
   `package.loadlib`.
-- If the module is absent, a copied native provider descriptor supplies its
+- If the module is absent, a matching native preload descriptor supplies its
   resolver.
-- The selected DSO filename is consulted only when neither is available:
+- Next, a native executable can supply the resolver of a module already linked
+  into that image. See [The linked provider set](#the-linked-provider-set).
+- The selected DSO filename is consulted only when no descriptor is available:
   `loadlib` takes the first occupied `<entry>/<file>` along the state's
   [run-time Titan path](driver.md#the-run-time-titan-path-and-sdk-fallback),
   then the lazy SDK fallback.
 
 Descriptor lookup does not call a Lua preload loader or initialize the
 dependency. `titan_check_module_abi` and `titan_check_module_compatibility` run
-before the selected initializer is called, whether its code came from a copied
-resolver or a newly opened DSO.
+before the selected initializer is called, no matter which provider supplies
+the resolver.
 
 `titan_module_symbol` then resolves the required metadata callbacks, native
 entries, bound-method trampolines, and public slot numbers through the selected
@@ -1263,12 +1265,12 @@ the provider's resolved slot.
 A **transitive dynamic owner** (`global` binding) is resolved after the
 explicit exposing imports are initialized: `titan_module_provider` is called
 with the owner's logical name and a null filename. That owner must already be
-initialized; an uninitialized copied descriptor does not satisfy this
-canonical-only lookup. Its own ABI and selective compatibility checks precede
-native lookup through its export callback, and global symbol order never
-chooses the owner. The module userdata and nominal metatables are recovered
-from the same Lua state's registry. See [Type aliases](type-aliases.md) and
-[Selective binary dependency verification](binary-compatibility.md).
+initialized; neither a copied preload nor an uninitialized linked module
+satisfies this canonical-only lookup. Its own ABI and selective compatibility
+checks precede native lookup through its export callback, and global symbol
+order never chooses the owner. The same Lua state's registry supplies the
+module userdata and nominal metatables. See [Type aliases](type-aliases.md)
+and [Selective binary dependency verification](binary-compatibility.md).
 
 The runtime's `loadlib` (`titan-runtime/titan_path.c`) maps newly needed DSOs with
 `RTLD_LAZY | RTLD_GLOBAL`. This supports ordinary native-library relocations:
@@ -1277,6 +1279,31 @@ its lazy `uv_*` calls bind. This C-linker behavior is separate from Titan's
 logical module binding. Eager data or function-address relocations and native
 constructors cannot rely on initializer ordering. Compiler interface inspection
 is a separate `RTLD_LAZY | RTLD_LOCAL` operation.
+
+### The linked provider set
+
+Each native ELF or Mach-O primary module object contributes a private,
+pointer-aligned `{logical name, native resolver}` entry to a linker section.
+The entry refers only to a resolver in that same object. Taking the bounds
+of the output section does not extract dormant archive members: the image
+gets entries only for modules the link actually included. The resolver
+remains static or hidden and the entries carry no provider paths.
+
+The generated program or test launcher publishes the section bounds as one
+registry value inside its protected entry, before requiring the root.
+`titan_module_provider` scans that set only on a canonical and native-preload
+miss for a named DSO. The set is image-lifetime data, not initialized module
+userdata; binding to it still goes through all normal ABI and
+used-declaration checks. Initialization still follows the written import
+order. No entries are added to `package.preload` or `package.loaded`, the Lua
+package searcher does not consult this set, and child states do not inherit
+it. Once initialized, a module registers its ordinary native preload as
+before, and that preload can be copied into children.
+
+Final-link certification includes the launcher's election policy plus the
+bytes of the input objects and archives from which the native linker assembles
+the section. DLL launchers on Windows and archive-only Wasm images on the
+browser target do not use this set.
 
 ## User-value allocation
 

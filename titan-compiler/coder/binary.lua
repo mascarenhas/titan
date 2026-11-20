@@ -167,8 +167,14 @@ function coder._binary_resolver(tlcontext, ast)
             $ENTRIES
             return NULL;
         }
+        #if defined(TITAN_LINKED_MODULE_ENTRY)
+        static const TitanLinkedModule $LINKED_ENTRY
+            TITAN_LINKED_MODULE_ENTRY = { $MODULE, $NAME };
+        #endif
     ]], {
         NAME = resolver,
+        MODULE = c_string_literal(tlcontext.module),
+        LINKED_ENTRY = coder._private_symbol(tlcontext.module, "linked_module"),
         TRANSFER_MANIFEST = assert(tlcontext.transfer_manifest),
         ENTRIES = table.concat(entries, "\n"),
     })

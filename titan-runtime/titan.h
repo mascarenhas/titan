@@ -373,10 +373,37 @@ typedef struct TitanModuleProvider {
   TitanModuleSymbols symbols;
 } TitanModuleProvider;
 
-/* Prefer the initialized logical module, then a matching native preload
-** descriptor, before opening another image. A NULL file permits only the
-** canonical lookup used for initialized transitive owners. All successful
-** lookups and checks preserve the Lua stack. */
+/* Native image linker set. Each extracted Titan object contributes one
+** immutable entry; the launcher shares its own bounds with this state only.
+** No entry references another archive member or exposes a Lua loader. */
+#if defined(__ELF__) || defined(__APPLE__)
+typedef struct TitanLinkedModule {
+  const char *name;
+  TitanModuleSymbols symbols;
+} TitanLinkedModule;
+
+typedef struct TitanLinkedModules {
+  const TitanLinkedModule *begin;
+  const TitanLinkedModule *end;
+} TitanLinkedModules;
+
+#define TITAN_LINKED_MODULES_KEY "Titan linked module providers"
+
+#if defined(__APPLE__)
+#define TITAN_LINKED_MODULE_ENTRY \
+  __attribute__((used, section("__DATA_CONST,__titan_linked"), \
+      aligned(__alignof__(TitanLinkedModule))))
+#else
+#define TITAN_LINKED_MODULE_ENTRY \
+  __attribute__((used, retain, section("titan_linked"), \
+      aligned(__alignof__(TitanLinkedModule))))
+#endif
+#endif
+
+/* Prefer initialized state, a matching native preload descriptor, and the
+** launcher's private linked-module set, in that order, before opening an
+** image. A NULL file permits only the initialized canonical lookup. All
+** successful lookups and checks preserve the Lua stack. */
 TITAN_RUNTIME_FUNC TitanModuleProvider titan_module_provider(lua_State *L,
     const char *module, const char *file);
 TITAN_RUNTIME_FUNC void *titan_module_symbol(lua_State *L,

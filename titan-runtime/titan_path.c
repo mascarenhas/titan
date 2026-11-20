@@ -1554,11 +1554,33 @@ void *loadlib(lua_State *L, const char *file) {
 #endif
 }
 
+#if defined(TITAN_LINKED_MODULE_ENTRY)
+/* The protected launcher stores image-lifetime bounds, not Lua values. The
+** registry is the only common owner before any Titan module initializes.
+** This uses one of the slots reserved by the preceding canonical lookup. */
+static TitanModuleSymbols titan_path_find_linked_module(lua_State *L,
+                                                        const char *module) {
+    const TitanLinkedModules *linked = NULL;
+    lua_pushliteral(L, TITAN_LINKED_MODULES_KEY);
+    if (lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TLIGHTUSERDATA)
+        linked = (const TitanLinkedModules *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (linked != NULL) {
+        const TitanLinkedModule *entry;
+        for (entry = linked->begin; entry != linked->end; entry++) {
+            if (strcmp(entry->name, module) == 0) return entry->symbols;
+        }
+    }
+    return NULL;
+}
+#endif
+
 /* Implementation notes: doc/implementation/codegen-overview.md#static-vs-dynamic-dependency-wiring */
 TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
                                            const char *file) {
     TitanModuleProvider provider = { NULL, NULL };
-    if (titan_path_push_canonical_module(L, module, strlen(module))) {
+    size_t length = strlen(module);
+    if (titan_path_push_canonical_module(L, module, length)) {
         const TitanModuleData *data;
         if (lua_rawlen(L, -1) < sizeof(TitanModuleData)) {
             lua_pop(L, 1);
@@ -1575,9 +1597,13 @@ TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
     }
     if (file == NULL)
         luaL_error(L, "Titan canonical module '%s' is unavailable", module);
-    provider.symbols = titan_path_find_preload(L, module, strlen(module),
-        NULL, NULL);
+    provider.symbols = titan_path_find_preload(L, module, length, NULL, NULL);
     if (provider.symbols != NULL) return provider;
+#if defined(TITAN_LINKED_MODULE_ENTRY)
+    provider.symbols = titan_path_find_linked_module(L, module);
+    if (provider.symbols != NULL) return provider;
+#endif
+
     provider.handle = loadlib(L, file);
     return provider;
 }

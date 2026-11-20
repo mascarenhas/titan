@@ -7,6 +7,7 @@ spec/coder/documentation_spec.lua
 spec/coder/immediate_functions_spec.lua
 spec/coder/incremental_compilation_spec.lua
 spec/coder/link_certification_spec.lua
+spec/coder/linked_provider_composition_spec.lua
 spec/coder/multi_module_grouping_spec.lua
 spec/coder/multi_module_libraries_spec.lua
 spec/coder/multi_module_path_stdlib_spec.lua

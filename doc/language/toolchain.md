@@ -326,10 +326,24 @@ directly into the output with direct C calls. It is a preference, not a
 system-linker `-static` flag: missing archives still fall back to `.so` or
 source, and system libraries such as libc remain dynamically linked.
 
-When an archive carries a module whose public interface exposes a nominal type
-owned by another module, that owner is also linked directly if it lives inside
-the same archive; otherwise the consumer resolves the owner dynamically at run
-time and cannot independently substitute a conflicting copy of that owner.
+A library's default provider pair can serve both kinds of consumer. On Linux
+and macOS, a program or test executable gives the library's imports the same
+module instance as its own imports when the dependency is linked into the
+executable. This includes a sibling that the native linker pulled in from
+the same archive as a directly imported module. A dependency that is not
+linked still needs its original shared provider; Titan does not pull in an
+unused archive member solely to replace a shared dependency.
+
+Use `--static` when **building a library** only if you want to bundle the
+selected archives in both provider outputs. An executable cannot link such a
+bundle alongside a separate archive containing the same logical module.
+
+If a library exposes another module's nominal type, the owner can be part of
+the same archive, separately linked into the executable, or loaded dynamically.
+Titan still rejects conflicting physical copies and checks the declarations
+that a prebuilt importer uses before initializing a dynamically bound owner.
+Linking an archive does not by itself make its uninitialized modules available
+to Lua `require` or to independent Lua states.
 
 Native payloads passed with `-X` are carried into both `.so` and `.a`
 providers in command-line order (child archives are flattened into the

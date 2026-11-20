@@ -703,7 +703,7 @@ end
         for _, owner in ipairs({ "chain.mid", "chain.leaf" }) do
             assert.same({
                 {
-                    binding = "dynamic-global",
+                    binding = "dynamic-carried",
                     provider = dynamic,
                     exposer = "chain.api",
                 },

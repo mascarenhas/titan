@@ -6631,7 +6631,7 @@ function driver.defaultloader(static_deps, options)
             local status, value, metadata =
                 probe_compiled_interface(modname, exposing.filename, context)
             if status == "valid" then
-                add_native_constraint(context, modname, "dynamic-global",
+                add_native_constraint(context, modname, "dynamic-carried",
                     exposing.filename, exposing_name)
                 return remember_type(value, exposing, false,
                     metadata.layout_inventory, metadata.layouts, false)
@@ -6643,11 +6643,8 @@ function driver.defaultloader(static_deps, options)
 
         local ordinary = driver.imported[modname]
         if ordinary and ordinary ~= CIRCULAR_MARK then
-            -- The exposing compiled object did not carry/claim this owner, so
-            -- its machine code already chose a producer-dynamic identity.
-            -- Reuse the independently known type only to finish checking and
-            -- record the edge; finalization will reject that independently
-            -- selected source/archive/other-DSO implementation.
+            -- Recover the independently known interface without changing its
+            -- selection. The native constraint records the fallback edge.
             if exposing.kind ~= "embedded" then
                 add_native_constraint(context, modname, "dynamic-global",
                     exposing.static_archive or exposing.filename, exposing_name)
@@ -7266,6 +7263,7 @@ function driver.plan_descriptor(plan, modname)
         modname = modname,
         modules = modules,
         archives = plan.archives,
+        link_kind = plan.link_kind,
         reservations = plan.reservations,
     }
 end
@@ -7520,6 +7518,7 @@ function driver.compile_planned_module(context, modname, options)
     -- Provider inspection reuses the coordinator's archive metadata scans.
     context.planned_archives = type(plan.archives) == "table" and
         plan.archives or nil
+    context.link_kind = plan.link_kind
     local loader = driver.defaultloader({}, {
         context = context,
         worker_plan = plan,
@@ -8159,12 +8158,15 @@ function driver.finalize_resolver_context(context)
         end
     end
 
+    local elect_linked = (context.link_kind == "program" or
+        context.link_kind == "test") and
+        (context.target == "linux" or context.target == "darwin")
+    local rebound_owners
     for owner, keyed in pairs(context.native_constraints) do
-        -- Complete physical membership is native provenance even when the
-        -- owner was not independently selected. If another selected
-        -- provider's facade requires that owner through its producer-chosen
-        -- DSO, carrying the owner directly would mix identities.
+        -- Only an executable can satisfy an external fallback from an
+        -- already linked owner. A DSO that claims the owner stays distinct.
         local direct_provider = physical_owner[owner]
+        local linked_owner = elect_linked and (direct_provider or source_names[owner])
         local dynamic_provider
         for _, constraint in pairs(keyed) do
             if constraint.binding == "direct-carried" then
@@ -8176,9 +8178,11 @@ function driver.finalize_resolver_context(context)
                         tostring(constraint.provider) .. "'"
                 end
                 direct_provider = constraint.provider
-            elseif constraint.binding == "dynamic-global" then
-                if dynamic_provider and
-                   dynamic_provider ~= constraint.provider then
+            elseif linked_owner and constraint.binding == "dynamic-global" then
+                rebound_owners = rebound_owners or {}
+                rebound_owners[owner] = true
+            else
+                if dynamic_provider and dynamic_provider ~= constraint.provider then
                     errors[#errors + 1] = "logical owner '" .. owner ..
                         "' has producer-dynamic exposures from conflicting " ..
                         "providers '" .. dynamic_provider .. "' and '" ..
@@ -8243,13 +8247,17 @@ function driver.finalize_resolver_context(context)
                     end
                     expected = imports[dependency] and "handle" or "global"
                 end
+                -- A unit can use the initialized canonical owner even if a
+                -- different unit brings that owner into the final link.
                 if binding == "handle" and selected and selected.kind == "dynamic" then
                     if selected.type.file ~= native.providers[dependency] then
                         errors[#errors + 1] = "object for module '" .. name ..
                             "' loads a different provider for '" .. dependency ..
                             "'; rebuild it with the selected dependency providers"
                     end
-                elseif expected ~= binding then
+                elseif expected ~= binding and not (binding == "global" and
+                        expected == "direct" and rebound_owners and
+                        rebound_owners[dependency]) then
                     errors[#errors + 1] = "object for module '" .. name ..
                         "' requires " .. binding .. " binding for '" .. dependency ..
                         "'; rebuild it with the selected dependency providers"
@@ -10447,6 +10455,8 @@ local entrypoint_template = [[
 
 $PLATFORM_ALERTS
 
+$LINKED_MODULE_DECLARATIONS
+
 /* fatal error, from srlua */
 static void fatal(const char* message) {
     alert(message);
@@ -10521,6 +10531,7 @@ static int pmain(lua_State *L) {
      * invokes. Retrieve main before consulting the hook, then invoke either
      * path inside main()'s existing outer lua_pcall. */
     lua_settop(L, 0);
+    $LINKED_MODULE_INSTALL
     lua_getglobal(L, "require");
     lua_pushliteral(L, "$MODNAME");
     lua_call(L, 1, 1);
@@ -10633,6 +10644,7 @@ function driver.entrypoint_contents(modname, program_name, options)
         MODNAME = modname,
         SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
         COVERAGE_DECLARATIONS = "", COVERAGE_PREPARE = "", COVERAGE_FINISH = "",
+        LINKED_MODULE_DECLARATIONS = "", LINKED_MODULE_INSTALL = "",
         ERROR_HELPERS = require("titan-compiler.browserentry").error_helpers,
     }
     if platform.windows then
@@ -10649,6 +10661,28 @@ function driver.entrypoint_contents(modname, program_name, options)
         values.PLATFORM_ALERTS = util.render(unix_entrypoint_alerts, values)
         values.ENTRYPOINT_DECLARATIONS =
             "int " .. values.LUAOPEN_FN .. "(lua_State* L);"
+        if options.linked_modules then
+            -- Split the Mach-O names so the template never sees $start/$end.
+            values.LINKED_MODULE_DECLARATIONS = [[
+#if defined(__APPLE__)
+extern const TitanLinkedModule titan_linked_begin[]
+    __asm("section$" "start$" "__DATA_CONST$" "__titan_linked");
+extern const TitanLinkedModule titan_linked_end[]
+    __asm("section$" "end$" "__DATA_CONST$" "__titan_linked");
+#else
+extern const TitanLinkedModule titan_linked_begin[]
+    __asm("__start_titan_linked") __attribute__((visibility("hidden")));
+extern const TitanLinkedModule titan_linked_end[]
+    __asm("__stop_titan_linked") __attribute__((visibility("hidden")));
+#endif
+static const TitanLinkedModules titan_linked_modules = {
+    titan_linked_begin, titan_linked_end
+};]]
+            values.LINKED_MODULE_INSTALL = [[
+lua_pushliteral(L, TITAN_LINKED_MODULES_KEY);
+    lua_pushlightuserdata(L, (void *)&titan_linked_modules);
+    lua_rawset(L, LUA_REGISTRYINDEX);]]
+        end
     end
     if options.coverage_runtime then
         local runtime_path = assert(package.searchpath(
@@ -13641,6 +13675,10 @@ function driver.preflight_build_outputs(context, plan, options)
     end
     -- Stale-staging retirement protects the same accepted inputs.
     plan.reservations, plan.inputs = reservations, inputs
+    if not options.compile_only then
+        plan.link_kind = builds_program and (options.test and "test" or "program")
+            or "library"
+    end
     return true
 end
 

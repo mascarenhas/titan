@@ -405,24 +405,27 @@ nominal record:
 * if the exposing selected archive carries the owner, it reads that exact
   provider entry contextually and records a direct-carried constraint;
 * if an exposing DSO carries the owner protocol, it reads the same DSO and
-  records dynamic-global binding; otherwise
-* it uses compiled lookup in noncommitting type-only mode and records that the
-  exposing producer remains dynamic-global.
+  records a dynamic-carried constraint; otherwise
+* it uses compiled lookup in noncommitting type-only mode and records the
+  dynamic fallback constraint.
 
 The type-only path never inserts the owner into `driver.imported` and never
 adds an archive link input. Before repackaging, the same walk runs over every
 physical interface in each selected archive, including unused carried
 facades.
 
-Finalization rejects direct/dynamic identity mixtures, overlapping logical
-membership, conflicting physical providers, producer-dynamic exposures from
-different archives, independent resolution of a producer-dynamic owner,
-mangled-prefix collisions, and known native protocol/member collisions.
-Preflight rejects an impossible mixture; it never changes which candidate won.
+Finalization rejects overlapping logical membership, conflicting physical
+providers, independent resolution of a producer-dynamic owner, mangled-prefix
+collisions, and known native protocol/member collisions. A native program or
+test can satisfy a non-carried dynamic constraint with a direct owner already
+in the link plan; this does not allow it to replace an owner claimed by a
+different DSO. Library-mode repackaging retains its physical
+ownership checks.
 
-The public `Type.Module` metadata cannot reveal private imports. Their
-producer-chosen lowering remains in the object and is outside these exported-
-interface guarantees.
+Public `Type.Module` metadata does not expose private imports. An object's
+producer-chosen lowering remains in place; when it elects a dynamic provider,
+the [linked provider set](codegen-overview.md#the-linked-provider-set) can
+supply an owner from the same executable without changing that lowering.
 
 ## Generated import paths
 
@@ -436,9 +439,10 @@ providers the delta is:
   belongs to the exact linked producer. There is no runtime archive reader;
 * finalized same-binary provenance skips runtime compatibility verification
   and keeps provider slot indices constant;
-* `handle` and `global` describe finalized dynamic provenance only. A transitive
-  `global` owner must already exist and is never chosen through
-  `RTLD_DEFAULT`.
+* `handle` and `global` go through the runtime provider descriptor. Only a
+  `handle` lookup can elect a linked but uninitialized owner; `global` needs
+  a canonical module that an earlier initializer already established.
+  Neither binding uses `RTLD_DEFAULT`.
 
 The [compatibility projection](binary-compatibility.md) does not alter archive
 metadata or these ownership rules.
@@ -458,6 +462,10 @@ payload, such as bundled libuv, while `-X` archives are never broadly rescanned
 or force-loaded. Backtrace, Lua, platform, `-l`, and final-flag inputs remain
 outside both groups. Darwin uses its continual archive search. `--static` never
 becomes a system `-static` linker option.
+
+The launcher reads the section formed by ordinary archive extraction. It does
+not add symbol references to individual archive members or request extra
+extraction passes.
 
 Library-mode DSO construction instead force-loads selected-provider and
 `--c-source`/`-X` archives without groups (`driver.force_load_arguments`: GNU
