@@ -126,6 +126,7 @@ analysis-only inventory readers may accept its absence and expose only ABI/types
 Traversal uses `next` and `rawget` only after the
 metatable checks. The validator then re-renders the entry and requires exact
 payload equality.
+
 Native objects also publish `imports`: a dense, strictly bytewise-sorted
 list of distinct logical names from written Titan imports, including unused
 aliases whose initializers still run. The field contains neither file
@@ -399,10 +400,11 @@ probe side effects.
 Native executable preflight traverses written imports of reached archive
 members. It first honors the application's sources and already chosen
 archives; strict `--static` resolves other reached names through the archive
-pass and rejects missing inventories, missing owners and cycles. Default
-executables do not widen the archive plan to unrelated providers on behalf
-of a private edge. Reached names and archive observations feed worker
-selection, the standalone protocol check and final-link certification.
+pass and rejects missing inventories, missing owners and cycles. A default
+executable follows a private edge only when its dependency is already
+selected or belongs to the importing member's archive. Otherwise it keeps
+the recorded DSO fallback. Reached names and archive observations feed
+worker selection, the standalone protocol check and final-link certification.
 Dormant siblings supply physical collision information only: their imports
 and nominal interfaces do not create semantic requirements.
 
@@ -431,12 +433,12 @@ nominal record:
 * it uses compiled lookup in noncommitting type-only mode and records the
   dynamic fallback constraint.
 
-Type-only recovery never adds an archive link input. Finalization replays
-the reached interfaces, not every stored member. Purely external dynamic
-obligations may share the same canonical, verified provider, including
-library builds and multiple exposing DSOs. A physically carried obligation
-still enforces exact native ownership. Full physical membership is checked
-for overlapping names and native symbol collisions.
+Type-only recovery never adds an archive link input. Native executable
+finalization replays reached interfaces, not every stored member. Purely
+external dynamic obligations may share the same canonical, verified
+provider, including library builds and multiple exposing DSOs. A physically
+carried obligation still enforces exact native ownership. Full physical
+membership is checked for overlapping names and native symbol collisions.
 
 Public `Type.Module` metadata does not expose private imports. An object's
 producer-chosen lowering remains in place; when it elects a dynamic provider,

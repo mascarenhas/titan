@@ -6268,12 +6268,12 @@ function driver.defaultloader(static_deps, options)
         driver.imported[modname] = CIRCULAR_MARK
         table.insert(dependency_stack, {})
         for _, import in ipairs(record.object_metadata.imports or {}) do
-            local ok, result, errors = loader(import.name,
+            local dependency, errors = checker.checkimport(import.name, loader,
                 import.source_required and { kind = "source-import" } or nil)
-            if not ok or #errors ~= 0 then
+            if not dependency or #errors ~= 0 then
                 table.remove(dependency_stack)
                 driver.imported[modname] = nil
-                return false, ok and table.concat(errors, "\n") or result
+                return false, dependency and table.concat(errors, "\n") or errors
             end
         end
         table.remove(dependency_stack)
@@ -8021,13 +8021,15 @@ function perf.demand_archive_modules(context, plan)
     end
 
     local colors, demanded, chain = {}, {}, {}
-    local function visit(name)
+    local function visit(name, importer)
         if colors[name] == "done" then return true end
         if colors[name] == "visiting" then
             return nil, "cyclic archive import: " .. table.concat(chain, " -> ") .. " -> " .. name
         end
         local selected = driver.imported[name]
-        local provider = selected and selected.static_provider or owners[name]
+        local owner = owners[name]
+        local provider = selected and selected.static_provider or
+            (context.strict_static or owner == importer) and owner
         if selected and selected.kind ~= "static" then
             if provider and selected.kind == "source" then
                 return nil, "static provider '" .. provider.archive ..
@@ -8066,7 +8068,7 @@ function perf.demand_archive_modules(context, plan)
             end
             demanded[name] = selected
             for _, dependency in ipairs(entry.imports or {}) do
-                local ok, err = visit(dependency)
+                local ok, err = visit(dependency, provider)
                 if not ok then return nil, err end
             end
         elseif plan.modules[name] and plan.modules[name].kind == "source" then
@@ -8175,18 +8177,27 @@ function driver.finalize_resolver_context(context)
         end
     end
 
-    -- Dormant siblings affect physical overlap, not semantic dependencies.
+    -- Only native executables distinguish semantic demands from dormant
+    -- members. Browser and non-executable resolver clients retain the full
+    -- carried-interface replay.
     if context.loader then
-        local names = require("titan-compiler.coder.core").coder._sorted_keys(selected_static_modules)
-        for _, name in ipairs(names) do
-            local mod = selected_static_modules[name]
-            local registered, register_error = checker.register_module_interface(
-                name, mod.type, context.loader, {
-                    name = name, kind = "static", type = mod.type,
-                    filename = mod.filename, static_archive = mod.static_archive,
-                    static_provider = mod.static_provider,
-                })
-            if not registered then return nil, {register_error} end
+        local demand_only = not context.analysis_only and context.target ~= "browser" and
+            (context.link_kind == "program" or context.link_kind == "test")
+        for _, provider in ipairs(selected_static_providers) do
+            local names = provider.key_order or
+                require("titan-compiler.coder.core").coder._sorted_keys(provider.entries)
+            for _, name in ipairs(names) do
+                if not demand_only or selected_static_modules[name] then
+                    local entry = provider.entries[name]
+                    local registered, register_error = checker.register_module_interface(
+                        name, entry.type, context.loader, {
+                            name = name, kind = "static", type = entry.type,
+                            filename = provider.archive, static_archive = provider.archive,
+                            static_provider = provider,
+                        })
+                    if not registered then return nil, {register_error} end
+                end
+            end
         end
     end
 

@@ -313,9 +313,149 @@ function main(args: {string}): integer
 end
 ]])
         built("app", "linked", "package", "--static", "demo")
+        local symbols = fixture:run({ "nm", fixture.output .. "/demo" })
+        assert.is_true(symbols.ok, symbols.output)
+        assert.truthy(symbols.output:find("titan_json_init", 1, true), symbols.output)
         local result = run_deployed("linked/demo")
         assert.is_true(result.ok, result.output)
         assert.equal("42\n", result.output)
+    end)
+
+    it("certifies a private archive chain and preserves the executable on a deep miss", function()
+        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
+        file("author/leaf.titan", "function answer(): integer return 41 end\n")
+        built("author", "package", nil, "leaf")
+        file("author/bridge.titan", [[
+local leaf = import "leaf"
+
+function answer(): integer
+  return leaf.answer()
+end
+]])
+        built("author", "package", "package", "bridge")
+        file("app/check.titan", [[
+local bridge = import "bridge"
+local io = import "io"
+
+function main(args: {string}): integer
+  io.print(bridge.answer())
+  return 0
+end
+]])
+        local function link()
+            return built("app", "linked", "package", "--static", "--incremental", "-v", "check")
+        end
+        link()
+        local output = link()
+        assert.truthy(output:find("Titan link hit", 1, true), output)
+        local result = run_with_providers("check")
+        assert.is_true(result.ok, result.output)
+        assert.equal("41\n", result.output)
+
+        file("author/base.titan", "const answer = 42\n")
+        built("author", "package", nil, "base")
+        file("author/leaf.titan", [[
+local base = import "base"
+
+function answer(): integer
+  return base.answer
+end
+]])
+        built("author", "package", "package", "leaf")
+        output = link()
+        assert.truthy(output:find("Titan link miss", 1, true), output)
+        output = link()
+        assert.truthy(output:find("Titan link hit", 1, true), output)
+
+        local program = fixture.output .. "/check"
+        local bytes = support.read(program)
+        assert(os.remove(fixture.root .. "/package/base.a"))
+        result = compile("app", "linked", "package", "--static", "--incremental", "check")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find(
+            "--static requires an archive (.a) for 'base' imported by bridge -> leaf",
+            1, true), result.output)
+        assert.equal(bytes, support.read(program))
+        result = run_deployed("linked/check")
+        assert.is_true(result.ok, result.output)
+        assert.equal("42\n", result.output)
+
+        file("app/base.titan", "const answer = 42\n")
+        built("app", "source-linked", "package", "--static", "check", "base")
+        result = run_with_providers("check")
+        assert.is_true(result.ok, result.output)
+        assert.equal("42\n", result.output)
+    end)
+
+    it("rejects a cycle assembled from independently published archive members", function()
+        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
+        file("author/left.titan", "function answer(): integer return 42 end\n")
+        built("author", "package", nil, "left")
+        file("author/right.titan", [[
+local left = import "left"
+
+function answer(): integer
+  return left.answer()
+end
+]])
+        built("author", "package", "package", "right")
+        file("author/left.titan", [[
+local right = import "right"
+
+function answer(): integer
+  return right.answer()
+end
+]])
+        built("author", "package", "package", "left")
+        file("app/check.titan", [[
+local left = import "left"
+
+function main(args: {string}): integer
+  return left.answer() - 42
+end
+]])
+        local result = compile("app", "linked", "package", "--static", "check")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find("cyclic archive import: left -> right -> left",
+            1, true), result.output)
+        assert.is_nil(lfs.attributes(fixture.output .. "/check", "mode"))
+    end)
+
+    it("keeps default DSO fallback for a private member of another selected archive", function()
+        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
+        file("author/bundle/leaf.titan", "function answer(): integer return 41 end\n")
+        built("author", "package", nil, "bundle.leaf")
+        file("extension/bridge.titan", [[
+local leaf = import "bundle.leaf"
+
+function answer(): integer
+  return leaf.answer()
+end
+]])
+        built("extension", "package", "package", "bridge")
+        file("author/bundle/leaf.titan", "function answer(): integer return 42 end\n")
+        file("author/bundle/live.titan", "const offset = 1\n")
+        built("author", "package", nil, "bundle.leaf", "bundle.live")
+        assert(os.remove(fixture.root .. "/package/bridge.so"))
+        assert(os.remove(fixture.root .. "/package/bundle.so"))
+        file("app/check.titan", [[
+local bridge = import "bridge"
+local live = import "bundle.live"
+local io = import "io"
+
+function main(args: {string}): integer
+  io.print(bridge.answer() - live.offset)
+  return 0
+end
+]])
+        built("app", "default", "package", "check")
+        local result = run_with_providers("check")
+        assert.is_true(result.ok, result.output)
+        assert.equal("40\n", result.output)
+        built("app", "strict", "package", "--static", "check")
+        result = run_deployed("strict/check")
+        assert.is_true(result.ok, result.output)
+        assert.equal("41\n", result.output)
     end)
 
     it("leaves dormant archive siblings and their missing exposed types unneeded", function()
@@ -336,6 +476,9 @@ function main(args: {string}): integer
 end
 ]])
         built("app", "linked", "package", "--static", "check")
+        local symbols = fixture:run({ "nm", fixture.output .. "/check" })
+        assert.is_true(symbols.ok, symbols.output)
+        assert.is_nil(symbols.output:find("bundle_dormant_init", 1, true))
         local result = run_deployed("linked/check")
         assert.is_true(result.ok, result.output)
     end)

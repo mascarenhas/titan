@@ -922,7 +922,7 @@ exit 0
         write_file(source_root .. "/targetcheck.titan", [[
 local left = import "pkg.left"
 
-function read(): integer
+function main(args: {string}): integer
     return left.read()
 end
 ]])
@@ -2632,20 +2632,23 @@ end
         assert.truthy(os.remove(provider_stem .. ".titan"))
         assert.truthy(os.remove(shared_path(legacy_workspace, "luaopen/bundle/foo")))
 
-        write_file(legacy_source .. "/bundle/foo_abi_value.titan", [[
+        write_file(legacy_source .. "/bundle/foo_abi_value.titan", [=[
 local old = import "luaopen.bundle.foo"
-function probe(): integer return old.probe() + 40 end
-]])
-        ok, output = compile(
-            legacy_workspace, legacy_source, "--static", "bundle.foo_abi_value")
+local lua = import "lua"
+
+function main(args: {string}): integer
+    local ok = lua.load([[return require("luaopen.bundle.foo").probe() == 2]])()
+    if ok as boolean and old.probe() + 40 == 42 then return 0 end
+    return 1
+end
+]=])
+        ok, output = compile_with_environment(legacy_workspace, legacy_source, {
+            TITAN_PATH_0_6 = legacy_workspace .. ";;",
+        }, "--static", "bundle.foo_abi_value")
         assert.truthy(ok, output)
-        local ran, result = run_lua(legacy_workspace, [[
-local current = require "bundle.foo_abi_value"
-local old = require "luaopen.bundle.foo"
-io.write(current.probe(), " ", old.probe())
-]])
+        local ran, result = run({ legacy_workspace .. "/bundle/foo_abi_value" },
+            legacy_workspace)
         assert.truthy(ran, result)
-        assert.equal("42 2", result)
     end)
 
     for _, protocol in ipairs({
