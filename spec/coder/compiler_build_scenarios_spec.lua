@@ -979,7 +979,9 @@ end
             assert(uv.fs_copyfile(output .. "/" .. filename, lib .. "/" .. filename))
         end
         local function publish(output)
-            built("library", output, "via")
+            local step = built("library", output, "via")
+            assert.matches("Finished in [^\n]+: 1 compiled, linked via", step.raw)
+            assert.equal(1, #step.module_compiles, step.raw)
             assert.is_false(exists(output .. "/meter.o"))
             assert.is_false(exists(output .. "/units.o"))
             local object = output .. "/via.o"
@@ -988,7 +990,9 @@ end
                 assert.equal("global", record.object_metadata.bindings[owner])
                 assert.is_nil(record.object_metadata.providers[owner])
             end
-            local step = built("library", output, "via")
+            step = built("library", output, "via")
+            assert.matches("Finished in [^\n]+: 1 up to date, via", step.raw)
+            assert.same({}, step.module_compiles)
             assert.truthy(step.object_hits.via, step.raw)
             assert.truthy(next(step.link_hits), step.raw)
             install(output, "via" .. SHARED_SUFFIX)

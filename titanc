@@ -569,11 +569,13 @@ elseif args.print_ast then
         end
     end
     loader = driver.defaultloader({}, loader_options)
-    for _, name in ipairs(require("titan-compiler.coder.core").coder
-            ._sorted_keys(plan.semantic_sources or {})) do
-        local ok, errs = checker.checkimport(name, loader)
-        if not ok then exit(errs) end
-        if #errs > 0 then exit(table.concat(errs, "\n")) end
+    if plan.semantic_sources then
+        for _, name in ipairs(require("titan-compiler.coder.core").coder
+                ._sorted_keys(plan.semantic_sources)) do
+            local ok, errs = checker.checkimport(name, loader)
+            if not ok then exit(errs) end
+            if #errs > 0 then exit(table.concat(errs, "\n")) end
+        end
     end
     for _, modname in ipairs(requested_modules) do
         local ok, errs = checker.checkimport(modname, loader)

@@ -6298,7 +6298,8 @@ function driver.defaultloader(static_deps, options)
             record, record_error = objectmetadata.read(bytes, object)
         end
         if not record or type(record.object_metadata) ~= "table" then
-            return false, "cannot decode planned source for module '" ..
+            local artifact = item.interface and "source interface" or "object"
+            return false, "cannot decode planned " .. artifact .. " for module '" ..
                 modname .. "': " .. tostring(record_error)
         end
         driver.imported[modname] = CIRCULAR_MARK

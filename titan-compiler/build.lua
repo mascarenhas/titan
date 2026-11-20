@@ -672,7 +672,7 @@ function Scheduler:worker_settled(worker)
     local reporter = self.options.progress
     if reporter then
         if node.state == "done" then
-            reporter:module_done(node.name)
+            reporter:module_done(node.name, node.module and node.module.check_only)
         elseif node.state == "failed" then
             reporter:module_failed(node.name)
         end

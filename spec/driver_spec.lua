@@ -1851,7 +1851,9 @@ describe("independent nominal layout metadata", function()
         assert.equal(serialized, types.serialize(modtype))
         assert.equal(layouts, metadata.layouts)
         assert.same({}, metadata.layout_inventory.layouts)
-        assert.same({ "physical_abi", "physical_types", "physical_layouts" }, requested)
+        assert.is_nil(metadata.source_requirements)
+        assert.same({ "physical_abi", "physical_types", "physical_layouts",
+            "physical_source_requirements" }, requested)
         requested = {}
         layouts = nil
         status, modtype, metadata = driver.probe_compiled_interface(
@@ -1860,6 +1862,7 @@ describe("independent nominal layout metadata", function()
         assert.equal(serialized, types.serialize(modtype))
         assert.is_nil(metadata.layouts)
         assert.is_nil(metadata.layout_inventory)
+        assert.is_nil(metadata.source_requirements)
         assert.same({ "physical_abi", "physical_types" }, requested)
     end)
 
@@ -5182,6 +5185,8 @@ describe("compiler module loader", function()
                     return function() return serialized end
                 elseif symbol == prefix .. "_layouts" then
                     return function() return empty_layouts(name) end
+                elseif symbol == prefix .. "_source_requirements" then
+                    return nil, "undefined symbol: " .. symbol, "init"
                 end
             end
             error("unexpected symbol " .. symbol)
@@ -6268,9 +6273,16 @@ describe("compiler module loader", function()
                     modules[middle].object = source .. "/missing.o"
                 end), 1, true)
             write_file(source .. "/not-an-object.o", "not an object")
-            assert.matches("cannot decode planned object for module '" .. middle .. "'",
+            local corrupt = diverged(top, function(modules)
+                modules[middle].object = source .. "/not-an-object.o"
+            end)
+            assert.matches("cannot decode planned object for module '" .. middle .. "'", corrupt, 1, true)
+            assert.matches("not-an-object.o", corrupt, 1, true)
+            assert.matches("cannot decode planned source interface for module '" .. middle .. "'",
                 diverged(top, function(modules)
-                    modules[middle].object = source .. "/not-an-object.o"
+                    modules[middle].object = nil
+                    modules[middle].check_only = true
+                    modules[middle].interface = "not a source record"
                 end), 1, true)
             assert.matches("build plan divergence: module '" .. middle ..
                 "' has unsupported planned kind 'archive'",
@@ -6565,8 +6577,8 @@ describe("compiler module loader", function()
             -- Like dlsym, the other provider has no symbols of the planned module.
             local load = titan._loadlib
             titan._loadlib = function(found, symbol)
-                local ok, value = pcall(load, found, symbol)
-                if ok then return value end
+                local ok, value, message, stage = pcall(load, found, symbol)
+                if ok then return value, message, stage end
                 return nil, "undefined symbol: " .. symbol, "init"
             end
             local _, unclaimed = compiled(function(item) item.file = other end)
@@ -9588,6 +9600,8 @@ end
                 return function() return "Module('titan.timer',{})" end
             elseif symbol == "titan_timer_layouts" then
                 return function() return empty_layouts("titan.timer") end
+            elseif symbol == "titan_timer_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             return nil, "unexpected symbol " .. symbol
         end
@@ -9597,7 +9611,8 @@ end
         assert.truthy(ok)
         assert.equal("Type.Module", modtype._tag)
         assert.equal(0, #errors)
-        assert.same({ "titan_timer_abi", "titan_timer_types", "titan_timer_layouts" }, symbols)
+        assert.same({ "titan_timer_abi", "titan_timer_types", "titan_timer_layouts",
+            "titan_timer_source_requirements" }, symbols)
         assert.is_nil(driver.imported["titan.timer"].ast)
 
         -- A later explicit build request replaces a cached binary interface
@@ -9795,6 +9810,8 @@ end
                 return function() return serialized end
             elseif symbol == "provider_layouts" then
                 return function() return empty_layouts("provider") end
+            elseif symbol == "provider_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
         end
@@ -9980,6 +9997,8 @@ end
                 return function() return "Module('fallback',{})" end
             elseif symbol == "fallback_layouts" then
                 return function() return empty_layouts("fallback") end
+            elseif symbol == "fallback_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
         end
@@ -10036,6 +10055,8 @@ end
                 end
             elseif symbol == "fallback_static_layouts" then
                 return function() return empty_layouts("fallback_static") end
+            elseif symbol == "fallback_static_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
         end
@@ -11198,6 +11219,8 @@ typedef double titan_driver_symlink_value;
                 return function() return "Module('choice',{})" end
             elseif symbol == "choice_layouts" then
                 return function() return empty_layouts("choice") end
+            elseif symbol == "choice_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected metadata symbol " .. symbol)
         end
@@ -11768,6 +11791,8 @@ typedef double titan_driver_symlink_value;
                 return function() return "Module('dup.item',{})" end
             elseif symbol == "dup_item_layouts" then
                 return function() return empty_layouts("dup.item") end
+            elseif symbol == "dup_item_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected metadata symbol " .. symbol)
         end
@@ -11778,7 +11803,8 @@ typedef double titan_driver_symlink_value;
         assert.equal(provider_path("dup.so"), modtype.file)
         assert.equal(binary .. provider_path("/dup.so"),
             driver.imported["dup.item"].filename)
-        assert.same({ "dup_item_abi", "dup_item_types", "dup_item_layouts" }, symbols)
+        assert.same({ "dup_item_abi", "dup_item_types", "dup_item_layouts",
+            "dup_item_source_requirements" }, symbols)
     end)
 
     it("caches two logical interfaces from one physical container separately",
@@ -11790,6 +11816,7 @@ typedef double titan_driver_symlink_value;
                 return "Module('bundle.left',{})"
             end,
             bundle_left_layouts = function() return empty_layouts("bundle.left") end,
+            bundle_left_source_requirements = function() return "shared.meter\nshared.startup" end,
             bundle_right_abi = function() return driver.TITAN_ABI_VERSION end,
             bundle_right_types = function()
                 return "Module('bundle.right',{})"
@@ -11801,6 +11828,9 @@ typedef double titan_driver_symlink_value;
         titan._loadlib = function(filename, symbol)
             assert.equal(binary .. provider_path("/bundle.so"), filename)
             table.insert(symbols, symbol)
+            if symbol == "bundle_right_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
+            end
             return assert(functions[symbol], "unexpected metadata symbol")
         end
 
@@ -11814,6 +11844,9 @@ typedef double titan_driver_symlink_value;
         assert.not_equal(left, right)
         assert.not_equal(driver.imported["bundle.left"],
             driver.imported["bundle.right"])
+        assert.same({ "shared.meter", "shared.startup" },
+            driver.imported["bundle.left"].source_requirements)
+        assert.is_nil(driver.imported["bundle.right"].source_requirements)
         assert.equal(provider_path("bundle.so"), left.file)
         assert.equal(provider_path("bundle.so"), right.file)
         assert.equal(binary .. provider_path("/bundle.so"),
@@ -11822,7 +11855,9 @@ typedef double titan_driver_symlink_value;
             driver.imported["bundle.right"].filename)
         assert.same({
             "bundle_left_abi", "bundle_left_types", "bundle_left_layouts",
+            "bundle_left_source_requirements",
             "bundle_right_abi", "bundle_right_types", "bundle_right_layouts",
+            "bundle_right_source_requirements",
         }, symbols)
         local call_count = #symbols
         local cached_ok, cached_left, cached_errors = loader("bundle.left")
@@ -12138,6 +12173,8 @@ typedef double titan_driver_symlink_value;
                 end
             elseif symbol == "titan_sample_child_layouts" then
                 return function() return empty_layouts("titan.sample.child") end
+            elseif symbol == "titan_sample_child_source_requirements" then
+                return nil, "undefined symbol: " .. symbol, "init"
             end
             return nil, "unexpected symbol " .. symbol
         end
