@@ -1007,6 +1007,71 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("forces closed Array and Map slots before forwarding through value",
+    function()
+        h.run_coder([[
+            local function optional(present: boolean): (...: {integer}?)
+                if not present then return nil end
+                return {5}
+            end
+
+            local function optional_array<|T|>(item: T): (...: {T}?)
+                return {item}
+            end
+
+            local function raw<|T|>(item: T): (...: T?) return item end
+            local function unforced<|T|>(item: T): (...: T) return item end
+
+            local function count<|T|>(...: T): integer return #... end
+            local function one<|T|>(_: T): integer return 1 end
+
+            function fixed(items: {integer}?): integer
+                return one<|{integer}|>(items)
+            end
+
+            function open(present: boolean): integer
+                return count<|{integer}|>(optional(present))
+            end
+
+            function from_array_carrier(): integer
+                return count<|{integer}|>(optional_array<|integer|>(5))
+            end
+
+            function from_value_array(item: value): integer
+                return count<|{integer}|>(raw<|{integer}|>(item))
+            end
+
+            function from_value_map(item: value): integer
+                return count<|{string: integer}|>(raw<|{string: integer}|>(item))
+            end
+
+            function raw_flow(item: value): integer
+                return count<|{integer}|>(unforced<|{integer}|>(item))
+            end
+
+            function polluted(): {value} return {"wrong element"} end
+        ]], [[
+            local function rejects(call, fragment, ...)
+                local ok, err = pcall(call, ...)
+                assert(not ok and err:find(fragment, 1, true), tostring(err))
+            end
+
+            local array = test.polluted()
+            assert(test.fixed(array) == 1)
+            assert(test.open(true) == 1)
+            assert(test.from_array_carrier() == 1)
+            rejects(test.fixed, "expected { integer } but found nil", nil)
+            rejects(test.open, "expected { integer } but found nil", false)
+            rejects(test.from_value_array, "expected { integer } but found nil", nil)
+            rejects(test.from_value_map, "expected { string : integer } but found nil", nil)
+            rejects(test.from_value_array, "found string", "wrong outer")
+            rejects(test.from_value_map, "found string", "wrong outer")
+            assert(test.from_value_array(array) == 1)
+            assert(test.from_value_map({item = "wrong element"}) == 1)
+            assert(test.raw_flow("wrong outer") == 1)
+        ]])
+    end)
+
     it("forces a generic container result in a generic-for setup tuple",
     function()
         h.run_coder([[

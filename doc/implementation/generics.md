@@ -64,8 +64,10 @@ The implementation is governed by these invariants:
    recovery for a constrained carrier. There is no trusted reverse path based
    on call provenance.
 8. The declared graph is frozen separately before the AST and active registry
-   are erased. Coder sees only ordinary monomorphic types and existing concrete
-   annotations.
+   are erased. Coder consumes only monomorphic types and concrete operations
+   over them, including the bounded container Option boundary plan below.
+   No type parameter, generic scheme, or application metadata participates
+   in code generation.
 9. Source order, declaration frontiers, duplicate precedence, visibility, and
    parse-time constructor adjacency are the same as for non-generic code.
 10. Generic storage is Transient/Shallow. The implementation promises open-
@@ -662,9 +664,9 @@ bound functions; Interface slots; hidden `for ... in` components; and Lua/FFI
 boundaries. Lowering preserves expression order and materializes an operand when
 an existing adjustment would otherwise reference it more than once.
 
-Any missing temporary boundary link, unknown adjustment, generic-only plan, or
-remaining generic annotation is an internal compiler error at this phase—not a
-relation for coder to infer.
+Any missing temporary boundary link, unknown adjustment, generic type or
+declaration in a code-facing plan, or malformed concrete plan is an internal
+compiler error—not a relation for coder to infer.
 
 ### Container views and presence
 
@@ -673,19 +675,30 @@ At a generic boundary the view is itself the input to subsequent operations.
 The typed cast exposes the closed Array or Map type without changing the
 shared producer or its result slots. A following force still checks nil,
 wrap still introduces an Option, and typed element reads still use their
-normal guards. Array constness and backing identity do not change.
-
-This also replaces the call-shaped spread special case: spread forces the
-closed subject before evaluating its bounds. A failing force now reports the
-closed type, for example `{ integer }`, instead of the erased `{ value }`.
+normal guards. Array constness and backing identity do not change. A typed
+container that already has the required outer kind and qualifier needs no
+second outer check, even in an Option slot. A spread forces the closed
+subject before evaluating its bounds and reports that type if it is nil.
 
 For open runs, the producer updates the physical element descriptor and the
-adjusted expression list owns the sink plan. When an already accepted
-surface force or wrap preserves its payload type, the open sink can retain
-that operation between ordinary structural container views on the producer
-and consumer sides. This is a bounded composition of checked operations,
-not a new assignment relation. The sink applies the operations once to each
-consumed element, in the original order; empty runs do not force a value.
+adjusted expression list owns the sink plan.
+`generic_open_container_option_plan` can produce a
+`container_option_boundary` plan for each consumed element. It has these
+monomorphic steps, in order:
+
+1. An optional carrier-to-container structural view. For a force, a raw
+   `value` carrier can instead use a strict projection to the Option
+   container. This checks the outer kind and Array qualifier, not contents.
+2. The admitted force or wrap with an unchanged Array or Map payload.
+3. An optional structural view from the container to the sink carrier. A
+   forced container can also use the ordinary injection into a `value` slot.
+
+The validator checks each adjacent endpoint and allows only the steps above,
+with at least one carrier step. This is not an assignment relation. Equal
+physical endpoints can still require the force: `value` may carry a wrong
+outer kind or nil. The sink applies the plan once to each consumed element,
+in order; empty runs do not force a value. Flows without a container force
+do not acquire these extra `value` checks.
 
 ### Concrete callback wrappers
 

@@ -355,11 +355,17 @@ function first(items: {integer}?): integer
 end
 ```
 
-The same rules apply to the values delivered by a flexible result tail. These
-boundaries do not allow an ordinary assignment from `{value}?` to `{integer}`;
-that still needs a separate structural view and Option force.
+The same rules apply to the values delivered by a flexible result tail. If
+a variadic parameter requires a non-optional Array or Map, each delivered
+Option is forced before forwarding, even when the generic function stores its
+arguments as `value`. When the offered value is dynamically represented, it
+must be nil or have the required outer container kind before the force; nil
+then fails the force. Element checks still wait until typed reads, and a
+`value` flow without a required container force is unchanged.
+
+An ordinary assignment from `{value}?` to `{integer}` still requires a
+separate structural view and Option force.
 
 A nil generic Array or integer-keyed Map used as a spread subject raises
-before the spread bounds are evaluated. The error now names the instantiated
-container (for example, `expected { integer } but found nil` rather than
-`expected { value } but found nil`).
+before the spread bounds are evaluated. The error names the instantiated
+container, for example `expected { integer } but found nil`.

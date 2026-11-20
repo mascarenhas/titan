@@ -174,16 +174,8 @@ function generic_interface_downcast_expression(
 end
 
 local function is_structural_container_view(plan)
-    if not plan or plan.kind ~= "gradual_view" or plan.op ~= "structural" then
-        return false
-    end
-    local source, target = plan.source, plan.target
-    if target._tag == "Type.Option" then
-        source, target = source.base, target.base
-    end
-    return source._tag == target._tag
-        and (target._tag == "Type.Map"
-            or (target._tag == "Type.Array" and source.isconst.tag == target.isconst.tag))
+    return plan and plan.kind == "gradual_view" and plan.op == "structural"
+        and types.same_container_view_representation(plan.source, plan.target)
 end
 
 -- Implementation notes: doc/implementation/generics.md#focused-cast-and-adapter-insertion
@@ -237,7 +229,7 @@ function generic_open_descriptor(source)
     return nil
 end
 
-local function generic_open_option_view(source, target, prior, state)
+local function generic_open_container_option_plan(source, target, prior, state)
     -- An open run has no expression for each element. Retain the admitted
     -- surface presence change between ordinary views of the two carriers.
     -- The surface plan must already have accepted an unchanged payload.
@@ -249,20 +241,30 @@ local function generic_open_option_view(source, target, prior, state)
     end
     local surface_source, surface_target =
         types.erase(prior.source), types.erase(prior.target)
+    local allow_value = coercion.op == "option_force"
+        and (surface_target._tag == "Type.Array" or surface_target._tag == "Type.Map")
     local from_carrier, to_carrier
     if not types.equals(source, surface_source) then
         from_carrier = generic_ordinary_assignment(source, surface_source, state)
-        if not is_structural_container_view(from_carrier) then return nil end
+        if not is_structural_container_view(from_carrier)
+           and not (allow_value and from_carrier and from_carrier.kind == "gradual_view"
+                    and from_carrier.op == "project") then
+            return nil
+        end
     end
     if not types.equals(surface_target, target) then
         to_carrier = generic_ordinary_assignment(surface_target, target, state)
-        if not is_structural_container_view(to_carrier) then return nil end
+        if not is_structural_container_view(to_carrier)
+           and not (allow_value and to_carrier and to_carrier.kind == "gradual_view"
+                    and to_carrier.op == "inject") then
+            return nil
+        end
     end
     if not from_carrier and not to_carrier then return nil end
     local option = assert(generic_ordinary_assignment(
         surface_source, surface_target, state))
     return {
-        kind = "erased_option_view",
+        kind = "container_option_boundary",
         source = source,
         target = target,
         from_carrier = from_carrier,
@@ -291,7 +293,7 @@ local function generic_reclassify_open_adjustment(
         or not types.equals(types.erase(prior_target), target)
     if not stale then return end
 
-    local plan = generic_open_option_view(source, target, prior, state)
+    local plan = generic_open_container_option_plan(source, target, prior, state)
         or generic_ordinary_assignment(
             source, target, state, { allow_coercion = true })
     if not plan then
