@@ -78,7 +78,7 @@ p:flag('--no-uv-bootstrap',
 p:flag('--no-line-directives',
     'Omit source #line directives from generated C.')
 p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed compilers use their matching Lua SDK).')
-p:option('-t --tree', 'Root of the source tree, used for looking for source modules (defaults to ".").')
+p:option('-t --tree', 'Semicolon-separated authored source roots (default: current directory), searched before installed sources.')
 p:option('-T --target', 'Compilation target (default: TITAN_TARGET or the host OS).')
 p:option('-o --output', 'Folder for generated files, preserving the source hierarchy (created if needed).')
 p:option('-l --link', 'Library linked into the final executable or provider; repeatable, comma lists allowed, order kept.'):count('*'):action(native_switch('library'))
@@ -382,6 +382,10 @@ local target, target_error =
     driver.validate_target(resolver_context, target_value, target_origin)
 if not target then exit(target_error) end
 resolver_context.target = target
+-- This is a lookup fallback, not a writable source tree or discovery root.
+if driver.INSTALLED and driver.INSTALL_PATHS then
+    resolver_context.installed_source_root = driver.INSTALL_PATHS.titan_bin
+end
 resolver_context.strict_static = args.static and target ~= "browser" or nil
 if target == "browser" then
     if not args.output then exit("--target browser requires --output") end
@@ -477,6 +481,9 @@ if #args.test_dir > 0 then
         source_overrides[modname] = source
     end
 end
+-- A positional/discovered root must be authored even if another root imports
+-- it first. Share the same policy with the coordinator's publication check.
+resolver_context.authored_source_roots = requested_roots
 local loader_options = {
     source_roots = requested_roots,
     incremental = args.incremental,
@@ -635,6 +642,9 @@ if args.test then
 end
 local builds_program = main_module ~= nil or
     (args.test and not args.compile_only)
+if not builds_program and not args.compile_only and preflight_plan.installed_source_library_error then
+    exit(preflight_plan.installed_source_library_error)
+end
 if args.exe and not builds_program then
     exit("--exe is only valid when compiling a standalone or test executable")
 end

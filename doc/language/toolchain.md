@@ -15,10 +15,10 @@ least one module name is required unless you pass `--print-root`,
 
 | Option | Meaning |
 | --- | --- |
-| `<module>...` | Dotted logical module names to compile as build roots. |
-| `-o`, `--output DIR` | Root directory for all generated files, created if missing. Required for `--target browser`. |
+| `<module>...` | Dotted logical module names to compile as build roots (resolved only from authored `--tree` roots, never the implicit SDK source fallback). |
+| `-o`, `--output DIR` | Root directory for all generated files, created if missing. Required for `--target browser` and whenever a build selects an installed `.titan` source through the SDK fallback. |
 | `--exe PATH` | Exact destination for a standalone or `--test` executable, relative to the current directory. |
-| `-t`, `--tree PATH` | Semicolon-separated source root directories (default: `.`). |
+| `-t`, `--tree PATH` | Semicolon-separated authored source root directories (default: `.`). Positional roots and `--test-dir` use only these authored roots; ordinary imports search authored roots before the read-only implicit SDK root `<root>/lib/titan/0.6`. |
 | `-T`, `--target TGT` | Compilation target: host OS (`linux`, `darwin`, `windows`) or `browser` (default: `TITAN_TARGET` or host OS). |
 | `--static` | Require archives for compiled dependencies of a Linux/macOS executable or test. Also valid with `-c`, even for roots without `main`. |
 | `--source-first` | Prefer available `.titan` source dependencies over compiled providers, with compiled fallback on miss. |
@@ -186,11 +186,17 @@ Paths relative to `out/` on Linux and macOS:
   `out/app/main.mjs`, `out/app/main.wasm`, `out/app/main.wasm.trace`, and
   `out/app/main.wasm.map` (see [Browser target](browser-target.md)).
 - Omitting `-o` writes generated C, objects, and headers beside each source
-  file and places final outputs relative to the working directory.
+  file and places final outputs relative to the working directory. However,
+  when a build actually selects an installed `.titan` source through the
+  implicit SDK source fallback (`<root>/lib/titan/0.6`), `-o`/`--output` is
+  required: `titanc` refuses (naming the logical module) rather than writing
+  or locking in that implicit fallback root. Builds that do not select an
+  installed source keep their existing behavior.
 
 `--output` selects write locations only; it does not add `out` to provider
 search paths. To consume a library built under `out`, add `out` to
-`TITAN_PATH_0_6`.
+`TITAN_PATH_0_6` (or install it into the SDK with `titan-install`; see
+[Packaging and distributing modules with LuaRocks](modules.md#packaging-and-distributing-modules-with-luarocks)).
 
 ### Choosing the executable path (`--exe`)
 
@@ -227,14 +233,45 @@ refuses to overwrite authored files occupying reserved paths.
 
 ### Source versus compiled lookup order
 
-Explicit command-line roots and explicit source imports (`import "pkg.mod.titan"`)
-always resolve to source. Ordinary `import` statements resolve in this order:
+Explicit positional command-line roots—for a library, program, `-c`, explicit
+`--test`, or `--exe` build—always resolve to source **only** under the authored
+`--tree` roots (default `.`), never through the implicit installed source
+fallback `<root>/lib/titan/0.6`. If a requested root exists only as installed
+source, `titanc` rejects it and directs you to compile from a source checkout
+with `--tree`. Explicit source imports (`import "pkg.mod.titan"`) also require
+source. Ordinary `import` statements inside a valid authored root resolve in
+this order:
 
 | Mode | Search order |
 | --- | --- |
-| Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix executable builds only) on the Titan path -> 3. Source (folder then flat) on `--tree` |
-| `--static` | 1. Static providers (`.a`) -> 2. Source on `--tree`; no shared-provider fallback |
-| `--source-first` or `--test` | 1. Source on `--tree` -> 2. Compiled providers according to the selected mode |
+| Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix executable builds only) on the Titan path -> 3. Source (folder then flat) on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` |
+| `--static` *(executables/`-c`, Unix only)* | 1. Static providers (`.a`) -> 2. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6`; no shared-provider fallback (rejected on final no-main library outputs) |
+| `--source-first` or `--test` | 1. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` -> 2. Compiled providers according to the selected mode |
+
+Authored source roots come from `--tree` (default `.`). Passing `--tree`
+replaces the default `.` without disabling the read-only implicit SDK fallback
+`<root>/lib/titan/0.6` for ordinary imports. That fallback applies on both
+native targets and `--target browser` (where `<root>/lib/titan/0.6` is searched
+for `.titan` source only, selecting `.browser.titan` and shared `.titan`
+variants normally; native compiled providers there are never eligible for
+browser builds). `--test-dir` scans only the specified directory inside an
+authored `--tree` root and never scans the installed SDK automatically.
+Whenever a build selects an installed source through the fallback,
+`-o`/`--output` is required so all generated files land in the consumer's
+output directory by logical module name. Separately from the positional-root
+rule above, compiling an ordinary binary library fails if a dependency is
+selected from the implicit installed source fallback (including under
+`--source-first` when a paired compiled provider is also installed) rather than
+copying another rock's module into the library's provider; install or use its
+compiled provider (building without `--source-first` if one is already
+installed) or publish the library as source-only—see
+[Source-only modules](modules.md#source-only-modules) and
+[titan#427](https://github.com/mascarenhas/titan/issues/427). (Without `-o`,
+the generic missing-`--output` diagnostic can appear first; adding `-o` does
+not permit vendoring an installed source into a library.) Same-repo
+authored sources under `--tree` still build together into a library, and
+standalone (ordinary or `--static`) applications and `--test` builds still
+compile installed fallback sources into `--output`.
 
 Within each compiled format, lookup is **path-root first, shallowest prefix to
 exact module**. For logical module `a.b.c`, one directory is probed as:
@@ -323,10 +360,12 @@ selects the active compiler's slice.
 
 Build a library or canonical bundle by listing its source roots, for example
 `titanc --tree src -o out pkg.left pkg.right`. The pair contains those
-modules and their source-backed helpers, not any selected external compiled
-provider. An external compiled dependency must have a shared provider to
-build the pair; an archive alone is not sufficient. `--static` is not a
-library-production mode.
+modules and their source helpers from authored `--tree` roots, not any
+selected external compiled provider. A dependency selected from the implicit
+installed source fallback is refused, as described above
+([titan#427](https://github.com/mascarenhas/titan/issues/427)). An external
+compiled dependency must have a shared provider to build the pair; an archive
+alone is not sufficient. `--static` is not a library-production mode.
 
 A default application may still use an archive when no shared provider
 claims its import. To link the full Titan dependency closure of an
@@ -658,14 +697,18 @@ A passing run prints an executable-line summary and writes annotated output to
 
 ### Source selection and artifacts
 
-- By default, `--coverage` instruments every source-imported module in the
-  build graph that defines no top-level `test_*` function. Prebuilt providers
-  and modules containing any `test_` function are excluded. To include an
-  untested module in the denominator, import it from a test root.
+- By default, `--coverage` instruments every authored source-imported module in
+  the build graph that defines no top-level `test_*` function. Modules resolved
+  from source through the implicit SDK fallback (`<root>/lib/titan/0.6`),
+  prebuilt providers, and modules containing any `test_` function are excluded.
+  To include an untested authored module in the denominator, import it from a
+  test root.
 - Repeatable `--coverage-module GLOB` replaces automatic selection with a
   union of logical-module globs (`*` matches zero or more characters, `?`
-  matches one, including dots; quote globs from the shell). Prebuilt and
-  `test_`-bearing modules remain excluded, and an empty match is an error.
+  matches one, including dots; quote globs from the shell). A matching glob
+  opts an installed fallback source into instrumentation, while selected
+  compiled providers and `test_`-bearing modules remain excluded, and an empty
+  match is an error.
 - Coverage C, objects, and `.gcno`/`.gcda` files live in `.coverage/`
   subdirectories (`out/app/.coverage/calc.o`), completely separate from normal
   objects so normal and coverage builds never contaminate each other.

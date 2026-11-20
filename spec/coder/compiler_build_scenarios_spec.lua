@@ -419,6 +419,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             TITAN_EXTRA_CFLAGS = env.TITAN_EXTRA_CFLAGS or "-O0 -fno-lto",
             TITAN_EXTRA_LDFLAGS = env.TITAN_EXTRA_LDFLAGS or "-fno-lto",
         }
+        if env.PATH then env_table.PATH = env.PATH end
         if env.CC then env_table.CC = env.CC end
         if env.TITAN_C_PARTS then env_table.TITAN_C_PARTS = env.TITAN_C_PARTS end
         local argv = {
@@ -431,6 +432,10 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
                 REPOSITORY .. "/titan-runtime/bootstrap/?" .. SHARED_SUFFIX .. ";"),
             frontend,
         }
+        if options.init_code and options.init_code ~= "" then
+            table.insert(argv, 5, options.init_code)
+            table.insert(argv, 5, "-e")
+        end
         for _, arg in ipairs(options.args or {}) do
             argv[#argv + 1] = arg
         end
@@ -631,6 +636,227 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
 
     after_each(function()
         remove(workspace)
+    end)
+
+    it("uses installed source modules without treating the SDK as an output or test-discovery root", function()
+        local uv = require("luv")
+        local sdk = workspace .. "/isolated SDK"
+        local release_dir = "lib/titan/" .. driver.TITAN_LIBRARY_VERSION
+        local lib = sdk .. "/" .. release_dir
+        local function copy(relative)
+            local source, target = prefix .. "/" .. relative, sdk .. "/" .. relative
+            if lfs.attributes(source, "mode") == "directory" then
+                mkdir(target)
+                for name in lfs.dir(source) do
+                    if name ~= "." and name ~= ".." then copy(relative .. "/" .. name) end
+                end
+            else
+                mkdir(assert(target:match("^(.*)/[^/]+$")))
+                assert(uv.fs_copyfile(source, target))
+            end
+        end
+        copy("include")
+        copy("src/lua-5.5.1")
+        copy("etc/titan/build-profile")
+        copy("lib/libbacktrace.a")
+        copy(platform.windows and "lib/liblua55.a" or "lib/liblua.a")
+        copy(release_dir .. "/libtitan.a")
+        copy(release_dir .. "/titan" .. SHARED_SUFFIX)
+        local tool_path
+        if platform.windows then
+            -- Fresh image validation uses the selected SDK's lua.exe. Keep
+            -- its DLLs beside it and on PATH for the generated launchers too.
+            for _, name in ipairs({ "lua.exe", "lua55.dll", "libuv-1.dll",
+                    "libllhttp-9.4.dll", "libsqlite3-0.dll", "libssl-3-x64.dll",
+                    "libcrypto-3-x64.dll" }) do
+                copy("bin/" .. name)
+            end
+            tool_path = sdk .. "/bin;" .. (os.getenv("PATH") or "")
+        else
+            copy(release_dir .. "/titan.a")
+        end
+        local module = lib .. "/fruit/pick/pick.titan"
+        write(module, "function answer(): integer return add(40) end\n")
+        write(lib .. "/fruit/pick/internal.titan",
+            "local function add(n: integer): integer return n + 2 end\n")
+        write(lib .. "/sdk_test.titan", "this must not be discovered\n")
+        write(lib .. "/sdk_entry.titan",
+            "function main(args: {string}): integer return 0 end\n")
+        put_source("consumer.titan", [[
+local pick = import "fruit.pick"
+function main(args: {string}): integer return pick.answer() - 42 end
+]])
+        put_source("private_consumer.titan", [[
+local pick = import "fruit.pick.titan"
+function main(args: {string}): integer return pick.add(40) - 42 end
+]])
+        put_source("plain.titan", "function answer(): integer return 42 end\n")
+        put_source("fixture_test.titan", [[
+local test = import "test"
+local pick = import "fruit.pick"
+function test_installed(context: test.Context)
+    test.assert(pick.answer() == 42)
+end
+]])
+        put_source("uses_sdk.titan", [[
+local pick = import "fruit.pick"
+function answer(): integer return pick.answer() end
+]])
+        put_source("through_sdk.titan", [[
+local wrapper = import "uses_sdk"
+function answer(): integer return wrapper.answer() end
+]])
+        local collector = require("spec.support.luacov_children").new(
+            REPOSITORY, REPOSITORY, workspace .. "/child-coverage")
+        local init_code = collector:init_code()
+        local function compile(cwd, ...)
+            local args = { "-v", ... }
+            if args[2] ~= "--print-ast" then table.insert(args, 2, "--incremental") end
+            local argv, env = compiler_argv({
+                args = args,
+                env = { TITAN_ROOT = sdk, PATH = tool_path }, init_code = init_code,
+            })
+            return run_command(argv, cwd, env)
+        end
+        local function run_program(output, name)
+            local executable = platform.windows and
+                assert(driver.windows_program_paths(name, nil, nil, output)).executable or
+                output .. "/" .. name
+            return run_executable(executable, nil, {
+                TITAN_PATH_0_6 = lib .. ";;", PATH = tool_path,
+            })
+        end
+        local ok, output = compile(source_dir, "consumer")
+        assert.is_false(ok, output)
+        assert.matches("installed source module 'fruit.pick' requires --output DIR", output, 1, true)
+        ok, output = compile(source_dir, "-c", "plain")
+        assert.is_true(ok, output)
+        assert.is_true(exists(source_dir .. "/plain.o"))
+        assert.is_false(exists(lib .. "/.titan-build.lock"))
+        ok, output = compile(workspace, "--tree", source_dir, "--test",
+            "--test-dir", lib, "-o", build_dir)
+        assert.is_false(ok, output)
+        assert.matches("is outside every --tree source root", output, 1, true)
+        -- Reject every positional mode before generating the requested root,
+        -- even when the first root needs it as an import, or discovery adds
+        -- authored tests. An SDK source with main is not an --exe target.
+        local root_error = "is installed in the SDK; titanc builds only authored roots"
+        for index, invocation in ipairs({
+            { "fruit.pick" },
+            { "-c", "fruit.pick" },
+            { "--test", "fruit.pick" },
+            { "--test", "--test-dir", source_dir, "--tree", source_dir, "fruit.pick" },
+            { "--exe", workspace .. "/not-authored", "sdk_entry" },
+            { "consumer", "fruit.pick" },
+        }) do
+            local rejected = workspace .. "/rejected-" .. index
+            ok, output = compile(source_dir, "-o", rejected, table.unpack(invocation))
+            assert.is_false(ok, output)
+            assert.matches(root_error, output, 1, true)
+            assert.matches("pass --tree to a checkout of it", output, 1, true)
+            assert.is_false(exists(rejected .. "/fruit"))
+            assert.is_false(exists(rejected .. "/consumer.o"))
+            assert.is_false(exists(rejected .. "/sdk_entry.o"))
+        end
+        ok, output = compile(source_dir, "--print-ast", "-o", build_dir, "fruit.pick")
+        assert.is_false(ok, output)
+        assert.matches(root_error, output, 1, true)
+        local library_error = "cannot build a library with dependency 'fruit.pick' from installed SDK source"
+        local library = build_dir .. "/library"
+        ok, output = compile(source_dir, "-o", library, "through_sdk")
+        assert.is_false(ok, output)
+        assert.matches(library_error, output, 1, true)
+        assert.matches("see Titan issue #427", output, 1, true)
+        assert.is_false(exists(library .. "/through_sdk.o"))
+        assert.is_false(exists(library .. "/fruit"))
+        ok, output = compile(source_dir, "--print-ast", "-o", library, "uses_sdk")
+        assert.is_false(ok, output)
+        assert.matches(library_error, output, 1, true)
+        ok, output = compile(source_dir, "-c", "-o", library, "through_sdk")
+        assert.is_true(ok, output)
+        assert.is_true(exists(library .. "/fruit/pick/pick.o"))
+        local object = read(library .. "/through_sdk.o")
+        ok, output = compile(source_dir, "-o", library, "through_sdk")
+        assert.is_false(ok, output)
+        assert.matches(library_error, output, 1, true)
+        assert.equal(object, read(library .. "/through_sdk.o"))
+        assert.is_false(exists(library .. "/through_sdk" .. SHARED_SUFFIX))
+        assert.is_false(exists(library .. "/through_sdk.a"))
+        if not platform.windows then
+            -- This SDK has no bin/lua, and the invoking Lua has options before
+            -- the script name. Fresh validation must use that interpreter.
+            local provider = build_dir .. "/provider"
+            assert.is_false(exists(sdk .. "/bin/lua"))
+            ok, output = compile(source_dir, "-o", provider, "plain")
+            assert.is_true(ok, output)
+            assert.is_true(exists(provider .. "/plain.so"))
+            assert.is_true(exists(provider .. "/plain.a"))
+        end
+
+        ok, output = compile(source_dir, "-o", build_dir, "consumer")
+        assert.is_true(ok, output)
+        assert.is_true(exists(build_dir .. "/fruit/pick/pick.o"))
+        local ran, result = run_program(build_dir, "consumer")
+        assert.is_true(ran, result)
+        ok, output = compile(workspace, "--tree", source_dir, "-o", build_dir, "consumer")
+        assert.is_true(ok, output)
+        assert.matches("Titan object hit fruit.pick", output, 1, true)
+        local installed_object = read(build_dir .. "/fruit/pick/pick.o")
+        ok, output = compile(source_dir, "-c", "-o", build_dir, "fruit.pick")
+        assert.is_false(ok, output)
+        assert.matches(root_error, output, 1, true)
+        assert.equal(installed_object, read(build_dir .. "/fruit/pick/pick.o"))
+        ok, output = compile(source_dir, "-j", "2", "-o", build_dir, "private_consumer")
+        assert.is_true(ok, output)
+        ran, result = run_program(build_dir, "private_consumer")
+        assert.is_true(ran, result)
+        ok, output = compile(workspace, "--tree", source_dir, "--test",
+            "--test-dir", source_dir, "-o", build_dir .. "/sdk-test")
+        assert.is_true(ok, output)
+        ran, result = run_program(build_dir .. "/sdk-test", "fixture_test")
+        assert.is_true(ran, result)
+        assert.matches("[  PASSED  ] 1 test.", result, 1, true)
+        ok, output = compile(workspace, "--tree", source_dir, "consumer")
+        assert.is_false(ok, output)
+        assert.matches("installed source module 'fruit.pick' requires --output DIR", output, 1, true)
+        write(module, "function answer(): integer return add(41) end\n")
+        ok, output = compile(workspace, "--tree", source_dir, "-o", build_dir, "consumer")
+        assert.is_true(ok, output)
+        assert.matches("Titan object miss fruit.pick", output, 1, true)
+        local _, _, reason, status = run_program(build_dir, "consumer")
+        assert.equal("exit", reason)
+        assert.equal(1, status)
+
+        local second = workspace .. "/second"
+        write(second .. "/fruit/pick.titan", "function answer(): integer return 42 end\n")
+        ok, output = compile(workspace, "--tree", second, "-c", "-o", build_dir .. "/authored", "fruit.pick")
+        assert.is_true(ok, output)
+        assert.is_true(exists(build_dir .. "/authored/fruit/pick.o"))
+        local authored = build_dir .. "/authored-library"
+        ok, output = compile(workspace, "--tree", source_dir .. ";" .. second,
+            "-o", authored, "through_sdk")
+        assert.is_true(ok, output)
+        assert.is_true(exists(authored .. "/through_sdk" .. SHARED_SUFFIX))
+        local provider = build_dir .. "/dependency-provider"
+        ok, output = compile(workspace, "--tree", second, "-o", provider, "fruit.pick")
+        assert.is_true(ok, output)
+        assert(uv.fs_copyfile(provider .. "/fruit/pick" .. SHARED_SUFFIX,
+            lib .. "/fruit/pick" .. SHARED_SUFFIX))
+        local binary = build_dir .. "/compiled-library"
+        ok, output = compile(workspace, "--tree", source_dir, "-o", binary, "through_sdk")
+        assert.is_true(ok, output)
+        assert.is_true(exists(binary .. "/through_sdk" .. SHARED_SUFFIX))
+        assert.is_false(exists(binary .. "/fruit"))
+        ok, output = compile(workspace, "--tree", source_dir .. ";" .. second,
+            "--test", "--test-dir", source_dir, "-o", build_dir .. "/test")
+        assert.is_true(ok, output)
+        ran, result = run_program(build_dir .. "/test", "fixture_test")
+        assert.is_true(ran, result)
+        assert.matches("[  PASSED  ] 1 test.", result, 1, true)
+        assert.is_false(exists(lib .. "/fruit/pick/pick.o"))
+        assert.is_false(exists(lib .. "/fruit/pick/pick.c"))
+        assert.is_false(exists(lib .. "/.titan-build.lock"))
+        collector:collect()
     end)
 
     it("builds and incrementally updates application and test executables across closure, header, flag, profile, link, discovery, and recovery scenarios", function()

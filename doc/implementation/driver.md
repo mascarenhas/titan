@@ -56,8 +56,46 @@ family probes and the folder sweep's grammar.
 
 All modules, including the standard library, use the same two path strings:
 
-* **`driver.TITAN_SOURCE_PATH`** — where `.titan` sources live. Default
-  `"."`; `titanc --tree <root>` overrides it.
+* **`driver.TITAN_SOURCE_PATH`** — authored `.titan` source roots. Default
+  `"."`; `titanc --tree <root>` replaces the authored root list. Positional
+  CLI build roots (for a library, program, `-c`, explicit `--test`, or `--exe`
+  build) resolve **only** from these authored roots, never from the implicit
+  installed source fallback; if a requested root exists only as installed
+  source in `<root>/lib/titan/0.6`, `titanc` rejects it and directs the user
+  to a source checkout with `--tree`. Ordinary `import` resolution inside a
+  valid authored root searches every authored root in order and then falls back
+  to the read-only implicit SDK root `<root>/lib/titan/0.6` on both native and
+  browser targets (browser builds search that directory for `.titan` source
+  only, selecting `.browser.titan` and shared `.titan` variants normally;
+  native providers there are never eligible for browser builds). Selecting an
+  installed source through that implicit fallback requires `-o`/`--output` so
+  generated files land under the consumer's output tree and `titanc` neither
+  writes nor locks in the implicit fallback root; builds that do not select an
+  installed source keep their existing behavior. Separately from the
+  positional-root restriction, compiling an ordinary binary library rejects a
+  dependency selected from the implicit installed source fallback (including
+  under `--source-first` when a paired provider is also installed) rather than
+  copying another rock's module into the library's provider (same-repo authored
+  `--tree` sources still build into a library together, and
+  ordinary/`--static` executables and `--test` builds still compile installed
+  fallback sources into `--output`; see
+  [titan#427](https://github.com/mascarenhas/titan/issues/427)). Without `-o`,
+  source output relocation can report the generic missing-`--output` diagnostic
+  first, and passing `-o` still does not permit vendoring an installed source
+  into a binary library. Mechanically, `titanc` sets
+  `context.authored_source_roots` to the positional plus `--test-dir` roots;
+  `resolve_source` checks it only after every authored root misses and the
+  implicit SDK fallback would match, returning the named `--tree` diagnostic
+  (workers receive planned or overridden descriptors and never resolve roots,
+  and language-server/analysis contexts leave the field unset). In library
+  mode, `preflight_build_outputs` inspects planned source descriptors for the
+  `installed` origin, records the installed-source library refusal, and rejects
+  no-main non-compile-only builds before provider planning or worker dispatch,
+  and `titanc` repeats the check after the checker's final `main`
+  classification to guard against shape-based preflight detection. Explicit
+  `driver.resolve_source(context, modname, source_path)` calls, closed-world
+  and explicit analysis roots, and `--test-dir` remain exact and never scan the
+  installed SDK automatically.
 * **`driver.TITAN_BIN_PATH`** — the configured Titan path for compiled
   provider `.so` and `.a` files: `TITAN_PATH_0_6` when set, otherwise
   `TITAN_PATH`, otherwise `nil`. `nil` selects
@@ -3091,7 +3129,7 @@ concepts.
 | `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | detected from checkout files unless `TITAN_ROOT` is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. Detection is lazy (`driver.initialize_layout`); before resolver initialization the module exposes only a provisional lexical checkout layout. |
 | `driver.INSTALL_PATHS` | `driver.installed_paths(root)` | `root`, `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua` (`liblua55.a` on Windows), `titan_bin`, and `sdk_digests`; bundled `libuv.a` is deliberately not an installed SDK path. The browser table, `installed_paths(root, "browser")`, lives only in a browser descriptor ([Installed paths](browser-target.md#installed-paths)). |
 | `driver.TITAN_BIN_PATH` / `driver.DEFAULT_TITAN_BIN_PATH` | `TITAN_PATH_0_6`, then `TITAN_PATH`, else `nil` / `.;<root>/lib/titan/0.6`, or `.` without a root | Configured and default compile-time Titan paths; `driver.titan_bin_path_entries` expands them. |
-| `driver.TITAN_SOURCE_PATH` | `"."` (`titanc --tree`) | Semicolon-separated source roots. |
+| `driver.TITAN_SOURCE_PATH` | `"."` (`titanc --tree`) | Semicolon-separated authored source roots; positional CLI roots and `--test-dir` search only authored roots, while ordinary imports append read-only `<root>/lib/titan/0.6` on native and browser targets (requiring `--output` when an installed source is selected). |
 | `driver.LUA_SOURCE_PATH` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode | Lua internal source/header tree; checkout-only override by `titanc --lua`. |
 | `driver.INCLUDE_PATH` | `<root>/include` in installed mode | SDK headers used by generated C and foreign imports; see [the runtime support library](#the-runtime-support-library-titan-runtime). |
 | `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime and libbacktrace locations. |

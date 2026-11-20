@@ -69,12 +69,16 @@ normal executable locations. Coverage final links require a test or standalone
 executable; library-only provider links are rejected. Compile-only coverage
 remains available for incremental object DAGs.
 
-After the requested source graph resolves, automatic selection includes source
-modules with no top-level `test_` functions; a module containing any test is
-excluded as a whole. Repeated `--coverage-module` globs restrict the same graph
-instead; `*` and `?` match logical-name characters including dots. Neither mode
-imports additional roots or instruments prebuilt providers. The generated test
-runner is unmeasured. An empty selection is a compiler error.
+After the requested source graph resolves, automatic selection includes
+authored source modules with no top-level `test_` functions; modules resolved
+from source through the implicit SDK fallback (`<root>/lib/titan/0.6`) and
+any module containing a test are excluded (a test-bearing module is excluded as
+a whole). Repeated `--coverage-module` globs replace automatic selection over
+the resolved source graph instead, opting a matching installed fallback source
+into instrumentation; `*` and `?` match logical-name characters including dots.
+Neither mode imports additional roots or instruments selected compiled
+providers, and `test_`-bearing modules stay excluded in both modes. The
+generated test runner is unmeasured. An empty selection is a compiler error.
 
 Each generated object records `coverage_test_functions`
 (`coverage.test_functions(ast)`) and its partial coverage inventory

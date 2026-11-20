@@ -46,6 +46,7 @@ install-compiler:
 install-rock-tools:
 	mkdir -p "$(INST_PREFIX)/installer" "$(INST_BINDIR)"
 	install -p -m 0644 scripts/titan_install.lua "$(INST_PREFIX)/installer/titan_install.lua"
+	install -p -m 0755 scripts/titan-install "$(INST_BINDIR)/titan-install"
 	install -p -m 0755 scripts/titan-uninstall "$(INST_BINDIR)/titan-uninstall"
 	printf '%s\n' '$(OPENSSL_MODE)' > "$(INST_PREFIX)/installer/openssl-mode"
 

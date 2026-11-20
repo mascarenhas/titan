@@ -66,7 +66,7 @@ Two invariants shape everything downstream of the checker:
 | Chapter | Covers |
 | --- | --- |
 | [Repository development workflow](repository-workflow.md) | Isolated prefixes, profile and environment hygiene, repository make/test commands, checkout-Lua Busted runs, output routing, and shared-artifact ownership. |
-| [Build and installation responsibilities](build-script-audit.md) | Makefile and LuaRocks ownership: Lua and native dependency preparation, `titanc --incremental` delegation, job pools, `make browser-sdk`, and install targets. |
+| [Build and installation responsibilities](build-script-audit.md) | Makefile and LuaRocks ownership: Lua and native dependency preparation, `titanc --incremental` delegation, job pools, `make browser-sdk`, install targets, and [module rock publication/removal](build-script-audit.md#module-rock-publication-and-removal). |
 | [Continuous integration and platform validation](continuous-integration.md) | Linux lanes, four-way coverage shards, `browser-toolchain`/`browser-stdlib`/`browser-playwright`/`browser-packaging` jobs, caches, sanitizers, and macOS pre-merge gates. |
 | [Experimental Windows build](windows-build.md) | Stock Lua DLL and SDK recipe, UTF-8 relocation, `titanc.exe` launcher, DLL publication, NTFS test ownership, and Windows runtime limits. |
 | [Native test runner](test-runner.md) | `--test-dir` discovery, certified-object case discovery, synthetic runner, browser stdlib test images, parallel aggregate groups, and regression placement. |

@@ -2820,6 +2820,10 @@ end
 -- This also handles absolute/external source roots without '..' escapes.
 -- Implementation notes: doc/implementation/output-directory.md#one-source-identity-separate-artifact-locations
 function driver.relocate_source_output(modname, source, output_root)
+    if source.installed and not output_root then
+        return nil, "installed source module '" .. modname ..
+            "' requires --output DIR (the Titan SDK is read-only to the build)"
+    end
     if not output_root or source._output_root == output_root then return source end
     if source.kind ~= "generated" then
         if not staticmetadata.valid_module_name(modname) then
@@ -3035,9 +3039,18 @@ local function resolve_source(paths, modname, context)
     local target, target_error = driver.context_target(context)
     if not target then return nil, target_error end
     context.source_labels = context.source_labels or driver.target_selection_labels(target)
-    for root in paths:gmatch("[^;]+") do
+    for root in (paths or driver.TITAN_SOURCE_PATH):gmatch("[^;]+") do
         local source, err = source_resolution_in_root(root, modname, context)
         if source or err then return source, err end
+    end
+    if not paths and context.installed_source_root then
+        local source, err = source_resolution_in_root(context.installed_source_root, modname, context)
+        if (source or err) and context.authored_source_roots and context.authored_source_roots[modname] then
+            return nil, "module '" .. modname .. "' is installed in the SDK; " ..
+                "titanc builds only authored roots (pass --tree to a checkout of it)"
+        end
+        if source then source.installed = true end
+        return source, err
     end
     return nil
 end
@@ -5566,8 +5579,7 @@ function driver.defaultloader(static_deps, options)
             return false, "cached interface for module '" .. modname ..
                 "' must list its main source filename first"
         end
-        local source, source_error = resolve_source(
-            driver.TITAN_SOURCE_PATH, modname, context)
+        local source, source_error = resolve_source(nil, modname, context)
         if source_error then return false, source_error end
         if not source or source.kind == "blocked" or source.main ~= filename or
            #source.files ~= #source_files then return nil end
@@ -6799,8 +6811,7 @@ function driver.defaultloader(static_deps, options)
                     return source
                 end
             end
-            source, source_err = resolve_source(
-                driver.TITAN_SOURCE_PATH, modname, context)
+            source, source_err = resolve_source(nil, modname, context)
             return source, source_err
         end
         local function load_source(candidate)
@@ -7031,15 +7042,15 @@ end
 
 -- Ordinary tagged source lookup (folder before flat, blocked constituents
 -- reported as such) over `source_path`, which defaults to the invocation's
--- `;`-separated source roots. Returns a descriptor, `nil, err`, or `nil` when
+-- `;`-separated source roots plus its optional installed fallback. Returns a
+-- descriptor, `nil, err`, or `nil` when
 -- no root has the module.
 function driver.resolve_source(context, modname, source_path)
     if type(context) ~= "table" or context.io == nil then
         error("source lookup requires a resolver context", 2)
     end
     driver.assert_target_context(context)
-    return resolve_source(source_path or driver.TITAN_SOURCE_PATH, modname,
-        context)
+    return resolve_source(source_path, modname, context)
 end
 
 -- Coordinator and worker entry points; their private helpers stay local to
@@ -7050,8 +7061,7 @@ do
 -- would select it: relocated under the output root, and coverage-relocated
 -- when sources are instrumented. Publication revalidates against it.
 local function current_source_descriptor(context, modname)
-    local source, source_error = resolve_source(
-        driver.TITAN_SOURCE_PATH, modname, context)
+    local source, source_error = resolve_source(nil, modname, context)
     if not source then
         return nil, source_error or driver.missing_module_message(context, modname, true)
     elseif source.kind == "blocked" then
@@ -7881,8 +7891,7 @@ function driver.resolve_external_modules(
         end
 
         if not results[name] then
-            local source, source_error = resolve_source(
-                driver.TITAN_SOURCE_PATH, name, context)
+            local source, source_error = resolve_source(nil, name, context)
             if source_error then
                 results[name] = {
                     kind = "error",
@@ -12805,8 +12814,11 @@ end
 
 local function current_lua_executable()
     if driver.INSTALL_PATHS then
-        return root_join(driver.INSTALL_PATHS.root,
+        local installed_lua = root_join(driver.INSTALL_PATHS.root,
             platform.windows and "bin/lua.exe" or "bin/lua")
+        if platform.windows or lfs.attributes(installed_lua, "mode") == "file" then
+            return installed_lua
+        end
     end
     if platform.windows then
         local source_lua = driver.LUA_SOURCE_PATH .. "/lua.exe"
@@ -12818,9 +12830,14 @@ local function current_lua_executable()
     end
     local source_lua = driver.LUA_SOURCE_PATH .. "/lua"
     if lfs.attributes(source_lua, "mode") == "file" then return source_lua end
-    if type(arg) == "table" and type(arg[-1]) == "string" and
-       lfs.attributes(arg[-1], "mode") == "file" then
-        return arg[-1]
+    if type(arg) == "table" then
+        -- A Unix rock tree may have no Lua executable of its own. The
+        -- launcher already selected Lua; options such as -E precede arg[0],
+        -- so the interpreter is at the lowest negative index, not arg[-1].
+        local index = -1
+        while type(arg[index - 1]) == "string" do index = index - 1 end
+        local interpreter = arg[index]
+        if type(interpreter) == "string" and interpreter ~= "" then return interpreter end
     end
     return "lua"
 end
@@ -13531,6 +13548,11 @@ function driver.preflight_build_outputs(context, plan, options)
         local selected = plan.modules[name]
         if selected.kind == "source" then
             local source, certified = selected.source, selected.certified
+            if source.installed and not plan.installed_source_library_error then
+                plan.installed_source_library_error = "cannot build a library with dependency '" ..
+                    name .. "' from installed SDK source; select its compiled provider or " ..
+                    "ship this library as source only (see Titan issue #427)"
+            end
             local saved = certified and certified.status == "hit" and certified.record
             local info = { source = source, aliases = {}, imports = {}, saved = saved }
             modules[name] = info
@@ -13793,6 +13815,7 @@ function driver.preflight_build_outputs(context, plan, options)
             if driver.IS_DARWIN then output(executable .. ".dSYM", "standalone dSYM", "directory") end
         end
     elseif not options.compile_only then
+        if plan.installed_source_library_error then return nil, plan.installed_source_library_error end
         local provider, _, left, right = driver.common_module_provider(options.roots)
         if not provider then
             return nil, "cannot link modules into one shared library: '" ..

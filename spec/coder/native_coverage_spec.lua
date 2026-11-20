@@ -118,8 +118,19 @@ end
 ]]
 
 local workspace, children
-local function compile(options, roots)
-    local argv = { LUA, workspace .. "/frontend.lua", "-q" }
+local function configure_frontend(sdk)
+    local frontend = workspace .. "/tooling"
+    write(workspace .. "/frontend.lua", "package.path = " .. string.format("%q", frontend .. "/?.lua;")
+        .. " .. package.path\n" .. children:init_code() .. "\n"
+        .. "local platform = require 'titan-compiler.platform'\nlocal getenv = platform.getenv\n"
+        .. "local values = " .. string.format("{CC=%q,TITAN_ROOT=%q,TITAN_EXTRA_CFLAGS=%q,TITAN_EXTRA_CPPFLAGS='',TITAN_EXTRA_LDFLAGS='',TITAN_NO_LINE_DIRECTIVES='0',TITAN_PROBE_CACHE_DISABLE='1'}", CC, sdk, "-O2 -fno-lto")
+        .. "\nplatform.getenv = function(name) if values[name] ~= nil then return values[name] end return getenv(name) end\n"
+        .. "assert(require('lfs').chdir(" .. string.format("%q", workspace) .. "))\n"
+        .. "dofile(" .. string.format("%q", frontend .. "/titanc") .. ")\n")
+end
+
+local function compile(options, roots, verbose)
+    local argv = { LUA, workspace .. "/frontend.lua", verbose and "-v" or "-q" }
     for _, item in ipairs(options or {}) do argv[#argv + 1] = item end
     argv[#argv + 1], argv[#argv + 2] = "--tree", workspace
     for _, name in ipairs(roots or { "checks" }) do argv[#argv + 1] = name end
@@ -178,13 +189,7 @@ describe("native compile-and-run coverage", function()
             copy(ROOT .. "/" .. name, frontend .. "/" .. name)
         end
         children = luacov_children.new(ROOT, frontend, workspace .. "/child-luacov")
-        write(workspace .. "/frontend.lua", "package.path = " .. string.format("%q", frontend .. "/?.lua;")
-            .. " .. package.path\n" .. children:init_code() .. "\n"
-            .. "local platform = require 'titan-compiler.platform'\nlocal getenv = platform.getenv\n"
-            .. "local values = " .. string.format("{CC=%q,TITAN_ROOT=%q,TITAN_EXTRA_CFLAGS=%q,TITAN_EXTRA_CPPFLAGS='',TITAN_EXTRA_LDFLAGS='',TITAN_NO_LINE_DIRECTIVES='0',TITAN_PROBE_CACHE_DISABLE='1'}", CC, PREFIX, "-O2 -fno-lto")
-            .. "\nplatform.getenv = function(name) if values[name] ~= nil then return values[name] end return getenv(name) end\n"
-            .. "assert(require('lfs').chdir(" .. string.format("%q", workspace) .. "))\n"
-            .. "dofile(" .. string.format("%q", frontend .. "/titanc") .. ")\n")
+        configure_frontend(PREFIX)
         write(workspace .. "/calc.titan", PRODUCTION)
         write(workspace .. "/checks.titan", CHECKS)
         write(workspace .. "/mixed.titan", [[local test = import "test"
@@ -207,6 +212,71 @@ function test_mixed(_context: test.Context) test.assert(true) end
         local report = annotated()
         assert.is_true((line_count(report, workspace .. "/calc.titan", 2) or 0) > 0, report)
         assert.equal(0, line_count(report, workspace .. "/calc.titan", 5), report)
+    end)
+
+    it("excludes installed source from automatic coverage and reports it when explicitly selected", function()
+        if platform.windows then
+            pending("split Unix SDK fixture")
+            return
+        end
+        available()
+        local sdk = workspace .. "/sdk"
+        local lib = "lib/titan/" .. driver.TITAN_LIBRARY_VERSION
+        for _, directory in ipairs({ "", "/etc", "/lib", "/src", "/lib/titan", "/" .. lib }) do
+            assert(lfs.mkdir(sdk .. directory))
+        end
+        for _, directory in ipairs({ "include", "etc/titan", "src/lua-5.5.1" }) do
+            copy(PREFIX .. "/" .. directory, sdk .. "/" .. directory)
+        end
+        for _, name in ipairs({ "liblua.a", "libbacktrace.a" }) do
+            copy(PREFIX .. "/lib/" .. name, sdk .. "/lib/" .. name)
+        end
+        for _, name in ipairs({ "titan.so", "titan.a", "libtitan.a" }) do
+            copy(PREFIX .. "/" .. lib .. "/" .. name, sdk .. "/" .. lib .. "/" .. name)
+        end
+
+        local provider_source = workspace .. "/sdk_cov.titan"
+        write(provider_source, "function double(n: integer): integer return -1 end\n")
+        local ok, output = compile({ "-o", workspace .. "/provider" }, { "sdk_cov" })
+        assert.truthy(ok, output)
+        assert(os.remove(provider_source))
+        copy(workspace .. "/provider/sdk_cov.so", sdk .. "/" .. lib .. "/sdk_cov.so")
+        copy(workspace .. "/provider/sdk_cov.a", sdk .. "/" .. lib .. "/sdk_cov.a")
+        local installed = sdk .. "/" .. lib .. "/sdk_cov.titan"
+        write(installed, [[function double(n: integer): integer
+  return n * 2
+end
+]])
+        write(workspace .. "/calc.titan", [[local sdk = import "sdk_cov"
+function answer(): integer
+  return sdk.double(21)
+end
+]])
+        write(workspace .. "/checks.titan", [[local test = import "test"
+local calc = import "calc"
+function test_answer(context: test.Context)
+  test.assert(calc.answer() == 42)
+end
+]])
+        configure_frontend(sdk)
+        local build = workspace .. "/build"
+        local function check(expected, ...)
+            local built, log = compile(coverage_options("-o", build, "--incremental", ...), nil, true)
+            assert.truthy(built, log)
+            local ran, result = run_program({ build .. "/checks" })
+            assert.truthy(ran, result)
+            assert.matches("Titan executable lines: " .. expected, result, 1, true)
+            return log, annotated()
+        end
+        local _, report = check("1/1")
+        assert.is_nil(line_count(report, installed, 2))
+        assert.is_nil(lfs.attributes(build .. "/.coverage/sdk_cov.gcno"))
+        _, report = check("2/2", "--coverage-module", "calc", "--coverage-module", "sdk_cov")
+        assert.is_true((line_count(report, installed, 2) or 0) > 0, report)
+        assert.equal("file", lfs.attributes(build .. "/.coverage/sdk_cov.gcno", "mode"))
+        local warm = check("2/2", "--coverage-module", "calc", "--coverage-module", "sdk_cov")
+        assert.matches("Titan object hit sdk_cov", warm, 1, true)
+        assert.is_nil(lfs.symlinkattributes(sdk .. "/" .. lib .. "/.coverage"))
     end)
 
     it("keeps coverage objects, generated test runners and default reports inside the output tree", function()

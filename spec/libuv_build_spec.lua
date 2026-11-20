@@ -1403,6 +1403,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
                 "Makefile", "prepared", "LICENSE", "THIRD_PARTY_NOTICES.md",
                 "scripts/install_compiler.mk", "scripts/browser.mk",
                 "scripts/titan_install.lua", "scripts/titan-uninstall",
+                "scripts/titan-install",
                 "spec/support/stdlib_test_modules.mk",
                 "titanc", "titan-compiler/driver.lua",
                 "titan-compiler/build.lua", "titan-compiler/build_worker.lua",
@@ -1581,6 +1582,8 @@ done
             assert.is_nil(lfs.symlinkattributes(private .. "/lua/titan"))
             assert.equal(read_file(root .. "/scripts/titan_install.lua"),
                 read_file(private .. "/installer/titan_install.lua"))
+            assert.equal(read_file(root .. "/scripts/titan-install"),
+                read_file(private .. "/bin/titan-install"))
             assert.equal(read_file(root .. "/scripts/titan-uninstall"),
                 read_file(private .. "/bin/titan-uninstall"))
             assert.is_nil(lfs.attributes(private .. "/titan-sdk/share/lua"))

@@ -1,0 +1,21 @@
+#!/usr/bin/env lua
+
+local usage = "Usage: titan-install --path ROCK_VERSION_DIR"
+if #arg == 1 and arg[1] == "--help" then
+    print(usage .. "\nPublish the retained dist of a LuaRocks package in this Titan installation tree.")
+    return
+end
+if #arg ~= 2 or arg[1] ~= "--path" or arg[2] == "" then
+    io.stderr:write(usage, "\n")
+    os.exit(2)
+end
+local script = arg[0]
+if package.config:sub(1, 1) == "\\" then script = script:gsub("\\", "/") end
+local private = assert(script:match("^(.*)/bin/[^/]+$"),
+    "cannot locate Titan's private installation directory")
+local installer = assert(loadfile(private .. "/installer/titan_install.lua"))()
+local called, message = pcall(installer.publish_module, private, arg[2])
+if not called then
+    io.stderr:write(tostring(message), "\n")
+    os.exit(1)
+end

@@ -96,8 +96,14 @@ Windows output layout and limits:
   `<file>.stage.tmp.<suffix>` directory; the next link removes it automatically
   unless it contains a build input or tool.
 - **Packaging and uninstalling:** Run `mingw32-make -f Makefile.win binary-rock
-  PREFIX=/c/Titan/sdk` to package a binary rock, and `titan-uninstall` (after
-  closing Titan consumers) to remove Titan while preserving Lua and LuaRocks.
+  PREFIX=/c/Titan/sdk` to package a Titan binary rock, and `titan-uninstall`
+  (after closing Titan consumers) to remove Titan while preserving Lua and
+  LuaRocks. Third-party Titan module rocks stage only provider DLLs under
+  `dist/modules/` (no `.lib` Titan provider; optional native link inputs go
+  under `dist/lib/`), invoke `titan-install.bat --path "$(PREFIX)"` in their
+  Windows `post_install` hook, and remove cleanly with
+  `titan-uninstall ROCK [VERSION]` after closing consumers holding mapped DLLs;
+  see [Packaging and distributing modules with LuaRocks](modules.md#packaging-and-distributing-modules-with-luarocks).
 
 ## Build for the browser
 

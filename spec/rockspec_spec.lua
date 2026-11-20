@@ -543,7 +543,17 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         if platform.windows then assert.falsy(retained_native["titan.a"], manifest)
         else assert.truthy(retained_native["titan.a"], manifest) end
         assert.truthy(manifest_table.installer["titan_install.lua"], manifest)
+        assert.truthy(manifest_table.bin["titan-install"], manifest)
         assert.truthy(manifest_table.bin["titan-uninstall"], manifest)
+        assert_file(PREFIX .. "/bin/titan-install" .. (platform.windows and ".bat" or ""))
+        if platform.windows then
+            local launch = 'type NUL && "' .. PREFIX .. '/bin/titan-install.bat"'
+            assert.truthy(os.execute(launch .. " --help"))
+            local accepted, outcome, status = os.execute(launch .. " --module invalid")
+            assert.is_nil(accepted)
+            assert.equal("exit", outcome)
+            assert.equal(2, status)
+        end
         -- LuaRocks owns the compiler entry: the native program on Windows,
         -- which runs the rock's Lua copy of the titanc script.
         if platform.windows then
@@ -1827,6 +1837,7 @@ describe("LuaRocks native payload lifecycle", function()
             end
         end
         copy_tree("scripts/titan_install.lua", source .. "/installer/titan_install.lua")
+        copy_tree("scripts/titan-install", source .. "/titan-install")
         copy_tree("scripts/titan-uninstall", source .. "/titan-uninstall")
         -- LuaRocks deploys and owns the `titan` support module as an
         -- ordinary native module in the tree's lib/lua/5.5.
@@ -1840,6 +1851,7 @@ all:
 install:
 	mkdir -p "$(INST_PREFIX)" "$(INST_BINDIR)" "$(INST_LIBDIR)"
 	cp -R titan-sdk installer "$(INST_PREFIX)/"
+	install -m 0755 titan-install "$(INST_BINDIR)/titan-install"
 	install -m 0755 titan-uninstall "$(INST_BINDIR)/titan-uninstall"
 	install -m 0755 %s "$(INST_LIBDIR)/%s"
 ]], support_name, support_name))
@@ -1895,6 +1907,8 @@ build = {
             assert.truthy(manifest.lib[support_name])
             assert.equal(support, read_file(tree .. "/lib/lua/5.5/" .. support_name))
             assert_file(retained .. "/installer/titan_install.lua")
+            assert_file(retained .. "/bin/titan-install")
+            assert_file(tree .. "/bin/titan-install")
             assert_file(retained .. "/bin/titan-uninstall")
             assert_file(tree .. "/bin/titan-uninstall" .. (platform.windows and ".bat" or ""))
             local location = assert(loadfile(retained .. "/installer/location.lua", "t", {}))()
@@ -1946,6 +1960,141 @@ build = { type = "builtin", modules = { [%q] = %q } }
         end
         install_dependency("titan-install-test-keep", "fixture_dependency", '"lua ~> 5.5"')
         install_dependency("titan-install-test-dependent", "fixture_dependent", '"titan == 0.6.0-1"')
+
+        -- Exercise the real deployed wrapper and LuaRocks' own exact-version
+        -- removal, including rollback of a refused post_install hook.
+        local tree = trees[3]
+        local function module_tool(tool, ...)
+            return run(environment({ tree .. "/bin/titan-" .. tool, ... }), outside)
+        end
+        assert.truthy(module_tool("install", "--help"))
+        assert.truthy(module_tool("uninstall", "--help"))
+        for _, tool in ipairs({ "install", "uninstall" }) do
+            local accepted, usage, _, status = module_tool(tool, "--module", private(tree))
+            assert.falsy(accepted, usage)
+            assert.equal(2, status, usage)
+            assert.truthy(usage:find("Usage: titan-" .. tool, 1, true), usage)
+            assert.falsy(usage:find("stack traceback", 1, true), usage)
+        end
+        assert.falsy(module_tool("install", "--path", private(trees[1])))
+        ok, output = module_tool("install", "--path", private(tree))
+        assert.falsy(ok, output)
+        assert.truthy(output:find("the Titan rock is reserved", 1, true), output)
+        assert.falsy(module_tool("uninstall", "titan-install-test-keep", "1.0-1"))
+        ok, output = module_tool("uninstall", "titan-install-test-keep")
+        assert.falsy(ok, output)
+        assert.truthy(output:find("no active Titan module publication", 1, true), output)
+        assert.falsy(module_tool("uninstall", "titan", "0.6.0-1"))
+        local function module_rock(name, version, payload, expected_error)
+            local base = workspace .. "/" .. name .. "-" .. version
+            make_directory(base)
+            local rockspec_path = base .. "/" .. name .. "-" .. version .. ".rockspec"
+            write_file(rockspec_path, string.format([[
+rockspec_format = "3.0"
+package = %q
+version = %q
+source = { url = "file:///unused" }
+description = { license = "MIT" }
+dependencies = { "titan == 0.6.0-1" }
+hooks = { post_install = '"$(SCRIPTS_DIR)/titan-install" --path "$(PREFIX)"' }
+build = { type = "builtin", modules = {}, copy_directories = { "dist" } }
+]], name, version))
+            remove_tree(base .. "/dist")
+            for path, contents in pairs(payload) do
+                local staged = base .. "/dist/" .. path
+                make_directory(assert(staged:match("^(.+)/[^/]+$")))
+                write_file(staged, contents)
+            end
+            local installed, log = run(environment({
+                LUAROCKS, "--tree", tree, "make", rockspec_path, "--deps-mode=none", "--keep",
+            }), base)
+            if expected_error then
+                assert.falsy(installed, log)
+                assert.truthy(log:find(expected_error, 1, true), log)
+            else
+                assert.truthy(installed, log)
+            end
+            return tree .. "/lib/luarocks/rocks-5.5/" .. name .. "/" .. version
+        end
+        local module_name, other_name = "fixture-titan-first", "fixture-titan-second"
+        local module_lib = tree .. "/lib/titan/0.6"
+        local old = module_rock(module_name, "1.0-1", {
+            ["modules/fixture/nested/old.titan"] = "old source",
+            ["include/shared/header.h"] = "first header",
+            ["lib/named/archive.a"] = "first archive",
+        })
+        assert.equal("old source", read_file(module_lib .. "/fixture/nested/old.titan"))
+        assert.equal("first header", read_file(tree .. "/include/shared/header.h"))
+        assert.equal("first archive", read_file(tree .. "/lib/named/archive.a"))
+        local other = module_rock(other_name, "1.0-1", {
+            ["modules/fixture/second.titan"] = "second source",
+            ["include/shared/other.h"] = "second header",
+        })
+        module_rock(module_name, "1.0-1", {
+            ["modules/fixture/first.titan"] = "same-version replacement",
+        })
+        assert_absent(module_lib .. "/fixture/nested")
+        assert_absent(tree .. "/include/shared/header.h")
+        assert_absent(tree .. "/lib/named")
+        assert.equal("same-version replacement", read_file(module_lib .. "/fixture/first.titan"))
+        local active = module_rock(module_name, "2.0-1", {
+            ["modules/fixture/current.titan"] = "new active version",
+        })
+        assert_absent(module_lib .. "/fixture/first.titan")
+        assert_file(old .. "/rock_manifest")
+        local refused = module_rock(other_name, "2.0-1", {
+            ["modules/fixture/current.titan"] = "foreign owner",
+            ["include/must-not-write.h"] = "preflight must check all files first",
+        }, "module destination already exists")
+        assert_absent(refused)
+        assert_absent(tree .. "/include/must-not-write.h")
+        assert.truthy(module_tool("uninstall", module_name, "1.0-1"))
+        assert_absent(old)
+        assert_file(active .. "/rock_manifest")
+        assert.equal("new active version", read_file(module_lib .. "/fixture/current.titan"))
+        install_dependency("titan-install-test-consumer", "fixture_consumer",
+            '"' .. module_name .. ' == 2.0-1"')
+        ok, output = module_tool("uninstall", module_name)
+        assert.falsy(ok, output)
+        assert.truthy(output:find("Titan module files were preserved", 1, true), output)
+        assert_file(active .. "/rock_manifest")
+        assert.equal("new active version", read_file(module_lib .. "/fixture/current.titan"))
+        luarocks(tree, "remove", "titan-install-test-consumer", "1.0-1")
+        luarocks(tree, "remove", module_name, "2.0-1")
+        assert_absent(active)
+        assert_file(module_lib .. "/fixture/current.titan")
+        ok, output = module_tool("uninstall", module_name, "2.0-1")
+        assert.truthy(ok, output)
+        assert.truthy(output:find("Cleaned published files for " .. module_name .. " 2.0-1", 1, true), output)
+        ok, output = module_tool("uninstall", module_name, "2.0-1")
+        assert.truthy(ok, output)
+        assert.truthy(output:find("Nothing to remove for " .. module_name .. " 2.0-1", 1, true), output)
+        assert.truthy(module_tool("uninstall", module_name))
+        assert.truthy(module_tool("uninstall", other_name, "9.0-1"))
+        assert_absent(module_lib .. "/fixture/current.titan")
+        assert.equal("second source", read_file(module_lib .. "/fixture/second.titan"))
+        assert.equal("second header", read_file(tree .. "/include/shared/other.h"))
+        assert.truthy(module_tool("uninstall", other_name))
+        assert_absent(other)
+        assert_absent(module_lib .. "/fixture")
+        assert_absent(tree .. "/include/shared")
+
+        local alias_name = "fixture-titan-alias-version"
+        local alias_first = module_rock(alias_name, "1.01-1", {
+            ["include/alias-version.h"] = "first spelling",
+        })
+        local alias_second = module_rock(alias_name, "1.1-1", {
+            ["include/alias-version.h"] = "second spelling",
+        })
+        ok, output = module_tool("uninstall", alias_name, "1.1-1")
+        assert.falsy(ok, output)
+        assert.truthy(output:find("without also matching 1.01-1", 1, true), output)
+        assert_file(alias_first .. "/rock_manifest")
+        assert_file(alias_second .. "/rock_manifest")
+        assert.equal("second spelling", read_file(tree .. "/include/alias-version.h"))
+        luarocks(tree, "remove", alias_name)
+        assert.truthy(module_tool("uninstall", alias_name))
+
         local preserved = {
             "bin/lua" .. PROGRAM_SUFFIX, "include/unrelated.h", "include/titan/keep.h",
             "share/titan/user-note.txt",
@@ -1974,6 +2123,7 @@ build = { type = "builtin", modules = { [%q] = %q } }
             for _, path in ipairs(owned) do assert_absent(tree .. "/" .. path) end
             assert_absent(private(tree))
             assert_absent(tree .. "/lib/lua/5.5/" .. support_name)
+            assert_absent(tree .. "/bin/titan-install")
             assert_absent(tree .. "/bin/titan-uninstall" .. (platform.windows and ".bat" or ""))
             for _, path in ipairs(dependency_sdk) do
                 assert.equal(read_file(source .. "/titan-sdk/" .. path), read_file(tree .. "/" .. path))
@@ -2564,7 +2714,7 @@ describe("relocatable Lua build configuration", function()
             return path
         end
         for _, path in ipairs({ "Makefile.win", "scripts/install_compiler.mk", "scripts/browser.mk",
-                "scripts/titan_install.lua", "scripts/titan-uninstall",
+                "scripts/titan_install.lua", "scripts/titan-install", "scripts/titan-uninstall",
                 "spec/support/stdlib_test_modules.mk" }) do
             fixture(source, path, read_file(path))
         end
@@ -2640,6 +2790,7 @@ describe("relocatable Lua build configuration", function()
         assert.same({}, staged, "unexpected files in the retained native SDK")
         for _, copy in ipairs({
             { "titanc", "lua/titan-compiler/titanc.lua" },
+            { "scripts/titan-install", "bin/titan-install" },
             { "scripts/titan-uninstall", "bin/titan-uninstall" },
             { "scripts/titan_install.lua", "installer/titan_install.lua" },
             { "titan-compiler/driver.lua", "lua/titan-compiler/driver.lua" },

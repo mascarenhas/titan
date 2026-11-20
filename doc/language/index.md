@@ -68,7 +68,7 @@ print(m.sum_list(m.sample())) --> 10
 
 | Ch. | Chapter | Summary |
 | ---: | --- | --- |
-| 13 | [Modules and Program Structure](modules.md) | Flat and folder modules, visibility, module initializers, standard short imports, target variants, `.titan` source imports, and LDoc comments. |
+| 13 | [Modules and Program Structure](modules.md) | Flat and folder modules, visibility, module initializers, standard short imports, target variants, `.titan` source imports, LDoc comments, and [LuaRocks module packaging](modules.md#packaging-and-distributing-modules-with-luarocks). |
 | 14 | [Concurrency: Tasks, Channels, and Threads](concurrency.md) | Cooperative `async` Tasks, combinators, cancellation, same-state channels, multi-core OS threads, bounded MPMC channels, and stackful coroutines. |
 | 15 | [Interoperating with Lua](lua-interop.md) | Requiring Titan modules from Lua, cross-boundary representations, dynamic conversions versus strict guards, calling Lua via `lua`, and multiple states. |
 | 16 | [Calling C: The Foreign Function Interface](ffi.md) | Unsafe boundary rules, `foreign import`, C types, pointers, operators, casts, strings, automatic and `owned` storage, embedded C fields, and linking. |

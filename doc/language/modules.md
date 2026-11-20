@@ -503,6 +503,188 @@ If any transitively imported module initializes `titan.async` (for example `asyn
 
 ### The Titan path
 
-Compiled providers (`.so`, `.a`, or `.dll`) are searched along a semicolon-separated list of directories taken from `TITAN_PATH_0_6` (or `TITAN_PATH`), where `;;` inserts the default path and `!` expands to the running executable's directory. At compile time the default is `.;<root>/lib/titan/0.6`; at run time it is `!;!/../lib/titan/0.6` followed by the SDK fallback (never the current working directory).
+Compiled providers (`.so`, `.a`, or `.dll`) are searched along a semicolon-separated list of directories taken from `TITAN_PATH_0_6` (or `TITAN_PATH`), where `;;` inserts the default path and `!` expands to the running executable's directory. At compile time the default is `.;<root>/lib/titan/0.6`; at run time it is `!;!/../lib/titan/0.6` followed by the SDK fallback (never the current working directory). Positional `titanc` build roots resolve only from authored `--tree` roots (default `.`), never from the implicit installed source fallback; ordinary `import` statements inside an authored root search authored `--tree` roots first and then fall back to the read-only implicit SDK root `<root>/lib/titan/0.6` on both native and browser targets (requiring `-o`/`--output` if an installed source is selected).
 
 For complete `titanc` flags and environment variables, provider search rules, `--static` archive linking, multi-module bundling, shared-library binary compatibility, `--incremental` and `-c` separate compilation, build profiles, stock Lua hosting, and `--coverage`, see [Appendix B: The `titanc` Toolchain, Linking, and Coverage](toolchain.md). For Windows DLL providers and launchers, see [Appendix A.2: Installing and Using Titan on Windows](windows-build.md).
+
+## Packaging and distributing modules with LuaRocks
+
+Installing Titan places `titan-install` and `titan-uninstall` beside `titanc` in the tree's `bin/` directory (`titan-install.bat` and `titan-uninstall.bat` on Windows). A module rock stages only its final library files under `$(PREFIX)/dist/` and invokes `titan-install --path "$(PREFIX)"` from its format `3.0` `post_install` hook so other Titan projects—and, for compiled native providers, Lua programs—can load the module without extra search paths. No Makefile is required.
+
+### A complete minimal package
+
+Choose a lowercase LuaRocks package name (`titan-cui`) and a logical Titan module name (`cui`, or a dotted prefix such as `cui.box` and `cui.text`). Neither the rock name nor Lua's `package.cpath` changes Titan's binary lookup: provider filenames always follow the logical module name or longest common dotted prefix.
+
+Illustrative layout (ignore `/build/` and `.titan-ls/` in `.gitignore`):
+
+```text
+titan-cui/
+  titan-cui-0.1.0-1.rockspec
+  src/
+    cui.titan
+```
+
+Write `titan-cui/src/cui.titan` without `main` so `titanc` builds a library provider (for native library tests, see [Testing standard library](standard-library-test.md)):
+
+<!-- doc-check: file=titan-cui/src/cui.titan -->
+```titan
+local strings = import "string"
+
+function box(text: string): string
+  local edge = strings.rep("=", #text + 4)
+  return edge .. "\n= " .. text .. " =\n" .. edge
+end
+```
+
+Write `titan-cui/titan-cui-0.1.0-1.rockspec` (replace `source.url` and `tag` with your own release when packing a `.src.rock`):
+
+<!-- doc-check: file=titan-cui/titan-cui-0.1.0-1.rockspec -->
+```lua
+rockspec_format = "3.0"
+package = "titan-cui"
+version = "0.1.0-1"
+source = { url = "git+https://example.invalid/titan-cui.git", tag = "v0.1.0" }
+description = { summary = "Minimal console UI box helper for Titan", license = "MIT" }
+dependencies = { "lua ~> 5.5", "titan ~> 0.6" }
+build = {
+   type = "command",
+   build_command = '"$(SCRIPTS_DIR)/titanc" --incremental --tree src --output build cui',
+   install_command = 'mkdir -p "$(PREFIX)/dist/modules" && cp -p build/cui.so build/cui.a "$(PREFIX)/dist/modules/"',
+   platforms = {
+      windows = {
+         build_command = '"$(SCRIPTS_DIR)\\titanc.exe" --incremental --tree src --output build cui',
+         install_command = '(if not exist "$(PREFIX)\\dist\\modules" mkdir "$(PREFIX)\\dist\\modules") && copy /Y build\\cui.dll "$(PREFIX)\\dist\\modules\\cui.dll"'
+      }
+   }
+}
+hooks = {
+   post_install = '"$(SCRIPTS_DIR)/titan-install" --path "$(PREFIX)"',
+   platforms = {
+      windows = {
+         post_install = '"$(SCRIPTS_DIR)\\titan-install.bat" --path "$(PREFIX)"'
+      }
+   }
+}
+```
+
+In a rockspec, `$(PREFIX)` is the *installing rock's private version directory* (for example `<tree>/lib/luarocks/rocks-5.5/titan-cui/0.1.0-1`), not your shell `$PREFIX`, the Titan SDK root, or `dist/`; `$(SCRIPTS_DIR)` is the tree's public `bin/`. In LuaRocks, `~>` is a prefix match (`"lua ~> 5.5"` matches `5.5.*`, and `"titan ~> 0.6"` matches Titan `0.6.*` releases; `TITAN_ABI_VERSION` is tracked independently of the package version).
+
+Install from the checkout (`luarocks make` builds locally without fetching `source.url`):
+
+<!-- doc-check: run -->
+```sh
+(cd titan-cui && luarocks make titan-cui-0.1.0-1.rockspec)
+```
+
+Verify from a separate directory `demo/` with no access to `titan-cui/src` or `titan-cui/build`. Write `demo/main.titan`:
+
+<!-- doc-check: file=demo/main.titan -->
+```titan
+local cui = import "cui"
+local io = import "io"
+
+function main(args: {string}): integer
+  io.print(cui.box("Titan"))
+  return 0
+end
+```
+
+Compile and run with no `--tree` and no `TITAN_PATH_0_6` override (dynamic, Unix `--static`, and Lua `require` for the compiled provider):
+
+<!-- doc-check: run -->
+```sh
+(cd demo &&
+  titanc --output build --exe build/demo main &&
+  ./build/demo &&
+  titanc --static --output build-static --exe build-static/demo main &&
+  ./build-static/demo &&
+  lua -e 'require "titan"; print(require("cui").box("Titan"))')
+```
+
+Each invocation prints:
+
+<!-- doc-check: expect=demo-banner -->
+```text
+=========
+= Titan =
+=========
+```
+
+On Windows (no `--static` mode):
+
+```cmd
+titanc --output build --exe build\demo.exe main
+build\demo.exe
+```
+
+Remove the module rock and its published files:
+
+<!-- doc-check: run -->
+```sh
+titan-uninstall titan-cui
+```
+
+### Staging layout (`dist/`)
+
+Build a single library module or a related canonical bundle in ordinary library mode with explicit logical roots (for example, Titan's standard library names all of its own roots; no other package embeds the standard library), producing only its own provider pair (`.so` and `.a` on Linux/macOS; `.dll` only on Windows) without incorporating external Titan dependencies. Declare package dependencies in the rockspec instead. `--static` is rejected on every final no-main library output, including canonical bundles (`-c --static` still compiles individual objects for a later executable, not a linked library). Dynamic/default applications may still fall back to an archive-only dependency or compile source, while on Linux and macOS a `--static` standalone or `--test` executable embeds the full reached Titan dependency closure from `.a` archives alongside source compiled in the application, with no fallback to shared Titan `.so` providers (a missing archive for an external prebuilt dependency not satisfied by application-compiled source is a build error). `--static` governs Titan module archives—it does not force `libc`, OS support, or external native libraries to link statically (nor forbid explicit linker flags that request it).
+
+`titan-install --path "$(PREFIX)"` publishes regular files recursively from three namespaces under `$(PREFIX)/dist/`:
+
+| Staged directory | Published destination | Contents |
+| --- | --- | --- |
+| `dist/modules/` | `<tree>/lib/titan/0.6/` | Compiled Titan providers (`cui.so` and `cui.a` on Linux/macOS; `cui.dll` only on Windows) or `.titan` source files, preserving logical subpaths (`cui/box.so` for `cui.box`). |
+| `dist/include/` *(optional)* | `<tree>/include/` | Public C headers exported by the package (for example `.titan.h` or companion FFI headers); `include/titan/` is reserved for Titan SDK headers, so place package headers in a package-specific directory such as `dist/include/cui/`. |
+| `dist/lib/` *(optional)* | `<tree>/lib/` | Optional native link inputs (such as C archives or Windows import `.lib` files); these are not stand-alone Titan providers. |
+
+Stage only the exact final files—never copy `build/` wholesale, never stage compiler intermediates (`.c`, `.o`, `.titan/`, `.titan-links/`), `dist/bin/`, or symlinks, and never write directly into the SDK during the build. Relative paths under `dist/` must use portable ASCII ordinary file components (spaces are allowed; Windows reserved spellings, symlinks, and path or ASCII case aliases are rejected; this portable-entry naming rule does not apply to the absolute SDK or checkout path). You may alternatively recreate a fresh local `dist/` directory and declare `build.copy_directories = { "dist" }`, though staging into `$(PREFIX)/dist/modules` avoids carrying stale local files.
+
+### Source-only modules
+
+To distribute uncompiled `.titan` source files instead of prebuilt native providers, keep the same rockspec metadata, dependencies, and `hooks`, and replace only `build`. Either keep `src/cui.titan` and stage it into `$(PREFIX)/dist/modules/` during install:
+
+```lua
+build = {
+   type = "command",
+   install_command = 'mkdir -p "$(PREFIX)/dist/modules" && cp -p src/cui.titan "$(PREFIX)/dist/modules/"',
+   platforms = {
+      windows = {
+         install_command = '(if not exist "$(PREFIX)\\dist\\modules" mkdir "$(PREFIX)\\dist\\modules") && copy /Y src\\cui.titan "$(PREFIX)\\dist\\modules\\cui.titan"'
+      }
+   }
+}
+```
+
+Or check `dist/modules/cui.titan` directly into the repository (do **not** ignore `/dist/` in `.gitignore`) and copy it without shell commands:
+
+```lua
+build = {
+   type = "none",
+   copy_directories = { "dist" }
+}
+```
+
+When compiling a consumer from an authored root (`main` below), positional `titanc` build roots—whether for a library, program, `-c`, explicit `--test`, or `--exe` build—resolve **only** from authored `--tree` roots (default `.`), never from the implicit installed source fallback (to compile a package itself, run from its source checkout with `--tree`, as the rockspec above does for `cui`, rather than naming an installed dependency as a positional root). Ordinary `import` statements inside a valid authored root search every authored root from `--tree` and then fall back to the read-only implicit SDK root `<root>/lib/titan/0.6` on both native and browser targets (on `--target browser`, `<root>/lib/titan/0.6` is searched for `.titan` source only, selecting `.browser.titan` or shared `.titan` variants normally; native providers there are never eligible):
+
+```sh
+titanc --output build --exe build/demo main
+```
+
+Whenever a build actually selects an installed `.titan` source through that implicit fallback, `-o`/`--output` is required so generated C, objects, and headers stay under the consumer's output tree and `titanc` neither writes nor locks inside the implicit SDK root; omitting `--output` fails with an error naming the module and asking for `--output DIR`. Builds that do not select an installed source keep their existing behavior. Compiling an ordinary binary library fails if a dependency is selected from the implicit installed source fallback (including under `--source-first` when a paired compiled provider is also installed) rather than copying another rock's module into the library's provider: install or use that dependency's compiled provider (building without `--source-first` if one is already installed), or publish your library as source-only until [titan#427](https://github.com/mascarenhas/titan/issues/427) allows a library to depend on an installed source compiled once by the final program. (Without `-o`/`--output`, the generic missing-`--output` diagnostic can appear first; passing `-o` does not permit vendoring an installed source into a binary library.) Same-repo authored sources under `--tree` (or default `.`) still compile together into one library, and standalone (ordinary or `--static`) applications and `--test` builds still compile installed fallback source dependencies into the caller's `--output` directory. Ordinary Lua `require` loads compiled providers (`.so`/`.dll`), not uncompiled `.titan` sources.
+
+### Publishing, packing, and upgrades
+
+Keep three packaging concepts distinct:
+
+1. **Source distribution (`.rockspec` / `.src.rock`):** A `.rockspec` describes how to fetch and build the package; running `luarocks pack titan-cui-0.1.0-1.rockspec` fetches the pinned `source` URL and tag and packs both the rockspec and sources into `titan-cui-0.1.0-1.src.rock`. To publish through your LuaRocks account, run `luarocks upload titan-cui-0.1.0-1.rockspec` (which packs a `.src.rock` by default; pass a prepacked `titan-cui-0.1.0-1.src.rock` only as the optional second argument—do not run `upload` during local verification). Consumers then run `luarocks install titan-cui` to build on their own platform.
+2. **Package-built native provider:** Compiled during `luarocks install` (or `luarocks make`) and published to `<tree>/lib/titan/0.6/` (`cui.so`/`cui.a` on Unix, `cui.dll` on Windows), usable by both Titan `import` and Lua `require`.
+3. **Installed source-only module:** `.titan` source published to `<tree>/lib/titan/0.6/`, compiled into each Titan consumer's `--output` directory (not loaded directly by Lua `require`).
+
+If you pack an already installed native rock with `luarocks pack titan-cui 0.1.0-1`, LuaRocks archives the retained `$(PREFIX)` directory (including `dist/`), and installing that `.rock` runs `hooks.post_install` without recompiling. Because `dist/modules/` sits outside LuaRocks' `lib` deployment, `luarocks pack` can name a native Titan rock `.all.rock`. Rename it to the architecture reported by `luarocks config arch` (for example `titan-cui-0.1.0-1.linux-x86_64.rock`) before sharing, and treat it as tied to the OS, CPU architecture, Lua version, Titan ABI, and build profile.
+
+Each rock has one active published version. Before changing any published files, `titan-install` runs preflight checks and refuses the install if any destination collides with a foreign file, a Titan SDK-owned path (including the reserved `include/titan/` header subtree), or a protected `lib/` subtree (distinct from mid-copy I/O failures; there is no blanket transaction guarantee). Ownership is tracked strictly per physical destination file, with no compiler or DSO metadata introspection on publish: keep one rock per logical module or namespace and choose distinct author prefixes (the same convention that prevents Lua module rocks from masking each other), because two rocks shipping different physical representations of the same logical module—such as `.titan` source versus prebuilt `.so`/`.a`/`.dll` or flat versus folder files—are not rejected by logical name and can shadow one another. A succeeding same-version reinstall or upgrade retires only stale files owned by that rock and prunes shared directories only when empty.
+
+### Uninstalling
+
+Use `titan-uninstall titan-cui` to remove the active published version, or `titan-uninstall titan-cui 0.1.0-1` for an exact full rock version (removing an inactive older version leaves the active one intact, with no automatic switch-back). Plain `luarocks remove` has no uninstall hook and leaves published files behind; if you already ran it, follow with `titan-uninstall titan-cui` (or with its version) to clean up the remaining files (repeating cleanup for an absent rock is a no-op). When LuaRocks' dependency check fails, `titan-uninstall` leaves all published files untouched.
+
+Running `titan-uninstall` with no arguments requests whole-Titan removal ([Uninstalling](installation.md#uninstalling)), which is likewise subject to LuaRocks' dependency check. On Windows, close consumers holding a module's mapped DLL before upgrading or removing it ([Windows](windows-build.md)). For the full ownership and preflight contract, see [Module rock publication and removal](../implementation/build-script-audit.md#module-rock-publication-and-removal).
