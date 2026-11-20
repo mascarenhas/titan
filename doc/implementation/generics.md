@@ -64,8 +64,10 @@ The implementation is governed by these invariants:
    recovery for a constrained carrier. There is no trusted reverse path based
    on call provenance.
 8. The declared graph is frozen separately before the AST and active registry
-   are erased. Coder sees only ordinary monomorphic types and existing concrete
-   annotations.
+   are erased. Coder consumes only monomorphic types and concrete operations
+   over them, including the bounded container Option boundary plan below.
+   No type parameter, generic scheme, or application metadata participates
+   in code generation.
 9. Source order, declaration frontiers, duplicate precedence, visibility, and
    parse-time constructor adjacency are the same as for non-generic code.
 10. Generic storage is Transient/Shallow. The implementation promises open-
@@ -601,12 +603,10 @@ ABI in coder.
 
 At an optional Array boundary, a closed `({integer})?` and its erased
 `({value})?` carrier use the ordinary structural `gradual_view` in either
-direction. `assignment_adjustment` selects consistency before its separate
-Option(Array) rule, so the outer Option does not turn this view into an
-unsupported element-adjustment wrapper. The same Array and optional slot are
-retained; closed element observations still use their ordinary strict guards.
-Consistency requires matching Array qualifiers, so a mutable-to-const freeze
-remains a separate operation and is never classified as this view.
+direction. Their Array qualifiers match, so the ordinary consistency rule
+applies. The view preserves `nil` and the existing Array; reads of the closed
+element type still use their ordinary strict guards. An Option view does not
+freeze a mutable Array.
 
 Generic-for lowering (`generic_lower_forin`) visits the complete adjusted
 setup tuple, including discarded surplus expressions, its synthesized
@@ -627,17 +627,15 @@ AST:
    surface application where direction is needed; then
 2. insert ordinary casts, guards, and callable/Interface adjustment annotations
    for those boundaries. `generic_erased_boundary_expression` asks for the
-   ordinary assignment adjustment between the two erased types and applies it
-   through `trycoerce`; when none exists it tries
-   `generic_interface_downcast_expression`, and otherwise raises an internal
-   compiler error.
+   ordinary assignment adjustment between the two erased types. It applies a
+   structural Array or Map view as a typed cast (also through Option), and
+   otherwise uses `trycoerce`. If no ordinary adjustment exists, it tries
+   `generic_interface_downcast_expression` before reporting an internal error.
 
 This is not a second semantic typecheck. It performs no inference, constraint
-search, or body recheck. It sees the exact types coder will see and emits only
-the `CoercionPlan`, `GuardPlan`, callable adapter, Interface conversion,
-written-cast, comparison, and AST cast forms codegen already consumes. It
-does not ask an ordinary relation to rediscover an edge involving a
-`Parameter` that has already disappeared.
+search, or body recheck. It sees the exact types coder will see. It does not
+ask an ordinary relation to rediscover an edge involving a `Parameter` that
+has already disappeared.
 
 For a closed use, the pass implements the selected direction rules:
 
@@ -666,9 +664,42 @@ bound functions; Interface slots; hidden `for ... in` components; and Lua/FFI
 boundaries. Lowering preserves expression order and materializes an operand when
 an existing adjustment would otherwise reference it more than once.
 
-Any missing temporary boundary link, unknown adjustment, generic-only plan, or
-remaining generic annotation is an internal compiler error at this phase—not a
-relation for coder to infer.
+Any missing temporary boundary link, unknown adjustment, generic type or
+declaration in a code-facing plan, or malformed concrete plan is an internal
+compiler error—not a relation for coder to infer.
+
+### Container views and presence
+
+Ordinary structural sink adjustments leave the producer's type unchanged.
+At a generic boundary the view is itself the input to subsequent operations.
+The typed cast exposes the closed Array or Map type without changing the
+shared producer or its result slots. A following force still checks nil,
+wrap still introduces an Option, and typed element reads still use their
+normal guards. Array constness and backing identity do not change. A typed
+container that already has the required outer kind and qualifier needs no
+second outer check, even in an Option slot. A spread forces the closed
+subject before evaluating its bounds and reports that type if it is nil.
+
+For open runs, the producer updates the physical element descriptor and the
+adjusted expression list owns the sink plan.
+`generic_open_container_option_plan` can produce a
+`container_option_boundary` plan for each consumed element. It has these
+monomorphic steps, in order:
+
+1. An optional carrier-to-container structural view. For a force, a raw
+   `value` carrier can instead use a strict projection to the Option
+   container. This checks the outer kind and Array qualifier, not contents.
+2. The admitted force or wrap. It keeps the Array or Map carrier; the
+   payload type is unchanged or uses the ordinary maybe-const Array widening.
+3. An optional structural view from the container to the sink carrier. A
+   forced container can also use the ordinary injection into a `value` slot.
+
+The validator checks each adjacent endpoint and allows only the steps above,
+with at least one carrier step. This is not an assignment relation. Equal
+physical endpoints can still require the force: `value` may carry a wrong
+outer kind or nil. The sink applies the plan once to each consumed element,
+in order; empty runs do not force a value. Flows without a container force
+do not acquire these extra `value` checks.
 
 ### Concrete callback wrappers
 

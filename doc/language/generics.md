@@ -335,3 +335,37 @@ For a constrained parameter `T: I`, storing a `value` checks the `value -> I` In
 - **Shallow casts and containers:** `raw as Box<|integer|>` and `raw is Box<|integer|>` verify only the outer `Box` record identity, never its type arguments or current field contents. Do not rely on phantom type parameters for runtime security across `value` or Lua boundaries. An Array created inside generic code with unconstrained element `T` uses the permissive `{value}` Lua writer while retaining strict reads when viewed as `{integer}`.
 - **Callbacks:** Passing a concrete function into a generic parameter (such as the lambda passed to `foldl`) automatically adapts arguments and results across the erased boundary; closure identity is not preserved across such adapted boundaries.
 - **From Lua:** Lua has no type-argument syntax and always sees the erased declaration—unconstrained parameters and fields behave as `value`, constrained ones expect the erased Interface, and non-generic parameters and fields keep their ordinary Lua boundary checks.
+
+### Optional Arrays and Maps
+
+Use the instantiated type of a generic result or field just as you would a
+non-generic value. For example, an inferred local forces a `{integer}?`
+result, an optional local keeps nil, and passing a `{integer}` to a
+`{integer}?` parameter wraps it. None of these steps copies the Array or Map,
+and typed reads still check individual elements.
+
+```titan
+local function keep<|T|>(items: {T}?): {T}?
+    return items
+end
+
+function first(items: {integer}?): integer
+    local present = keep<|integer|>(items)
+    return present[1]
+end
+```
+
+The same rules apply to the values delivered by a flexible result tail. If
+a variadic parameter requires a non-optional Array or Map, each delivered
+Option is forced before forwarding, even when the generic function stores its
+arguments as `value`. When the offered value is dynamically represented, it
+must be nil or have the required outer container kind before the force; nil
+then fails the force. Element checks still wait until typed reads, and a
+`value` flow without a required container force is unchanged.
+
+An ordinary assignment from `{value}?` to `{integer}` still requires a
+separate structural view and Option force.
+
+A nil generic Array or integer-keyed Map used as a spread subject raises
+before the spread bounds are evaluated. The error names the instantiated
+container, for example `expected { integer } but found nil`.

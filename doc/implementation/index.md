@@ -82,8 +82,8 @@ Two invariants shape everything downstream of the checker:
 | [Lexer and parser](lexer-parser.md) | Scannerless LPegLabel grammar, longest-match rules, foreign-body grammar, fold captures, precedence, desugarings, error labels, and non-reentrancy. |
 | [The type checker](checker.md) | Checker entry contract, speculative C-probe barrier and authoritative recheck, symbol table, staged collection, initializers, AST rewriting, and global state. |
 | [Type relations and boundary plans](type-relations-and-boundaries.md) | Consistency versus coercion, strict guards, dynamic conversion, C scalar rules, written casts, boundary matrix, and checker-owned plans. |
-| [Const-value implementation](const-values.md) | `const` locals, fields, and Arrays: descriptors, initializer-only write authority, Interface field snapshots, linear-use freeze proofs, and Array pairs. |
-| [Generics](generics.md) | Rigid checking, local type inference, declared/erased-graph validation, Interface constraint erasure, FFI admission, metadata serialization, and async owners. |
+| [Const-value implementation](const-values.md) | `const` locals and fields, initializer-only write authority, Interface snapshots, concrete Array construction, optional maybe-const views, and linear-use freeze proofs. |
+| [Generics](generics.md) | Rigid checking, local type inference, declared/erased-graph validation, Interface constraint erasure, [container views and Option adjustment](generics.md#container-views-and-presence), FFI admission, metadata serialization, and async owners. |
 | [Interfaces](interfaces.md) | Structural satisfaction, frozen conversion and adapter plans, wrapper userdata layout, four dispatch paths, metatable identity, downcasts, and separate compilation. |
 | [Union implementation](unions.md) | Parser lowering, variant descriptors, visibility, payload eligibility, `case` checking and non-fallthrough, runtime layout, dispatch, Lua exposure, and schemas. |
 | [Record constructors](record-constructors.md) | Record-call desugaring, custom `new` overrides, private literal construction authority, provider metadata, Lua namespace calls, and stdlib usage. |

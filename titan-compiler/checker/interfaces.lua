@@ -126,8 +126,8 @@ local function freeze_interface_guard(plan, target, seen)
     if tag == "Type.Array" then
         interface_adapter_assert(
             plan.op == "array"
+                and types.valid_array_constness(plan.isconst)
                 and plan.isconst.tag == target.isconst.tag
-                and (types.valid_array_constness(plan.isconst) and plan.isconst.tag ~= "maybe")
                 and plan.element,
             "Array guard has the wrong shape")
         frozen.isconst = target.isconst
