@@ -634,7 +634,7 @@ titan-uninstall titan-cui
 | `dist/include/` *(optional)* | `<tree>/include/` | Public C headers exported by the package (for example `.titan.h` or companion FFI headers). |
 | `dist/lib/` *(optional)* | `<tree>/lib/` | Optional native link inputs (such as C archives or Windows import `.lib` files); these are not stand-alone Titan providers. |
 
-Stage only the exact final files—never copy `build/` wholesale, never stage compiler intermediates (`.c`, `.o`, `.titan/`, `.titan-links/`), `dist/bin/`, or symlinks, and never write directly into the SDK during the build. Relative paths under `dist/` must use portable ASCII ordinary file components (spaces are allowed; Windows reserved spellings, symlinks, and path or ASCII case aliases are rejected; checkout and SDK roots are unrestricted). You may alternatively recreate a fresh local `dist/` directory and declare `build.copy_directories = { "dist" }`, though staging into `$(PREFIX)/dist/modules` avoids carrying stale local files.
+Stage only the exact final files—never copy `build/` wholesale, never stage compiler intermediates (`.c`, `.o`, `.titan/`, `.titan-links/`), `dist/bin/`, or symlinks, and never write directly into the SDK during the build. Relative paths under `dist/` must use portable ASCII ordinary file components (spaces are allowed; Windows reserved spellings, symlinks, and path or ASCII case aliases are rejected; this portable-entry naming rule does not apply to the absolute SDK or checkout path). You may alternatively recreate a fresh local `dist/` directory and declare `build.copy_directories = { "dist" }`, though staging into `$(PREFIX)/dist/modules` avoids carrying stale local files.
 
 ### Source-only modules
 
@@ -673,13 +673,13 @@ Whenever a build actually selects an installed `.titan` source through that impl
 
 Keep three packaging concepts distinct:
 
-1. **Source distribution (`.rockspec` / `.src.rock`):** A `.rockspec` describes how to fetch and build the package; running `luarocks pack titan-cui-0.1.0-1.rockspec` fetches the pinned `source` URL and tag and packs both the rockspec and sources into `titan-cui-0.1.0-1.src.rock`. Publish the rockspec or `.src.rock` through your LuaRocks account (for example with `luarocks upload`). Consumers then run `luarocks install titan-cui` to build on their own platform.
+1. **Source distribution (`.rockspec` / `.src.rock`):** A `.rockspec` describes how to fetch and build the package; running `luarocks pack titan-cui-0.1.0-1.rockspec` fetches the pinned `source` URL and tag and packs both the rockspec and sources into `titan-cui-0.1.0-1.src.rock`. To publish through your LuaRocks account, run `luarocks upload titan-cui-0.1.0-1.rockspec` (which packs a `.src.rock` by default; pass a prepacked `titan-cui-0.1.0-1.src.rock` only as the optional second argument—do not run `upload` during local verification). Consumers then run `luarocks install titan-cui` to build on their own platform.
 2. **Package-built native provider:** Compiled during `luarocks install` (or `luarocks make`) and published to `<tree>/lib/titan/0.6/` (`cui.so`/`cui.a` on Unix, `cui.dll` on Windows), usable by both Titan `import` and Lua `require`.
 3. **Installed source-only module:** `.titan` source published to `<tree>/lib/titan/0.6/`, compiled into each Titan consumer's `--output` directory (not loaded directly by Lua `require`).
 
 If you pack an already installed native rock with `luarocks pack titan-cui 0.1.0-1`, LuaRocks archives the retained `$(PREFIX)` directory (including `dist/`), and installing that `.rock` runs `hooks.post_install` without recompiling. Because `dist/modules/` sits outside LuaRocks' `lib` deployment, `luarocks pack` can name a native Titan rock `.all.rock`. Rename it to the architecture reported by `luarocks config arch` (for example `titan-cui-0.1.0-1.linux-x86_64.rock`) before sharing, and treat it as tied to the OS, CPU architecture, Lua version, Titan ABI, and build profile.
 
-Each rock has one active published version: reinstalling or upgrading retires only stale files owned by that rock, never overwrites foreign or SDK-owned files, and prunes shared directories only when empty.
+Each rock has one active published version. Before changing any published files, `titan-install` runs preflight checks and refuses the install if any destination collides with a foreign file, a Titan SDK-owned path, or a protected `lib/` subtree (distinct from mid-copy I/O failures; there is no blanket transaction guarantee). A succeeding same-version reinstall or upgrade retires only stale files owned by that rock and prunes shared directories only when empty.
 
 ### Uninstalling
 
