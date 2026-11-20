@@ -5033,6 +5033,16 @@ local function find_embedded_interface(modname, context)
     }
 end
 
+-- Transfer the per-member compiler metadata without replacing the selected
+-- semantic view, physical path, or owning archive. Archive imports stay on
+-- the archive member; ABI/compatibility are checked by their own protocols.
+function perf.attach_provider_metadata(selection, metadata)
+    selection.layouts = metadata.layouts
+    selection.layout_inventory = metadata.layout_inventory
+    selection.source_requirements = metadata.source_requirements
+    return selection
+end
+
 function driver.find_dependency_interface(paths, modname, context)
     driver.assert_target_context(context)
     local browser = context.target == "browser"
@@ -5047,15 +5057,12 @@ function driver.find_dependency_interface(paths, modname, context)
                 driver.find_dynamic_interface(paths, modname, context)
             if modtype then
                 remember_nominal_layouts(context, metadata.layout_inventory, filename)
-                return {
+                return perf.attach_provider_metadata({
                     kind = "dynamic",
                     type = modtype,
                     filename = filename,
                     relative = relative,
-                    layouts = metadata.layouts,
-                    layout_inventory = metadata.layout_inventory,
-                    source_requirements = metadata.source_requirements,
-                }
+                }, metadata)
             elseif filename then
                 return nil, filename
             end
@@ -5065,17 +5072,14 @@ function driver.find_dependency_interface(paths, modname, context)
             if modtype then
                 local metadata = provider.entries[modname]
                 remember_nominal_layouts(context, metadata.layout_inventory, filename)
-                return {
+                return perf.attach_provider_metadata({
                     kind = "static",
                     type = modtype,
                     filename = filename,
                     relative = relative,
                     static_archive = filename,
                     static_provider = provider,
-                    layouts = metadata.layouts,
-                    layout_inventory = metadata.layout_inventory,
-                    source_requirements = metadata.source_requirements,
-                }
+                }, metadata)
             elseif filename then
                 return nil, filename
             end
@@ -5956,7 +5960,7 @@ function driver.defaultloader(static_deps, options)
 
             local replacements = {}
             for _, name in ipairs(selected_names) do
-                local dynamic_type, filename, relative =
+                local dynamic_type, filename, relative, metadata =
                     driver.find_dynamic_interface(
                         driver.TITAN_BIN_PATH, name, context)
                 if not dynamic_type then
@@ -5978,18 +5982,19 @@ function driver.defaultloader(static_deps, options)
                     file = dynamic_type.file,
                     filename = filename,
                     relative = relative,
+                    metadata = metadata,
                 }
             end
 
             for _, replacement in ipairs(replacements) do
                 replacement.type.file = replacement.file
-                driver.imported[replacement.name] = {
+                driver.imported[replacement.name] = perf.attach_provider_metadata({
                     kind = "dynamic",
                     type = replacement.type,
                     filename = replacement.filename,
                     relative = replacement.relative,
                     compiled = true,
-                }
+                }, replacement.metadata)
                 static_deps[replacement.name] = nil
             end
         end
@@ -6345,12 +6350,10 @@ function driver.defaultloader(static_deps, options)
                     "', planned '" .. tostring(item.provider_file) .. "'"
             end
             remember_nominal_layouts(context, metadata.layout_inventory, item.file)
-            resolved = {
+            resolved = perf.attach_provider_metadata({
                 kind = "dynamic", type = value, filename = item.file,
-                relative = item.relative, layouts = metadata.layouts,
-                layout_inventory = metadata.layout_inventory,
-                source_requirements = metadata.source_requirements,
-            }
+                relative = item.relative,
+            }, metadata)
         elseif item.kind == "static" then
             local provider, provider_error = inspect_static_provider(
                 context, item.archive, item.relative)
@@ -6362,13 +6365,11 @@ function driver.defaultloader(static_deps, options)
                     modname .. "'"
             end
             remember_nominal_layouts(context, metadata.layout_inventory, item.archive)
-            resolved = {
+            resolved = perf.attach_provider_metadata({
                 kind = "static", type = metadata.type, filename = item.archive,
                 relative = item.relative, static_archive = item.archive,
-                static_provider = provider, layouts = metadata.layouts,
-                layout_inventory = metadata.layout_inventory,
-                source_requirements = metadata.source_requirements,
-            }
+                static_provider = provider,
+            }, metadata)
             static_deps[modname] = true
         else
             return false, "build plan divergence: module '" .. modname ..
@@ -6957,8 +6958,7 @@ function driver.defaultloader(static_deps, options)
                         return false, "cached compiled interface for module '" ..
                             modname .. "' changed before native compilation"
                     end
-                    mod.layouts, mod.layout_inventory =
-                        metadata.layouts, metadata.layout_inventory
+                    perf.attach_provider_metadata(mod, metadata)
                 elseif mod.kind == "static" and not mod.layout_inventory then
                     local provider, provider_error = inspect_static_provider(
                         context, mod.static_archive, mod.relative)
@@ -6969,8 +6969,7 @@ function driver.defaultloader(static_deps, options)
                             modname .. "' changed before native compilation"
                     end
                     mod.static_provider = provider
-                    mod.layouts, mod.layout_inventory =
-                        metadata.layouts, metadata.layout_inventory
+                    perf.attach_provider_metadata(mod, metadata)
                 end
                 remember_nominal_layouts(context, mod.layout_inventory,
                     mod.static_archive or mod.filename)
@@ -8244,11 +8243,11 @@ function perf.demand_archive_modules(context, plan, requirements)
                     name .. "' lacks an import inventory; rebuild the archive with this compiler"
             end
             if not selected then
-                selected = { kind = "static", compiled = true, type = entry.type,
+                selected = perf.attach_provider_metadata({
+                    kind = "static", compiled = true, type = entry.type,
                     filename = provider.archive, relative = provider.relative_archive,
                     static_archive = provider.archive, static_provider = provider,
-                    layouts = entry.layouts, layout_inventory = entry.layout_inventory,
-                    source_requirements = entry.source_requirements }
+                }, entry)
                 driver.imported[name] = selected
                 plan.add_static(name, selected)
             end
