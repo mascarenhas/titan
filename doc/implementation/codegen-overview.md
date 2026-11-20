@@ -1305,14 +1305,16 @@ package searcher does not consult this set, and child states do not inherit
 it. Once initialized, a module registers its ordinary native preload as
 before, and that preload can be copied into children.
 
-A catalog miss in a strict `--static` executable reports a missing linked
-provider instead of opening a DSO. A default executable retains the
-recorded DSO fallback on a miss. The catalog never replaces an existing
-physical producer token or redirects direct calls.
+For `--static`, preflight verifies the complete written import closure and
+the table anchors its archive members. The runtime still opens a named
+DSO on a catalog miss: a plugin loaded explicitly through Lua `require`
+and its own dependencies are not part of the host's certified graph.
+The catalog never replaces an existing physical producer token or
+redirects direct calls.
 
-Final-link certification includes the sorted catalog names, strict-mode
-policy, and the bytes of the input objects and archives. Windows DLL
-launchers and archive-only browser images do not install this catalog.
+Final-link certification includes the sorted catalog names and the bytes
+of the input objects and archives. Windows DLL launchers and archive-only
+browser images do not install this catalog.
 
 ## User-value allocation
 

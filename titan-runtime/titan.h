@@ -384,7 +384,6 @@ typedef struct TitanLinkedModule {
 typedef struct TitanLinkedModules {
   const TitanLinkedModule *begin;
   const TitanLinkedModule *end;
-  int strict;
 } TitanLinkedModules;
 
 #define TITAN_LINKED_MODULES_KEY "Titan linked module providers"

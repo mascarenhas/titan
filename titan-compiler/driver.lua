@@ -10841,11 +10841,9 @@ $LINKED_MODULE_ENTRIES
 };
 static const TitanLinkedModules titan_linked_modules = {
     titan_linked_entries,
-    titan_linked_entries + sizeof(titan_linked_entries) / sizeof(*titan_linked_entries),
-    $LINKED_MODULE_STRICT
+    titan_linked_entries + sizeof(titan_linked_entries) / sizeof(*titan_linked_entries)
 };]]
             values.LINKED_MODULE_ENTRIES = table.concat(entries, "\n")
-            values.LINKED_MODULE_STRICT = options.context.strict_static and "1" or "0"
             values.LINKED_MODULE_INSTALL = [[
 lua_pushliteral(L, TITAN_LINKED_MODULES_KEY);
     lua_pushlightuserdata(L, (void *)&titan_linked_modules);

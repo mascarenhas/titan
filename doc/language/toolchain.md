@@ -346,6 +346,11 @@ the first initialized compatible provider in the state; physical carrying
 conflicts still fail. `--static` does not request the system linker's `-static`
 flag: system libraries such as libc can remain dynamic.
 
+The closure covers the executable's Titan `import` declarations, not
+modules explicitly loaded at runtime. A plugin loaded through Lua
+`require` can still load its own shared dependencies in a `--static`
+executable.
+
 Native payloads passed with `-X` are carried into both `.so` and `.a`
 providers in command-line order (child archives are flattened into the
 generated `.a`, and metadata-bearing Titan objects are rejected on `-X`).

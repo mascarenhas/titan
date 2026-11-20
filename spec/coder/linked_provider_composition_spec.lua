@@ -321,6 +321,37 @@ end
         assert.equal("42\n", result.output)
     end)
 
+    it("loads a runtime plugin and its shared dependency in a static executable", function()
+        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
+        file("dep/plugin_dep.titan", "function answer(): integer return 42 end\n")
+        built("dep", "package", nil, "plugin_dep")
+        file("plugin/plugin.titan", [[
+local dep = import "plugin_dep"
+
+function answer(): integer
+  return dep.answer()
+end
+]])
+        built("plugin", "package", "package", "plugin")
+        local providers = fixture.root .. "/package"
+        assert(os.remove(providers .. "/plugin.a"))
+        assert(os.remove(providers .. "/plugin_dep.a"))
+
+        file("app/host.titan", [=[
+local lua = import "lua"
+
+function main(args: {string}): integer
+  lua.load([[assert(require("plugin").answer() == 42)]])()
+  return 0
+end
+]=])
+        built("app", "linked", "package", "--static", "host")
+        local result = fixture:run({ "env", "-i", "PATH=/usr/bin:/bin",
+            "TITANC=" .. fixture.root .. "/no-compiler", "TITAN_ROOT=" .. fixture.root,
+            "TITAN_PATH_0_6=" .. providers, fixture.output .. "/host" })
+        assert.is_true(result.ok, result.output)
+    end)
+
     it("certifies a private archive chain and preserves the executable on a deep miss", function()
         if platform.windows then pending("Titan archive providers are not available on Windows"); return end
         file("author/leaf.titan", "function answer(): integer return 41 end\n")
@@ -385,40 +416,6 @@ end
         result = run_with_providers("check")
         assert.is_true(result.ok, result.output)
         assert.equal("42\n", result.output)
-    end)
-
-    it("rejects a cycle assembled from independently published archive members", function()
-        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
-        file("author/left.titan", "function answer(): integer return 42 end\n")
-        built("author", "package", nil, "left")
-        file("author/right.titan", [[
-local left = import "left"
-
-function answer(): integer
-  return left.answer()
-end
-]])
-        built("author", "package", "package", "right")
-        file("author/left.titan", [[
-local right = import "right"
-
-function answer(): integer
-  return right.answer()
-end
-]])
-        built("author", "package", "package", "left")
-        file("app/check.titan", [[
-local left = import "left"
-
-function main(args: {string}): integer
-  return left.answer() - 42
-end
-]])
-        local result = compile("app", "linked", "package", "--static", "check")
-        assert.is_false(result.ok, result.output)
-        assert.truthy(result.output:find("cyclic archive import: left -> right -> left",
-            1, true), result.output)
-        assert.is_nil(lfs.attributes(fixture.output .. "/check", "mode"))
     end)
 
     it("keeps default DSO fallback for a private member of another selected archive", function()

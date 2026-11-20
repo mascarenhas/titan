@@ -1570,8 +1570,6 @@ static TitanModuleSymbols titan_path_find_linked_module(lua_State *L,
         for (entry = linked->begin; entry != linked->end; entry++) {
             if (strcmp(entry->name, module) == 0) return entry->symbols;
         }
-        if (linked->strict)
-            luaL_error(L, "--static program has no linked provider for module '%s'", module);
     }
     return NULL;
 }
