@@ -1296,13 +1296,14 @@ the table does not reference dormant siblings.
 The launcher publishes the array bounds as one registry value inside its
 protected entry, before requiring the root. A default program containing
 only its source root and shared-provider imports needs no catalog.
-`titan_module_provider` scans that set only on a canonical and native-preload
-miss for a named DSO. The set is image-lifetime data, not initialized module
-userdata; binding to it still goes through all normal ABI and
-used-declaration checks. Initialization still follows the written import
-order. No entries are added to `package.preload` or `package.loaded`, the Lua
-package searcher does not consult this set, and child states do not inherit
-it. Once initialized, a module registers its ordinary native preload as
+`titan_module_provider` binary-searches that array only after a canonical
+and native-preload miss on a named import. The table holds image-lifetime
+data, not initialized module userdata; binding to it still goes through
+the normal ABI and used-declaration checks. Modules still initialize in
+written import order. The table adds nothing to `package.preload` or
+`package.loaded`. The Lua package searcher does not consult it, and child
+states do not inherit it.
+Once initialized, a module registers its ordinary native preload as
 before, and that preload can be copied into children.
 
 For `--static`, preflight verifies the complete written import closure and

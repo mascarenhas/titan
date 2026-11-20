@@ -8422,9 +8422,10 @@ function driver.finalize_resolver_context(context)
     context.physical_owner = physical_owner
     context.linked_module_names = nil
     if elect_linked then
+        local runner = require("titan-compiler.test_runner").MODULE_NAME
         local names = {}
         for name in pairs(source_names) do
-            if name ~= "titan.test.runner" then names[#names + 1] = name end
+            if name ~= runner then names[#names + 1] = name end
         end
         for name, mod in pairs(selected_static_modules) do
             -- Older archives need not provide a link-visible resolver.
@@ -10830,11 +10831,13 @@ function driver.entrypoint_contents(modname, program_name, options)
             for _, name in ipairs(names) do
                 local resolver = private_symbol(name, "native_symbol")
                 declarations[#declarations + 1] =
-                    "TITAN_RUNTIME_FUNC void *" .. resolver .. "(const char *symbol);"
+                    "TITAN_SOURCE_LOCAL void *" .. resolver .. "(const char *symbol);"
                 entries[#entries + 1] =
                     "    { \"" .. c_string_contents(name) .. "\", " .. resolver .. " },"
             end
-            values.LINKED_MODULE_DECLARATIONS = table.concat(declarations, "\n") .. [[
+            local source_visibility = require("titan-compiler.cpreamble").source_visibility
+            values.LINKED_MODULE_DECLARATIONS = source_visibility .. "\n" ..
+                table.concat(declarations, "\n") .. [[
 
 static const TitanLinkedModule titan_linked_entries[] = {
 $LINKED_MODULE_ENTRIES

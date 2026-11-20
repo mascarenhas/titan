@@ -20,7 +20,7 @@ least one module name is required unless you pass `--print-root`,
 | `--exe PATH` | Exact destination for a standalone or `--test` executable, relative to the current directory. |
 | `-t`, `--tree PATH` | Semicolon-separated source root directories (default: `.`). |
 | `-T`, `--target TGT` | Compilation target: host OS (`linux`, `darwin`, `windows`) or `browser` (default: `TITAN_TARGET` or host OS). |
-| `--static` | Require archives for compiled dependencies of a Linux/macOS executable or test. Also valid for their compile-only objects. |
+| `--static` | Require archives for compiled dependencies of a Linux/macOS executable or test. Also valid with `-c`, even for roots without `main`. |
 | `--source-first` | Prefer available `.titan` source dependencies over compiled providers, with compiled fallback on miss. |
 | `--incremental` | Certify and reuse unchanged module objects, `--c-source` objects, and final links. |
 | `-c`, `--compile-only` | Generate objects and headers only without linking. Rebuilds all sources unless combined with `--incremental`. |
@@ -577,11 +577,12 @@ titanc -o out --static -c --incremental app.main
 titanc -o out --static --incremental --exe out/bin/app app.main
 ```
 
-Compile-only builds of a root with `main`, or of `--test` roots, use the same
-provider composition rules as the executable build. They write only objects
-and headers: the launcher and executable are generated at the final link.
-Pass the same provider-selection and compile options in both steps, including
-`--test` and `--coverage` when applicable.
+Compile-only builds with a `main` root, `--test`, or `--static` use
+executable provider checks. `-c --static` checks the complete import
+closure even for a helper without `main`. These builds write only objects
+and headers; the final link generates the launcher and executable.
+Pass the same provider-selection and compile options in both steps,
+including `--static`, `--test`, and `--coverage` when applicable.
 
 ## Build profiles, parallelism, and build output
 

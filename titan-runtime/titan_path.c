@@ -1566,9 +1566,14 @@ static TitanModuleSymbols titan_path_find_linked_module(lua_State *L,
         linked = (const TitanLinkedModules *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     if (linked != NULL) {
-        const TitanLinkedModule *entry;
-        for (entry = linked->begin; entry != linked->end; entry++) {
-            if (strcmp(entry->name, module) == 0) return entry->symbols;
+        const TitanLinkedModule *begin = linked->begin;
+        const TitanLinkedModule *end = linked->end;
+        while (begin < end) {
+            const TitanLinkedModule *entry = begin + (end - begin) / 2;
+            int order = strcmp(module, entry->name);
+            if (order == 0) return entry->symbols;
+            if (order < 0) end = entry;
+            else begin = entry + 1;
         }
     }
     return NULL;

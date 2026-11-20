@@ -44,12 +44,13 @@ code generator, spawns a module-compilation child process, or mutates
 stages accept a record does `driver.restore_source_object` install the module's
 declarations and checking headers into the active resolver.
 
-Preflight classifies rooted `main` and `--test` builds for provider
-finalization, even under `-c`. It uses the same source information or
-certified main marker it already reads for output planning; the coordinator
-and its workers share the classification. Only a final link reserves
-executable outputs or generates a launcher. Compile-only builds that name
-neither kind of executable root keep the ordinary provider checks.
+Preflight uses executable provider checks for a rooted `main`, `--test`,
+and any `-c --static` build, even when none of its roots defines `main`.
+It uses the same source information or certified main marker it already
+reads for output planning; the coordinator and its workers share the
+classification. Only a final link reserves executable outputs or
+generates a launcher. Without these options or a `main` root, a
+compile-only build keeps the ordinary provider checks.
 
 Two execution paths share this pipeline:
 
