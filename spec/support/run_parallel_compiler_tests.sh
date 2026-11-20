@@ -302,7 +302,7 @@ trap cleanup EXIT
 install_signal_handlers
 
 "$lua_cmd" -E "$workspace/spec/support/compiler_test_groups.lua" \
-    local-plan "$jobs" "$worker_root" || exit 2
+    local-plan "$jobs" "$worker_root" "${1:-all}" || exit 2
 effective_jobs=0
 exclusive_count=0
 while IFS='=' read -r key val; do

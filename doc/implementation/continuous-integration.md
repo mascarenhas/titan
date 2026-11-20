@@ -1,8 +1,9 @@
 # Continuous integration and platform validation
 
 The executable definitions are `.github/workflows/ci.yml`,
-`.github/workflows/macos.yml`, and `spec/support/ci_*.sh`. This chapter explains
-their ownership and ordering contracts and is the canonical description of the
+`.github/workflows/macos.yml`, `.github/workflows/windows.yml`, and
+`spec/support/ci_*.sh`. This chapter explains their ownership and ordering
+contracts and is the canonical description of the
 CI lanes. Local setup and commands are in [repository
 workflow](repository-workflow.md); test implementation, local Busted
 partitions and native coverage are in [test runner](test-runner.md) and
@@ -707,11 +708,11 @@ runner with `MAKEFLAGS=-j4` and `TITAN_JOBS=4`.
 
 ## Cache ownership
 
-Native dependency caches belong to their consuming stdlib/sanitizer lane, not
-the compiler producer. Prefix-owned `var/cache/titan-probes/2` is restored and
-saved independently in stdlib coverage, sanitizer, and macOS lanes. Compiler
-workers remain probe-cache-free because fixtures reuse header pathnames.
-Never restore probe evidence from a less-trusted writer.
+Linux native dependency caches belong to their consuming stdlib/sanitizer lane,
+not the compiler producer. Prefix-owned `var/cache/titan-probes/2` is restored
+and saved independently by platform and lane. Compiler workers remain
+probe-cache-free because fixtures reuse header pathnames. Never restore probe
+evidence from a less-trusted writer.
 
 Regular probe keys retain the `test-linux-stdlib` namespace and include
 OS/architecture/profile, an immutable commit key, and stable restore prefix.
@@ -836,35 +837,86 @@ stack, so a runner-image or compiler change that stops the placement fails the
 job instead of silently removing that coverage from the `test_unwind_` gate.
 Local Clang sanitizer lanes do not exercise the normalization.
 
-## macOS pre-merge gate
+## Hosted macOS and Windows
 
-Complete macOS validation is a pre-merge check. Prefer an equivalent complete
-local VM run covering runtime, packaging, native/compiler suites, and both
-OpenSSL production modes, with exact source and architecture evidence. Intel
-evidence does not establish Apple Silicon runtime behavior. The complete run
-uses the validation profile, including both dependency-mode smokes. For the
-companion extension, put GNU Make 4.4.1 first on `PATH` ahead of Apple Make 3.81.
+These are separate native workflows: both run on pushes and pull requests for
+all branches, and both can be dispatched manually. They use the `validation`
+profile and run no browser, sanitizer, or coverage lanes. The hosted runner
+labels select these public-repository budgets:
 
-The hosted `macos.yml` fallback is manual-only. PR creation/update does not
-authorize its cost; dispatch only with an explicit maintainer request:
+| Workflow | Runner | Build slots | Parallel test cells |
+| --- | --- | ---: | --- |
+| macOS | `macos-15` (arm64, 3 vCPU, 7 GB RAM) | 3 | Native and four compiler shards |
+| Windows | `windows-2025-vs2026` (x64, 4 vCPU, 16 GB RAM) | 4 | Native and four compiler shards |
 
-```sh
-gh workflow run macos.yml --ref <branch>
-```
+Every cell checks out the pinned sources, prepares an isolated SDK prefix,
+and installs the checked-out Titan rock. Rebuilding the rock in each cell
+avoids transporting SDKs and CMake state with embedded paths. The four
+compiler cells partition the same repository test inventory used on Linux:
+the compiler and installed-stdlib integration domains, without LuaCov.
+`compiler_test_groups.lua local-plan` distributes whole files using the
+uncovered timing column; `run_parallel_compiler_tests.sh` runs each file in a
+private worker checkout and isolates the explicitly exclusive files from
+other work in that runner. Ordinary workers cap nested Make/Titan work at one
+slot. The native cell covers the retained runtime/packaging domain and the
+unfiltered native aggregate. The matrix keeps running if another cell fails.
+The cold-cache critical path is targeted at about 45 minutes before runner
+queue time. This is an estimate, not hosted evidence: full local gates on
+larger machines took about 22–25 minutes on Apple Silicon and 45–50 minutes on
+Windows. Use hosted setup, build, and test durations to check the estimate and
+rebalance only where needed.
 
-The hosted job sets all three concurrency bounds to three (`MAKEFLAGS=-j3`,
-`TITAN_JOBS=3`, and `TITAN_TEST_JOBS=3`), so its `make stdlib-test` runs the
-native aggregate as three ordinary owner groups followed by the timing-guarded
-owners alone. Its `libuv_build_spec.lua` checks Apple Make 3.81's serial
-default through `/usr/bin/make`; the GNU Make 4.2 pool-seeding case stays
-pending there, and `TITAN_TEST_LEGACY_MAKE` names an older GNU Make for that
-check on other hosts. It retries only dependency acquisition within the same prefix;
-build and complete test execution remain single-shot. Run all uncovered
-stdlib/runtime/packaging work and the aggregate before
-`ci_test_groups.sh compiler-uncovered`. Before compiler
-fixtures, use `ci_stdlib_snapshot.sh` to preserve the runtime archive and the
-canonical provider pair with its conditional dSYM, then restore them
-before bundled/system production smokes. Retain the real x86_64/arm64 universal
-Mach-O archive lookup/repackaging proof; a host-only synthetic check is not a
-replacement. Compiler/language specs must not delete shared runtime state to
-force recompilation.
+### macOS native lane and full dispatch
+
+The runner puts Homebrew GNU Make ahead of Apple Make 3.81 and gives fixtures
+a physical temp path under `/private/tmp`. Test drivers run in the foreground,
+not under `nohup`, so SIGHUP tests exercise the default signal behavior.
+`libuv_build_spec.lua` still checks Apple Make's serial default explicitly
+through `/usr/bin/make`. The real x86_64/arm64 universal Mach-O archive
+lookup and repackaging proof still runs; a host-only check is not a replacement.
+
+The native cell runs `make stdlib-test`, with three native owner groups and
+the timing-guarded owners alone, certifies that an identical SDK reinstall
+keeps all native aggregate artifacts reusable, checks the 15-second runtime
+shutdown case, and runs the bundled/system OpenSSL production smokes. Manual
+dispatch selects the `full` cell instead of the matrix. It additionally runs
+all compiler/language and installed-stdlib integration specs in private
+checkouts before the smokes.
+
+### Windows native lane
+
+The workflow provisions MSYS2 CLANG64/UCRT through `setup-msys2` with package
+caching enabled, and uses `mingw32-make -f Makefile.win` with native Clang.
+It leaves `LD` unset, preserves MSYS2's UTF-8 locale, and stages the checkout
+on a short fixed NTFS path on `C:` rather than using a runner work drive
+that may be ReFS. The native cell uses the [complete Windows aggregate
+harness](windows-build.md#test-ownership-and-keep-going), with the same
+platform and capability skip rules as local validation. Busted workers use
+the existing Windows Job Object supervisor and its private checkout and
+TEMP paths. The hosted Windows validation build uses the pinned bundled
+OpenSSL; [system OpenSSL](../language/windows-build.md#install-from-source)
+remains available for local platform validation.
+
+### Hosted platform caches
+
+`actions/cache` restores exact-key Lua, native dependency, and LuaRocks
+dependency snapshots. Keys include platform, architecture, profile, the
+actual toolchain identity and build location, the Lua gitlink, and the
+relevant dependency pins and recipe hashes. On macOS, libbacktrace also keys
+on the resolved upstream revision and the other native dependencies have
+separate caches. On Windows the native libraries share a build tree: its key
+includes both pinned source manifests, patches, build recipes, and OpenSSL mode.
+The LuaRocks cache stops before installing the Titan rock. Only the native
+cell (or macOS manual `full`) saves dependency misses; no persistent cache
+contains the installed Titan rock or its generated provider.
+
+The C-probe cache restores separately before building the rock, using a
+stable platform/toolchain prefix and a fresh key for each run and attempt.
+The same native or full cell saves it after installation, before any
+OpenSSL-mode switch. Build logs show the restore results. Standard GitHub
+cache visibility applies: a PR's merge-ref cache does not warm a later
+default-branch run.
+
+Hosted and local validation are separate evidence. Record the exact source,
+architecture, SDK profile, and all relevant dependency modes when using a local
+VM to establish platform behavior that the hosted workflow does not cover.

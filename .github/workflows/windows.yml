@@ -1,0 +1,216 @@
+name: Windows
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TITAN_BUILD_PROFILE: validation
+  TITAN_ABI_VERSION: "2"
+
+jobs:
+  test-windows:
+    name: Windows x64 CLANG64 (${{ matrix.suite }})
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [native, hosted-compiler-shard-1, hosted-compiler-shard-2, hosted-compiler-shard-3, hosted-compiler-shard-4]
+    defaults:
+      run:
+        shell: msys2 {0}
+        working-directory: C:/titan-ci
+    env:
+      PREFIX: C:/titan-ci/.lua
+      TITAN_PREFIX: C:/titan-ci/.lua
+      TITAN_TEST_BUILD_DIR: C:/titan-stdlib-tests
+      TITAN_JOBS: "4"
+      # LuaRocks passes ROCK_CFLAGS to its nested Make. Keep the native
+      # dependency flags identical before and during that invocation.
+      NATIVE_CFLAGS: "-O0 -fno-lto"
+      OPENSSL_MODE: bundled
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+
+    steps:
+      - uses: actions/checkout@v6
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Install MSYS2 CLANG64 build and test tools
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          location: C:/titan-msys2
+          cache: true
+          install: >-
+            git make perl curl tar unzip
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-clang-tools-extra
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-make
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-openssl
+            mingw-w64-clang-x86_64-python
+
+      # The native suite requires a fixed NTFS volume. Do not use D:, which
+      # runner images may format as ReFS. A short physical path also leaves
+      # room for nested fixture paths; do not introduce a subst or junction.
+      - name: Stage the checkout on local NTFS
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          git config --global core.autocrlf false
+          git config --global protocol.file.allow always
+          test ! -e /c/titan-ci
+          cp -a . /c/titan-ci
+          test -f /c/titan-ci/lua-5.5.1/src/lua.h
+          df -h /c
+
+      - name: Identify Lua and CLANG64 toolchain inputs
+        id: toolchain
+        run: |
+          set -euo pipefail
+          export PATH="/clang64/bin:$PATH"
+          unset LD
+          mingw32-make -f Makefile.win toolchain-check
+          python3 -c 'import os; assert os.name == "nt"'
+          gitlink=$(git rev-parse HEAD:lua-5.5.1)
+          digest=$({
+            cygpath -m "$PWD"
+            cygpath -m /clang64
+            uname -r
+            pacman -Q
+          } | tee /tmp/titan-windows-toolchain | sha256sum | cut -d' ' -f1)
+          cat /tmp/titan-windows-toolchain
+          echo "identity=windows-2025-vs2026-${RUNNER_ARCH}-CLANG64-${TITAN_BUILD_PROFILE}-${digest}-${gitlink}" >> "$(cygpath -u "$GITHUB_OUTPUT")"
+
+      # The three component DLLs share a CMake tree, and the source manifest
+      # pins those libraries and OpenSSL. Cache the native trees as one unit.
+      - name: Restore the Lua SDK and pinned Windows native dependency builds
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: &windows-native-paths |
+            C:/titan-ci/.lua/bin/lua.exe
+            C:/titan-ci/.lua/bin/luac.exe
+            C:/titan-ci/.lua/bin/lua55.dll
+            C:/titan-ci/.lua/include/lua*.h
+            C:/titan-ci/.lua/include/lua.hpp
+            C:/titan-ci/.lua/lib/liblua55.a
+            C:/titan-ci/.lua/share/man
+            C:/titan-ci/.lua/src/lua-5.5.1
+            C:/titan-ci/out/windows-validation/lua-5.5.1
+            C:/titan-ci/out/windows-validation/native-src
+            C:/titan-ci/out/windows-validation/native
+          key: ${{ steps.toolchain.outputs.identity }}-native-${{ env.OPENSSL_MODE }}-${{ hashFiles('Makefile.win', 'scripts/*windows*native*', 'scripts/*windows*libbacktrace*', 'scripts/windows_build_profile.sh', 'vendor/windows-native/**', 'vendor/libbacktrace/**', 'vendor/libuv/*.patch', 'vendor/lua/*', '.github/workflows/windows.yml') }}
+
+      - name: Restore standalone-prefix LuaRocks dependencies
+        id: rocks-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: &windows-rocks-paths |
+            C:/titan-ci/.lua/bin/busted*
+            C:/titan-ci/.lua/bin/cluacov*
+            C:/titan-ci/.lua/bin/luacov*
+            C:/titan-ci/.lua/bin/luarocks*.exe
+            C:/titan-ci/.lua/etc/luarocks
+            C:/titan-ci/.lua/lib/lua/5.5
+            C:/titan-ci/.lua/lib/luarocks
+            C:/titan-ci/.lua/share/lua/5.5
+          key: ${{ steps.toolchain.outputs.identity }}-rocks-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile.win', 'scripts/install_windows_luarocks.sh', 'titan-0.6.0-1.rockspec') }}
+
+      - name: Restore Windows C-probe results
+        id: probe-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: C:/titan-ci/.lua/var/cache/titan-probes/2
+          key: titan-probes-2-${{ steps.toolchain.outputs.identity }}-${{ env.OPENSSL_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            titan-probes-2-${{ steps.toolchain.outputs.identity }}-${{ env.OPENSSL_MODE }}-
+
+      - name: Report Windows cache hits
+        run: |
+          echo "Lua/native dependencies: ${{ steps.native-cache.outputs.cache-hit || 'false' }}"
+          echo "LuaRocks: ${{ steps.rocks-cache.outputs.cache-hit || 'false' }}"
+          echo "C-probe restore: ${{ steps.probe-cache.outputs.cache-matched-key != '' }}"
+
+      - name: Build Lua, LuaRocks and the pinned native dependencies
+        run: |
+          set -euo pipefail
+          unset LD
+          export PATH="/clang64/bin:$PATH"
+          mingw32-make -f Makefile.win lua luarocks libbacktrace native
+          export LUAROCKS_CONFIG="$PREFIX/etc/luarocks/config-5.5.lua"
+          mingw32-make -f Makefile.win compiler-deps
+          "$PREFIX/bin/luarocks.exe" --lua-version=5.5 --tree="$PREFIX" test --prepare titan-0.6.0-1.rockspec
+
+      # Only the native cell publishes shared dependency caches, and never
+      # includes Titan-generated objects or the installed Titan rock.
+      - name: Save the Lua SDK and pinned Windows native dependency builds
+        if: matrix.suite == 'native' && steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *windows-native-paths
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+
+      - name: Save standalone-prefix LuaRocks dependencies
+        if: matrix.suite == 'native' && steps.rocks-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *windows-rocks-paths
+          key: ${{ steps.rocks-cache.outputs.cache-primary-key }}
+
+      - name: Build and install the Windows rock
+        id: install-rock
+        run: |
+          set -euo pipefail
+          unset LD
+          export PATH="/clang64/bin:$PATH"
+          mingw32-make -f Makefile.win compiler
+          "$PREFIX/bin/titanc.exe" --print-root
+          test -f "$PREFIX/lib/lua/5.5/titan.dll"
+          test -f "$PREFIX/lib/titan/0.6/titan.dll"
+
+      - name: Save Windows C-probe results
+        if: matrix.suite == 'native'
+        uses: actions/cache/save@v4
+        with:
+          path: C:/titan-ci/.lua/var/cache/titan-probes/2
+          key: ${{ steps.probe-cache.outputs.cache-primary-key }}
+
+      - name: Build and run the complete Windows native stdlib aggregate
+        if: matrix.suite == 'native'
+        run: |
+          set -euo pipefail
+          unset LD
+          export PATH="/clang64/bin:$PATH"
+          mingw32-make -f Makefile.win titan-stdlib-test
+
+      - name: Run retained specs or a compiler and language shard without coverage
+        if: ${{ !cancelled() && steps.install-rock.outcome == 'success' }}
+        env:
+          TITAN_ROCK_TEST_JOBS: "3"
+          TITAN_COMPILER_GROUP: ${{ matrix.suite == 'native' && 'retained' || matrix.suite }}
+        run: |
+          set -euo pipefail
+          unset LD
+          export PATH="/clang64/bin:$PATH"
+          supervisor=$(cygpath -m /tmp/titan-compiler-supervisor.exe)
+          clang.exe -std=c99 -Wall -Wextra -Werror -municode \
+            spec/fixtures/stdlib/native/windows_test_supervisor.c -o "$supervisor"
+          export TITAN_ROCK_TEST_SUPERVISOR="$supervisor"
+          bash spec/support/run_parallel_compiler_tests.sh "$TITAN_COMPILER_GROUP"

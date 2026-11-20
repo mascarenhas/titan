@@ -625,6 +625,30 @@ elseif command == "local-plan" then
         io.stderr:write(err .. "\n")
         os.exit(2)
     end
+    local group = select(4, ...) or "all"
+    if group == "retained" then
+        inventory = { items = inventory.retained }
+    elseif group ~= "all" then
+        local shard
+        if group ~= "compiler-uncovered" then
+            shard = tonumber(group:match("^hosted%-compiler%-shard%-(%d+)$"))
+            if not shard or shard < 1 or shard > M.CI_SHARDS then
+                io.stderr:write("invalid hosted compiler shard: " .. group .. "\n")
+                os.exit(2)
+            end
+        end
+        local compiler_items = {}
+        for _, item in ipairs(inventory.items) do
+            if item.domain ~= "retained" then
+                compiler_items[#compiler_items + 1] = item
+            end
+        end
+        if shard then
+            local shards = assert(M.partition_lpt(compiler_items, M.CI_SHARDS, "local_validation"))
+            compiler_items = assert(shards[shard], "empty hosted compiler shard").items
+        end
+        inventory = { items = compiler_items }
+    end
     local plan, plan_err = M.plan_local(inventory, n, "local_validation")
     if not plan then
         io.stderr:write(plan_err .. "\n")
@@ -653,6 +677,6 @@ elseif command == "local-plan" then
     end
     os.exit(0)
 else
-    io.stderr:write("usage: compiler_test_groups.lua {check|ci-select GROUP [all|ordinary|exclusive]|local-plan JOBS DIR}\n")
+    io.stderr:write("usage: compiler_test_groups.lua {check|ci-select GROUP [all|ordinary|exclusive]|local-plan JOBS DIR [GROUP]}\n")
     os.exit(2)
 end

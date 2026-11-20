@@ -1109,7 +1109,7 @@ esac
                 "make titan-native-coverage-build TITAN_VERBOSE=1" },
             { linux, "Certify identical SDK reinstall without sanitizer compilation or linking",
                 "make titan-stdlib-test-build TITAN_VERBOSE=1" },
-            { macos, "Run complete macOS tests without coverage",
+            { macos, "Run macOS stdlib tests without coverage",
                 "make titan-stdlib-test-build TITAN_VERBOSE=1" },
         }) do
             local start = assert(contract[1]:find("- name: " .. contract[2], 1, true))
@@ -5764,9 +5764,7 @@ printf '%s\n' "${schedule[@]}"
             end
 
             local linux_workflow = read_file(".github/workflows/ci.yml")
-            local macos_workflow = read_file(".github/workflows/macos.yml")
-            -- Retain aggregate contracts across the independently triggered lanes.
-            local workflow = linux_workflow .. "\n" .. macos_workflow
+            local workflow = linux_workflow
             local function count_literal(text, needle)
                 local count = 0
                 local offset = 1
@@ -5829,26 +5827,18 @@ printf '%s\n' "${schedule[@]}"
             local playwright_job = named_job(linux_workflow, "browser-playwright")
             local packaging_job = named_job(linux_workflow, "browser-packaging")
             local native_coverage_job = named_job(linux_workflow, "native-coverage")
-            local macos_job = named_job(macos_workflow, "test-macos")
             local sanitizer_job = named_job(linux_workflow, "sanitizer")
 
             assert.equal(1, count_literal(linux_workflow, "\n  push:"),
                 linux_workflow)
             assert.falsy(linux_workflow:find("workflow_dispatch", 1, true),
                 linux_workflow)
-            local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
-            assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
-                macos_events)
             assert.equal(8, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
-            assert.equal(1, count_literal(macos_workflow,
-                "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
             assert.equal(8, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
             assert.equal(8, count_literal(linux_workflow,
                 "\n    runs-on: ubuntu-24.04\n"), linux_workflow)
-            assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
-                macos_workflow)
             for _, job_name in ipairs({
                 "build-compiler", "test-linux-compiler", "browser-toolchain",
                 "browser-stdlib",
@@ -5856,8 +5846,6 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
-                assert.falsy(macos_workflow:find(
-                    "\n  " .. job_name .. ":", 1, true), job_name)
             end
             assert.equal(1, count_literal(browser_job,
                 "\n    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
@@ -5865,13 +5853,6 @@ printf '%s\n' "${schedule[@]}"
             assert.equal(1, count_literal(browser_stdlib_job,
                 "\n    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
                 browser_stdlib_job)
-            assert.equal(1, count_literal(macos_workflow, "\n  test-macos:"),
-                macos_workflow)
-            assert.falsy(linux_workflow:find("\n  test-macos:", 1, true),
-                linux_workflow)
-            assert.falsy(macos_job:find("\n    needs:", 1, true), macos_job)
-            assert.equal(1, count_literal(macos_workflow,
-                'TITAN_ABI_VERSION: "2"'), macos_workflow)
             for _, removed in ipairs({
                 "\n  test-linux-stdlib:", "\n  compiler-coverage:",
                 "prepare-linux", "test-linux-library", "ubuntu-slim",
@@ -6014,16 +5995,16 @@ printf '%s\n' "${schedule[@]}"
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
             -- browser-packaging restores the emsdk and Playwright caches.
-            assert.equal(15, count_literal(workflow,
+            assert.equal(14, count_literal(workflow,
                 "uses: actions/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: actions/cache/restore@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: actions/cache/save@v4"), workflow)
-            assert.equal(4, count_literal(workflow,
+            assert.equal(3, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/2"), workflow)
             assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
-            assert.equal(7, count_literal(workflow,
+            assert.equal(6, count_literal(workflow,
                 "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
             -- Keep the existing regular cache identity when moving its owner.
             assert.truthy(native_coverage_job:find("-test-linux-stdlib-", 1, true))
@@ -6034,9 +6015,8 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(job:find("-test-linux-stdlib-", 1, true))
             end
             assert.truthy(sanitizer_job:find("-sanitizer-", 1, true))
-            assert.truthy(macos_job:find("-test-macos-", 1, true))
-            assert.equal(3, count_literal(workflow, "-${{ github.sha }}"), workflow)
-            assert.equal(3, count_literal(workflow,
+            assert.equal(2, count_literal(workflow, "-${{ github.sha }}"), workflow)
+            assert.equal(2, count_literal(workflow,
                 "          key: titan-probes-2-"), workflow)
 
             local regular_cache_step = named_step(native_coverage_job,
@@ -6753,51 +6733,51 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(codecov_policy:find("  native-stdlib:\n    paths:\n      - titan/", 1, true),
                 codecov_policy)
 
-            assert.equal(1, count_literal(macos_job,
-                "if: github.event_name == 'workflow_dispatch'"), macos_job)
-            assert.falsy(macos_job:find(
-                "if: github.event_name == 'push'", 1, true), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                'MAKEFLAGS: "-j3"'), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                'TITAN_JOBS: "3"'), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "make stdlib-test"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "make titan-stdlib-test-run"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "TITAN_TEST_TIMEOUT=15"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "ci_test_groups.sh compiler-uncovered"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "ci_stdlib_snapshot.sh save"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "ci_stdlib_snapshot.sh restore"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "ci_dependency_mode_smoke.sh"), macos_job)
-            assert.falsy(macos_job:find('luacov "', 1, true), macos_job)
-            assert.falsy(macos_job:find("id-token: write", 1, true),
-                macos_job)
-            assert.equal(2, count_literal(macos_job,
-                "ci_retry_luarocks_dependencies.sh"), macos_job)
-            assert.equal(2, count_literal(workflow,
-                "ci_retry_luarocks_dependencies.sh"), workflow)
-            assert.equal(1, count_literal(macos_job,
-                "luarocks make --only-deps"), macos_job)
-            assert.equal(2, count_literal(macos_job,
-                "luarocks make --force"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "luarocks test --prepare"), macos_job)
-            local macos_cache_index = assert(macos_job:find(
-                "- name: Restore macOS C-probe results", 1, true))
-            local macos_build_index = assert(macos_job:find(
-                "- name: Build and install the rock", macos_cache_index,
-                true))
-            local macos_tests_index = assert(macos_job:find(
-                "- name: Run complete macOS tests without coverage",
-                macos_build_index, true))
-            assert.is_true(macos_cache_index < macos_build_index)
-            assert.is_true(macos_build_index < macos_tests_index)
+            for _, platform_ci in ipairs({
+                { "macos", "macOS", "macos-15", "Build and install the rock" },
+                { "windows", "Windows", "windows-2025-vs2026", "Build and install the Windows rock" },
+            }) do
+                local platform_id, label, runner, install = table.unpack(platform_ci)
+                local hosted = read_file(".github/workflows/" .. platform_id .. ".yml")
+                local suite = named_job(hosted, "test-" .. platform_id)
+                local events = assert(hosted:match("\non:(.-)\npermissions:"))
+                assert.equal(1, count_literal(events, '\n  push:\n    branches: ["**"]\n'), events)
+                assert.equal(1, count_literal(events, '\n  pull_request:\n    branches: ["**"]\n'), events)
+                assert.equal(1, count_literal(events, "\n  workflow_dispatch:\n"), events)
+                assert.equal(1, count_literal(suite, "\n    runs-on: " .. runner .. "\n"), suite)
+                assert.equal(1, count_literal(suite, "fail-fast: false"), suite)
+                for shard = 1, 4 do
+                    assert.equal(1, count_literal(suite, "hosted-compiler-shard-" .. shard))
+                end
+                assert.falsy(suite:find("codecov/", 1, true), suite)
+                assert.falsy(suite:find("id-token: write", 1, true), suite)
+                assert_ordered(suite,
+                    "- name: Restore standalone-prefix LuaRocks dependencies",
+                    "- name: Restore " .. label .. " C-probe results",
+                    "- name: Report " .. label .. " cache hits",
+                    "- name: Save standalone-prefix LuaRocks dependencies",
+                    "- name: " .. install,
+                    "- name: Save " .. label .. " C-probe results",
+                    "run_parallel_compiler_tests.sh")
+                local probe_restore = named_step(suite, "Restore " .. label .. " C-probe results")
+                local probe_save = named_step(suite, "Save " .. label .. " C-probe results")
+                assert_ordered(probe_restore, "actions/cache/restore@v4",
+                    "var/cache/titan-probes/2", "${{ github.run_id }}-${{ github.run_attempt }}",
+                    "restore-keys:")
+                assert_ordered(probe_save, "actions/cache/save@v4",
+                    "var/cache/titan-probes/2", "steps.probe-cache.outputs.cache-primary-key")
+                if platform_id == "macos" then
+                    assert_ordered(suite, "make stdlib-test", "TITAN_TEST_TIMEOUT=15",
+                        "if: matrix.suite == 'full'", "run_parallel_compiler_tests.sh compiler-uncovered",
+                        "ci_dependency_mode_smoke.sh")
+                else
+                    assert_ordered(suite, "msys2/setup-msys2@v2", "msystem: CLANG64", "cache: true",
+                        "mingw32-make -f Makefile.win compiler-deps",
+                        "mingw32-make -f Makefile.win compiler",
+                        "mingw32-make -f Makefile.win titan-stdlib-test",
+                        "TITAN_ROCK_TEST_SUPERVISOR")
+                end
+            end
             local sanitizer_cache_index = assert(sanitizer_job:find(
                 "- name: Restore sanitizer C-probe results", 1, true))
             local sanitizer_build_index = assert(sanitizer_job:find(
@@ -6821,7 +6801,6 @@ printf '%s\n' "${schedule[@]}"
                 "run: make openssl",
                 "Canary source-rock installation with system OpenSSL",
                 "OPENSSL_MODE=system",
-                "brew install cmake readline openssl@3 pkgconf",
                 "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
@@ -6843,7 +6822,7 @@ printf '%s\n' "${schedule[@]}"
                 'TITAN_COVERAGE_TEST_REQUIRED: "1"'), native_coverage_job)
             assert.equal(1, count_literal(native_coverage_job,
                 "clang-format --version"), native_coverage_job)
-            for _, ordinary_job in ipairs({ build_job, sanitizer_job, macos_job }) do
+            for _, ordinary_job in ipairs({ build_job, sanitizer_job }) do
                 assert.falsy(ordinary_job:find("clang-format", 1, true), ordinary_job)
             end
             assert.equal(1, count_literal(workflow,
