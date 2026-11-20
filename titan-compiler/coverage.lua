@@ -50,7 +50,7 @@ end
 function coverage.matches(build, name, test_functions)
     if test_functions and #test_functions > 0 then return false end
     if name == "titan.test.runner" or build.generated[name] then return false end
-    if #build.patterns == 0 then return true end
+    if #build.patterns == 0 then return not build.installed_sources[name] end
     for _, pattern in ipairs(build.patterns) do
         if name:match(pattern) then return true end
     end
@@ -122,6 +122,7 @@ function coverage.prepare(driver, args, strategy)
     if not gcovr or #gcovr == 0 then return nil, gcovr_error or "coverage gcovr command is empty" end
     return {
         selected = {}, modules = {}, patterns = patterns, generated = {}, outputs = {},
+        installed_sources = {},
         backend = backend, gcov = gcov_argv, gcovr = gcovr,
         root = absolute(args.coverage_root or "."),
         output = absolute(args.coverage_output or
@@ -139,6 +140,7 @@ function coverage.source(build, name, source)
     end
     build.outputs[name] = source.native_output
     if source.kind == "generated" then build.generated[name] = true end
+    if source.installed then build.installed_sources[name] = true end
     return true
 end
 
