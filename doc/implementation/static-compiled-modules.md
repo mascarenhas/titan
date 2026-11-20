@@ -515,9 +515,10 @@ or force-loaded. Backtrace, Lua, platform, `-l`, and final-flag inputs remain
 outside both groups. Darwin uses its continual archive search. `--static` never
 becomes a system `-static` linker option.
 
-The generated launcher anchors reached native members (and, when needed on
-browser, materialized app-owned source objects) through their hidden
-resolvers; it does not add references to dormant members. Native library
+The generated launcher anchors reached native members (and, when source
+requirements activate the catalog on browser, app-owned source objects
+excluding the synthetic test runner) through their hidden resolvers; it does
+not add references to dormant members. Native library
 builds do not include another compiled Titan archive or external
 installed-source dependencies. They publish the same owned authored source
 object list in both provider forms, with primary objects before their parts.

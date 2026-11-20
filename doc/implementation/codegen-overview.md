@@ -1295,50 +1295,63 @@ is a separate `RTLD_LAZY | RTLD_LOCAL` operation.
 ### The linked provider set
 
 Application and `--test` preflight walks reached archive `imports` and reached
-`source_requirements`. When an executable or test image needs private linked
-election, `perf.linked_module_catalog(names, provider)` and
-`perf.catalog_install` (`driver.lua`) emit one sorted `TitanLinkedModule` array
-and `TitanLinkedModules` descriptor and install it under
-`TITAN_LINKED_MODULES_KEY` in the Lua registry inside the protected entrypoint
-before requiring the root:
+`source_requirements`. When an executable or test image activates private
+linked election (`elect_linked` on Unix, or `elect_app_sources` when
+`context.application_source_requirements` is non-nil on any target),
+`finalize_resolver_context` reconciles canonical owners (`linked_owner`) and
+builds `context.linked_module_names` using every actual application-owned
+source module in `source_names` (excluding the synthetic test runner
+`titan.test.runner`, via `linked_source(name)`), not only the frontier names
+recorded in `context.application_source_requirements`—while a published
+library's folded `source_requirements` still stops at its direct or forwarded
+installed source names and never consumes that source's transitive imports.
+`perf.linked_module_catalog(names, provider)` and `perf.catalog_install`
+(`driver.lua`) emit one sorted `TitanLinkedModule` array and
+`TitanLinkedModules` descriptor and install it under `TITAN_LINKED_MODULES_KEY`
+in the Lua registry inside the protected entrypoint before requiring the root:
 
 * **Linux and macOS:** Enabled when `elect_linked` holds (strict `--static`,
   `--test`, physical archive owners, or dynamic imports with multiple linked
-  sources) or when `context.application_source_requirements` is non-nil. The
-  launcher emits hidden `TITAN_SOURCE_LOCAL` native resolvers for linked
-  sources and reached archive members (or only the materialized source
-  requirements when `elect_linked` itself is false). Each archive entry is a
-  strong reference that retains its primary object; dormant siblings are never
-  referenced. A default program with only its source root and shared-provider
-  imports carrying no source obligations needs no catalog.
+  sources) or when `elect_app_sources` holds
+  (`context.application_source_requirements` is non-nil). The launcher emits
+  hidden `TITAN_SOURCE_LOCAL` native resolvers for all app-owned source modules
+  in `source_names` (excluding the synthetic test runner) plus, when
+  `elect_linked` holds, reached archive members (`selected_static_modules` with
+  `imports ~= nil`, which also retain strict `--static` `direct_provider`
+  reconciliation). Each archive entry is a strong reference that retains its
+  primary object; dormant siblings are never referenced. A default program with
+  only its source root and shared-provider imports carrying no source
+  obligations needs no catalog.
 * **Windows:** App-owned source modules live in the companion application
-  provider DLL, not the launcher EXE. Enabled only when
-  `context.application_source_requirements` is non-nil: `entrypoint_contents`
-  emits sorted entries with `NULL` resolver pointers and sets
-  `TitanLinkedModules.provider` to the companion application DLL (`$PROVIDER`).
-  `titan_path_find_linked_module` opens that provider via `loadlib`, so a
-  loaded library DLL resolves the app-owned module's already-exported
-  `_abi_value`, `_compatibility`, and `_init` entries and then switches to the
-  initialized canonical in-memory resolver—without passing hidden resolver
-  pointers across the PE boundary or adding general exports to the application
-  DLL.
-* **Browser (`--target browser`):** Enabled only when
-  `context.application_source_requirements` is non-nil:
-  `browser_entrypoint_contents` emits the sorted hidden-resolver table for the
-  materialized source requirements and installs it in
-  `titan_browser_initialize_worker` before `require("$MODNAME")`, anchoring
-  those source objects under `wasm-ld --gc-sections` with no new Wasm imports
-  or host JavaScript/loader changes. Ordinary browser builds without source
-  obligations omit the table.
+  provider DLL, not the launcher EXE. Enabled only when `elect_app_sources`
+  holds (`context.application_source_requirements` is non-nil):
+  `entrypoint_contents` emits sorted entries for all app-owned source modules
+  in `source_names` (excluding the synthetic test runner) with `NULL` resolver
+  pointers and sets `TitanLinkedModules.provider` to the companion application
+  DLL (`$PROVIDER`). `titan_path_find_linked_module` opens that provider via
+  `loadlib`, so a loaded library DLL resolves the app-owned module's
+  already-exported `_abi_value`, `_compatibility`, and `_init` entries and then
+  switches to the initialized canonical in-memory resolver—without passing
+  hidden resolver pointers across the PE boundary or adding general PE exports
+  to the application DLL. Ordinary Windows builds without source obligations
+  omit the table.
+* **Browser (`--target browser`):** Enabled only when `elect_app_sources` holds
+  (`context.application_source_requirements` is non-nil):
+  `browser_entrypoint_contents` emits the sorted hidden-resolver table for all
+  app-owned source modules in `source_names` (excluding the synthetic test
+  runner) and installs it in `titan_browser_initialize_worker` before
+  `require("$MODNAME")`, anchoring those source objects under
+  `wasm-ld --gc-sections` with no new Wasm imports or host JavaScript/loader
+  changes. Ordinary browser builds without source obligations omit the table.
 
-When an application compiles materialized source requirements
-(`context.application_source_requirements` is non-nil),
-`finalize_resolver_context` populates `context.application_nominal_layouts`
-through `perf.public_source_layout(name, mod)` (backed by
-`coder._own_nominal_layouts`) across all compiled `source_names`, so
-non-collaborating consumers (without a direct explicit `.titan` import on that
-owner) use erased public nominal layouts (`coder/nominal.lua`)—including for
-installed sources reached transitively through another required source.
+When `elect_app_sources` holds (`context.application_source_requirements` is
+non-nil), `finalize_resolver_context` also populates
+`context.application_nominal_layouts` through `perf.public_source_layout(name,
+mod)` (backed by `coder._own_nominal_layouts`) across all compiled
+`source_names`, so non-collaborating consumers (without a direct explicit
+`.titan` import on that owner) use erased public nominal layouts
+(`coder/nominal.lua`)—including for installed sources reached transitively
+through another required source.
 
 `titan_module_provider` binary-searches the installed table only after a
 canonical and native-preload miss on a named import. The table holds
