@@ -298,9 +298,13 @@ Inside a variadic function, four operations read `...`:
   - Into a **variadic Titan callee** (`sum(offset, ...)`), the runtime count
     is forwarded. If the static prefix leaves fixed parameters unfilled, the
     leading elements of `...` fill them first (nil-filling optional ones,
-    raising on missing required ones). The two variadic element types must be
-    equal or gradually consistent (`integer` and `value` forward both ways;
-    `integer` into `float` or record `R` into Interface `I` is rejected).
+    raising on missing required ones). The forwarded tail admits equal or
+    gradually consistent element types (for example, `integer` and `value`
+    forward both ways). It also admits
+    [maybe-const Array views](arrays-maps.md#read-only-and-maybe-const-arrays)
+    without introducing or forcing an Option. Unlike collection spreads,
+    forwarding bare `...` does not apply scalar conversions to the tail:
+    `integer` into `float` or record `R` into Interface `I` is rejected.
   - Into **`{...}`**, the run constructs an Array `{T}` (or `{integer: V}` in
     an exact integer-Map context), applying any element conversion required by
     the target context (such as `integer` to `float` in `as_floats`).

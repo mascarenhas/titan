@@ -601,12 +601,10 @@ ABI in coder.
 
 At an optional Array boundary, a closed `({integer})?` and its erased
 `({value})?` carrier use the ordinary structural `gradual_view` in either
-direction. `assignment_adjustment` selects consistency before its separate
-Option(Array) rule, so the outer Option does not turn this view into an
-unsupported element-adjustment wrapper. The same Array and optional slot are
-retained; closed element observations still use their ordinary strict guards.
-Consistency requires matching Array qualifiers, so a mutable-to-const freeze
-remains a separate operation and is never classified as this view.
+direction. Their Array qualifiers match, so the ordinary consistency rule
+applies. The view preserves `nil` and the existing Array; reads of the closed
+element type still use their ordinary strict guards. An Option view does not
+freeze a mutable Array.
 
 Generic-for lowering (`generic_lower_forin`) visits the complete adjusted
 setup tuple, including discarded surplus expressions, its synthesized

@@ -217,6 +217,9 @@ Rules for `const? { T }`:
   This applies between Options (preserving `nil`), when introducing an
   Option, and when forcing an Option (raising on `nil`). The view keeps the
   original Array, and reads still check the target element type.
+  Forwarding a bare [`...`](functions.md#variadic-parameters) tail can carry
+  the view, but cannot introduce or force an Option per element. A collection
+  spread can apply those adjustments element by element.
   This rule does not lift through Array elements, Map keys or values,
   function types, or generic owner arguments. It does not add written `as`
   or `is` conversions across Option boundaries.

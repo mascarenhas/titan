@@ -3222,10 +3222,10 @@ local function relation_identity(left, right)
     return types.equals(left, right)
 end
 
--- Same-element widening changes only the view. A matching outer Option can
--- reuse the same slot too: both nil and either concrete Array tag are valid.
--- This is neither equality nor gradual consistency, and does not descend into
--- Array elements or any other container.
+-- Match the outer shape of a directional Array view over normalized types.
+-- A matching pair of Options exposes the Arrays without changing nil.
+-- Callers select the element relation separately; do not recurse into
+-- elements or any other container here.
 local function array_view_elements(source, target)
     if source._tag == "Type.Option" and target._tag == "Type.Option" then
         source, target = source.base, target.base
