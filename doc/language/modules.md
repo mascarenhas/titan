@@ -716,7 +716,14 @@ without rebuilding the library when the dependency's distribution changes:
   Missing all eligible owners, malformed claimed providers, conflicting
   independent physical owners, and cross-boundary cycles fail the build; ABI
   and used-interface compatibility are also checked on binding and
-  initialization when a shared provider is replaced after linking.
+  initialization when a shared provider is replaced after linking. For a
+  recorded requirement, if two genuinely independent installed physical copies
+  exist for the same logical module (for example a loose `meas/meter.so`
+  alongside a different bundle `meas.a` carrying `meas.meter`), both builds and
+  editors diagnose the duplicate installation in either import order and ask
+  you to remove one—paired `.so`/`.a` companions at the same provider stem are
+  one distribution, not duplicates, and ordinary written imports keep their
+  normal precedence.
 - **Editors and semantic tools:** Suppose a compiled library `via` imports
   `meter` (recorded from installed source), which in turn imports `units`. If
   `via` exposes `units.Quantity`, the editor resolves `meter` on demand by

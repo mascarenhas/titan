@@ -784,8 +784,13 @@ are `source_roots` and the shared resolver `context`.
   ordinary single-owner election (`perf.load_source_requirement`, shared with
   `plan.load_requirements`—never forcing `source_required`, while explicit
   `import "x.titan"` remains strictly source-only): first checking already
-  selected providers (`perf.carried_requirement`, rejecting independent
-  physical duplicates without scanning unrelated files), then normal target
+  selected providers (`perf.carried_requirement`, diagnosing genuinely
+  independent duplicate installed physical copies—such as a loose
+  `meas/meter.so` and a different bundle `meas.a` carrying it—in either written
+  import order in both builds and semantic checks while treating paired
+  `.so`/`.a` companions at the same provider stem as one distribution, leaving
+  ordinary written imports on their normal precedence, and never scanning
+  unrelated files), then normal target
   and build-mode lookup (compiled providers first by default—including
   canonical common-prefix bundles—or source first under `--source-first` /
   `--test`, rejecting DSO-only providers under `--static` and host binaries on
