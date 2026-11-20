@@ -115,7 +115,7 @@ The states are deliberately strict:
   validation), both native and analysis-only queries probe optional
   `<mangled>_source_requirements` (clean absence when omitted; open/call/decode
   failure is terminal; no module initialization runs, and
-  `<mangled>_compatibility` is never a compiler query);
+  `<mangled>_compatibility` is not queried during compiler DSO lookup);
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 

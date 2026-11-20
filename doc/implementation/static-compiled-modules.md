@@ -120,11 +120,12 @@ ordering remains bytewise deterministic.
 Validation compiles the chunk as text with an empty `_ENV`, protected-calls it
 while counting results, and accepts exactly one plain table containing one
 valid dotted module key. Its value must be a plain table with string
-fields `abi` and `types`, plus an optional string `layouts` (and optional
-`imports` / `source_requirements` lists). Native compilation
+fields `abi` and `types`, plus optional `layouts` string and optional `imports`
+and `source_requirements` lists. Native compilation
 requires `layouts` and validates its closed module-specific graph separately;
-analysis-only inventory readers may accept its absence and still retain
-ABI, types, and optional per-member `source_requirements`.
+semantic archive readers may accept absent `layouts` while still retaining
+per-member `source_requirements` when present (narrow metadata-only clients may
+inspect only ABI and types).
 Traversal uses `next` and `rawget` only after the
 metatable checks. The validator then re-renders the entry and requires exact
 payload equality.
@@ -465,16 +466,16 @@ nominal record:
 * if the exposing selected archive carries the owner, it reads that exact
   provider entry contextually and records a direct-carried constraint;
 * if an exposing DSO carries the owner protocol, it reads the same DSO and
-  records a dynamic-carried constraint;
-* in an unplanned open-world semantic check (without a build plan), if the
-  exposing compiled member carries recorded `source_requirements`, it lazily
-  checks that recorded source frontier on demand from actual source (authored
-  roots then `<root>/lib/titan/0.6`) and follows each loaded source's ordinary
-  imports to recover the owner's public interface
-  ([`driver.defaultloader`](driver.md#driverdefaultloaderstatic_deps-options));
-  otherwise
-* it uses compiled lookup in noncommitting type-only mode and records the
-  dynamic fallback constraint.
+  records a dynamic-carried constraint; otherwise
+* when the owner is not already selected and not directly listed in the
+  exposer's `source_requirements`, it tries compiled lookup
+  (`find_dependency_interface`) first in noncommitting type-only mode,
+  recording the dynamic fallback constraint on a hit;
+* in an unplanned open-world semantic check where the exposer carries
+  `source_requirements`, a directly required owner, an already-selected source
+  owner, or a clean compiled miss enters that recorded frontier lazily on
+  demand ([Contextual source-requirement
+  recovery](driver.md#contextual-source-requirement-recovery)).
 
 Type-only recovery never adds an archive link input. Native executable
 finalization replays reached interfaces, not every stored member. Purely
