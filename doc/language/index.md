@@ -56,7 +56,7 @@ print(m.sum_list(m.sample())) --> 10
 | 3 | [Statements, Scope, and Control Flow](statements.md) | Lexical blocks, `local` and `const` bindings, assignment, `if` truthiness, `while`/`repeat`, numeric and generic `for`, `return`, and `break`. |
 | 4 | [Functions, Arguments, and Results](functions.md) | Declarations, arity adjustment, optional `T?` parameters, named calls, multiple and flexible returns, variadics, spreads, and standalone `main`. |
 | 5 | [First-Class Functions and Closures](closures.md) | Function types, functions as values, contextual lambda inference, lexical captures, bound methods, callable adjustment, and cross-state snapshots. |
-| 6 | [Arrays, Maps, and Iteration](arrays-maps.md) | Distinct `{T}` Arrays and `{K: V}` Maps, 1-based indexing and holes, `const`/`const?` Array views, Map equality, and iteration. |
+| 6 | [Arrays, Maps, and Iteration](arrays-maps.md) | Distinct Arrays and Maps, 1-based indexing and holes, concrete Array literals and optional maybe-const views, Map equality, and iteration. |
 | 7 | [Records and Methods](records.md) | Nominal records, `Record(...)` shorthand and custom `new`, mutable/`const`/`local` fields, instance methods, static functions, and optional receivers. |
 | 8 | [Tagged Unions and Pattern Matching](unions.md) | Closed nominal unions, positional and named payload parts, variant constructors, `case ... when ... else`, and non-fallthrough coverage analysis. |
 | 9 | [Interfaces](interfaces.md) | Nominal behavioral views, `const` field snapshots, structural satisfaction at conversion sites, `io` interfaces in practice, and `is`/`as` downcasts. |

@@ -1003,11 +1003,10 @@ function generic_positional_constructor_element_type(
 end
 
 local function array_constructor_type(elem, expected_constness)
-    -- A maybe-const context supplies the element type, not a runtime tag.
-    -- As in an unqualified context, a fresh Array is mutable by default.
-    local isconst = expected_constness and expected_constness.tag == "yes"
-        and expected_constness or { tag = "no" }
-    return types.Array(elem, isconst)
+    -- A read-only context constructs the const tag even when it admits
+    -- either tag for an existing Array.
+    local readonly = expected_constness and expected_constness.tag ~= "no"
+    return types.Array(elem, { tag = readonly and "yes" or "no" })
 end
 
 function generic_finish_positional_constructor(node, st, errors, container_tag,

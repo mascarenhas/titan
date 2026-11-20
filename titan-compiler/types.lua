@@ -3231,7 +3231,8 @@ local function array_view_elements(source, target)
         source, target = source.base, target.base
     end
     if source._tag == "Type.Array" and target._tag == "Type.Array"
-       and (source.isconst.tag == "no" or source.isconst.tag == "yes")
+       and (source.isconst.tag == "no" or source.isconst.tag == "yes"
+           or source.isconst.tag == "maybe")
        and target.isconst.tag == "maybe" then
         return source.elem, target.elem
     end
@@ -3240,6 +3241,13 @@ end
 function types.is_array_view_widening(source, target)
     local from, to = array_view_elements(source, target)
     return from ~= nil and types.equals(from, to)
+end
+
+-- Like the exact variant, this only traverses the outer Array and, when
+-- present at both endpoints, its Option. Inputs have been normalized.
+function types.is_gradual_array_view(source, target)
+    local from, to = array_view_elements(source, target)
+    return from ~= nil and types.consistent(from, to)
 end
 
 local function sound_guardable(typ, seen)
@@ -4496,7 +4504,7 @@ local function coercion_plan(op, source, target, fields)
     return plan("coercion", fields)
 end
 
-local function coercion_impl(source, target, policy, seen, allow_array_view)
+local function coercion_impl(source, target, policy, seen)
     source, target = normalized_pair(source, target)
     if not source or not target
        or source._tag == "Type.Variant"
@@ -4613,9 +4621,7 @@ local function coercion_impl(source, target, policy, seen, allow_array_view)
                 end
             else
                 local inner
-                if relation_identity(source, target.base)
-                   or (allow_array_view
-                       and types.is_array_view_widening(source, target.base)) then
+                if relation_identity(source, target.base) then
                     inner = plan("identity", {
                         source = source,
                         target = target.base,
@@ -4634,9 +4640,7 @@ local function coercion_impl(source, target, policy, seen, allow_array_view)
         if types.has_tvalue_representation(source.base)
            and not optional_owner_to_pointer(source.base, target) then
             local inner
-            if relation_identity(source.base, target)
-               or (allow_array_view
-                   and types.is_array_view_widening(source.base, target)) then
+            if relation_identity(source.base, target) then
                 inner = plan("identity", {
                     source = source.base,
                     target = target,
@@ -5000,6 +5004,28 @@ function types.comparable(left, right)
     return nil
 end
 
+-- Option introduction/force at an assignment sink may combine with the
+-- maybe-const view. Written casts and ordinary coercions remain separate.
+local function option_array_view_coercion(source, target)
+    local from, to, op
+    if source._tag == "Type.Array" and target._tag == "Type.Option" then
+        from, to, op = source, target.base, "option_wrap"
+    elseif source._tag == "Type.Option" and target._tag == "Type.Array" then
+        from, to, op = source.base, target, "option_force"
+    else
+        return nil
+    end
+    local inner
+    if types.is_array_view_widening(from, to) then
+        inner = plan("identity", { source = from, target = to })
+    elseif types.is_gradual_array_view(from, to) then
+        inner = gradual_view_plan(from, to)
+    end
+    if inner then
+        return coercion_plan(op, source, target, { inner = inner })
+    end
+end
+
 -- Implementation notes: doc/implementation/type-relations-and-boundaries.md#direct-coercion-and-assignment
 function types.assignment_adjustment(source, target, policy)
     policy = policy or {}
@@ -5049,8 +5075,7 @@ function types.assignment_adjustment(source, target, policy)
     -- The outer Array qualifier can widen without changing the carrier,
     -- including under one Option. Element compatibility still uses the
     -- ordinary consistency relation, which does not cross qualifiers.
-    local from_element, to_element = array_view_elements(source, target)
-    if from_element and relation_consistent(from_element, to_element) then
+    if types.is_gradual_array_view(source, target) then
         return gradual_view_plan(source, target)
     end
 
@@ -5061,9 +5086,8 @@ function types.assignment_adjustment(source, target, policy)
     end
 
     if policy.allow_coercion ~= false then
-        -- Written casts share the direct coercion planner but do not admit
-        -- these additional Option wrap/force pairs.
-        local direct = coercion_impl(source, target, policy, {}, true)
+        local direct = option_array_view_coercion(source, target)
+            or coercion_impl(source, target, policy, {})
         if direct then
             return plan("direct_coercion", {
                 source = source,

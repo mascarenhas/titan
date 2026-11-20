@@ -981,6 +981,18 @@ function coder._is_boxable_c_value_plan_type(typ)
         or typ._tag == "Type.CPointer"
 end
 
+local function checked_option_payload(plan, source, target, use, seen)
+    if plan and plan.kind == "gradual_view" then
+        assert(source._tag == "Type.Array" and target._tag == "Type.Array"
+               and plan.op == "structural"
+               and types.is_gradual_array_view(source, target),
+            use .. " has a mismatched maybe-const Array view")
+        coder._checked_adjustment_plan(plan, source, target, use)
+    else
+        coder._checked_coercion_plan_impl(plan, source, target, use, seen)
+    end
+end
+
 function coder._checked_coercion_plan_impl(
         coercion, source_type, target_type, use, seen)
     use = use or "direct coercion"
@@ -1111,16 +1123,14 @@ function coder._checked_coercion_plan_impl(
                and source._tag ~= "Type.Option"
                and target._tag == "Type.Option",
             use .. " has a mismatched Option-wrap operation")
-        coder._checked_coercion_plan_impl(
-            coercion.inner, source, target.base,
-            use .. " Option wrap", seen)
+        checked_option_payload(
+            coercion.inner, source, target.base, use .. " Option wrap", seen)
     elseif op == "option_force" then
         assert(source._tag == "Type.Option"
                and target._tag ~= "Type.Option",
             use .. " has a mismatched Option-force operation")
-        coder._checked_coercion_plan_impl(
-            coercion.inner, source.base, target,
-            use .. " Option force", seen)
+        checked_option_payload(
+            coercion.inner, source.base, target, use .. " Option force", seen)
     elseif op == "interface_wrapper" then
         assert(source._tag == "Type.Nominal"
                and target._tag == "Type.Nominal"

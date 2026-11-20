@@ -116,17 +116,21 @@ license to lift every coercion.
 plan:
 
 ```text
-identity
+identity            exact match or same-element Array widening (also under Option)
 rejected            two applications of the same generic owner (invariant)
 callable            Function -> Function, via callable_adjustment
 written_cast        linear mutable Array -> const Array (array_freeze, mode "freeze")
-identity | gradual_view
-                    any Array -> maybe-const Array
-rejected            maybe-const Array -> mutable or const Array
+gradual_view        Array widening with gradually consistent elements;
+                    applies to bare Arrays or two Option-wrapped Arrays
 gradual_view        project | inject | structural, with its GuardPlan
-option_adjustment   Option(Array) -> Option(Array), wrapping the inner plan
 direct_coercion     CoercionPlan (unless policy.allow_coercion == false)
 ```
+
+The implicit assignment path also admits Array widening as the inner plan
+of `option_wrap` or `option_force`: identity for equal elements, a structural
+Array view for gradually consistent elements. These plans still perform
+the outer Option operation and require `allow_coercion`. That admission
+does not change `coercion` or `written_cast` on their own.
 
 Applications of one generic owner are invariant for implicit assignment.
 Erased-boundary passages between them are inserted by generic lowering

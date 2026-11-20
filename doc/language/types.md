@@ -138,6 +138,10 @@ end
 
 Direct base coercions also compose with options in a nil-preserving way: `integer? -> float?`, `float? -> integer?`, and `R? -> I?` pass `nil` through unchanged and convert present values (narrowing conversions such as `float? -> integer?` can still raise on a non-integral present value). As always, option coercions do not lift through containers or function types: `{integer}` is not `{integer?}` and `function (): (integer)` is not `function (): (integer?)`.
 
+At implicit typed sinks, [maybe-const Array widening](arrays-maps.md#read-only-and-maybe-const-arrays)
+also preserves `nil` between Options and can introduce or force an Option
+without changing the Array itself.
+
 ### Truthiness, `boolean?`, and equality
 
 Conditions (`if`, `while`, `repeat ... until`) and `not` accept any option without unwrapping it and without narrowing its static type. For most option types, truthiness tests presence (`nil` is falsy; every present value is truthy).
