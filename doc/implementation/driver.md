@@ -2217,7 +2217,10 @@ error alerts):
   the integer returned by the Titan `main` becomes the **process exit status**:
   `ret = lua_tointeger(L, -1); lua_close(L); return ret;`.
 * **`pmain`** first publishes the original `argc` integer and `argv` pointer
-  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls global
+  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`. A native program or
+  test with compiled providers can also install its
+  [linked provider set](codegen-overview.md#the-linked-provider-set) here,
+  without registering any Lua loaders. It then calls global
   `require("$MODNAME")` and retrieves and retains that module's `main`
   callable. A transitive `titan.async` initialization calls the public
   idempotent `uv.setup_process_args()` helper, which passes only those

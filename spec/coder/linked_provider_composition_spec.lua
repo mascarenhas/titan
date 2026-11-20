@@ -243,6 +243,41 @@ end
         assert.is_true(result.ok, result.output)
     end)
 
+    it("rejects incompatible physical state before binding an implicit direct owner", function()
+        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
+        file("dependency/dep/owner.titan", owner)
+        file("dependency/dep/api.titan", "const answer = 42\n")
+        built("dependency", "package", nil, "dep.api", "dep.owner")
+        file("extension/facade.titan", facade)
+        built("extension", "package", "package", "facade")
+        file("app/load_owner.titan", [[
+local lua = import "lua"
+
+do
+  lua.load("require 'dep.owner'")()
+end
+]])
+        file("app/demo.titan", [[
+local load_owner = import "load_owner"
+local facade = import "facade"
+local api = import "dep.api"
+
+function main(args: {string}): integer
+  if facade.make():code() == 41 and api.answer == 42 then return 0 end
+  return 1
+end
+]])
+        built("app", "static", "package", "--static", "demo")
+        local deploy = fixture.root .. "/deployment"
+        support.mkdir(deploy)
+        assert(os.rename(fixture.root .. "/package/dep.so", deploy .. "/dep.so"))
+        local result = run_deployed("static/demo")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find(
+            "direct owner 'dep.owner' found canonical module state from a different physical provider",
+            1, true), result.output)
+    end)
+
     it("rejects a separately linked owner that fails the used-declaration check", function()
         if platform.windows then pending("Titan archive providers are not available on Windows"); return end
         file("dependency/dep/owner.titan", owner)
@@ -270,7 +305,7 @@ end
         local result = run_deployed("static/demo")
         assert.is_false(result.ok, result.output)
         assert.truthy(result.output:find(
-            "binary compatibility mismatch importing 'dep.owner' from 'facade': functions.next.type",
+            "binary compatibility mismatch importing 'dep.owner' from 'facade': functions.next.",
             1, true), result.output)
         assert.is_nil(result.output:find("incompatible owner initialized", 1, true), result.output)
     end)

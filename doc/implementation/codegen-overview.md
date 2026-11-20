@@ -1234,6 +1234,11 @@ called directly, and the returned module must carry the exact linked producer's
 physical identity: a same-name module created by another image cannot safely
 supply the private state that direct native code expects.
 
+When a native call implicitly uses a directly linked nominal owner (through
+an exposing import), the importer checks the same physical identity once
+while caching the canonical module userdata. It does not call the owner's
+initializer early or add a check to each method invocation.
+
 **Dynamic** dependencies (`handle` bindings) first use `titan_module_provider`
 (`titan-runtime/titan.h`) to look up the logical module in the Lua registry.
 

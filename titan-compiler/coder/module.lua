@@ -175,6 +175,27 @@ function coder._source_prefix_layout(modtype)
     return types.source_module_prefix_layout(modtype)
 end
 
+local function direct_owner_check(sigs, modname, public_layout, description)
+    local identity = coder._source_module_identity_name(modname)
+    table.insert(sigs, render(
+        "TITAN_SOURCE_LOCAL const void *$IDENTITY(void);", { IDENTITY = identity }))
+    -- The public prefix is common to every direct-owner reference. The two
+    -- unconditional Array metatable slots immediately precede the token.
+    return render([[
+        if (_m->nuvalue <= $IDENTITY_INDEX
+            || !ttislightuserdata(&_m->uv[$IDENTITY_INDEX].uv)
+            || pvalue(&_m->uv[$IDENTITY_INDEX].uv) != $IDENTITY()) {
+            luaL_error(L, "$DESCRIPTION '$MODULE' found canonical "
+                "module state from a different physical provider");
+        }
+    ]], {
+        IDENTITY = identity,
+        IDENTITY_INDEX = c_integer_literal(#public_layout + 2),
+        DESCRIPTION = description,
+        MODULE = modname,
+    })
+end
+
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
 -- Implementation notes: doc/implementation/codegen-overview.md#static-vs-dynamic-dependency-wiring
@@ -188,23 +209,8 @@ function import_module(loadmods, initmods, sigs, mprefixes,
     local first_import = mprefixes[modname] == nil
     mprefixes[modname] = mprefix
     if not dynamic then
-        local identity = coder._source_module_identity_name(modname)
-        local identity_index = #public_layout + 2
-        table.insert(sigs, render([[
-            TITAN_SOURCE_LOCAL const void *$IDENTITY(void);
-        ]], { IDENTITY = identity }))
-        source_check = render([[
-            if(_m->nuvalue <= $IDENTITY_INDEX
-               || !ttislightuserdata(&_m->uv[$IDENTITY_INDEX].uv)
-               || pvalue(&_m->uv[$IDENTITY_INDEX].uv) != $IDENTITY()) {
-                luaL_error(L, "source import '$MODULE' found canonical "
-                    "module state from a different physical provider");
-            }
-        ]], {
-            IDENTITY = identity,
-            IDENTITY_INDEX = c_integer_literal(identity_index),
-            MODULE = modname,
-        })
+        source_check = direct_owner_check(sigs, modname, public_layout,
+            "source import")
     end
     if dynamic then
         -- The checker may have rehydrated this logical module from an ancestor
@@ -397,14 +403,38 @@ function init_data_from_other_modules(tlcontext, includes, binding_defs, loadmod
 
     for _, module in ipairs(coder._sorted_keys(tlcontext.modules)) do
         local upvalue = tlcontext.modules[module]
-        table.insert(initmetas, render([[
-            lua_getfield(L, LUA_REGISTRYINDEX, "Titan module $MODULE");
-            setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
-            luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
-            lua_pop(L, 1);
+        local check = ""
+        local stage = initmetas
+        if static_deps[module] and not mprefixes[module] then
+            -- This consumer accesses module state using direct native code, but
+            -- an exposing import, not a direct _init call, established it.
+            local modtype = assert(tlcontext.binary_modules[module],
+                "missing direct owner interface " .. module)
+            check = render([[
+                if (!ttisfulluserdata(s2v(L->top.p - 1)))
+                    luaL_error(L, "canonical module '$MODULE' is unavailable");
+                Udata *_m = uvalue(s2v(L->top.p - 1));
+                $IDENTITY_CHECK
+            ]], {
+                MODULE = module,
+                IDENTITY_CHECK = direct_owner_check(includes, module,
+                    coder._public_prefix_layout(modtype), "direct owner"),
+            })
+            -- Check before publishing the importing module, including retries.
+            stage = loadglobals
+        end
+        table.insert(stage, render([[
+            {
+                lua_getfield(L, LUA_REGISTRYINDEX, "Titan module $MODULE");
+                $CHECK
+                setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
+                luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
+                lua_pop(L, 1);
+            }
         ]], {
             INDEX = c_integer_literal(upvalue),
             MODULE = module,
+            CHECK = check,
         }))
     end
 end
