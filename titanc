@@ -534,6 +534,14 @@ local function preflight_outputs(plan)
     return ready, err
 end
 
+local browser_assets
+if target == "browser" and args.test and not args.compile_only then
+    -- The coordinator plans the runner's implicit titan.test import before
+    -- link certification. Require the SDK first for this known image kind.
+    local err
+    browser_assets, err = driver.require_browser_sdk(resolver_context)
+    if not browser_assets then exit(err) end
+end
 
 local loader
 if c_source_only then
@@ -720,7 +728,7 @@ if #extra_objects == 0 then extra_objects = nil end
 
 -- The final-link certificate gates every runner/entrypoint generation,
 -- archive probe, validation link and final link. A hit changes nothing.
-local browser_assets, browser_profile, browser_probe, browser_library_error
+local browser_profile, browser_probe, browser_library_error
 local link_ticket, program_path, windows_paths, coverage_runtime, dsymutil
 local link_record_committed
 -- The final link's output basename, reported as the progress step.
@@ -802,8 +810,10 @@ if not args.compile_only and not args.print_ast then
     local runtime, runtime_flags = {}, {}
     if driver.context_target(resolver_context) == "browser" then
         local err
-        browser_assets, err = driver.require_browser_sdk(resolver_context)
-        if not browser_assets then exit(err) end
+        if not browser_assets then
+            browser_assets, err = driver.require_browser_sdk(resolver_context)
+            if not browser_assets then exit(err) end
+        end
         if builds_program then
             -- The final-link certificate must certify the profile this image
             -- will actually be linked with, so pass the resolved image kind.
