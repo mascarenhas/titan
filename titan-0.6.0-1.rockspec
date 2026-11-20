@@ -14,7 +14,7 @@ description = {
       GC while compiling to binary modules and standalone
       executables.
    ]],
-   homepage = "http://github.com/titan-lang/titan",
+   homepage = "https://titan-lang.dev",
    issues_url = "https://github.com/titan-lang/titan/issues",
    labels = { "compiler", "lua", "language", "titan" },
    license = "MIT"
