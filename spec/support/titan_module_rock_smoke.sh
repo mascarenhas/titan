@@ -136,7 +136,7 @@ TITAN
     [[ ! -e $rocks/titan-source-addon/0.1.0-1 && -f $lib/addon/bonus/bonus.titan ]]
     titan-uninstall titan-source-addon
     titan-uninstall titan-source-addon 0.1.0-1
-    [[ ! -e $lib/addon && ! -e $lib/.module-rocks ]]
+    [[ ! -e $lib/addon && ! -e $sdk/lib/titan/.module-rocks ]]
 )
 "${hash[@]}" "$sdk/include/titan.h" "$sdk/include/test-unrelated.h" "$lib/titan.so" \
     "$lib/titan.a" "$lib/libtitan.a" "$lib/test-unrelated.txt" > "$workspace/sdk.after"
