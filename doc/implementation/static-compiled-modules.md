@@ -100,6 +100,9 @@ return {
         abi = "<current ABI>",
         types = "Module('pkg.left', ...)",
         layouts = "<encoded public physical layouts>",
+        imports = {
+            "other.helper",
+        },
     },
 }
 ```
@@ -123,6 +126,13 @@ analysis-only inventory readers may accept its absence and expose only ABI/types
 Traversal uses `next` and `rawget` only after the
 metatable checks. The validator then re-renders the entry and requires exact
 payload equality.
+Native objects also publish `imports`: a dense, strictly bytewise-sorted
+list of distinct logical names from written Titan imports, including unused
+aliases whose initializers still run. The field contains neither file
+paths nor private source data. Strict static closure requires the field
+on every reached module; `{}` declares no imports, while absence requests
+an archive rebuild. Other readers and browser fixtures can read legacy
+payloads. The banner and ABI version do not change.
 
 The driver checks the ABI before evaluating the serialized type expression,
 evaluates that expression with `types` as the constructor environment, and
@@ -368,21 +378,33 @@ archives by normalized absolute path and keeps these concepts separate:
 * the final direct-name set used by code generation.
 
 Default lookup performs a complete `.so` pass, then a complete `.a` pass, then
-source. `--static` swaps the first two. Each compiled pass remains
-path-root-major and shallow-to-exact, with an independent occupied-relative-
-pathname set for its extension. A browser context has only the `.a` pass,
-rooted first at the browser SDK directory and then at the browser Titan path
-([Provider lookup](browser-target.md#provider-lookup)).
+source. A native library link refuses archive-only external dependencies;
+`--static` executables and their compile-only builds omit the shared pass.
+Each compiled pass remains path-root-major and shallow-to-exact, with an
+independent occupied-relative-pathname set for its extension. A browser
+context has only the `.a` pass, rooted first at the browser SDK directory and
+then at the browser Titan path ([Provider lookup](browser-target.md#provider-lookup)).
 
-An archive claim materializes only the requested key in `driver.imported`.
-Other physical keys remain provider metadata, not resolver results. An exact
-archive without the key is terminal; an ancestor archive without it is a clean
-nonclaim.
+An ordinary archive claim materializes the requested key in `driver.imported`.
+An exact archive without the key is terminal; an ancestor archive without it
+is a clean nonclaim.
 
 Explicit roots bypass both compiled passes. If a name was cached earlier as a
 compiled dependency, the source request replaces it. Selected providers and
 constraints are derived again from final provenance rather than from monotone
 probe side effects.
+
+### Demanded archive closure
+
+Native executable preflight traverses written imports of reached archive
+members. It first honors the application's sources and already chosen
+archives; strict `--static` resolves other reached names through the archive
+pass and rejects missing inventories, missing owners and cycles. Default
+executables do not widen the archive plan to unrelated providers on behalf
+of a private edge. Reached names and archive observations feed worker
+selection, the standalone protocol check and final-link certification.
+Dormant siblings supply physical collision information only: their imports
+and nominal interfaces do not create semantic requirements.
 
 ## Resolver provenance versus native binding
 
@@ -409,23 +431,12 @@ nominal record:
 * it uses compiled lookup in noncommitting type-only mode and records the
   dynamic fallback constraint.
 
-The type-only path never inserts the owner into `driver.imported` and never
-adds an archive link input. Before repackaging, the same walk runs over every
-physical interface in each selected archive, including unused carried
-facades.
-
-Finalization rejects overlapping logical membership, mangled-prefix and
-native symbol collisions, and incompatible physical owner constraints.
-Without a qualifying owner, combinations of direct and dynamic identity
-claims, dynamic exposures from different providers, and independent
-resolution of a producer-dynamic owner are still errors. An executable
-can satisfy a non-carried dynamic constraint with a linked owner (Linux
-and macOS) or, when no obligation claims the owner as physically carried,
-an independently selected shared provider. In the latter case both
-consumers verify the canonical provider in the existing import order.
-Neither case substitutes for an owner physically carried by a different
-DSO. Preflight never changes which provider won ordinary lookup.
-Library-mode repackaging retains its physical ownership checks.
+Type-only recovery never adds an archive link input. Finalization replays
+the reached interfaces, not every stored member. Purely external dynamic
+obligations may share the same canonical, verified provider, including
+library builds and multiple exposing DSOs. A physically carried obligation
+still enforces exact native ownership. Full physical membership is checked
+for overlapping names and native symbol collisions.
 
 Public `Type.Module` metadata does not expose private imports. An object's
 producer-chosen lowering remains in place; when it elects a dynamic provider,
@@ -468,22 +479,14 @@ or force-loaded. Backtrace, Lua, platform, `-l`, and final-flag inputs remain
 outside both groups. Darwin uses its continual archive search. `--static` never
 becomes a system `-static` linker option.
 
-The launcher reads the section formed by ordinary archive extraction. It does
-not add symbol references to individual archive members or request extra
-extraction passes.
-
-Library-mode DSO construction instead force-loads selected-provider and
-`--c-source`/`-X` archives without groups (`driver.force_load_arguments`: GNU
-`--whole-archive`, Darwin `-force_load`). The paired static archive
-(`driver.build_static_archive`) flattens the identical logical/native payload:
-
-1. source modules in bytewise logical-name order, each as its primary object
-   immediately followed by its part objects in part order;
-2. selected providers in bytewise absolute-path order, preserving member
-   order;
-3. every `--c-source` object (in first-source order) and `-X` input (in CLI
-   order), inserting one object directly or each archive's objects in member
-   order at that position.
+The generated launcher anchors reached native members through their hidden
+resolvers; it does not add references to dormant members. Native library
+builds do not include another compiled Titan archive. They publish the same
+source object list in both provider forms, with primary objects before their
+parts. Native `--c-source` objects and metadata-free `-X` payload retain their
+existing order. DSO construction force-loads those native payload archives
+and `driver.build_static_archive` flattens their members in that same order.
+Browser library composition still accepts selected browser archives.
 
 Runtime, backtrace, Lua, `-l`, and final flags are not copied into the archive.
 

@@ -240,9 +240,8 @@ function digits(): strings.Regex
 end
 ]])
         result = compile("suite", "partial-out", "package", "-c", "partial")
-        assert.is_false(result.ok, result.output)
-        assert.truthy(result.output:find("requires its producer-chosen dynamic identity",
-            1, true), result.output)
+        assert.is_true(result.ok, result.output)
+        built("suite", "partial-out", "package", "--incremental", "partial")
     end)
 
     it("consumes the same stock-stdlib provider pair in native applications and tests", function()
@@ -292,7 +291,7 @@ end
         assert.truthy(result.output:find("checks.test_compiled_library", 1, true), result.output)
     end)
 
-    it("rejects an overlapping private DSO fallback and works with an explicit link", function()
+    it("links a private stdlib dependency without an application import or DSO", function()
         if platform.windows then pending("Titan archive providers are not available on Windows"); return end
         file("author/jlib.titan", [[
 local json = import "json"
@@ -303,29 +302,64 @@ end
 ]])
         built("author", "package", nil, "jlib")
 
-        local imports = 'local jlib = import "jlib"\nlocal io = import "io"\n'
-        local body = [[
+        assert(os.remove(fixture.root .. "/package/jlib.so"))
+        file("app/demo.titan", [[
+local jlib = import "jlib"
+local io = import "io"
 
 function main(args: {string}): integer
   io.print(jlib.show(42))
   return 0
 end
-]]
-        file("app/demo.titan", imports .. body)
-        built("app", "fallback", "package", "--static", "demo")
-        local result = run_with_providers("demo")
-        assert.is_false(result.ok, result.output)
-        assert.equal("exit", result.why, result.output)
-        assert.equal(1, result.status, result.output)
-        assert.truthy(result.output:find(
-            "found canonical module state from a different physical provider",
-            1, true), result.output)
-
-        file("app/demo.titan", imports .. 'local json = import "json"\n' .. body)
+]])
         built("app", "linked", "package", "--static", "demo")
-        result = run_deployed("linked/demo")
+        local result = run_deployed("linked/demo")
         assert.is_true(result.ok, result.output)
         assert.equal("42\n", result.output)
+    end)
+
+    it("leaves dormant archive siblings and their missing exposed types unneeded", function()
+        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
+        file("dependency/dep/owner.titan", owner)
+        built("dependency", "package", nil, "dep.owner")
+        file("bundle/bundle/live.titan", "const answer = 42\n")
+        file("bundle/bundle/dormant.titan", facade)
+        built("bundle", "package", "package", "bundle.live", "bundle.dormant")
+        assert(os.remove(fixture.root .. "/package/dep/owner.a"))
+        assert(os.remove(fixture.root .. "/package/dep/owner.so"))
+        assert(os.remove(fixture.root .. "/package/bundle.so"))
+        file("app/check.titan", [[
+local live = import "bundle.live"
+
+function main(args: {string}): integer
+  return live.answer - 42
+end
+]])
+        built("app", "linked", "package", "--static", "check")
+        local result = run_deployed("linked/check")
+        assert.is_true(result.ok, result.output)
+    end)
+
+    it("rejects cycles formed by separately updated archives", function()
+        if platform.windows then pending("Titan archive providers are not available on Windows"); return end
+        file("author/first.titan", "const answer = 42\n")
+        built("author", "package", nil, "first")
+        file("author/second.titan", 'local first = import "first"\nconst answer = first.answer\n')
+        built("author", "package", "package", "second")
+        file("author/first.titan", 'local second = import "second"\nconst answer = second.answer\n')
+        built("author", "package", "package", "first")
+        file("app/check.titan", [[
+local first = import "first"
+
+function main(args: {string}): integer
+  return first.answer - 42
+end
+]])
+        local result = compile("app", "linked", "package", "--static", "check")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find("cyclic archive import: first -> second -> first",
+            1, true), result.output)
+        assert.is_nil(lfs.attributes(fixture.output .. "/check", "mode"))
     end)
 
     it("shares a carried nominal owner in either import order without publishing it early", function()
@@ -387,10 +421,11 @@ end
         local result = run_deployed("separate/separate")
         assert.is_true(result.ok, result.output)
 
-        -- A DSO-only facade still resolves its external dependency against
-        -- the executable; the DSO has not claimed the owner's own protocol.
+        -- Strict static mode cannot substitute a DSO-only facade.
         assert(os.remove(fixture.root .. "/package/facade.a"))
-        built("app", "mixed", "package", "--static", "separate")
+        local rejected = compile("app", "mixed", "package", "--static", "separate")
+        assert.is_false(rejected.ok, rejected.output)
+        assert.truthy(rejected.output:find("--static requires an archive", 1, true), rejected.output)
         file("app/dep/owner.titan", owner)
         file("app/source_owner.titan", [[
 local facade = import "facade"
@@ -405,8 +440,6 @@ end
         assert(os.remove(fixture.root .. "/package/dep.so"))
         local deploy = fixture.root .. "/deployment"
         assert(os.rename(fixture.root .. "/package/facade.so", deploy .. "/facade.so"))
-        result = run_deployed("mixed/separate")
-        assert.is_true(result.ok, result.output)
         result = run_deployed("mixed-source/source_owner")
         assert.is_true(result.ok, result.output)
     end)
@@ -478,45 +511,23 @@ end
         assert.is_nil(result.output:find("incompatible owner initialized", 1, true), result.output)
     end)
 
-    it("keeps explicit static producer bundles self-contained and rejects their overlap", function()
+    it("refuses static library mode and preserves canonical shared-bundle ownership", function()
         if platform.windows then pending("Titan archive providers are not available on Windows"); return end
         file("dependency/dep/owner.titan", owner)
         built("dependency", "package", nil, "dep.owner")
         file("extension/facade.titan", facade)
-        built("extension", "package", "package", "--static", "facade")
-        file("app/alone.titan", [[
-local facade = import "facade"
-
-function main(args: {string}): integer
-  if facade.make().serial ~= 2 then return 1 end
-  return 0
-end
-]])
-        built("app", "static", "package", "--static", "alone")
-        local result = run_deployed("static/alone")
-        assert.is_true(result.ok, result.output)
-        file("app/conflict.titan", [[
-local facade = import "facade"
-local owner = import "dep.owner"
-
-function main(args: {string}): integer
-  return 0
-end
-]])
-        result = compile("app", "static", "package", "--static", "conflict")
+        local result = compile("extension", "package", "package", "--static", "facade")
         assert.is_false(result.ok, result.output)
-        assert.truthy(result.output:find("both contain logical module 'dep.owner'", 1, true), result.output)
-
-        assert(os.remove(fixture.root .. "/package/facade.a"))
-        result = compile("app", "mixed", "package", "--static", "conflict")
+        assert.truthy(result.output:find("--static is valid only for standalone/test", 1, true),
+            result.output)
+        assert(os.rename(fixture.root .. "/package/dep/owner.so",
+            fixture.root .. "/package/dep/owner.saved"))
+        result = compile("extension", "package", "package", "facade")
         assert.is_false(result.ok, result.output)
-        assert.truthy(result.output:find(
-            "logical owner 'dep.owner' is required both directly", 1, true), result.output)
-
-        result = compile("app", "dynamic-conflict", "package", "conflict")
-        assert.is_false(result.ok, result.output)
-        assert.truthy(result.output:find(
-            "requires its producer-chosen dynamic identity", 1, true), result.output)
+        assert.truthy(result.output:find("install its paired shared provider", 1, true),
+            result.output)
+        assert(os.rename(fixture.root .. "/package/dep/owner.saved",
+            fixture.root .. "/package/dep/owner.so"))
 
         -- The carried owner can still be imported from that same DSO. A
         -- second facade with an external edge must not defeat its claim.

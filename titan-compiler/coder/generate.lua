@@ -893,7 +893,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     local encoded_layouts = assert(require("titan-compiler.nominallayout")
         .encode(modname, own_layouts))
     local metadata, metadata_err =
-        staticmetadata.render(modname, abi, serialized_type, encoded_layouts)
+        staticmetadata.render(modname, abi, serialized_type, encoded_layouts,
+            not tlcontext.browser_trace and coder._sorted_keys(mprefixes) or nil)
     assert(metadata, metadata_err)
     local initializer, initializer_err =
         staticmetadata.c_initializer(metadata)

@@ -60,7 +60,7 @@ p:option('-j --jobs',
 p:option('--c-parts',
     'Maximum generated-C translation units per module above the split threshold (default: TITAN_C_PARTS, 4 on Linux, or 1 on macOS/Windows).')
 p:option('--exe', 'Exact executable destination, relative to the current directory (Windows appends .exe when absent; the DLL provider stays under --output).')
-p:flag('--static', 'Prefer static Titan archive providers (unsupported on Windows).')
+p:flag('--static', 'Require Titan archives for compiled executable dependencies (Linux/macOS only).')
 p:flag('--source-first', 'Prefer available source modules to compiled providers.')
 p:flag('--incremental', 'Reuse each source module object, including requested roots, whose certificate still matches: own sources, compiler, native configuration, C headers, dependency interfaces and bindings (-v explains each miss).')
 p:flag('-c --compile-only', 'Generate objects and headers only; without --incremental every module is rebuilt.')
@@ -382,6 +382,7 @@ local target, target_error =
     driver.validate_target(resolver_context, target_value, target_origin)
 if not target then exit(target_error) end
 resolver_context.target = target
+resolver_context.strict_static = args.static and target ~= "browser" or nil
 if target == "browser" then
     if not args.output then exit("--target browser requires --output") end
     acquire_output_locks()
@@ -536,6 +537,7 @@ elseif args.print_ast then
     -- where the ASTs live, and compile through the ordinary batch below.
     local plan, plan_errors = build.plan(resolver_context, {
         roots = requested_modules, loader_options = loader_options,
+        test = args.test, compile_only = args.compile_only,
     })
     if not plan then exit(table.concat(plan_errors, "\n")) end
     local ready, preflight_error = preflight_outputs(plan)
@@ -543,6 +545,7 @@ elseif args.print_ast then
     -- Planning admits placeholders, not checked ASTs. Every source must still
     -- pass the ordinary in-process checker before its AST is printed.
     driver.imported = {}
+    for name, mod in pairs(plan.demanded_static or {}) do driver.imported[name] = mod end
     loader = driver.defaultloader({}, loader_options)
     for _, modname in ipairs(requested_modules) do
         local ok, errs = checker.checkimport(modname, loader)
@@ -872,7 +875,8 @@ if not args.compile_only and not args.print_ast then
         entry = {
             module = args.test and test_runner.MODULE_NAME or main_module,
             no_uv_bootstrap = args.no_uv_bootstrap == true,
-            linked_modules = resolver_context.linked_provider_election,
+            linked_modules = resolver_context.linked_module_names,
+            strict_static = resolver_context.strict_static,
         },
         no_uv_bootstrap = args.no_uv_bootstrap == true,
         argv = driver.link_extra_flags(),

@@ -784,7 +784,7 @@ end
         }}, contextual_resolutions(context))
     end)
 
-    it("rejects an independently resolved DSO owner required dynamically by an archive",
+    it("shares an independently resolved DSO owner with an external archive obligation",
        function()
         local owner = owner_interface("identity.owner", "Box")
         local facade = facade_interface(
@@ -835,14 +835,8 @@ end
 
         local finalized, final_errors =
             driver.finalize_resolver_context(context)
-        assert.is_nil(finalized)
-        local message = table.concat(final_errors, "\n")
-        assert.match(
-            "logical owner 'identity.owner' resolved independently as dynamic",
-            message, 1, true)
-        assert.match(facade_provider.archive, message, 1, true)
-        assert.match("requires its producer-chosen dynamic identity",
-            message, 1, true)
+        assert.truthy(finalized, final_errors and table.concat(final_errors, "\n"))
+        assert.equal("global", context.native_bindings["identity.owner"])
     end)
 
     it("rejects a source owner against an archive facade's dynamic identity",
@@ -1121,7 +1115,7 @@ end
         assert.equal("source", driver.imported[owner_name].kind)
     end)
 
-    it("rejects producer-dynamic owner constraints from different providers",
+    it("accepts external owner obligations from multiple providers",
        function()
         local owner = owner_interface("shared.owner", "Box")
         local left = facade_interface(
@@ -1130,10 +1124,10 @@ end
             "right.facade", "Box", "shared.owner.Box")
         local context =
             driver.new_resolver_context({ prefer_static = true })
-        local left_provider = cache_provider(context, "left.a", {
+        cache_provider(context, "left.a", {
             ["left.facade"] = left,
         })
-        local right_provider = cache_provider(context, "right.a", {
+        cache_provider(context, "right.a", {
             ["right.facade"] = right,
         })
         cache_provider(context, "shared/owner.a", {
@@ -1153,12 +1147,9 @@ end
 
         local finalized, final_errors =
             driver.finalize_resolver_context(context)
-        assert.is_nil(finalized)
-        local message = table.concat(final_errors, "\n")
-        assert.match("logical owner 'shared.owner' has producer-dynamic " ..
-            "exposures from conflicting providers", message, 1, true)
-        assert.match(left_provider.archive, message, 1, true)
-        assert.match(right_provider.archive, message, 1, true)
+        assert.truthy(finalized, final_errors and table.concat(final_errors, "\n"))
+        assert.equal("global", context.native_bindings["shared.owner"])
+        assert.is_nil(driver.imported["shared.owner"])
     end)
 
     it("rejects a producer-dynamic owner physically carried by another selected archive",

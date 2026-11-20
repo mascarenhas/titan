@@ -987,6 +987,12 @@ function build.plan(context, request)
         local ok, err = loader(root)
         if not ok then append_all(diagnostics, err) end
     end
+    -- Resolve the runner's ordinary provider before certifying the final
+    -- image, even if no requested source module imports it.
+    if request.test and not request.compile_only then
+        local ok, err = loader("titan.test")
+        if not ok then append_all(diagnostics, err) end
+    end
     if #diagnostics > 0 then return nil, diagnostics end
     local plan, plan_error = driver.resolution_plan(context)
     if not plan then return nil, append_all({}, plan_error) end

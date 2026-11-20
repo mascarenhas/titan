@@ -1287,19 +1287,15 @@ is a separate `RTLD_LAZY | RTLD_LOCAL` operation.
 
 ### The linked provider set
 
-Each native ELF or Mach-O primary module object contributes a private,
-pointer-aligned `{logical name, native resolver}` entry to a linker section.
-The entry refers only to a resolver in that same object. Taking the bounds
-of the output section does not extract dormant archive members: the image
-gets entries only for modules the link actually included. The resolver
-remains static or hidden and the entries carry no provider paths.
-Clang's address sanitizer leaves the entries unpadded so the runtime can
-iterate them at their natural stride.
+The native coordinator walks the written imports of demanded archive
+members. The generated launcher emits one sorted array of logical names
+and hidden native resolvers for the resulting members and linked sources.
+Each archive entry is a strong reference that retains its primary object;
+the table does not reference dormant siblings.
 
-The generated program or test launcher publishes the section bounds as one
-registry value inside its protected entry, before requiring the root.
-An ordinary executable with no provider archives and only one source module
-does not publish a set: there is no second linked owner to elect.
+The launcher publishes the array bounds as one registry value inside its
+protected entry, before requiring the root. A default program containing
+only its source root and shared-provider imports needs no catalog.
 `titan_module_provider` scans that set only on a canonical and native-preload
 miss for a named DSO. The set is image-lifetime data, not initialized module
 userdata; binding to it still goes through all normal ABI and
@@ -1309,20 +1305,14 @@ package searcher does not consult this set, and child states do not inherit
 it. Once initialized, a module registers its ordinary native preload as
 before, and that preload can be copied into children.
 
-On a linked-set miss the named import still opens its recorded DSO. That
-DSO can itself have direct imports of siblings physically carried in the
-same image. If one of those siblings is also linked into the executable,
-the existing direct producer-token check can refuse the two copies of
-the logical module. The linked provider set does not redirect direct
-calls. Explicitly importing the private dependency in the executable
-lets `--static` select its archive and avoid opening that DSO, if the
-archive is available. Accepting provably compatible physical copies is
-tracked separately in [titan#426](https://github.com/mascarenhas/titan/issues/426).
+A catalog miss in a strict `--static` executable reports a missing linked
+provider instead of opening a DSO. A default executable retains the
+recorded DSO fallback on a miss. The catalog never replaces an existing
+physical producer token or redirects direct calls.
 
-Final-link certification includes the launcher's election policy plus the
-bytes of the input objects and archives from which the native linker assembles
-the section. DLL launchers on Windows and archive-only Wasm images on the
-browser target do not use this set.
+Final-link certification includes the sorted catalog names, strict-mode
+policy, and the bytes of the input objects and archives. Windows DLL
+launchers and archive-only browser images do not install this catalog.
 
 ## User-value allocation
 

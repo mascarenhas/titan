@@ -1554,7 +1554,7 @@ void *loadlib(lua_State *L, const char *file) {
 #endif
 }
 
-#if defined(TITAN_LINKED_MODULE_ENTRY)
+#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 /* The protected launcher stores image-lifetime bounds, not Lua values. The
 ** registry is the only common owner before any Titan module initializes.
 ** This uses one of the slots reserved by the preceding canonical lookup. */
@@ -1570,6 +1570,8 @@ static TitanModuleSymbols titan_path_find_linked_module(lua_State *L,
         for (entry = linked->begin; entry != linked->end; entry++) {
             if (strcmp(entry->name, module) == 0) return entry->symbols;
         }
+        if (linked->strict)
+            luaL_error(L, "--static program has no linked provider for module '%s'", module);
     }
     return NULL;
 }
@@ -1599,7 +1601,7 @@ TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
         luaL_error(L, "Titan canonical module '%s' is unavailable", module);
     provider.symbols = titan_path_find_preload(L, module, length, NULL, NULL);
     if (provider.symbols != NULL) return provider;
-#if defined(TITAN_LINKED_MODULE_ENTRY)
+#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
     provider.symbols = titan_path_find_linked_module(L, module);
     if (provider.symbols != NULL) return provider;
 #endif

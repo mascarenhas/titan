@@ -373,10 +373,9 @@ typedef struct TitanModuleProvider {
   TitanModuleSymbols symbols;
 } TitanModuleProvider;
 
-/* Native image linker set. Each extracted Titan object contributes one
-** immutable entry; the launcher shares its own bounds with this state only.
-** No entry references another archive member or exposes a Lua loader. */
-#if defined(__ELF__) || defined(__APPLE__)
+/* Immutable image-local catalog and archive anchors, published only in the
+** launcher's state. Entries name native resolvers, not Lua loaders. */
+#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 typedef struct TitanLinkedModule {
   const char *name;
   TitanModuleSymbols symbols;
@@ -385,48 +384,10 @@ typedef struct TitanLinkedModule {
 typedef struct TitanLinkedModules {
   const TitanLinkedModule *begin;
   const TitanLinkedModule *end;
+  int strict;
 } TitanLinkedModules;
 
 #define TITAN_LINKED_MODULES_KEY "Titan linked module providers"
-
-#if defined(__APPLE__)
-#define TITAN_LINKED_MODULE_SEGMENT "__DATA_CONST"
-#define TITAN_LINKED_MODULE_SECTION "__titan_linked"
-#define TITAN_LINKED_MODULE_PLACEMENT \
-  section(TITAN_LINKED_MODULE_SEGMENT "," TITAN_LINKED_MODULE_SECTION)
-extern const TitanLinkedModule titan_linked_begin[]
-    __asm("section$start$" TITAN_LINKED_MODULE_SEGMENT "$" TITAN_LINKED_MODULE_SECTION);
-extern const TitanLinkedModule titan_linked_end[]
-    __asm("section$end$" TITAN_LINKED_MODULE_SEGMENT "$" TITAN_LINKED_MODULE_SECTION);
-#else
-#define TITAN_LINKED_MODULE_SECTION "titan_linked"
-#define TITAN_LINKED_MODULE_PLACEMENT section(TITAN_LINKED_MODULE_SECTION)
-extern const TitanLinkedModule titan_linked_begin[]
-    __asm("__start_" TITAN_LINKED_MODULE_SECTION) __attribute__((visibility("hidden")));
-extern const TitanLinkedModule titan_linked_end[]
-    __asm("__stop_" TITAN_LINKED_MODULE_SECTION) __attribute__((visibility("hidden")));
-#if defined(__has_attribute)
-#if __has_attribute(retain)
-#define TITAN_LINKED_MODULE_RETAIN __attribute__((retain))
-#endif
-#endif
-#endif
-
-#ifndef TITAN_LINKED_MODULE_RETAIN
-#define TITAN_LINKED_MODULE_RETAIN
-#endif
-
-/* The linker set is a dense array; Clang must not add global redzones. */
-#if defined(__clang__)
-#define TITAN_LINKED_MODULE_NO_ASAN __attribute__((no_sanitize("address")))
-#else
-#define TITAN_LINKED_MODULE_NO_ASAN
-#endif
-
-#define TITAN_LINKED_MODULE_ENTRY \
-  __attribute__((used, TITAN_LINKED_MODULE_PLACEMENT, \
-      aligned(__alignof__(TitanLinkedModule)))) \
-  TITAN_LINKED_MODULE_RETAIN TITAN_LINKED_MODULE_NO_ASAN
 #endif
 
 /* Prefer initialized state, a matching native preload descriptor, and the

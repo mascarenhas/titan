@@ -163,8 +163,36 @@ local function diagnostic_value(value)
     return "<" .. type(value) .. ":" .. tostring(value) .. ">"
 end
 
+local function render_imports(modname, imports)
+    if type(imports) ~= "table" or getmetatable(imports) ~= nil then
+        return nil, "metadata imports must be a plain array"
+    end
+    local count, last = 0, 0
+    for key in next, imports do
+        if math.type(key) ~= "integer" or key < 1 then
+            return nil, "metadata imports must be a dense array"
+        end
+        count, last = count + 1, math.max(last, key)
+    end
+    if last ~= count then return nil, "metadata imports must be a dense array" end
+    local lines = { "        imports = {\n" }
+    local previous
+    for _, name in ipairs(imports) do
+        if not valid_module_name(name) or name == modname then
+            return nil, "invalid imported Titan module name " .. diagnostic_value(name)
+        end
+        if previous and not bytewise_less(previous, name) then
+            return nil, "metadata imports must be distinct and in bytewise order"
+        end
+        lines[#lines + 1] = "            " .. format("%q", name) .. ",\n"
+        previous = name
+    end
+    lines[#lines + 1] = "        },\n"
+    return table.concat(lines)
+end
+
 -- Implementation notes: doc/implementation/static-compiled-modules.md#canonical-payload
-function staticmetadata.render(modname, abi, serialized_types, serialized_layouts)
+function staticmetadata.render(modname, abi, serialized_types, serialized_layouts, imports)
     if not valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             diagnostic_value(modname)
@@ -178,6 +206,12 @@ function staticmetadata.render(modname, abi, serialized_types, serialized_layout
     if serialized_layouts ~= nil and type(serialized_layouts) ~= "string" then
         return nil, "serialized nominal layouts must be a string"
     end
+    local serialized_imports = ""
+    if imports ~= nil then
+        local err
+        serialized_imports, err = render_imports(modname, imports)
+        if not serialized_imports then return nil, err end
+    end
     return staticmetadata.BANNER ..
         "return {\n" ..
         "    [" .. format("%q", modname) .. "] = {\n" ..
@@ -185,6 +219,7 @@ function staticmetadata.render(modname, abi, serialized_types, serialized_layout
         "        types = " .. format("%q", serialized_types) .. ",\n" ..
         (serialized_layouts ~= nil and
             "        layouts = " .. format("%q", serialized_layouts) .. ",\n" or "") ..
+        serialized_imports ..
         "    },\n" ..
         "}\n"
 end
@@ -317,10 +352,8 @@ function staticmetadata.validate(payload, origin, options)
             format("%q", module_name) .. " must be a plain table")
     end
 
-    local field_count = 0
     for key in next, entry do
-        field_count = field_count + 1
-        if key ~= "abi" and key ~= "types" and key ~= "layouts" then
+        if key ~= "abi" and key ~= "types" and key ~= "layouts" and key ~= "imports" then
             return payload_error(origin, "metadata entry for " ..
                 format("%q", module_name) .. " has unknown field " ..
                 diagnostic_value(key))
@@ -329,8 +362,8 @@ function staticmetadata.validate(payload, origin, options)
     local abi = rawget(entry, "abi")
     local serialized_types = rawget(entry, "types")
     local serialized_layouts = rawget(entry, "layouts")
-    if (field_count ~= 2 and field_count ~= 3) or type(abi) ~= "string" or
-       type(serialized_types) ~= "string" or
+    local imports = rawget(entry, "imports")
+    if type(abi) ~= "string" or type(serialized_types) ~= "string" or
        (serialized_layouts ~= nil and type(serialized_layouts) ~= "string") then
         return payload_error(origin, "metadata entry for " ..
             format("%q", module_name) ..
@@ -347,7 +380,7 @@ function staticmetadata.validate(payload, origin, options)
     end
 
     local canonical, render_error =
-        staticmetadata.render(module_name, abi, serialized_types, serialized_layouts)
+        staticmetadata.render(module_name, abi, serialized_types, serialized_layouts, imports)
     if not canonical then
         return payload_error(origin, render_error)
     end
@@ -398,6 +431,7 @@ function staticmetadata.validate(payload, origin, options)
         decoded_types = decoded_types,
         layouts = serialized_layouts,
         decoded_layouts = decoded_layouts,
+        imports = imports,
         payload = payload,
         origin = origin,
     }

@@ -20,7 +20,7 @@ least one module name is required unless you pass `--print-root`,
 | `--exe PATH` | Exact destination for a standalone or `--test` executable, relative to the current directory. |
 | `-t`, `--tree PATH` | Semicolon-separated source root directories (default: `.`). |
 | `-T`, `--target TGT` | Compilation target: host OS (`linux`, `darwin`, `windows`) or `browser` (default: `TITAN_TARGET` or host OS). |
-| `--static` | Prefer static `.a` Titan archive providers over `.so` providers. Unsupported on Windows. |
+| `--static` | Require archives for compiled dependencies of a Linux/macOS executable or test. Also valid for their compile-only objects. |
 | `--source-first` | Prefer available `.titan` source dependencies over compiled providers, with compiled fallback on miss. |
 | `--incremental` | Certify and reuse unchanged module objects, `--c-source` objects, and final links. |
 | `-c`, `--compile-only` | Generate objects and headers only without linking. Rebuilds all sources unless combined with `--incremental`. |
@@ -232,9 +232,9 @@ always resolve to source. Ordinary `import` statements resolve in this order:
 
 | Mode | Search order |
 | --- | --- |
-| Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix only) on the Titan path -> 3. Source (folder then flat) on `--tree` |
-| `--static` | 1. Static providers (`.a`) -> 2. Shared providers (`.so`) -> 3. Source |
-| `--source-first` or `--test` | 1. Source on `--tree` -> 2. Compiled providers (fallback on miss) |
+| Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix executable builds only) on the Titan path -> 3. Source (folder then flat) on `--tree` |
+| `--static` | 1. Static providers (`.a`) -> 2. Source on `--tree`; no shared-provider fallback |
+| `--source-first` or `--test` | 1. Source on `--tree` -> 2. Compiled providers according to the selected mode |
 
 Within each compiled format, lookup is **path-root first, shallowest prefix to
 exact module**. For logical module `a.b.c`, one directory is probed as:
@@ -321,46 +321,30 @@ primary object embeds its public type interface, so no sidecar file is needed.
 On macOS, `titanc` can consume universal `x86_64`/`arm64` `.a` providers and
 selects the active compiler's slice.
 
-`--static` prefers `.a` providers over `.so` providers so dependencies link
-directly into the output with direct C calls. It is a preference, not a
-system-linker `-static` flag: missing archives still fall back to `.so` or
-source, and system libraries such as libc remain dynamically linked.
+Build a library or canonical bundle by listing its source roots, for example
+`titanc --tree src -o out pkg.left pkg.right`. The pair contains those
+modules and their source-backed helpers, not any selected external compiled
+provider. An external compiled dependency must have a shared provider to
+build the pair; an archive alone is not sufficient. `--static` is not a
+library-production mode.
 
-A library's default provider pair can serve both kinds of consumer. On Linux
-and macOS, a program or test executable gives the library's imports the same
-module instance as its own imports when the dependency is linked into the
-executable. This includes a sibling that the native linker pulled in from
-the same archive as a directly imported module. A dependency that is not
-linked can still fall back to its shared provider. Titan does not pull in
-an unused archive member solely to avoid that fallback.
+A default application may still use an archive when no shared provider
+claims its import. To link the full Titan dependency closure of an
+executable or test on Linux and macOS, use `titanc --static -o out app`.
+An application module already compiled from source can satisfy an import.
+Otherwise every reached compiled module, including a prebuilt library's
+private imports, must have an archive. A missing archive is a build
+error, even if its shared provider exists. Rebuild older archives that
+lack the import inventory. Dormant siblings in a multi-module archive are
+not loaded or extracted just because another member was selected.
 
-If the fallback shared provider directly imports a sibling already linked
-into the executable, the two physical copies can conflict. Titan reports a
-`different physical provider` error rather than letting one copy's code
-use the other's private module state. To avoid this, explicitly import the
-private dependency in the executable so that `--static` can link it from an
-archive. For example, if a library privately imports `json` and the executable
-imports `io`, add `local json = import "json"` to the executable. See
-[titan#426](https://github.com/mascarenhas/titan/issues/426) for the proposal
-to accept provably compatible physical copies.
-
-Use `--static` when **building a library** only if you want to bundle the
-selected archives in both provider outputs. An executable cannot link such a
-bundle alongside a separate archive containing the same logical module.
-A default program can also encounter the duplicate at run time if it
-independently selects a shared provider for a module the bundle contains.
-
-If a library exposes another module's nominal type, the owner can be part of
-the same archive, separately linked into the executable, or loaded dynamically.
-Titan still rejects conflicting physical copies and checks the declarations
-that a prebuilt importer uses before initializing a dynamically bound owner.
-When a native executable and a separate shared library both import an
-external owner, the first import to initialize it supplies the module
-instance for that state. Later imports verify that instance rather than
-opening a second copy.
-
-Linking an archive does not by itself make its uninitialized modules available
-to Lua `require` or to independent Lua states.
+Direct imports still require the exact physical owner. A prebuilt library's
+external import can instead bind to the executable's linked copy after ABI
+and used-declaration checks, without initializing modules early or exposing
+unused modules to Lua `require`. Shared consumers of an external owner reuse
+the first initialized compatible provider in the state; physical carrying
+conflicts still fail. `--static` does not request the system linker's `-static`
+flag: system libraries such as libc can remain dynamic.
 
 Native payloads passed with `-X` are carried into both `.so` and `.a`
 providers in command-line order (child archives are flattened into the
