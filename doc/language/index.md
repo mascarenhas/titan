@@ -1,6 +1,8 @@
 # The Titan Programming Language
 
-<img align="right" src="../images/titan-logo.svg" alt="Titan logo: the moon Titan in front of Saturn, with the rings seen edge-on" width="160">
+<p align="center">
+  <img src="../images/titan-logo.svg" alt="Titan logo: the moon Titan in front of Saturn, with the rings seen edge-on" width="160">
+</p>
 
 Titan is a statically typed, ahead-of-time-compiled sister language to
 [Lua](https://www.lua.org). Its syntax and arithmetic are close to Lua, every
