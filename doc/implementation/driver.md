@@ -101,17 +101,26 @@ All modules, including the standard library, use the same two path strings:
   providers and on browser). Under `--incremental`, `check_only` external
   sources have no persisted `.o` or separate source-interface cache and are
   rechecked in memory on each library invocation while owned objects and the
-  final provider still hit their certificates. In library mode,
-  `perf.plan_source_obligations` loads only compiled-provider source
-  requirements whose nominal owners appear in the provider's public interface
-  (`perf.exposed_source_owners`); in applications and `--test` builds,
-  `perf.plan_source_obligations` materializes every reached logical member's
-  `source_requirements` once per logical name via `plan.load_sources`—requiring
-  actual source (authored `--tree` roots first, then `<root>/lib/titan/0.6`,
-  with no silent binary substitution), diagnosing missing source (`module
-  '<importer>' requires source for '<name>': ...`), conflicting compiled
-  providers, archives physically containing a required source, and
-  cross-boundary cycles (`cyclic source requirement: ...`).
+  final provider still hit their certificates. In both library (including
+  prospective-library `-c`) and application/`--test` builds,
+  `perf.plan_source_obligations` uses every reached logical member's
+  `source_requirements` as starting frontiers and resolves their normal import
+  closure once per logical name via `plan.load_sources`—requiring actual source
+  (authored `--tree` roots first, then `<root>/lib/titan/0.6`, with no silent
+  binary substitution), diagnosing missing source (`module '<importer>' requires
+  source for '<name>': ...`), conflicting compiled providers, archives
+  physically containing a required source, and cross-boundary cycles (`cyclic
+  source requirement: ...`). Following the full source closure lets a library
+  recover nominal owners defined deeper than a compiled provider's folded
+  frontier (for example, a transitive nominal owner reached through a required
+  installed source whose own name does not appear in the provider's public type
+  surface); ownership is classified afterward, so applications and `--test`
+  builds compile those materialized sources into the application (setting
+  `context.application_source_requirements` and, on native targets, running
+  `perf.demand_archive_modules`), whereas libraries and prospective-library `-c`
+  builds classify non-owned sources and their reached providers as `check_only`,
+  neither emitting nor linking them and keeping the published folded frontier
+  unchanged (unselected siblings still impose nothing).
   `titanc --print-ast` preserves compiled `plan.modules` and pre-checks
   `plan.semantic_sources` in-process after resetting `driver.imported`.
   Mechanically, `titanc` sets `context.authored_source_roots` to the positional
