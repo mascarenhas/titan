@@ -5340,15 +5340,16 @@ local function certificate_dependency(context, name, linked_names)
     local recovered = context.contextual_owner_entries and
         context.contextual_owner_entries[name]
     if recovered then return recovered, recovered.linked == true end
-    for _, selected in pairs(driver.imported) do
+    for selected_name, selected in pairs(driver.imported) do
         if selected ~= CIRCULAR_MARK and selected.kind == "static" and
            selected.static_provider and selected.static_provider.entries[name] then
             local carried = selected.static_provider.entries[name]
+            local semantic_only = context.check_only_binaries and context.check_only_binaries[selected_name]
             return {
                 kind = "static", type = carried.type, layouts = carried.layouts,
                 filename = selected.static_archive,
                 static_archive = selected.static_archive,
-            }, true
+            }, not semantic_only
         end
     end
     local resolved = driver.find_dependency_interface(
@@ -5372,6 +5373,7 @@ local function resolver_plan(context, linked_names)
         if context.check_only_sources and context.check_only_sources[name] then
             return ""
         end
+        if context.check_only_binaries and context.check_only_binaries[name] then return nil end
         local mod = driver.imported[name]
         if not mod or mod == CIRCULAR_MARK or mod.kind ~= "dynamic" then
             return nil
@@ -6669,13 +6671,16 @@ function driver.defaultloader(static_deps, options)
                 exposing.static_provider or exposing.embedded_provider
             local entry = provider and provider.entries[modname]
             if entry then
+                local semantic_only = context.check_only_binaries and
+                    context.check_only_binaries[exposing_name]
                 if exposing.kind == "static" then
-                    add_native_constraint(context, modname, "direct-carried",
+                    add_native_constraint(context, modname,
+                        semantic_only and "dynamic-global" or "direct-carried",
                         exposing.static_archive, exposing_name)
                 end
                 return remember_type(entry.type, exposing, false,
                     entry.layout_inventory, entry.layouts,
-                    exposing.kind == "static")
+                    exposing.kind == "static" and not semantic_only)
             end
         elseif exposing.kind == "dynamic" then
             local status, value, metadata =
@@ -7303,10 +7308,8 @@ function driver.resolution_plan(context)
     end
     function plan.linked(name)
         driver.assert_target_context(context)
-        if context.check_only_sources and context.check_only_sources[name] then
-            return false
-        end
         local module = modules[name]
+        if module and module.check_only then return false end
         if module and module.kind == "unavailable" then return nil end
         local mod, is_linked = certificate_dependency(context, name, linked)
         if not mod then return nil end
@@ -7316,6 +7319,7 @@ function driver.resolution_plan(context)
         driver.assert_target_context(context)
         local module = modules[name]
         if module and module.kind == "source" and module.check_only then return "" end
+        if module and module.check_only then return nil end
         return module and module.kind == "dynamic" and module.provider_file or nil
     end
     function plan.path(filename)
@@ -7671,8 +7675,13 @@ function driver.compile_planned_module(context, modname, options)
     end
     for name, item in pairs(plan.modules) do
         if item.check_only then
-            context.check_only_sources = context.check_only_sources or {}
-            context.check_only_sources[name] = true
+            if item.kind == "source" then
+                context.check_only_sources = context.check_only_sources or {}
+                context.check_only_sources[name] = true
+            elseif item.kind == "dynamic" or item.kind == "static" then
+                context.check_only_binaries = context.check_only_binaries or {}
+                context.check_only_binaries[name] = true
+            end
         end
     end
     local loader = driver.defaultloader({}, {
@@ -8182,7 +8191,7 @@ function perf.demand_archive_modules(context, plan, requirements)
     for name, mod in pairs(driver.imported) do
         if mod.kind == "static" then roots[#roots + 1] = name end
     end
-    if #roots == 0 then return {} end
+    if #roots == 0 then return true end
     table.sort(roots, util.bytewise_less)
     for _, name in ipairs(roots) do
         local provider = driver.imported[name].static_provider
@@ -8192,7 +8201,7 @@ function perf.demand_archive_modules(context, plan, requirements)
         end
     end
 
-    local colors, demanded, chain = {}, {}, {}
+    local colors, chain = {}, {}
     local missing
     local function visit(name, importer)
         if colors[name] == "done" then return true end
@@ -8242,7 +8251,6 @@ function perf.demand_archive_modules(context, plan, requirements)
                 driver.imported[name] = selected
                 plan.add_static(name, selected)
             end
-            demanded[name] = selected
             for _, dependency in ipairs(entry.source_requirements or {}) do
                 requirements[dependency] = requirements[dependency] or name
                 if owners[dependency] then
@@ -8269,7 +8277,15 @@ function perf.demand_archive_modules(context, plan, requirements)
         local ok, err = visit(name)
         if not ok then return nil, err end
     end
-    return demanded, nil, missing
+    return true, nil, missing
+end
+
+function perf.public_source_layout(name, mod)
+    if mod.layout_inventory then return mod.layout_inventory end
+    if not mod.ast then return nil end
+    local encoded = assert(require("titan-compiler.coder.core").coder
+        ._own_nominal_layouts(name, mod.ast))
+    return assert(decode_nominal_layouts(name, encoded))
 end
 
 function driver.finalize_resolver_context(context)
@@ -8288,8 +8304,10 @@ function driver.finalize_resolver_context(context)
     local providers_by_path = {}
 
     local check_only_sources = context.check_only_sources
+    local check_only_binaries = context.check_only_binaries
     for name, mod in pairs(driver.imported) do
-        if mod ~= CIRCULAR_MARK and not (check_only_sources and check_only_sources[name]) then
+        if mod ~= CIRCULAR_MARK and not (check_only_sources and check_only_sources[name]) and
+                not (check_only_binaries and check_only_binaries[name]) then
             if mod.kind == "static" then
                 selected_static_modules[name] = mod
                 providers_by_path[mod.static_archive] = mod.static_provider
@@ -8417,6 +8435,27 @@ function driver.finalize_resolver_context(context)
             native_bindings[name] = "handle"
         end
     end
+    -- A binary reached solely while checking an installed module never joins
+    -- the library link. Its public types can still be used by owned code;
+    -- bind those uses to the canonical owner initialized by the producer.
+    local semantic_binary_owners
+    if check_only_binaries then
+        semantic_binary_owners = {}
+        for name in pairs(source_names) do
+            local mod = driver.imported[name]
+            local uses = mod.object_metadata and mod.object_metadata.bindings or
+                mod.ast and mod.ast._binary_usage
+            for owner in pairs(uses or {}) do
+                if check_only_binaries[owner] then
+                    local selected = driver.imported[owner]
+                    if selected and selected ~= CIRCULAR_MARK then
+                        native_bindings[owner] = "global"
+                        semantic_binary_owners[owner] = selected
+                    end
+                end
+            end
+        end
+    end
     local physical_owner = {}
     local errors = {}
 
@@ -8486,7 +8525,9 @@ function driver.finalize_resolver_context(context)
              context.strict_static and direct_provider)
         linked_owner = linked_owner or (app_sources and app_sources[owner] and source_names[owner])
         local shared_dynamic_owner = not context.analysis_only and
-            context.target ~= "browser" and not direct_provider and not source_names[owner]
+            (context.target ~= "browser" or
+                check_only_binaries and check_only_binaries[owner]) and
+            not direct_provider and not source_names[owner]
         -- Keep an exposure from any actual carrying DSO exclusive.
         if shared_dynamic_owner then
             for _, constraint in pairs(keyed) do
@@ -8669,16 +8710,13 @@ function driver.finalize_resolver_context(context)
     for _, mod in pairs(dynamic_names) do
         remember_nominal_layouts(context, mod.layout_inventory)
     end
+    for _, mod in pairs(semantic_binary_owners or {}) do
+        remember_nominal_layouts(context, mod.layout_inventory)
+    end
     for name in pairs(check_only_sources or {}) do
         local mod = driver.imported[name]
         if mod and mod.kind == "source" then
-            local inventory = mod.layout_inventory
-            if not inventory and mod.ast then
-                local encoded = assert(require("titan-compiler.coder.core").coder
-                    ._own_nominal_layouts(name, mod.ast))
-                inventory = assert(decode_nominal_layouts(name, encoded))
-            end
-            remember_nominal_layouts(context, inventory, mod.filename)
+            remember_nominal_layouts(context, perf.public_source_layout(name, mod), mod.filename)
         end
     end
     for _, resolution in pairs(contextual_resolutions) do
@@ -8686,15 +8724,10 @@ function driver.finalize_resolver_context(context)
         remember_nominal_layouts(context, provider and provider[resolution.owner])
     end
     context.application_nominal_layouts = nil
-    for name in pairs(app_sources or {}) do
-        local mod = driver.imported[name]
-        if mod and mod.kind == "source" then
-            local inventory = mod.layout_inventory
-            if not inventory and mod.ast then
-                local encoded = assert(require("titan-compiler.coder.core").coder
-                    ._own_nominal_layouts(name, mod.ast))
-                inventory = assert(decode_nominal_layouts(name, encoded))
-            end
+    if app_sources then
+        for name in pairs(source_names) do
+            local mod = driver.imported[name]
+            local inventory = perf.public_source_layout(name, mod)
             if inventory then
                 local layouts = context.application_nominal_layouts or {}
                 context.application_nominal_layouts = layouts
@@ -13870,7 +13903,7 @@ end
 
 function perf.plan_source_obligations(context, plan, link_kind, native)
     local ordered = require("titan-compiler.coder.core").coder._sorted_keys
-    local demanded, missing
+    local missing
     local all_requirements = {}
     while true do
         local requirements = {}
@@ -13886,9 +13919,9 @@ function perf.plan_source_obligations(context, plan, link_kind, native)
             end
         end
         if link_kind and native then
-            local err
-            demanded, err, missing = perf.demand_archive_modules(context, plan, requirements)
-            if not demanded then return nil, err end
+            local ok, err
+            ok, err, missing = perf.demand_archive_modules(context, plan, requirements)
+            if not ok then return nil, err end
         end
         local new = {}
         for name, importer in pairs(requirements) do
@@ -13901,7 +13934,6 @@ function perf.plan_source_obligations(context, plan, link_kind, native)
         if not ok then return nil, err end
     end
     if missing then return nil, missing end
-    plan.demanded_static = demanded
     if next(all_requirements) == nil then return true end
     plan.semantic_sources = all_requirements
     if link_kind then
@@ -13943,7 +13975,7 @@ function perf.plan_source_obligations(context, plan, link_kind, native)
             local ok, err = visit(dependency)
             if not ok then return nil, err end
         end
-        visiting[name], chain[#chain + 1] = nil, nil
+        visiting[name], chain[#chain] = nil, nil
         visited[name] = true
         return true
     end
@@ -13989,15 +14021,19 @@ function perf.classify_library_sources(context, plan, roots)
         if not ok then return nil, err end
     end
     if not has_requirements then return true end
-    local check_only = {}
+    local check_only, check_only_binaries = {}, {}
     for name, module in pairs(plan.modules) do
         if not owned[name] then
-            check_only[name] = true
+            if module.kind == "source" then check_only[name] = true
+            elseif module.kind == "dynamic" or module.kind == "static" then
+                check_only_binaries[name] = true
+            end
             module.check_only = true
         end
     end
     plan.check_only_sources = check_only
     context.check_only_sources = check_only
+    context.check_only_binaries = next(check_only_binaries) and check_only_binaries or nil
     local summaries = {}
     local ordered = require("titan-compiler.coder.core").coder._sorted_keys
     for _, name in ipairs(plan.order) do

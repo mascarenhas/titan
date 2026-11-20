@@ -878,6 +878,151 @@ function answer(): integer return pick.add(40) end
         collector:collect()
     end)
 
+    it("uses compiled nominal owners exposed by an installed source without linking them into a library", function()
+        local uv = require "luv"
+        local sdk, lib, tool_path = isolated_sdk()
+        put_source("owner/model.h", "typedef struct cell { int unused; } cell;\n")
+        put_source("owner/model.titan", [[
+foreign import "model.h"
+
+record Cell
+  serial: integer
+  local data: foreign cell
+end
+
+function Cell.new(serial: integer): Cell
+  local data = foreign cell.new()
+  return { serial = serial, data = data }
+end
+]])
+        write(lib .. "/units.h", "typedef struct quantity { int unused; } quantity;\n")
+        write(lib .. "/units.titan", [[
+foreign import "units.h"
+
+record Quantity
+  count: integer
+  local data: foreign quantity
+end
+
+function Quantity.new(count: integer): Quantity
+  local data = foreign quantity.new()
+  return { count = count, data = data }
+end
+]])
+        write(lib .. "/meter.titan", [[
+local strings = import "string"
+local model = import "model"
+local units = import "units"
+
+type Quantity = units.Quantity
+
+function measure(): Quantity
+  return units.Quantity(7)
+end
+
+function cell(): model.Cell
+  return model.Cell(42)
+end
+
+function writer(): strings.StringWriter
+  return strings.writer()
+end
+]])
+        put_source("library/via.titan", [[
+local meter = import "meter"
+
+type Quantity = meter.Quantity
+
+function measure(): Quantity
+  return meter.measure()
+end
+
+function text(): string
+  local writer = meter.writer()
+  writer:write("shared")
+  return writer:drain() .. ":" .. meter.cell().serial
+end
+]])
+        put_source("app/nominal.titan", [[
+local via = import "via"
+
+function main(args: {string}): integer
+  if via.text() ~= "shared:42" or via.measure().count ~= 7 then return 1 end
+  return 0
+end
+]])
+        local collector = require("spec.support.luacov_children").new(
+            REPOSITORY, REPOSITORY, workspace .. "/child-coverage")
+        local function built(tree, output, ...)
+            local argv, env = compiler_argv({
+                args = { "--tree", source_dir .. "/" .. tree, "-o", output,
+                    "--incremental", "-v", "-j", "2", ... },
+                env = { TITAN_ROOT = sdk, PATH = tool_path },
+                init_code = collector:init_code(),
+            })
+            local ok, log = run_command(argv, workspace, env)
+            assert.is_true(ok, log)
+            return parse_verbose_output(log)
+        end
+        local function run(name, output)
+            local program = platform.windows and
+                assert(driver.windows_program_paths(name, nil, nil, output)).executable or
+                output .. "/" .. name
+            local providers = platform.windows and
+                output .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION .. ";" .. lib or lib
+            local ok, result = run_command({ program }, workspace, {
+                TITAN_ROOT = sdk, TITAN_PATH_0_6 = providers, PATH = tool_path,
+            })
+            assert.is_true(ok, result)
+        end
+        local function install(output, filename)
+            assert(uv.fs_copyfile(output .. "/" .. filename, lib .. "/" .. filename))
+        end
+        local function publish(output)
+            built("library", output, "via")
+            assert.is_false(exists(output .. "/meter.o"))
+            assert.is_false(exists(output .. "/units.o"))
+            local object = output .. "/via.o"
+            local record = assert(objectmetadata.read(read(object), object))
+            for _, owner in ipairs({ "titan.string", "model", "units" }) do
+                assert.equal("global", record.object_metadata.bindings[owner])
+                assert.is_nil(record.object_metadata.providers[owner])
+            end
+            local step = built("library", output, "via")
+            assert.truthy(step.object_hits.via, step.raw)
+            assert.truthy(next(step.link_hits), step.raw)
+            install(output, "via" .. SHARED_SUFFIX)
+            if not platform.windows then
+                local archive = output .. "/via.a"
+                local parsed = assert(staticmetadata.scan_archive(archive))
+                assert.same({ "via" }, parsed.key_order)
+                assert.same({ "meter" }, parsed.entries.via.source_requirements)
+                install(output, "via.a")
+            end
+        end
+
+        local owner = build_dir .. "/owner"
+        built("owner", owner, "model")
+        install(owner, "model" .. SHARED_SUFFIX)
+        if not platform.windows then install(owner, "model.a") end
+        publish(build_dir .. "/library")
+        local dynamic = build_dir .. "/dynamic"
+        built("app", dynamic, "nominal")
+        run("nominal", dynamic)
+        if not platform.windows then
+            -- An archive chosen only while checking meter is not an owned
+            -- archive dependency of via either.
+            assert(os.remove(lib .. "/titan.so"))
+            assert(os.remove(lib .. "/model.so"))
+            publish(build_dir .. "/archive-only-library")
+            assert(os.remove(lib .. "/via.so"))
+            local static = build_dir .. "/static"
+            built("app", static, "--static", "nominal")
+            run("nominal", static)
+        end
+        collector:collect()
+    end)
+
     it("publishes two libraries that share one application-owned installed source", function()
         local uv = require "luv"
         local sdk, lib, tool_path = isolated_sdk()
@@ -1093,6 +1238,7 @@ end
                 assert(uv.fs_copyfile(output .. "/" .. rock .. ".a", dist .. rock .. ".a"))
             end
             assert(installer.publish_module(titan_rock, installed))
+            return step
         end
 
         local left_out = build_dir .. "/left"
@@ -1108,13 +1254,16 @@ end
                 assert(driver.windows_program_paths(name, nil, nil, output)).executable or
                 output .. "/" .. name
         end
-        local function run(output, name, ...)
+        local function run_program(output, name, ...)
             local executable = program_path(output, name)
             local search = platform.windows and
                 output .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION .. ";" .. lib or lib
-            local ok, result = run_command({ executable, ... }, workspace, {
+            return run_command({ executable, ... }, workspace, {
                 TITAN_ROOT = sdk, TITAN_PATH_0_6 = search, PATH = tool_path,
             })
+        end
+        local function run(output, name, ...)
+            local ok, result = run_program(output, name, ...)
             assert.is_true(ok, result)
             return result
         end
@@ -1178,27 +1327,63 @@ end
             assert.is_false(ok, diagnostic)
             assert.matches("shared.counter", diagnostic, 1, true)
             assert.matches("other.a", diagnostic, 1, true)
-
-            -- A later compiled replacement cannot satisfy a source obligation.
-            local replacement = build_dir .. "/replacement"
-            put_source("replacement/shared/counter.titan", "const unused = true\n")
-            built("replacement", replacement, "shared.counter")
-            assert(uv.fs_copyfile(replacement .. "/shared/counter.a", lib .. "/shared/counter.a"))
         end
 
         write(lib .. "/shared/seed.titan", (read(lib .. "/shared/seed.titan"):gsub("return 40", "return 41")))
+        step = publish("facade", { "facade" }, "facade")
+        assert.truthy(step.object_hits.facade, step.raw)
+        assert.truthy(next(step.link_hits), step.raw)
         step = built("app", through, "through_facade")
         assert.equal(1, compile_count(step, "seed"), step.raw)
         assert.truthy(next(step.link_misses), step.raw)
         run(through, "through_facade", "changed")
         local original = read(lib .. "/shared/counter.titan")
-        write(lib .. "/shared/counter.titan", 'local facade = import "facade"\n' .. original)
+        write(lib .. "/shared/counter.titan",
+            (original:gsub("function next%(%)", "function next(delta: integer)")))
+        local function rejects_incompatible(output, static)
+            if static then built("app", output, "--static", "through_facade")
+            else built("app", output, "through_facade") end
+            local ok, diagnostic = run_program(output, "through_facade")
+            assert.is_false(ok, diagnostic)
+            assert.matches("binary compatibility mismatch", diagnostic, 1, true)
+            assert.matches("shared.counter", diagnostic, 1, true)
+        end
+        rejects_incompatible(build_dir .. "/incompatible-dynamic")
+        if not platform.windows then
+            rejects_incompatible(build_dir .. "/incompatible-static", true)
+        end
+        write(lib .. "/shared/counter.titan", "const extra = 0\n" .. original)
+        built("app", through, "through_facade")
+        run(through, "through_facade", "changed")
+
+        local helper = source_dir .. "/left/left/helper.titan"
+        write(helper, (read(helper):gsub('local startup = import "shared.startup"\n', "")))
+        write(lib .. "/shared/unused.titan", "const never = true\n")
+        requirements["left.helper"], requirements["left.live"] = { "shared.counter" }, { "shared.counter" }
+        publish("left", { "left.dormant", "left.helper", "left.live" }, "left.live", "left.dormant")
+        requirements.facade = { "shared.counter" }
+        step = publish("facade", { "facade" }, "facade")
+        assert.matches("source-requirements", step.object_misses.facade, 1, true)
+        local facade = build_dir .. "/facade/facade.o"
+        assert.same(requirements.facade, assert(objectmetadata.read(read(facade), facade))
+            .object_metadata.source_requirements)
+        assert(os.remove(lib .. "/shared/startup.titan"))
+        built("app", through, "through_facade")
+        run(through, "through_facade", "changed")
+
+        write(lib .. "/shared/counter.titan", original:gsub(
+            'local seed = import "shared.seed"\n', '%0local facade = import "facade"\n'))
         local cyclic, cycle = compile("app", through, "through_facade")
         assert.is_false(cyclic, cycle)
-        assert.matches("cyclic source requirement", cycle, 1, true)
-        assert.matches("shared.counter", cycle, 1, true)
-        assert.matches("facade", cycle, 1, true)
+        assert.matches("cyclic source requirement: shared.counter -> facade -> shared.counter",
+            cycle, 1, true)
         write(lib .. "/shared/counter.titan", original)
+        -- A later compiled replacement cannot satisfy a source obligation.
+        local replacement = build_dir .. "/replacement"
+        put_source("replacement/shared/counter.titan", "const unused = true\n")
+        built("replacement", replacement, "shared.counter")
+        assert(uv.fs_copyfile(replacement .. "/shared/counter" .. SHARED_SUFFIX,
+            lib .. "/shared/counter" .. SHARED_SUFFIX))
         assert(os.remove(lib .. "/shared/counter.titan"))
         local ok, diagnostic = compile("app", through, "through_facade")
         assert.is_false(ok, diagnostic)
