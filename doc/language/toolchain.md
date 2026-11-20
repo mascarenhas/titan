@@ -211,7 +211,8 @@ titanc --incremental -o out --test --exe out/my-tests --test-dir tests
 
 On Windows, `.exe` is appended if absent, the launcher is written to `PATH`,
 and the application provider DLL stays at `<output>/lib/titan/0.6/<module>.dll`
-(which must be on the same volume as `PATH`).
+(named after the logical root module—for example `main.dll` for root `main`—not
+the `--exe` basename; it must be on the same volume as `PATH`).
 
 ### Compiler-managed state inside `-o`
 
@@ -262,30 +263,25 @@ in the caller's output directory by logical module name without writing or
 locking inside the implicit SDK root. In a library build (including plain
 non-`main`, non-`--test`, non-`--static` `-c`), an ordinary public `import`
 selected from the implicit installed source fallback (including under
-`--source-first`) is checked for its public interface and public layouts and
-remains external: the library publishes only its authored roots and their
-authored helpers from `--tree`, without compiling or embedding the installed
-source or its private dependencies. Explicit `.titan` source collaboration
-across that installed-source library boundary is rejected; use an ordinary
-public `import` or bring the source into an authored `--tree` checkout.
+`--source-first`) is checked against its public interface and public layouts
+and stays external rather than entering the library provider (explicit `.titan`
+collaboration across that installed-source library boundary is rejected). Native
+library providers carry only their authored `--tree` modules (plus explicit
+non-Titan `-X` payloads); browser library archives likewise leave external
+installed sources outside the archive while retaining browser's preexisting
+separate archive composition for compiled browser dependencies.
 
-When a consumer application or `--test` executable (dynamic native, Unix
-`--static`, Windows DLL, or `--target browser`) imports prebuilt libraries whose
-reached logical members depend on installed source-only modules, `titanc`
-compiles each required source module **once** into the consumer's `--output`
-directory with no redundant user `import` in the application. Each such
-obligation requires **actual source** in the consuming build—searched in
-authored `--tree` roots first, then `<root>/lib/titan/0.6`—and is never
-silently satisfied by a later installed compiled binary; an independently
-carried physical owner for the same logical module is a conflict. If no allowed
-source is found, `titanc` names the missing module and referring library and
-directs you to install the source rock, supply a checkout via `--tree`, or
-rebuild the referring library against the binary distribution. Cross-boundary
-cycles between a prebuilt library and a required source are diagnosed at build
-time, and unreached siblings in a multi-module library impose no source build.
-Ordinary Lua `require` hosts have no Lua-side Titan compiler and cannot compile
-`.titan` sources on the fly. See [Source-only
-modules](modules.md#source-only-modules).
+When a consumer application or `--test` executable imports prebuilt libraries
+whose reached logical members depend on installed source-only modules, `titanc`
+compiles each required source module once into the application (under
+`--output` whenever an installed fallback source is selected or on `--target
+browser`), with no redundant user `import`. Each obligation requires actual
+source—authored `--tree` roots first, then `<root>/lib/titan/0.6`, never
+silently satisfied by a later compiled binary—and diagnoses missing source,
+conflicting physical owners, and cross-boundary cycles at build time. Unreached
+siblings impose no source build, and bare Lua `require` hosts cannot compile
+`.titan` sources. For the full rules, diagnostics, and rebuild behavior, see
+[Source-only modules](modules.md#source-only-modules).
 
 Within each compiled format, lookup is **path-root first, shallowest prefix to
 exact module**. For logical module `a.b.c`, one directory is probed as:
@@ -385,16 +381,17 @@ is not sufficient. `--static` is not a library-production mode.
 
 A default application may still use an archive when no shared provider
 claims its import, and compiles any source-only dependencies required by
-reached members of its selected libraries once into `--output`. To link the
+reached members of its selected libraries once into the application (under
+`--output` whenever an installed fallback source is selected). To link the
 full Titan dependency closure of an executable or test on Linux and macOS, use
 `titanc --static -o out app`. An application module compiled from source
-(including a required source-only dependency materialized from a prebuilt
-library) satisfies its own import. Otherwise every reached compiled module,
-including a prebuilt library's private imports, must have an archive. A missing
-archive is a build error, even if its shared provider exists. Rebuild older
-archives that lack the import inventory. Dormant siblings in a multi-module
-archive are not loaded or extracted, and impose no source build, just because
-another member was selected.
+(including a source-only dependency materialized for a prebuilt library)
+satisfies any reached prebuilt member's import of that module. Otherwise every
+reached compiled module, including a prebuilt library's private imports, must
+have an archive. A missing archive is a build error, even if its shared
+provider exists. Rebuild older archives that lack the import inventory. Dormant
+siblings in a multi-module archive are not loaded or extracted, and impose no
+source build, just because another member was selected.
 
 Direct imports still require the exact physical owner. A prebuilt library's
 external import (including an external source-only dependency compiled by the
@@ -652,16 +649,16 @@ titanc -o out --static --incremental --exe out/bin/app app.main
 ```
 
 Compile-only builds with a `main` root, `--test`, or `--static` use prospective
-executable composition (including compiling installed source-only dependencies
-into `--output`, and `-c --static` checking the complete import closure even
-for a helper without `main`). Plain `-c` on non-`main` roots without `--test`
-or `--static` uses prospective library composition: it emits only owned library
-objects, binds installed fallback sources externally without emitting objects
-for them, and enforces the library explicit-`.titan` boundary, so a subsequent
-`--incremental` library link reuses those objects directly. None of these `-c`
-modes publishes a final provider or executable; pass the same
-provider-selection and compile options in both steps, including `--static`,
-`--test`, and `--coverage` when applicable.
+executable composition (compiling required source dependencies as for the
+corresponding executable—under `--output` when an installed fallback is
+selected—and with `-c --static` checking the complete import closure even for a
+helper without `main`). Plain `-c` on non-`main` roots without `--test` or
+`--static` uses prospective library composition: it emits only owned library
+objects, leaves external installed fallback sources unemitted, and enforces the
+library explicit-`.titan` boundary, so a subsequent `--incremental` library
+link reuses those objects directly. None of these `-c` modes publishes a final
+provider or executable; pass the same provider-selection and compile options in
+both steps, including `--static`, `--test`, and `--coverage` when applicable.
 
 ## Build profiles, parallelism, and build output
 

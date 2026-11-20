@@ -73,33 +73,43 @@ All modules, including the standard library, use the same two path strings:
   caller's output tree and `titanc` neither writes nor locks in the implicit
   fallback root; builds that do not select an installed source keep their
   existing behavior. In a library build (including plain non-`main`,
-  non-`--test`, non-`--static` `-c`), an ordinary public `import` selected from
-  the implicit installed source fallback (including under `--source-first`) is
-  classified as an external source dependency: the library checks it in
-  isolation to obtain its closed public interface and public nominal layouts
-  without compiling, embedding, or reserving outputs for it, and prunes
-  checking-only transitive dependencies behind that edge from library link
-  inputs and certificates. An explicit `.titan` source-collaboration import
-  from an owned library module into the implicit installed source fallback is
-  rejected (authored collaboration under `--tree` and application/`--test`
-  explicit source imports remain valid). Each owned logical member folds its
-  external source obligations (stopping at the installed source boundary and
+  non-`--test`, non-`--static` `-c`, where `preflight_build_outputs` sets
+  `plan.link_kind = "library"`), `perf.classify_library_sources` partitions
+  owned authored sources from `check_only_sources` (`module.check_only = true`),
+  rejects explicit `.titan` imports from an owned library module into the
+  implicit installed source fallback (`library '<name>' cannot collaborate with
+  installed source via import "<dep>.titan"; ...`) and library ownership
+  conflicts (`library '<name>' owns source module '<source>' also required
+  externally by '<importer>'`), and computes per-member folded
+  `plan.requirements_by_module` (stopping at the installed source boundary and
   forwarding obligations from owned authored helpers and imported compiled
-  members) into optional private `source_requirements` metadata, omitted when
-  empty. Consuming applications and `--test` builds materialize reached logical
-  members' `source_requirements` once per logical name in the preflighted plan
-  before worker scheduling and certification—requiring actual source (authored
-  `--tree` roots first, then `<root>/lib/titan/0.6`, with no silent binary
-  substitution)—and diagnose missing source, physical ownership conflicts, and
-  cross-boundary cycles deterministically. Mechanically, `titanc` sets
-  `context.authored_source_roots` to the positional plus `--test-dir` roots;
-  `resolve_source` checks it only after every authored root misses and the
-  implicit SDK fallback would match, returning the named `--tree` diagnostic
-  (workers receive planned or overridden descriptors and never resolve roots,
-  and language-server/analysis contexts leave the field unset). Explicit
-  `driver.resolve_source(context, modname, source_path)` calls, closed-world
-  and explicit analysis roots, and `--test-dir` remain exact and never scan the
-  installed SDK automatically.
+  members, omitted when empty). `check_only` sources are checked in workers
+  without emitting C, `.o`, or `.titan.h` files (`driver.compile_planned_module`
+  returns an in-memory `objectmetadata.encode` payload with erased public
+  layouts from `coder._own_nominal_layouts`, validated by
+  `driver.publish_staged_module`), projected through `public_source_interface`
+  with `info.kind == "external_source"`, and excluded from output reservations,
+  `source_names`, `dynamic_names`, native-archive library refusals, and symbol
+  collision sets. In library mode, `perf.plan_source_obligations` loads only
+  compiled-provider source requirements whose nominal owners appear in the
+  provider's public interface (`perf.exposed_source_owners`); in applications
+  and `--test` builds, `perf.plan_source_obligations` materializes every
+  reached logical member's `source_requirements` once per logical name via
+  `plan.load_sources`—requiring actual source (authored `--tree` roots first,
+  then `<root>/lib/titan/0.6`, with no silent binary substitution), diagnosing
+  missing source (`module '<importer>' requires source for '<name>': ...`),
+  conflicting compiled providers, archives physically containing a required
+  source, and cross-boundary cycles (`cyclic source requirement: ...`).
+  `titanc --print-ast` preserves compiled `plan.modules` and pre-checks
+  `plan.semantic_sources` in-process after resetting `driver.imported`.
+  Mechanically, `titanc` sets `context.authored_source_roots` to the positional
+  plus `--test-dir` roots; `resolve_source` checks it only after every authored
+  root misses and the implicit SDK fallback would match, returning the named
+  `--tree` diagnostic (workers receive planned or overridden descriptors and
+  never resolve roots, and language-server/analysis contexts leave the field
+  unset). Explicit `driver.resolve_source(context, modname, source_path)`
+  calls, closed-world and explicit analysis roots, and `--test-dir` remain
+  exact and never scan the installed SDK automatically.
 * **`driver.TITAN_BIN_PATH`** — the configured Titan path for compiled
   provider `.so` and `.a` files: `TITAN_PATH_0_6` when set, otherwise
   `TITAN_PATH`, otherwise `nil`. `nil` selects

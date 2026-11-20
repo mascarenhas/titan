@@ -2,8 +2,9 @@
 
 Titan keeps **logical module identity** separate from the **physical native
 provider** that carries its symbols. A no-`main` `titanc` invocation
-compiles every selected source module independently and links their objects
-into matching shared and static providers. For example:
+compiles every owned authored source module independently (checking external
+installed-source dependencies without compiling or linking them) and links
+those owned objects into matching shared and static providers. For example:
 
 ```sh
 titanc app.model app.view
@@ -206,9 +207,12 @@ protocol:
 
 * `<mangled>_abi`, semantic `<mangled>_types`, physical `<mangled>_layouts`,
   the separate `<mangled>_compatibility` projection, and (only when the module
-  has non-empty folded external source obligations) an optional private
-  source-requirements metadata entry matched against the paired archive at
-  publication;
+  has non-empty folded external source obligations) `<mangled>_source_requirements`
+  returning the newline-joined canonical list (decoded by
+  `staticmetadata.decode_source_requirements`, probed by
+  `probe_compiled_interface` with clean `stage == "init"` absence when omitted,
+  and matched against the paired archive—including clean absence when empty—by
+  `driver.validate_library_image_fresh`);
 * `<mangled>_init` and `luaopen_<mangled>`;
 * a native export descriptor and per-state binding caches in the module payload;
 * a distinct registry-owned module `Udata`, variables, canonical closures,

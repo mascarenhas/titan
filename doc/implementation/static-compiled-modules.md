@@ -138,10 +138,13 @@ payloads.
 When a logical module has non-empty folded external source obligations—direct
 ordinary imports selected from the implicit installed source fallback
 (stopping at the external source), plus obligations forwarded through owned
-authored helpers or imported compiled members—its metadata also carries an
-optional canonical `source_requirements` list of distinct, strictly
-bytewise-sorted logical names, omitted when empty. Absence of that optional
-field (including in older providers built without it) means no external source
+authored helpers or imported compiled members—its `.titan.meta` payload also
+carries an optional canonical `source_requirements` list of distinct, strictly
+bytewise-sorted logical names, omitted when empty (`staticmetadata.render` and
+`staticmetadata.validate` reject an empty `{}` with `metadata
+source_requirements must be omitted when empty`; callable metadata strings use
+`staticmetadata.decode_source_requirements`). Absence of that optional field
+(including in older providers built without it) means no external source
 obligations, and never relaxes strict `--static`'s requirement for `imports`.
 The banner and ABI version do not change.
 
@@ -407,23 +410,28 @@ probe side effects.
 
 ### Demanded archive closure and source requirements
 
-Application and `--test` preflight resolves reached logical members'
-`source_requirements` alongside native archive `imports` in one fixed point
+Application and `--test` preflight runs `perf.plan_source_obligations`, which
+iteratively resolves reached logical members' `source_requirements` (via
+`plan.load_sources`) alongside native archive `imports` (via
+`perf.demand_archive_modules(context, plan, requirements)`) in one fixed point
 before output reservation, worker scheduling, and certification. Each recorded
 source requirement demands actual source—searched in authored `--tree` roots
 first, then the read-only installed SDK fallback `<root>/lib/titan/0.6`—never
 silently satisfied by a later installed compiled binary; an independently
-carried physical owner is a conflict. Materialized sources enter the build as
-ordinary application-owned source dependencies whose own current imports feed
-the same fixed point. On native executables, preflight traverses written
-imports of reached archive members: it first honors the application's sources
-(including materialized source requirements) and already chosen archives;
-strict `--static` resolves other reached names through the archive pass and
-rejects missing inventories, missing owners, and cycles. A default executable
-follows an ordinary private archive edge only when its dependency is already
-selected or belongs to the importing member's archive, keeping the recorded
-DSO fallback otherwise. Unified cycle detection checks cross-boundary cycles
-across sources, reached archive `imports`, and reached `source_requirements`
+selected compiled provider or an archive physically carrying that module is
+rejected (`static provider '<archive>' physically contains required source
+module '<name>'`). Materialized sources enter the build as ordinary
+application-owned source dependencies whose own current imports feed the same
+fixed point. On native executables, `perf.demand_archive_modules` traverses
+written imports of reached archive members: it first honors the application's
+sources (including materialized source requirements) and already chosen
+archives; strict `--static` resolves other reached names through the archive
+pass and rejects missing inventories, missing owners, and `cyclic archive
+import` cycles. A default executable follows an ordinary private archive edge
+only when its dependency is already selected or belongs to the importing
+member's archive, keeping the recorded DSO fallback otherwise. Unified cycle
+detection checks cross-boundary cycles across sources, reached archive
+`imports`, and reached `source_requirements` (`cyclic source requirement: ...`)
 on all targets. Reached names and archive observations feed worker selection,
 the standalone protocol check, and final-link certification. Dormant siblings
 supply physical collision information only: their `imports`,
@@ -739,11 +747,13 @@ arguments; publication supplies both.
    member) must itself define `<prefix>_abi`, `<prefix>_types`,
    `<prefix>_layouts`, `<prefix>_init`, and `luaopen_<prefix>` as defined,
    global, non-weak functions, where `<prefix>` is the mangled module name;
-   when that member carries non-empty `source_requirements`, it also defines
-   its matching global non-weak source-requirements entry. External
-   installed-source dependencies use the checked external ABI rather than
-   direct symbol references, so the staged archive still links and validates
-   alone under the executing protocol check.
+   when `archive.entries[name].source_requirements` is present, it must also
+   define `<prefix>_source_requirements` as a global non-weak function.
+   External installed-source dependencies use the checked external ABI with an
+   empty provider filename (`""`) rather than direct symbol references, so the
+   staged archive still links and validates alone under the executing protocol
+   check (which verifies `<prefix>_source_requirements` return shape and bytes,
+   exit codes `27` and `28`, when present).
    A definition in a sibling or a split part does not count, and a weak,
    local, or data definition fails:
    `<member-origin>: browser provider module "<name>" requires global non-weak function "<symbol>"`.

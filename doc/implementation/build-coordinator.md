@@ -175,20 +175,28 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    before any source byte is read. Selecting a later source module rebinds
    any overlapping static archive (`rebind_overlapping_static_providers`).
    Native executable preflight follows each selected archive member's
-   [declared imports](static-compiled-modules.md#demanded-archive-closure-and-source-requirements),
-   and application/`--test` preflight on all targets materializes reached
-   logical members' folded `source_requirements` (requiring actual source from
-   authored `--tree` roots first, then `<root>/lib/titan/0.6`) in the same
-   fixed point before output reservation, worker DAG scheduling, or final-link
-   certification, with unified cross-boundary cycle detection and worker DAG
-   edges from materialized sources to consumers that may recover their nominal
-   owners. In a library or prospective-library `-c` build (non-`main`,
-   non-`--test`, non-`--static`), preflight partitions owned authored modules
-   from external installed-source dependencies, rejects explicit `.titan`
-   imports across that library boundary, checks needed external sources in
-   isolation to project closed public interfaces and public nominal layouts,
-   and prunes checking-only transitive dependencies behind external sources
-   from reservations, worker dispatch, and link inputs.
+   [declared imports](static-compiled-modules.md#demanded-archive-closure-and-source-requirements)
+   through `perf.plan_source_obligations`, which also materializes reached
+   logical members' folded `source_requirements` (via `plan.load_sources`,
+   requiring actual source from authored `--tree` roots first, then
+   `<root>/lib/titan/0.6`) in the same fixed point before output reservation,
+   worker DAG scheduling, or final-link certification. It records
+   `module.semantic_dependencies` so `build.run` orders materialized source
+   owners ahead of consumers that import compiled providers exposing them, and
+   detects cross-boundary cycles (`cyclic source requirement: ...`) across all
+   targets. In a library or prospective-library `-c` build (non-`main`,
+   non-`--test`, non-`--static`, where preflight sets `plan.link_kind =
+   "library"`), `perf.plan_source_obligations` loads only compiled-provider
+   source requirements whose nominal owners appear in the provider's public
+   interface (`perf.exposed_source_owners`), and `perf.classify_library_sources`
+   marks modules outside the owned authored closure as `module.check_only =
+   true` while rejecting explicit `.titan` imports across the installed-source
+   library boundary. `build.run` dispatches `check_only` modules to workers
+   without invalidating `.o` files or reserving outputs; `compile_planned_module`
+   returns an in-memory encoded interface (`objectmetadata.encode` with erased
+   public layouts from `coder._own_nominal_layouts`) and writes no C, `.o`, or
+   `.titan.h` files, while `publish_staged_module` revalidates `source_snapshot`
+   in memory.
    A browser `--test` link checks the SDK's runtime assets before planning
    the synthetic runner's implicit `titan.test` import. Compile-only builds
    do not add that import or require the final-link assets.
