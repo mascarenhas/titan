@@ -5098,6 +5098,30 @@ function perf.attach_provider_metadata(selection, metadata)
     return selection
 end
 
+function perf.duplicate_requirement(name, left, right)
+    if util.bytewise_less(right, left) then left, right = right, left end
+    return "providers '" .. left .. "' and '" .. right ..
+        "' both contain required module '" .. name .. "'; remove one conflicting provider"
+end
+
+-- A native library's sibling .so/.a publication is one distribution.
+-- A different visible claimant is a duplicate, not precedence between the
+-- two file formats. Checking this at the marked edge makes that diagnosis
+-- independent of when a written import discovers the alternate carrier.
+function perf.requirement_conflict(context, name, selected)
+    if context.strict_static or (context.target ~= "linux" and context.target ~= "darwin") then return end
+    local typ, alternate
+    if selected.kind == "dynamic" then
+        typ, alternate = driver.find_static_interface(driver.TITAN_BIN_PATH, name, context)
+    elseif selected.kind == "static" then
+        typ, alternate = driver.find_dynamic_interface(driver.TITAN_BIN_PATH, name, context)
+    end
+    local filename = selected.static_archive or selected.filename
+    if typ and filename:gsub("%.[^.]+$", "") ~= alternate:gsub("%.[^.]+$", "") then
+        return perf.duplicate_requirement(name, filename, alternate)
+    end
+end
+
 -- Only selected images are eligible here. A requirement can use a member
 -- they already carry even if no independent pathname could discover it.
 function perf.carried_requirement(context, name, selected)
@@ -5134,9 +5158,7 @@ function perf.carried_requirement(context, name, selected)
             end
             if candidate then
                 if selected then
-                    return nil, "provider '" .. filename .. "' physically contains required module '" ..
-                        name .. "', which also resolved independently as " ..
-                        selected.kind .. " in '" .. selected_file .. "'"
+                    return nil, perf.duplicate_requirement(name, selected_file, filename)
                 end
                 selected, selected_file = perf.attach_provider_metadata(candidate, metadata), filename
             end
@@ -6767,7 +6789,7 @@ function driver.defaultloader(static_deps, options)
                 local ok, failure, detail = perf.load_source_requirement(
                     active_loader, name, required, checked and checked.error)
                 if ok then
-                    checked_requirements[required] = { entry = driver.imported[required] }
+                    checked_requirements[required] = { entry = driver.imported[required], exposer = name }
                 else
                     if detail then checked_requirements[required] = { error = detail } end
                     err = failure
@@ -7244,6 +7266,10 @@ function driver.defaultloader(static_deps, options)
             end
             local carried, carried_error = perf.carried_requirement(context, modname, existing)
             if carried_error then return false, carried_error end
+            if carried then
+                local conflict = perf.requirement_conflict(context, modname, carried)
+                if conflict then return false, conflict end
+            end
             if carried and not existing then
                 carried.compiled = true
                 driver.imported[modname] = carried
@@ -7379,6 +7405,10 @@ function driver.defaultloader(static_deps, options)
         local resolved, compiled_err = driver.find_dependency_interface(
             driver.TITAN_BIN_PATH, modname, context)
         if resolved then
+            if requirement_request then
+                local conflict = perf.requirement_conflict(context, modname, resolved)
+                if conflict then return false, conflict end
+            end
             resolved.compiled = true
             driver.imported[modname] = resolved
             if resolved.kind == "static" then
@@ -7436,6 +7466,7 @@ function driver.defaultloader(static_deps, options)
         end,
         planning = planning,
         semantic_source_recovery = semantic_source_recovery,
+        checked_requirements = semantic_source_recovery and checked_requirements or nil,
     }
     return loader
 end
@@ -8655,6 +8686,21 @@ function driver.finalize_resolver_context(context)
         return context
     end
     context.finalized_selection = nil
+    -- A later ordinary import can select a carrier whose filename was not a
+    -- candidate for the required member itself. Check that actual selected
+    -- inventory without replacing a view already used by the checker.
+    local binding = context.loader and loader_contexts[context.loader]
+    local checked = binding and binding.checked_requirements
+    if checked and next(checked) then
+        local ordered = require("titan-compiler.coder.core").coder._sorted_keys
+        for _, name in ipairs(ordered(checked)) do
+            local demand = checked[name]
+            if demand.entry and demand.entry == driver.imported[name] then
+                local _, conflict = perf.carried_requirement(context, name, demand.entry)
+                if conflict then return nil, { perf.source_requirement_error(demand.exposer, name, conflict) } end
+            end
+        end
+    end
     local source_names = {}
     local dynamic_names = {}
     local selected_embedded_modules = {}
@@ -14296,7 +14342,9 @@ function perf.plan_source_obligations(context, plan, link_kind, native)
     if next(requirements) == nil then return true end
     local semantic_sources = {}
     for _, name in ipairs(ordered(requirements)) do
-        local _, conflict = perf.carried_requirement(context, name, driver.imported[name])
+        local selected = driver.imported[name]
+        local _, conflict = perf.carried_requirement(context, name, selected)
+        conflict = conflict or perf.requirement_conflict(context, name, selected)
         if conflict then return nil, perf.source_requirement_error(requirements[name], name, conflict) end
         if plan.modules[name].kind == "source" then semantic_sources[name] = true end
     end

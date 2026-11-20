@@ -1834,6 +1834,9 @@ end
             assert.matches("shared.counter", diagnostic, 1, true)
             assert.matches("shared providers are not used", diagnostic, 1, true)
             copy_provider(replacement, "shared/counter", ".a")
+            local paired = build_dir .. "/paired-replacement"
+            built("app", paired, "through_facade")
+            run(paired, "through_facade", "own")
             built("app", strict, "--static", "through_facade")
             assert.is_false(exists(strict .. "/shared/counter.o"))
             run(strict, "through_facade", "own")

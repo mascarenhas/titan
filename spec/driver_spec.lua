@@ -5205,7 +5205,7 @@ describe("compiler module loader", function()
         return provider
     end
 
-    local function cache_dynamic_provider(filename, module_types, source_requirements)
+    local function cache_dynamic_provider(filename, module_types, source_requirements, nonclaims)
         write_file(filename, "mock dynamic provider\n")
         local abi_values = {}
         for name in pairs(module_types) do abi_values[name] = driver.TITAN_ABI_VERSION end
@@ -5227,7 +5227,9 @@ describe("compiler module loader", function()
                     return nil, "undefined symbol: " .. symbol, "init"
                 end
             end
-            return nil, "mock symbol absent: " .. symbol, "init"
+            local prefix = symbol:match("^(.*)_abi$") or symbol:match("^(.*)_types$")
+            if nonclaims and nonclaims[prefix] then return nil, "undefined symbol: " .. symbol, "init" end
+            error("unexpected symbol " .. symbol)
         end
     end
 
@@ -9674,7 +9676,7 @@ end
         local rel = provider_path("provider.so")
         local filename = binary .. "/" .. rel
         cache_dynamic_provider(filename, { [name] = types.Module(name, {}, {}) },
-            { [name] = { required } })
+            { [name] = { required } }, { meter = true })
         local loadlib = titan._loadlib
         local queries = {}
         titan._loadlib = function(found, symbol)
@@ -9727,12 +9729,9 @@ function main(args: {string}): integer return 0 end
         assert.equal(rel, upgraded.type.file)
         assert.equal(empty_layouts(name), upgraded.layouts)
         assert.same({}, upgraded.layout_inventory.layouts)
-        local member_queries = {}
-        for _, symbol in ipairs(queries) do
-            if symbol:match("^provider_layer_") then member_queries[#member_queries + 1] = symbol end
-        end
         assert.same({ "provider_layer_abi", "provider_layer_types", "provider_layer_layouts",
-            "provider_layer_source_requirements" }, member_queries)
+            "provider_layer_source_requirements", "meter_abi", "meter_types",
+            "meter_abi", "meter_types" }, queries)
         assert.same({ required }, upgraded.source_requirements)
         assert.same({ required }, library.requirements_by_module.wrap)
         assert.same({ "units", "meter", "wrap" }, library.order)
@@ -9835,6 +9834,95 @@ const broken: integer = "not an integer"
         end
     end)
 
+    it("rejects an independent required carrier in either transitive import order", function()
+        if platform.windows then pending("native archives are not selected on Windows"); return end
+        local checker = require "titan-compiler.checker"
+        local build = require "titan-compiler.build"
+        local quantity = types.Nominal("meas.meter.Quantity")
+        local function meter(field)
+            local integer = types.Integer()
+            local record = types.Record(quantity.fqtn, {
+                types.Field(quantity.fqtn, "count", integer, 0, false),
+                types.Field(quantity.fqtn, field, integer, 1, false),
+            }, {
+                new = types.StaticMethod(quantity.fqtn, "new", { integer, integer }, { quantity },
+                    nil, nil, { "count", field }),
+            }, {}, 2)
+            return types.Module("meas.meter", { types.ModuleMember("meas.meter", "Quantity", record, nil) })
+        end
+        assert(lfs.mkdir(binary .. "/meas"))
+        local loose = binary .. "/meas/meter.so"
+        cache_dynamic_provider(loose, { ["meas.meter"] = meter("standalone") })
+        write_file(source .. "/left.titan", 'local via = import "via"\n')
+        local main = "function main(args: {string}): integer return 0 end\n"
+        write_file(source .. "/early.titan", 'local right = import "right"\nlocal left = import "left"\n' .. main)
+        write_file(source .. "/late.titan", 'local left = import "left"\nlocal right = import "right"\n' .. main)
+        write_file(source .. "/ordinary.titan", 'local extra = import "meas.extra"\n' .. main)
+        local function new_case(analysis, carrier, extra)
+            driver.imported, types.registry = {}, {}
+            local context = new_context({ analysis_only = analysis })
+            cache_static_provider(context, binary .. "/via.a", {
+                via = result_module("via", quantity),
+            }, { via = { source_requirements = { "meas.meter" } } })
+            cache_static_provider(context, carrier, {
+                ["meas.meter"] = meter("carried"),
+                [extra] = types.Module(extra, {}),
+            })
+            return context
+        end
+        for _, namespace in ipairs({ "meas", "other" }) do
+            local carrier, extra = binary .. "/" .. namespace .. ".a", namespace .. ".extra"
+            write_file(source .. "/right.titan", ('local extra = import %q\n'):format(extra))
+            local expected = "providers '" .. carrier .. "' and '" .. loose .. "'"
+            if namespace == "other" then expected = "providers '" .. loose .. "' and '" .. carrier .. "'" end
+            expected = expected .. " both contain required module 'meas.meter'; remove one conflicting provider"
+            for _, client in ipairs({ "early", "late" }) do
+                local context = new_case(true, carrier, extra)
+                local loader = driver.defaultloader({}, { context = context })
+                local checked, diagnostics = checker.checkimport(client, loader)
+                assert.truthy(checked, diagnostics)
+                if namespace == "other" and client == "late" then
+                    -- This file was never a name candidate; ordinary import
+                    -- of the other namespace made it an actual participant.
+                    assert.equal(0, #diagnostics, table.concat(diagnostics, "\n"))
+                    local finalized
+                    finalized, diagnostics = driver.finalize_resolver_context(context)
+                    assert.is_nil(finalized)
+                else
+                    assert.is_nil(driver.imported["meas.meter"])
+                end
+                assert.equal(1, #diagnostics, table.concat(diagnostics, "\n"))
+                assert.matches(expected, diagnostics[1], 1, true)
+                assert.equal(carrier, driver.imported[extra].static_archive)
+                assert(driver.close_loader(loader))
+
+                context = new_case(false, carrier, extra)
+                local roots = { client }
+                local output = root .. "/out-" .. client
+                local plan = assert(build.plan(context, {
+                    roots = roots,
+                    loader_options = { source_roots = { [client] = true }, output_root = output },
+                }))
+                local ready, diagnostic = driver.preflight_build_outputs(context, plan, {
+                    roots = roots, output_root = output, c_parts = 1,
+                })
+                assert.is_nil(ready)
+                assert.matches(expected, diagnostic, 1, true)
+            end
+            assert(os.remove(carrier))
+        end
+
+        local carrier = binary .. "/meas.a"
+        local context = new_case(true, carrier, "meas.extra")
+        local loader = driver.defaultloader({}, { context = context })
+        local checked, diagnostics = checker.checkimport("ordinary", loader)
+        assert.truthy(checked, diagnostics)
+        assert.equal(0, #diagnostics, table.concat(diagnostics, "\n"))
+        assert.equal(carrier, driver.imported["meas.extra"].static_archive)
+        assert.is_nil(driver.imported["meas.meter"])
+        assert(driver.close_loader(loader))
+    end)
+
     it("recovers only reached archive members' recorded source frontiers", function()
         local checker = require "titan-compiler.checker"
         local context = new_context({ analysis_only = true, prefer_static = true })
@@ -9892,16 +9980,8 @@ const broken: integer = "not an integer"
                     [carried] = { source_requirements = { "meter" } },
                 })
             else
-                cache_dynamic_provider(provider, members, { [first] = { "not_needed" }, [carried] = { "meter" } })
-                local loadlib = titan._loadlib
-                titan._loadlib = function(filename, symbol)
-                    if filename == provider and
-                       (symbol == "scale_abi" or symbol == "scale_types" or
-                        symbol == "units_abi" or symbol == "units_types") then
-                        return nil, "absent", "init"
-                    end
-                    return loadlib(filename, symbol)
-                end
+                cache_dynamic_provider(provider, members, { [first] = { "not_needed" }, [carried] = { "meter" } },
+                    { meter = true, scale = true, units = true })
             end
             local scale = types.Record(rate.fqtn, {}, {
                 new = types.StaticMethod(rate.fqtn, "new", {}, { rate }, nil, nil, {}),
