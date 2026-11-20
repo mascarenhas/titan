@@ -537,13 +537,17 @@ Key rules for safe replacements:
 
 Passing `--incremental` reuses certified module objects, `--c-source` objects,
 and final links whenever every observable input still matches. Unchanged
-modules are restored without re-parsing, typechecking, or re-running the C
-compiler; only modules whose inputs changed compile in parallel worker
-processes.
+owned modules are restored without re-parsing, typechecking, or re-running the
+C compiler; only modules whose inputs changed compile in parallel worker
+processes. In a library build with external installed source-only
+dependencies, `titanc` may still re-parse and re-check those external sources
+in memory on each invocation while owned library objects and the final
+provider hit their certificates—no separate persisted source-interface cache
+or orphan `.o` file is written for them.
 
 | Invocation | Behavior |
 | --- | --- |
-| `titanc -o out app.base app.feature` | Compile all selected source modules afresh and link. |
+| `titanc -o out app.base app.feature` | Compile all owned source modules afresh and link. |
 | `titanc -o out --incremental app.base app.feature` | Reuse unchanged source objects (including roots), compile only misses, and reuse or relink the target. |
 | `titanc -o out -c app.feature` | Rebuild every owned module in the closure to objects and headers (leaving external installed sources unemitted for non-`main` library roots); skip linking. |
 | `titanc -o out -c --incremental app.feature` | Certify and reuse unchanged owned objects (including roots); compile only misses. |

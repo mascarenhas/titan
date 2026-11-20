@@ -189,14 +189,21 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    "library"`), `perf.plan_source_obligations` loads only compiled-provider
    source requirements whose nominal owners appear in the provider's public
    interface (`perf.exposed_source_owners`), and `perf.classify_library_sources`
-   marks modules outside the owned authored closure as `module.check_only =
-   true` while rejecting explicit `.titan` imports across the installed-source
-   library boundary. `build.run` dispatches `check_only` modules to workers
-   without invalidating `.o` files or reserving outputs; `compile_planned_module`
+   marks modules outside the owned authored closure with `module.check_only =
+   true` (separating `check_only_sources` from `check_only_binaries`, which
+   stay out of the library link while contributing verified `"global"` bindings
+   and public layouts when owned code uses their types) while rejecting
+   explicit `.titan` imports across the installed-source library boundary.
+   `build.run` dispatches `check_only` source modules to workers without
+   invalidating `.o` files or reserving outputs; `compile_planned_module`
    returns an in-memory encoded interface (`objectmetadata.encode` with erased
    public layouts from `coder._own_nominal_layouts`) and writes no C, `.o`, or
    `.titan.h` files, while `publish_staged_module` revalidates `source_snapshot`
-   in memory.
+   in memory. Under `--incremental`, `build.run` rechecks `check_only` external
+   sources in memory on each library invocation (sharing results across workers
+   of that invocation) while owned library objects and the final provider still
+   hit their certificates; Titan writes no separate persisted source-interface
+   cache and no orphan `.o` for external sources.
    A browser `--test` link checks the SDK's runtime assets before planning
    the synthetic runner's implicit `titan.test` import. Compile-only builds
    do not add that import or require the final-link assets.

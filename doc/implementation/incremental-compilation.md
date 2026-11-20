@@ -8,10 +8,14 @@ toolchain and compile options, own-source bytes and folder membership, split
 and coverage code-generation options, split-part artifacts, transitive C header
 file/search/origin closures, direct-import public or source-private interface
 digests, contextually exposed nominal-owner digests, resolved native
-bindings, and folded `source_requirements` obligations. Plain `-c` without
-`--incremental` forces a fresh compile of every owned source module (treating
-non-`main`, non-`--test`, non-`--static` invocations as prospective libraries
-whose `check_only` external sources are checked without writing `.o` files).
+bindings, and folded `source_requirements` obligations. Under `--incremental`,
+external installed-source dependencies of a library build (`check_only`
+sources) have no persisted `.o` or separate source-interface cache and are
+rechecked in memory on each invocation while owned library objects and the
+final provider still hit their certificates. Plain `-c` without `--incremental`
+forces a fresh compile of every owned source module (treating non-`main`,
+non-`--test`, non-`--static` invocations as prospective libraries whose
+`check_only` external sources are checked without writing `.o` files).
 
 The user-facing contract, `-v` diagnostics, and build-tool examples are in
 [Incremental and separate compilation](../language/toolchain.md#incremental-and-separate-compilation).
@@ -1020,9 +1024,11 @@ checks the decoded certificate against the final resolution `plan`:
    bytewise, `verdict` computes the expected binding from the plan:
    * `linked = (name == modname) or plan.linked(name)` (true when `name` is an
      owned source module compiled into the build or carried by a selected
-     static archive; false for `check_only_sources` in library mode);
+     static archive; false for `module.check_only` entries—both
+     `check_only_sources` and `check_only_binaries`—in library mode);
    * `provider = (name ~= modname) and plan.provider_file(name) or nil`
-     (`""` for `check_only` sources);
+     (`""` for `check_only` sources; `nil` for `check_only_binaries`, which
+     receive verified `"global"` bindings when owned code uses their types);
    * `expected = linked and "direct" or (direct[name] and provider and "handle" or "global")`;
    * `expected_provider = (not linked and direct[name]) and provider or nil`.
 

@@ -75,31 +75,43 @@ All modules, including the standard library, use the same two path strings:
   existing behavior. In a library build (including plain non-`main`,
   non-`--test`, non-`--static` `-c`, where `preflight_build_outputs` sets
   `plan.link_kind = "library"`), `perf.classify_library_sources` partitions
-  owned authored sources from `check_only_sources` (`module.check_only = true`),
-  rejects explicit `.titan` imports from an owned library module into the
-  implicit installed source fallback (`library '<name>' cannot collaborate with
-  installed source via import "<dep>.titan"; ...`) and library ownership
-  conflicts (`library '<name>' owns source module '<source>' also required
-  externally by '<importer>'`), and computes per-member folded
-  `plan.requirements_by_module` (stopping at the installed source boundary and
-  forwarding obligations from owned authored helpers and imported compiled
-  members, omitted when empty). `check_only` sources are checked in workers
-  without emitting C, `.o`, or `.titan.h` files (`driver.compile_planned_module`
-  returns an in-memory `objectmetadata.encode` payload with erased public
-  layouts from `coder._own_nominal_layouts`, validated by
-  `driver.publish_staged_module`), projected through `public_source_interface`
-  with `info.kind == "external_source"`, and excluded from output reservations,
-  `source_names`, `dynamic_names`, native-archive library refusals, and symbol
-  collision sets. In library mode, `perf.plan_source_obligations` loads only
-  compiled-provider source requirements whose nominal owners appear in the
-  provider's public interface (`perf.exposed_source_owners`); in applications
-  and `--test` builds, `perf.plan_source_obligations` materializes every
-  reached logical member's `source_requirements` once per logical name via
-  `plan.load_sources`—requiring actual source (authored `--tree` roots first,
-  then `<root>/lib/titan/0.6`, with no silent binary substitution), diagnosing
-  missing source (`module '<importer>' requires source for '<name>': ...`),
-  conflicting compiled providers, archives physically containing a required
-  source, and cross-boundary cycles (`cyclic source requirement: ...`).
+  owned authored sources from non-owned modules—keeping `check_only_sources`
+  (external installed sources) and `check_only_binaries` (compiled providers
+  reached solely while checking an external source) distinct while marking both
+  `module.check_only = true` in the plan transport—rejects explicit `.titan`
+  imports from an owned library module into the implicit installed source
+  fallback (`library '<name>' cannot collaborate with installed source via
+  import "<dep>.titan"; ...`) and library ownership conflicts (`library
+  '<name>' owns source module '<source>' also required externally by
+  '<importer>'`), and computes per-member folded `plan.requirements_by_module`
+  (stopping at the installed source boundary and forwarding obligations from
+  owned authored helpers and imported compiled members, omitted when empty).
+  `check_only` sources are checked in workers without emitting C, `.o`, or
+  `.titan.h` files (`driver.compile_planned_module` returns an in-memory
+  `objectmetadata.encode` payload with erased public layouts from
+  `coder._own_nominal_layouts`, validated by `driver.publish_staged_module`),
+  projected through `public_source_interface` with `info.kind ==
+  "external_source"`, and excluded from output reservations, `source_names`,
+  `dynamic_names`, and symbol collision sets. Compiled providers in
+  `check_only_binaries` likewise stay out of library link membership
+  (`dynamic_names`, `selected_static_modules`) and native-archive library
+  refusals, while any used public type they own receives a verified `"global"`
+  binding (`"dynamic-global"` on contextual static recovery) and registers its
+  `layout_inventory` in `finalize_resolver_context` (including for archive-only
+  providers and on browser). Under `--incremental`, `check_only` external
+  sources have no persisted `.o` or separate source-interface cache and are
+  rechecked in memory on each library invocation while owned objects and the
+  final provider still hit their certificates. In library mode,
+  `perf.plan_source_obligations` loads only compiled-provider source
+  requirements whose nominal owners appear in the provider's public interface
+  (`perf.exposed_source_owners`); in applications and `--test` builds,
+  `perf.plan_source_obligations` materializes every reached logical member's
+  `source_requirements` once per logical name via `plan.load_sources`—requiring
+  actual source (authored `--tree` roots first, then `<root>/lib/titan/0.6`,
+  with no silent binary substitution), diagnosing missing source (`module
+  '<importer>' requires source for '<name>': ...`), conflicting compiled
+  providers, archives physically containing a required source, and
+  cross-boundary cycles (`cyclic source requirement: ...`).
   `titanc --print-ast` preserves compiled `plan.modules` and pre-checks
   `plan.semantic_sources` in-process after resetting `driver.imported`.
   Mechanically, `titanc` sets `context.authored_source_roots` to the positional

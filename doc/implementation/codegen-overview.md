@@ -1331,11 +1331,14 @@ before requiring the root:
   or host JavaScript/loader changes. Ordinary browser builds without source
   obligations omit the table.
 
-When an application compiles materialized source requirements,
-`finalize_resolver_context` also populates `context.application_nominal_layouts`
-from `coder._own_nominal_layouts` so other application modules without a direct
-explicit `.titan` import on that owner use erased public nominal layouts
-(`coder/nominal.lua`).
+When an application compiles materialized source requirements
+(`context.application_source_requirements` is non-nil),
+`finalize_resolver_context` populates `context.application_nominal_layouts`
+through `perf.public_source_layout(name, mod)` (backed by
+`coder._own_nominal_layouts`) across all compiled `source_names`, so
+non-collaborating consumers (without a direct explicit `.titan` import on that
+owner) use erased public nominal layouts (`coder/nominal.lua`)—including for
+installed sources reached transitively through another required source.
 
 `titan_module_provider` binary-searches the installed table only after a
 canonical and native-preload miss on a named import. The table holds
