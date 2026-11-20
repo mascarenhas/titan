@@ -149,6 +149,15 @@ describe("linked provider composition", function()
             return
         end
 
+        local archive = fixture.root .. "/package/cui.a"
+        assert(os.rename(archive, archive .. ".saved"))
+        file("package/cui.a", "not a regular archive\n")
+        result = compile("app", "shadowed", "package", "--static", "demo")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find("cannot inspect static provider", 1, true),
+            result.output)
+        assert(os.rename(archive .. ".saved", archive))
+
         file("suite/checks.titan", [[
 local cui = import "cui"
 local io = import "io"
@@ -194,6 +203,11 @@ end
             local result = run_deployed(order .. "/" .. order)
             assert.is_true(result.ok, result.output)
         end
+
+        -- The diagnostic frontend also compiles this graph in-process.
+        built("app", "diagnostic", "package", "--print-ast", "--static", "facade_first")
+        local diagnostic = run_deployed("diagnostic/facade_first")
+        assert.is_true(diagnostic.ok, diagnostic.output)
 
         -- This compilation unit can recover the owner only contextually.
         -- A separate unit (the root) selects the archive that contains it.
