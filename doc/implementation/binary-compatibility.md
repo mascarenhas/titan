@@ -218,21 +218,23 @@ titan_check_module_compatibility(L, provider, "some_module_compatibility",
     "some/provider.so", verifier_source, verifier_length);
 ```
 
-Provider selection (canonical registry module, then copied native provider
-descriptor, then `loadlib` of the file) is described in [Static vs dynamic
-dependency wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring).
+Provider selection (canonical registry module, matching native preload
+descriptor, private executable-linked resolver, then `loadlib` of the file)
+is described in [Static vs dynamic dependency
+wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring).
 Generated initialization registers the descriptor through
 `titan_module_preload`, separately from the Lua preload loader; it holds only
 matching loader and `TitanModuleSymbols` resolver pointers, with no module
 state. `lua.new()` copies only descriptors matching eligible native loaders,
 including inherited descriptors for modules not yet initialized in its source
-state. For verification the invariant is ordering: ABI and consumer
-compatibility checks precede initialization for both copied providers and
-newly opened DSOs.
+state. In all cases, ABI and consumer compatibility checks precede
+initialization.
 
-`require` from Lua follows the same order through the [Titan package
-searcher](driver.md#the-titan-package-searcher). A claimed candidate's ABI is
-checked with `titan_check_abi_entry` (`titan-runtime/titan_path.c`, which the
+`require` from Lua does not use the private linked provider set. The [Titan
+package searcher](driver.md#the-titan-package-searcher) tries the canonical
+module and then a matching native preload before looking for a file. It
+checks a claimed candidate's ABI with `titan_check_abi_entry`
+(`titan-runtime/titan_path.c`, which the
 searcher shares with generated imports; on Windows through `_abi_value`) before
 the searcher returns `luaopen_<mangled>`, and that opener's [file-load
 name guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)

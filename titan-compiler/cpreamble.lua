@@ -140,13 +140,13 @@ cpreamble.fixed_prefix = fixed_prefix("")
 -- rather than inheriting the preceding definition's `#line`.
 cpreamble.definition_prefix = fixed_prefix("#line 1 TITAN_GENERATED_C_FILE\n")
 
-cpreamble.after_foreign_imports = [[#if defined(__GNUC__) || defined(__clang__)
+cpreamble.source_visibility = [[#if defined(__GNUC__) || defined(__clang__)
 #define TITAN_SOURCE_LOCAL __attribute__((visibility("hidden")))
 #else
 #define TITAN_SOURCE_LOCAL
-#endif
+#endif]]
 
-#ifdef __clang__
+cpreamble.after_foreign_imports = cpreamble.source_visibility .. "\n\n" .. [[#ifdef __clang__
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wparentheses-equality"
 #endif]]

@@ -922,7 +922,7 @@ exit 0
         write_file(source_root .. "/targetcheck.titan", [[
 local left = import "pkg.left"
 
-function read(): integer
+function main(args: {string}): integer
     return left.read()
 end
 ]])
@@ -1566,7 +1566,7 @@ end
             tostring(code) .. ")")
     end)
 
-    it("honors default/static preference, both fallbacks, and hidden-DSO execution",
+    it("honors strict static selection, default archive fallback, and hidden-DSO execution",
        function()
         if platform.windows then
             pending("Titan static-provider selection and archive fallback are unsupported on Windows")
@@ -1628,19 +1628,16 @@ end
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
-        -- `--static` is a preference: without the archive it uses the DSO.
+        -- A shared provider cannot satisfy strict static selection.
         write_file(selected_dso, dso_bytes)
         assert.truthy(os.remove(selected_archive))
         write_app("static_dso_fallback", "choice.api", 11)
         ok, output, why, code = compile(
             workspace, source_root, "--static",
             "apps.static_dso_fallback")
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        ok, output, why, code =
-            run_program(workspace, "apps/static_dso_fallback")
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
+        assert.falsy(ok)
+        assert.truthy(output:find("--static requires an archive", 1, true), output)
+        assert.truthy(output:find("choice.api", 1, true), output)
 
         -- Default mode likewise falls through from DSO to archive.
         write_file(selected_archive, archive_bytes)
@@ -1674,10 +1671,10 @@ end
             tostring(code) .. ")")
     end)
 
-    it("repackages complete provider membership and consumes it statically",
+    it("publishes separate provider memberships and consumes their closure statically",
        function()
         if platform.windows then
-            pending("Titan static-provider archive repackaging and standalone extraction are unsupported on Windows")
+            pending("Titan standalone archive extraction is unsupported on Windows")
             return
         end
         local provider_a = workspace .. "/provider-a"
@@ -1765,17 +1762,17 @@ function get(): integer
 end
 ]])
         ok, output, why, code = compile(
-            provider_b, source_b, "--static",
+            provider_b, source_b,
             "bundle.api", "bundle.impl", "bundle.unused")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local bundle = assert_provider_pair(
             provider_b, "bundle", {
-                "base.facade", "base.owner", "bundle.api", "bundle.impl",
+                "bundle.api", "bundle.impl",
                 "bundle.unused",
             }, true)
         assert.same({
-            "base.facade", "base.owner", "bundle.api", "bundle.impl",
+            "bundle.api", "bundle.impl",
             "bundle.unused",
         }, bundle.key_order)
         assert.is_nil(lfs.attributes(
@@ -1783,10 +1780,8 @@ end
         assert.is_nil(lfs.attributes(
             provider_b .. "/base/owner.lua", "mode"))
 
-        -- The selected provider has been flattened into B. Remove A entirely
-        -- before compiling and running the static consumer.
+        -- Neither provider's DSO is needed by the static consumer.
         assert.truthy(os.remove(provider_b .. "/base.so"))
-        assert.truthy(os.remove(provider_b .. "/base.a"))
         write_file(source_b .. "/app.titan", [=[
 local api = import "bundle.api"
 local tlua = import "lua"
@@ -1846,26 +1841,19 @@ end
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
-        -- Carried physical membership remains unavailable through an
-        -- unrelated ordinary lookup: bundle.a is not a candidate for
-        -- base.owner.
-        write_file(source_b .. "/negative.titan", [[
-local owner = import "base.owner"
-
-function probe(): integer
-    return owner.make(1).n
-end
-]])
-        ok, output = compile(provider_b, source_b, "--static", "negative")
+        assert.truthy(os.remove(provider_b .. "/base.a"))
+        ok, output = compile(provider_b, source_b, "--static", "app")
         assert.falsy(ok)
-        assert.truthy(output:find(
-            "module 'base.owner' not found", 1, true), output)
+        assert.truthy(output:find("--static requires an archive", 1, true), output)
+        assert.truthy(output:find("base.facade", 1, true), output)
+        ok, output = run_program(provider_b, "app")
+        assert.truthy(ok, output)
     end)
 
-    it("rejects raw members and repackages real macOS metadata objects",
+    it("rejects raw Mach-O archive members and links universal providers",
        function()
         if platform.windows then
-            pending("Mach-O universal Titan archive metadata and libtool repackaging")
+            pending("Mach-O universal Titan archive metadata")
             return
         end
         -- driver.IS_DARWIN is unset until a compiler operation initializes
@@ -2007,32 +1995,23 @@ function get(): integer
 end
 ]])
         ok, output, why, code = compile(
-            workspace, source_root, "--static", "bundle.api")
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        local bundle = assert_provider_pair(
-            workspace, "bundle/api", {
-                "bundle.api", "fat.api",
-            }, true)
-        assert.equal("archive", bundle.kind)
-        assert.same({ "bundle.api", "fat.api" }, bundle.key_order)
+            workspace, source_root, "bundle.api")
+        assert.falsy(ok)
+        assert.truthy(output:find("install its paired shared provider", 1, true), output)
 
         local libtool_archive = workspace .. "/bundle-libtool.a"
         ok, output = run({
             "/usr/bin/libtool", "-static", "-o", libtool_archive,
-            workspace .. "/bundle/api.a",
+            arm_archive,
         }, workspace)
         assert.truthy(ok, output)
         local libtool_result, libtool_err = staticmetadata.scan_archive(
             libtool_archive, metadata_options())
         assert.truthy(libtool_result, libtool_err)
         assert.equal("archive", libtool_result.kind)
-        assert.same(bundle.key_order, libtool_result.key_order)
-
-        assert.truthy(os.remove(universal))
-        assert.truthy(os.remove(shared_path(workspace, "bundle/api")))
+        assert.same(fat.key_order, libtool_result.key_order)
         write_file(source_root .. "/universal_app.titan", [[
-local api = import "bundle.api"
+local api = import "fat.api"
 
 function main(args: {string}): integer
     if api.get() == 42 then return 0 else return 1 end
@@ -2653,20 +2632,23 @@ end
         assert.truthy(os.remove(provider_stem .. ".titan"))
         assert.truthy(os.remove(shared_path(legacy_workspace, "luaopen/bundle/foo")))
 
-        write_file(legacy_source .. "/bundle/foo_abi_value.titan", [[
+        write_file(legacy_source .. "/bundle/foo_abi_value.titan", [=[
 local old = import "luaopen.bundle.foo"
-function probe(): integer return old.probe() + 40 end
-]])
-        ok, output = compile(
-            legacy_workspace, legacy_source, "--static", "bundle.foo_abi_value")
+local lua = import "lua"
+
+function main(args: {string}): integer
+    local ok = lua.load([[return require("luaopen.bundle.foo").probe() == 2]])()
+    if ok as boolean and old.probe() + 40 == 42 then return 0 end
+    return 1
+end
+]=])
+        ok, output = compile_with_environment(legacy_workspace, legacy_source, {
+            TITAN_PATH_0_6 = legacy_workspace .. ";;",
+        }, "--static", "bundle.foo_abi_value")
         assert.truthy(ok, output)
-        local ran, result = run_lua(legacy_workspace, [[
-local current = require "bundle.foo_abi_value"
-local old = require "luaopen.bundle.foo"
-io.write(current.probe(), " ", old.probe())
-]])
+        local ran, result = run({ legacy_workspace .. "/bundle/foo_abi_value" },
+            legacy_workspace)
         assert.truthy(ran, result)
-        assert.equal("42 2", result)
     end)
 
     for _, protocol in ipairs({

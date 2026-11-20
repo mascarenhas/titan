@@ -32,7 +32,7 @@ prefix derived from valid roots may end in that component, so
 Binary lookup maps a logical name to every shallow-to-exact provider
 candidate: for `a.b.c`, those are `a.so`, `a/b.so`, and `a/b/c.so`, plus the
 corresponding `.a` names (`driver.module_compiled_candidates`). It runs one
-complete format pass at a time (`.so` then `.a`, swapped by `--static`),
+complete format pass at a time (`.so` then `.a`, or only `.a` for `--static`),
 walking search roots from left to right and candidates from shallowest to
 exact within a pass. An earlier root's existing candidate occupies that
 relative pathname for its format even when its metadata does not claim the
@@ -424,7 +424,8 @@ created.
 | --- | --- |
 | `io` | Compiler I/O strategy; defaults to `compiler_io.new_sync()`. See [Compiler I/O strategy](#compiler-io-strategy). |
 | `output_root` | The `titanc --output` folder. Wraps `io:tmpname` so checking headers and transient probe payloads are reserved as `<output_root>/.titan-temporary-*`; persistent probe-cache destinations do not change. See [Output directory](output-directory.md). |
-| `prefer_static` | `titanc --static`: run the archive pass before the DSO pass. |
+| `prefer_static` | Programmatic resolver preference: run the archive pass before the DSO pass. |
+| `strict_static` | `titanc --static`: skip the DSO pass and require a complete archive dependency closure for the prospective executable. |
 | `source_first` | `--test` or `--source-first`: try source before compiled formats for every dependency, keeping compiled fallback on a clean miss. |
 | `target` | Source-selection target: `nil`/`""` for the host, or one of `driver.SOURCE_LABELS`; any other value raises. A host label selects source files only and is not checked against the host; `titanc` validates its CLI value first. `"browser"` also builds the [browser target descriptor](browser-target.md#the-descriptor) during construction and selects the browser toolchain, probe cache, provider lookup, and output policy. See [Target source selection](target-source-selection.md#the-context-target). |
 | `verbose`, `pretty_print` | Carry `-v` and `--pretty-print` into resolver-owned C-probe and checking-header work. |
@@ -568,10 +569,10 @@ The closure proceeds in this order:
 3. A remaining cache hit returns its type and records the dependency. Otherwise
    a preferred lookup tries folder/flat source first. An ordinary lookup first
    consults a non-overlapping embedded inventory, then runs one complete
-   compiled pass per format on `TITAN_BIN_PATH`—`.so` then `.a` by default,
-   reversed by `prefer_static`—before its final source fallback on
-   `TITAN_SOURCE_PATH`. Root-major, shallow-to-exact order and occupied relative-
-   path shadowing are independent within each filesystem format.
+   compiled pass per format on `TITAN_BIN_PATH`: `.so` then `.a` by default,
+   just `.a` under `strict_static`. `prefer_static` reverses the order for
+   programmatic native lookups. Root order, prefix order and path shadowing
+   are independent within each format.
 4. A source hit is a tagged flat/folder descriptor. Every listed file is read
    and parsed independently with its real filename. The main initializer is
    saved, contributor roots are appended in descriptor order, contributor
@@ -2033,23 +2034,22 @@ the logical inventory that Windows requires for its export file:
 ```sh
 cc --std=c99 -O3 ... -fPIC -g1 -flto=auto -ffat-lto-objects -shared \
    -o app.so app_model.o app_view.o dep.o ... \
-   [force-load selected-provider.a ...] \
    [ordered extra.o ... force-load native-payload.a ...] \
    <root>/lib/titan/0.6/libtitan.a <root>/lib/libbacktrace.a <root>/lib/liblua.a \
    [-ldl] -lm [-lSDL2 ...] [TITAN_EXTRA_LDFLAGS...]
 ```
 
 The objects are sorted by logical module name and deduplicated before this
-call. Selected Titan archives follow and are force-loaded into the DSO. The
-classified `ordered_payload` retains `-X` CLI order: objects enter directly
+call. Native library publication does not select external Titan archives.
+The classified `ordered_payload` retains `-X` CLI order: objects enter directly
 and archives are force-loaded. `extra_objects` is the legacy unclassified
 fallback. Runtime `libtitan.a`, separate `libbacktrace.a` (**before**
 `liblua.a`), matching `liblua.a`, platform libraries, `-l`, and ordered
 `TITAN_EXTRA_LDFLAGS` follow. Neither installed nor checkout mode links an
 individual `titan.o`. `compile_library(modname, ...)` remains a thin
 exact-output wrapper for programmatic and test-only callers. The paired
-archive builder flattens the same source, selected-provider, and ordered
-payload members without copying those common final libraries.
+archive builder carries the same source and native payload members without
+copying those common final libraries.
 
 On Linux and macOS, `titanc` derives the public provider from the requested
 roots and calls `driver.link_provider_pair`. That function links the DSO under
@@ -2217,7 +2217,10 @@ error alerts):
   the integer returned by the Titan `main` becomes the **process exit status**:
   `ret = lua_tointeger(L, -1); lua_close(L); return ret;`.
 * **`pmain`** first publishes the original `argc` integer and `argv` pointer
-  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls global
+  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`. On Linux and macOS a
+  program or test can also install its private
+  [linked provider set](codegen-overview.md#the-linked-provider-set) here,
+  without publishing Lua loaders. It then calls global
   `require("$MODNAME")` and retrieves and retains that module's `main`
   callable. A transitive `titan.async` initialization calls the public
   idempotent `uv.setup_process_args()` helper, which passes only those
@@ -2359,9 +2362,10 @@ requested modules in-process and dumps each AST.
 `-j`/`--jobs` sets the positive local job cap (overriding `TITAN_JOBS`, default
 4), which bounds concurrent worker frontends, generated-C compilations, the
 second provider link, and speculative C-probe batches ([GNU Make jobserver
-participation](#gnu-make-jobserver-participation)). `--static` swaps the
-compiled-provider passes to prefer self-describing archives before DSOs,
-`--test` (with optional `--test-dir` and `--test-exclude`) selects the native
+participation](#gnu-make-jobserver-participation)). `--static` requires the
+complete archive-backed Titan dependency closure of a native executable
+or compile-only build. `--test` (with optional `--test-dir` and
+`--test-exclude`) selects the native
 test pipeline ([Native test runner](test-runner.md)), and the `--coverage`
 family instruments and reports native line coverage ([Native
 coverage](native-coverage.md)).

@@ -146,7 +146,7 @@ describe("folder modules through the public compiler", function()
     local main_source
     local trace_source
 
-    local function compile(modname)
+    local function compile(modname, ...)
         local argv = {
             "env",
             "-u", "LUA_PATH", "-u", "LUA_CPATH",
@@ -172,6 +172,7 @@ describe("folder modules through the public compiler", function()
         table.insert(argv, "--tree")
         table.insert(argv, source_root)
         table.insert(argv, modname)
+        for _, argument in ipairs({ ... }) do table.insert(argv, argument) end
         local ok, output, why, code = run(argv, workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
@@ -540,7 +541,7 @@ type Alias = Factory
             if not platform.windows then assert.truthy(os.remove(unselected)) end
             assert.is_nil(lfs.attributes(provider_source))
             assert.is_nil(lfs.attributes(unselected))
-            write_file(source_root .. "/" .. consumer .. ".titan", string.format([[
+            local source = string.format([[
 local provider = import %q
 
 function positional(): (integer, string?, string)
@@ -554,7 +555,29 @@ end
 function string_argument(): (integer, string?, string)
     return provider.Factory "string"
 end
-]], provider))
+]], provider)
+            if mode == "static" then
+                write_file(source_root .. "/" .. consumer .. ".titan", source .. [[
+
+local function matches(expected: string, size: integer, missing: string?, text: string): boolean
+    return size == #expected and missing == nil and text == expected
+end
+
+function main(args: {string}): integer
+    if not matches("positional", positional()) then return 1 end
+    if not matches("named", named()) then return 2 end
+    if not matches("string", string_argument()) then return 3 end
+    return 0
+end
+]])
+                compile(consumer, "--static")
+                local ok, output, why, code = run({ workspace .. "/" .. consumer }, workspace)
+                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                    tostring(code) .. ")")
+                return
+            end
+
+            write_file(source_root .. "/" .. consumer .. ".titan", source)
             compile(consumer)
             local script = string.format([[
 package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath

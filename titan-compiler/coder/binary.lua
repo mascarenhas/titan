@@ -161,7 +161,7 @@ function coder._binary_resolver(tlcontext, ast)
     coder._record_private_symbol(tlcontext, resolver,
         "module native symbol resolver")
     return definitionline() .. render([[
-        TITAN_MODULE_PRIVATE void *$NAME(const char *symbol) {
+        TITAN_SOURCE_LOCAL void *$NAME(const char *symbol) {
             if (strcmp(symbol, TITAN_TRANSFER_MANIFEST_SYMBOL) == 0)
                 return (void *)&$TRANSFER_MANIFEST;
             $ENTRIES
@@ -185,7 +185,7 @@ function coder._binary_payload(tlcontext)
         typedef struct {
             $FIELDS
         } $TYPE;
-        TITAN_MODULE_PRIVATE void *$RESOLVER(const char *symbol);
+        TITAN_SOURCE_LOCAL void *$RESOLVER(const char *symbol);
     ]], {
         FIELDS = table.concat(fields, "\n"),
         TYPE = tlcontext.prefix .. "native_data",

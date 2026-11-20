@@ -5014,7 +5014,7 @@ function driver.find_dependency_interface(paths, modname, context)
     local browser = context.target == "browser"
     local embedded = not browser and find_embedded_interface(modname, context) or nil
     if embedded then return embedded end
-    local formats = browser and { "static" } or
+    local formats = (browser or context.strict_static) and { "static" } or
         (context.prefer_static and { "static", "dynamic" } or { "dynamic", "static" })
 
     for _, format in ipairs(formats) do
@@ -5910,6 +5910,10 @@ function driver.defaultloader(static_deps, options)
         table.sort(provider_paths, util.bytewise_less)
 
         for _, path in ipairs(provider_paths) do
+            if context.strict_static then
+                return nil, "static provider '" .. path ..
+                    "' physically contains source-selected module '" .. source_name .. "'"
+            end
             local provider = providers[path]
             local selected_names = {}
             for name, mod in pairs(driver.imported) do
@@ -6264,12 +6268,12 @@ function driver.defaultloader(static_deps, options)
         driver.imported[modname] = CIRCULAR_MARK
         table.insert(dependency_stack, {})
         for _, import in ipairs(record.object_metadata.imports or {}) do
-            local ok, result, errors = loader(import.name,
+            local dependency, errors = checker.checkimport(import.name, loader,
                 import.source_required and { kind = "source-import" } or nil)
-            if not ok or #errors ~= 0 then
+            if not dependency or #errors ~= 0 then
                 table.remove(dependency_stack)
                 driver.imported[modname] = nil
-                return false, ok and table.concat(errors, "\n") or result
+                return false, dependency and table.concat(errors, "\n") or errors
             end
         end
         table.remove(dependency_stack)
@@ -6631,7 +6635,7 @@ function driver.defaultloader(static_deps, options)
             local status, value, metadata =
                 probe_compiled_interface(modname, exposing.filename, context)
             if status == "valid" then
-                add_native_constraint(context, modname, "dynamic-global",
+                add_native_constraint(context, modname, "dynamic-carried",
                     exposing.filename, exposing_name)
                 return remember_type(value, exposing, false,
                     metadata.layout_inventory, metadata.layouts, false)
@@ -6642,12 +6646,15 @@ function driver.defaultloader(static_deps, options)
         end
 
         local ordinary = driver.imported[modname]
+        local planned = worker_plan and worker_plan.modules[modname]
+        if not ordinary and planned and planned.kind == "static" then
+            local loaded, err = load_planned_binary(modname, planned)
+            if not loaded then return false, err end
+            ordinary = driver.imported[modname]
+        end
         if ordinary and ordinary ~= CIRCULAR_MARK then
-            -- The exposing compiled object did not carry/claim this owner, so
-            -- its machine code already chose a producer-dynamic identity.
-            -- Reuse the independently known type only to finish checking and
-            -- record the edge; finalization will reject that independently
-            -- selected source/archive/other-DSO implementation.
+            -- Recover the independently known interface without changing its
+            -- selection. The native constraint records the fallback edge.
             if exposing.kind ~= "embedded" then
                 add_native_constraint(context, modname, "dynamic-global",
                     exposing.static_archive or exposing.filename, exposing_name)
@@ -6973,7 +6980,13 @@ function driver.defaultloader(static_deps, options)
             local candidate, candidate_err = find_source()
             if candidate_err then return false, candidate_err end
         end
-        if not source then return false, driver.missing_module_message(context, modname, false) end
+        if not source then
+            if context.strict_static then
+                return false, "--static requires an archive (.a) or application source for module '" ..
+                    modname .. "'; shared providers are not used"
+            end
+            return false, driver.missing_module_message(context, modname, false)
+        end
         return load_source(source)
     end
     context.loader = loader
@@ -7185,6 +7198,14 @@ function driver.resolution_plan(context)
 
     local accepted = {}
     local plan = { modules = modules, order = order, archives = archives }
+    function plan.add_static(name, mod)
+        modules[name] = { kind = "static", archive = mod.static_archive,
+            relative = mod.relative }
+        linked[name] = true
+        if archives[mod.static_archive] == nil then
+            archives[mod.static_archive] = planned_archive_metadata(context, mod)
+        end
+    end
     function plan.linked(name)
         driver.assert_target_context(context)
         local module = modules[name]
@@ -7266,6 +7287,8 @@ function driver.plan_descriptor(plan, modname)
         modname = modname,
         modules = modules,
         archives = plan.archives,
+        link_kind = plan.link_kind,
+        strict_static = plan.strict_static,
         reservations = plan.reservations,
     }
 end
@@ -7520,6 +7543,8 @@ function driver.compile_planned_module(context, modname, options)
     -- Provider inspection reuses the coordinator's archive metadata scans.
     context.planned_archives = type(plan.archives) == "table" and
         plan.archives or nil
+    context.link_kind = plan.link_kind
+    context.strict_static = plan.strict_static
     local loader = driver.defaultloader({}, {
         context = context,
         worker_plan = plan,
@@ -7919,6 +7944,7 @@ function perf.resolver_selection(context, previous)
     if previous and
        (previous.loader ~= context.loader or
         previous.analysis_only ~= context.analysis_only or
+        previous.link_kind ~= context.link_kind or
         previous.embedded_provider ~= context.embedded_interface_provider or
         previous.embedded_rejected ~= context.embedded_interface_provider_rejected or
         previous.embedded_overlap ~= context.embedded_interface_provider_overlap) then
@@ -7927,6 +7953,7 @@ function perf.resolver_selection(context, previous)
     local snapshot = not previous and {
         modules = {}, resolutions = {},
         loader = context.loader, analysis_only = context.analysis_only,
+        link_kind = context.link_kind,
         embedded_provider = context.embedded_interface_provider,
         embedded_rejected = context.embedded_interface_provider_rejected,
         embedded_overlap = context.embedded_interface_provider_overlap,
@@ -7962,6 +7989,104 @@ function perf.resolver_selection(context, previous)
     if previous then return previous.resolution_count == count end
     snapshot.resolution_count = count
     return snapshot
+end
+
+-- Complete the archive portion of a native executable plan before any
+-- worker or final-link certificate consumes it. In default mode only
+-- already chosen archives can satisfy an indirect edge.
+function perf.demand_archive_modules(context, plan)
+    local owners, roots = {}, {}
+    local function claim(provider)
+        for _, name in ipairs(provider.key_order) do
+            local previous = owners[name]
+            if previous and previous ~= provider then
+                return nil, "static providers '" .. previous.archive .. "' and '" ..
+                    provider.archive .. "' both contain logical module '" .. name .. "'"
+            end
+            owners[name] = provider
+        end
+        return true
+    end
+    for name, mod in pairs(driver.imported) do
+        if mod.kind == "static" then roots[#roots + 1] = name end
+    end
+    if #roots == 0 then return {} end
+    table.sort(roots, util.bytewise_less)
+    for _, name in ipairs(roots) do
+        local provider = driver.imported[name].static_provider
+        if owners[name] ~= provider then
+            local ok, err = claim(provider)
+            if not ok then return nil, err end
+        end
+    end
+
+    local colors, demanded, chain = {}, {}, {}
+    local function visit(name, importer)
+        if colors[name] == "done" then return true end
+        if colors[name] == "visiting" then
+            return nil, "cyclic archive import: " .. table.concat(chain, " -> ") .. " -> " .. name
+        end
+        local selected = driver.imported[name]
+        local owner = owners[name]
+        local provider = selected and selected.static_provider or
+            (context.strict_static or owner == importer) and owner
+        if selected and selected.kind ~= "static" then
+            if provider and selected.kind == "source" then
+                return nil, "static provider '" .. provider.archive ..
+                    "' physically contains source-selected module '" .. name .. "'"
+            end
+            if not context.strict_static or selected.kind ~= "source" then return true end
+        elseif not provider and context.strict_static then
+            local _, filename, _, found = driver.find_static_interface(
+                driver.TITAN_BIN_PATH, name, context)
+            if not found then
+                return nil, "--static requires an archive (.a) for '" .. name ..
+                    "' imported by " .. table.concat(chain, " -> ") ..
+                    (filename and (": " .. filename) or "; shared providers are not used")
+            end
+            local ok, err = claim(found)
+            if not ok then return nil, err end
+            provider = found
+        end
+        if not provider and not selected then return true end
+
+        colors[name] = "visiting"
+        chain[#chain + 1] = name
+        if provider then
+            local entry = provider.entries[name]
+            if context.strict_static and entry.imports == nil then
+                return nil, "static provider '" .. provider.archive .. "' module '" ..
+                    name .. "' lacks an import inventory; rebuild the archive with this compiler"
+            end
+            if not selected then
+                selected = { kind = "static", compiled = true, type = entry.type,
+                    filename = provider.archive, relative = provider.relative_archive,
+                    static_archive = provider.archive, static_provider = provider,
+                    layouts = entry.layouts, layout_inventory = entry.layout_inventory }
+                driver.imported[name] = selected
+                plan.add_static(name, selected)
+            end
+            demanded[name] = selected
+            for _, dependency in ipairs(entry.imports or {}) do
+                local ok, err = visit(dependency, provider)
+                if not ok then return nil, err end
+            end
+        elseif plan.modules[name] and plan.modules[name].kind == "source" then
+            for _, dependency in ipairs(plan.modules[name].imports) do
+                local ok, err = visit(dependency.name)
+                if not ok then return nil, err end
+            end
+        end
+        chain[#chain] = nil
+        colors[name] = "done"
+        return true
+    end
+
+    for _, name in ipairs(roots) do
+        local ok, err = visit(name)
+        if not ok then return nil, err end
+    end
+    return demanded
 end
 
 function driver.finalize_resolver_context(context)
@@ -8052,31 +8177,26 @@ function driver.finalize_resolver_context(context)
         end
     end
 
-    -- Every carried interface can impose native-owner constraints even when
-    -- ordinary lookup selected the provider through a different key.
+    -- Only native executables distinguish semantic demands from dormant
+    -- members. Browser and non-executable resolver clients retain the full
+    -- carried-interface replay.
     if context.loader then
+        local demand_only = not context.analysis_only and context.target ~= "browser" and
+            (context.link_kind == "program" or context.link_kind == "test")
         for _, provider in ipairs(selected_static_providers) do
-            local key_order = provider.key_order
-            if not key_order then
-                key_order = {}
-                for name in pairs(provider.entries) do
-                    key_order[#key_order + 1] = name
-                end
-                table.sort(key_order, util.bytewise_less)
-            end
-            for _, name in ipairs(key_order) do
-                local entry = provider.entries[name]
-                local registered, register_error =
-                    checker.register_module_interface(
+            local names = provider.key_order or
+                require("titan-compiler.coder.core").coder._sorted_keys(provider.entries)
+            for _, name in ipairs(names) do
+                if not demand_only or selected_static_modules[name] then
+                    local entry = provider.entries[name]
+                    local registered, register_error = checker.register_module_interface(
                         name, entry.type, context.loader, {
-                            name = name,
-                            kind = "static",
-                            type = entry.type,
-                            filename = provider.archive,
-                            static_archive = provider.archive,
+                            name = name, kind = "static", type = entry.type,
+                            filename = provider.archive, static_archive = provider.archive,
                             static_provider = provider,
                         })
-                if not registered then return nil, {register_error} end
+                    if not registered then return nil, {register_error} end
+                end
             end
         end
     end
@@ -8159,12 +8279,32 @@ function driver.finalize_resolver_context(context)
         end
     end
 
+    local native_executable = not context.analysis_only and context.target ~= "browser" and
+        (context.link_kind == "program" or context.link_kind == "test")
+    -- A test's synthetic main is not necessarily present at certification.
+    -- In an ordinary program with only a source root and DSOs, there is no
+    -- second linked owner to elect.
+    local elect_linked = native_executable and context.target ~= "windows" and
+        (context.strict_static or context.link_kind == "test" or next(physical_owner) ~= nil or
+         next(dynamic_names) ~= nil and next(source_names, (next(source_names))) ~= nil)
+    local rebound_owners
     for owner, keyed in pairs(context.native_constraints) do
-        -- Complete physical membership is native provenance even when the
-        -- owner was not independently selected. If another selected
-        -- provider's facade requires that owner through its producer-chosen
-        -- DSO, carrying the owner directly would mix identities.
         local direct_provider = physical_owner[owner]
+        local linked_owner = elect_linked and
+            (selected_static_modules[owner] or source_names[owner] or
+             context.strict_static and direct_provider)
+        local shared_dynamic_owner = not context.analysis_only and
+            context.target ~= "browser" and not direct_provider and not source_names[owner]
+        -- Keep an exposure from any actual carrying DSO exclusive.
+        if shared_dynamic_owner then
+            for _, constraint in pairs(keyed) do
+                if constraint.binding == "dynamic-carried" then
+                    shared_dynamic_owner = false
+                    break
+                end
+            end
+        end
+        local external_owner
         local dynamic_provider
         for _, constraint in pairs(keyed) do
             if constraint.binding == "direct-carried" then
@@ -8176,9 +8316,17 @@ function driver.finalize_resolver_context(context)
                         tostring(constraint.provider) .. "'"
                 end
                 direct_provider = constraint.provider
-            elseif constraint.binding == "dynamic-global" then
-                if dynamic_provider and
-                   dynamic_provider ~= constraint.provider then
+            elseif (linked_owner or shared_dynamic_owner) and
+                   constraint.binding == "dynamic-global" then
+                -- The fallback reaches the same checked canonical owner.
+                -- Only linked owners can change a unit's binding to direct.
+                external_owner = true
+                if linked_owner then
+                    rebound_owners = rebound_owners or {}
+                    rebound_owners[owner] = true
+                end
+            else
+                if dynamic_provider and dynamic_provider ~= constraint.provider then
                     errors[#errors + 1] = "logical owner '" .. owner ..
                         "' has producer-dynamic exposures from conflicting " ..
                         "providers '" .. dynamic_provider .. "' and '" ..
@@ -8213,7 +8361,8 @@ function driver.finalize_resolver_context(context)
                     "' requires its producer-chosen dynamic identity"
             end
         end
-        if dynamic_provider and not direct_provider then
+        if (dynamic_provider or external_owner) and not direct_provider and
+                not source_names[owner] then
             native_bindings[owner] = "global"
         elseif direct_provider then
             native_bindings[owner] = "direct"
@@ -8243,13 +8392,17 @@ function driver.finalize_resolver_context(context)
                     end
                     expected = imports[dependency] and "handle" or "global"
                 end
+                -- A unit can use the initialized canonical owner even if a
+                -- different unit brings that owner into the final link.
                 if binding == "handle" and selected and selected.kind == "dynamic" then
                     if selected.type.file ~= native.providers[dependency] then
                         errors[#errors + 1] = "object for module '" .. name ..
                             "' loads a different provider for '" .. dependency ..
                             "'; rebuild it with the selected dependency providers"
                     end
-                elseif expected ~= binding then
+                elseif expected ~= binding and not (binding == "global" and
+                        expected == "direct" and rebound_owners and
+                        rebound_owners[dependency]) then
                     errors[#errors + 1] = "object for module '" .. name ..
                         "' requires " .. binding .. " binding for '" .. dependency ..
                         "'; rebuild it with the selected dependency providers"
@@ -8267,6 +8420,24 @@ function driver.finalize_resolver_context(context)
     context.native_static_names = native_static_names
     context.native_bindings = native_bindings
     context.physical_owner = physical_owner
+    context.linked_module_names = nil
+    if elect_linked then
+        local runner = require("titan-compiler.test_runner").MODULE_NAME
+        local names = {}
+        for name in pairs(source_names) do
+            if name ~= runner then names[#names + 1] = name end
+        end
+        for name, mod in pairs(selected_static_modules) do
+            -- Older archives need not provide a link-visible resolver.
+            if mod.static_provider.entries[name].imports ~= nil then
+                names[#names + 1] = name
+            end
+        end
+        if #names > 0 then
+            table.sort(names, util.bytewise_less)
+            context.linked_module_names = names
+        end
+    end
 
     -- Simple recovered aliases may reuse a canonical registry owner while
     -- final interfaces are replayed, so contextual resolution callbacks are
@@ -10447,6 +10618,8 @@ local entrypoint_template = [[
 
 $PLATFORM_ALERTS
 
+$LINKED_MODULE_DECLARATIONS
+
 /* fatal error, from srlua */
 static void fatal(const char* message) {
     alert(message);
@@ -10521,6 +10694,7 @@ static int pmain(lua_State *L) {
      * invokes. Retrieve main before consulting the hook, then invoke either
      * path inside main()'s existing outer lua_pcall. */
     lua_settop(L, 0);
+    $LINKED_MODULE_INSTALL
     lua_getglobal(L, "require");
     lua_pushliteral(L, "$MODNAME");
     lua_call(L, 1, 1);
@@ -10633,6 +10807,7 @@ function driver.entrypoint_contents(modname, program_name, options)
         MODNAME = modname,
         SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
         COVERAGE_DECLARATIONS = "", COVERAGE_PREPARE = "", COVERAGE_FINISH = "",
+        LINKED_MODULE_DECLARATIONS = "", LINKED_MODULE_INSTALL = "",
         ERROR_HELPERS = require("titan-compiler.browserentry").error_helpers,
     }
     if platform.windows then
@@ -10649,6 +10824,34 @@ function driver.entrypoint_contents(modname, program_name, options)
         values.PLATFORM_ALERTS = util.render(unix_entrypoint_alerts, values)
         values.ENTRYPOINT_DECLARATIONS =
             "int " .. values.LUAOPEN_FN .. "(lua_State* L);"
+        local names = options.context and options.context.linked_module_names
+        if names then
+            local private_symbol = require("titan-compiler.coder.core").coder._private_symbol
+            local declarations, entries = {}, {}
+            for _, name in ipairs(names) do
+                local resolver = private_symbol(name, "native_symbol")
+                declarations[#declarations + 1] =
+                    "TITAN_SOURCE_LOCAL void *" .. resolver .. "(const char *symbol);"
+                entries[#entries + 1] =
+                    "    { \"" .. c_string_contents(name) .. "\", " .. resolver .. " },"
+            end
+            local source_visibility = require("titan-compiler.cpreamble").source_visibility
+            values.LINKED_MODULE_DECLARATIONS = source_visibility .. "\n" ..
+                table.concat(declarations, "\n") .. [[
+
+static const TitanLinkedModule titan_linked_entries[] = {
+$LINKED_MODULE_ENTRIES
+};
+static const TitanLinkedModules titan_linked_modules = {
+    titan_linked_entries,
+    titan_linked_entries + sizeof(titan_linked_entries) / sizeof(*titan_linked_entries)
+};]]
+            values.LINKED_MODULE_ENTRIES = table.concat(entries, "\n")
+            values.LINKED_MODULE_INSTALL = [[
+lua_pushliteral(L, TITAN_LINKED_MODULES_KEY);
+    lua_pushlightuserdata(L, (void *)&titan_linked_modules);
+    lua_rawset(L, LUA_REGISTRYINDEX);]]
+        end
     end
     if options.coverage_runtime then
         local runtime_path = assert(package.searchpath(
@@ -13401,6 +13604,93 @@ function driver.preflight_build_outputs(context, plan, options)
             end
         end
     end
+
+    -- Resolve just the transparent signature shapes needed for main selection,
+    -- including local/imported aliases; the ordinary checker remains authority
+    -- for all declaration validity and function bodies.
+    local function shape(name, typ, seen)
+        if not typ then return nil end
+        seen = seen or {}
+        if seen[typ] then return nil end
+        seen[typ] = true
+        local tag, info = typ._tag, modules[name]
+        if tag == "Ast.TypeInteger" or tag == "Type.Integer" then return "integer"
+        elseif tag == "Ast.TypeString" or tag == "Type.String" then return "string"
+        elseif (tag == "Ast.TypeArray" or tag == "Type.Array") and typ.isconst.tag == "no" then
+            if shape(name, typ.subtype or typ.elem, seen) == "string" then return "{string}" end
+        elseif tag == "Ast.TypeName" and #(typ.typeargs or {}) == 0 then
+            return shape(name, info and info.aliases[typ.name], seen)
+        elseif tag == "Ast.TypeQualName" and #(typ.typeargs or {}) == 0 then
+            local import = info and info.imports[typ.module]
+            local dependency = typ.module == "M" and name or import and import.modname
+            local target = dependency and modules[dependency]
+            if target and not target.saved then
+                return shape(dependency, target.aliases[typ.name], seen)
+            end
+            local selected = dependency and driver.imported[dependency]
+            local modtype = target and target.type or selected and selected.type
+            if modtype then
+                return shape(dependency, types.module_type_member(modtype, typ.name,
+                    import and import.source_required), seen)
+            end
+        end
+    end
+    local main
+    for _, name in ipairs(options.roots) do
+        local info = modules[name]
+        if info and not info.saved then
+            for _, node in ipairs(info.nodes) do
+                if node._tag == "Ast.TopLevelFunc" and node.name == "main"
+                   and #node.params == 1 and node.params[1].name ~= "..."
+                   and not node.flexrettype and #node.rettypes == 1
+                   and shape(name, node.params[1].type) == "{string}"
+                   and shape(name, node.rettypes[1]) == "integer" then
+                    info.has_main = true
+                end
+            end
+        end
+        if not options.test and info and info.has_main then
+            if not main then
+                main = name
+            elseif not options.compile_only then
+                return nil, name .. ": multiple main functions found (already declared in " .. main .. ")"
+            end
+        end
+    end
+    -- Compile-only still checks provider composition for these executable
+    -- roots, but reserves no executable outputs.
+    local link_kind = options.test and "test" or
+        (main or options.compile_only and context.strict_static) and "program"
+    local builds_program = not options.compile_only and link_kind ~= nil
+    if options.exe and not builds_program then
+        return nil, "--exe is only valid when compiling a standalone or test executable"
+    elseif options.no_uv_bootstrap and not builds_program then
+        return nil, "--no-uv-bootstrap is only valid when compiling a standalone executable"
+    elseif options.coverage and not options.compile_only and not builds_program then
+        return nil, "--coverage requires a test or standalone executable; use -c for coverage objects"
+    end
+    local native = context.target == "linux" or context.target == "darwin"
+    if native then
+        if context.strict_static and not options.compile_only and not builds_program then
+            return nil, "--static is valid only for standalone/test executables and -c objects; " ..
+                "build library bundles by listing their source roots without --static"
+        end
+        if not options.compile_only and not builds_program then
+            local names = require("titan-compiler.coder.core").coder._sorted_keys(plan.modules)
+            for _, name in ipairs(names) do
+                local dependency = plan.modules[name]
+                if dependency.kind == "static" then
+                    return nil, "library dependency '" .. name .. "' resolved to archive '" ..
+                        dependency.archive .. "'; install its paired shared provider (.so)"
+                end
+            end
+        elseif link_kind then
+            local demanded, err = perf.demand_archive_modules(context, plan)
+            if not demanded then return nil, err end
+            plan.demanded_static = demanded
+        end
+    end
+    plan.strict_static = context.strict_static
     local binary_names = {}
     for name, selected in pairs(plan.modules) do
         if selected.kind == "dynamic" or selected.kind == "static" then
@@ -13478,66 +13768,6 @@ function driver.preflight_build_outputs(context, plan, options)
             end
         end
         if #errors > 0 then return nil, table.concat(errors, "\n") end
-    end
-
-    -- Resolve just the transparent signature shapes needed for main selection,
-    -- including local/imported aliases; the ordinary checker remains authority
-    -- for all declaration validity and function bodies.
-    local function shape(name, typ, seen)
-        if not typ then return nil end
-        seen = seen or {}
-        if seen[typ] then return nil end
-        seen[typ] = true
-        local tag, info = typ._tag, modules[name]
-        if tag == "Ast.TypeInteger" or tag == "Type.Integer" then return "integer"
-        elseif tag == "Ast.TypeString" or tag == "Type.String" then return "string"
-        elseif (tag == "Ast.TypeArray" or tag == "Type.Array") and typ.isconst.tag == "no" then
-            if shape(name, typ.subtype or typ.elem, seen) == "string" then return "{string}" end
-        elseif tag == "Ast.TypeName" and #(typ.typeargs or {}) == 0 then
-            return shape(name, info and info.aliases[typ.name], seen)
-        elseif tag == "Ast.TypeQualName" and #(typ.typeargs or {}) == 0 then
-            local import = info and info.imports[typ.module]
-            local dependency = typ.module == "M" and name or import and import.modname
-            local target = dependency and modules[dependency]
-            if target and not target.saved then
-                return shape(dependency, target.aliases[typ.name], seen)
-            end
-            local selected = dependency and driver.imported[dependency]
-            local modtype = target and target.type or selected and selected.type
-            if modtype then
-                return shape(dependency, types.module_type_member(modtype, typ.name,
-                    import and import.source_required), seen)
-            end
-        end
-    end
-    local main
-    for _, name in ipairs(options.roots) do
-        local info = modules[name]
-        if info and not info.saved then
-            for _, node in ipairs(info.nodes) do
-                if node._tag == "Ast.TopLevelFunc" and node.name == "main"
-                   and #node.params == 1 and node.params[1].name ~= "..."
-                   and not node.flexrettype and #node.rettypes == 1
-                   and shape(name, node.params[1].type) == "{string}"
-                   and shape(name, node.rettypes[1]) == "integer" then
-                    info.has_main = true
-                end
-            end
-        end
-        if not options.test and info and info.has_main and not options.compile_only then
-            if main then
-                return nil, name .. ": multiple main functions found (already declared in " .. main .. ")"
-            end
-            main = name
-        end
-    end
-    local builds_program = not options.compile_only and (options.test or main ~= nil)
-    if options.exe and not builds_program then
-        return nil, "--exe is only valid when compiling a standalone or test executable"
-    elseif options.no_uv_bootstrap and not builds_program then
-        return nil, "--no-uv-bootstrap is only valid when compiling a standalone executable"
-    elseif options.coverage and not options.compile_only and not builds_program then
-        return nil, "--coverage requires a test or standalone executable; use -c for coverage objects"
     end
     if builds_program then
         local root = options.test and options.roots[1] or main
@@ -13641,6 +13871,7 @@ function driver.preflight_build_outputs(context, plan, options)
     end
     -- Stale-staging retirement protects the same accepted inputs.
     plan.reservations, plan.inputs = reservations, inputs
+    plan.link_kind = link_kind or (not options.compile_only and "library" or nil)
     return true
 end
 

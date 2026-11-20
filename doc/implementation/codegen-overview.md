@@ -1234,23 +1234,30 @@ called directly, and the returned module must carry the exact linked producer's
 physical identity: a same-name module created by another image cannot safely
 supply the private state that direct native code expects.
 
+When a native call implicitly uses a directly linked nominal owner (through
+an exposing import), the importer checks the same physical identity once
+while caching the canonical module userdata. It does not call the owner's
+initializer early or add a check to each method invocation.
+
 **Dynamic** dependencies (`handle` bindings) first use `titan_module_provider`
 (`titan-runtime/titan.h`) to look up the logical module in the Lua registry.
 
 - An initialized module supplies its native export callback, even if its code
   is embedded in the executable or was opened locally through
   `package.loadlib`.
-- If the module is absent, a copied native provider descriptor supplies its
+- If the module is absent, a matching native preload descriptor supplies its
   resolver.
-- The selected DSO filename is consulted only when neither is available:
+- Next, a native executable can supply the resolver of a module already linked
+  into that image. See [The linked provider set](#the-linked-provider-set).
+- The selected DSO filename is consulted only when no descriptor is available:
   `loadlib` takes the first occupied `<entry>/<file>` along the state's
   [run-time Titan path](driver.md#the-run-time-titan-path-and-sdk-fallback),
   then the lazy SDK fallback.
 
 Descriptor lookup does not call a Lua preload loader or initialize the
 dependency. `titan_check_module_abi` and `titan_check_module_compatibility` run
-before the selected initializer is called, whether its code came from a copied
-resolver or a newly opened DSO.
+before the selected initializer is called, no matter which provider supplies
+the resolver.
 
 `titan_module_symbol` then resolves the required metadata callbacks, native
 entries, bound-method trampolines, and public slot numbers through the selected
@@ -1263,12 +1270,12 @@ the provider's resolved slot.
 A **transitive dynamic owner** (`global` binding) is resolved after the
 explicit exposing imports are initialized: `titan_module_provider` is called
 with the owner's logical name and a null filename. That owner must already be
-initialized; an uninitialized copied descriptor does not satisfy this
-canonical-only lookup. Its own ABI and selective compatibility checks precede
-native lookup through its export callback, and global symbol order never
-chooses the owner. The module userdata and nominal metatables are recovered
-from the same Lua state's registry. See [Type aliases](type-aliases.md) and
-[Selective binary dependency verification](binary-compatibility.md).
+initialized; neither a copied preload nor an uninitialized linked module
+satisfies this canonical-only lookup. Its own ABI and selective compatibility
+checks precede native lookup through its export callback, and global symbol
+order never chooses the owner. The same Lua state's registry supplies the
+module userdata and nominal metatables. See [Type aliases](type-aliases.md)
+and [Selective binary dependency verification](binary-compatibility.md).
 
 The runtime's `loadlib` (`titan-runtime/titan_path.c`) maps newly needed DSOs with
 `RTLD_LAZY | RTLD_GLOBAL`. This supports ordinary native-library relocations:
@@ -1277,6 +1284,38 @@ its lazy `uv_*` calls bind. This C-linker behavior is separate from Titan's
 logical module binding. Eager data or function-address relocations and native
 constructors cannot rely on initializer ordering. Compiler interface inspection
 is a separate `RTLD_LAZY | RTLD_LOCAL` operation.
+
+### The linked provider set
+
+The native coordinator walks the written imports of demanded archive
+members. The generated launcher emits one sorted array of logical names
+and hidden native resolvers for the resulting members and linked sources.
+Each archive entry is a strong reference that retains its primary object;
+the table does not reference dormant siblings.
+
+The launcher publishes the array bounds as one registry value inside its
+protected entry, before requiring the root. A default program containing
+only its source root and shared-provider imports needs no catalog.
+`titan_module_provider` binary-searches that array only after a canonical
+and native-preload miss on a named import. The table holds image-lifetime
+data, not initialized module userdata; binding to it still goes through
+the normal ABI and used-declaration checks. Modules still initialize in
+written import order. The table adds nothing to `package.preload` or
+`package.loaded`. The Lua package searcher does not consult it, and child
+states do not inherit it.
+Once initialized, a module registers its ordinary native preload as
+before, and that preload can be copied into children.
+
+For `--static`, preflight verifies the complete written import closure and
+the table anchors its archive members. The runtime still opens a named
+DSO on a catalog miss: a plugin loaded explicitly through Lua `require`
+and its own dependencies are not part of the host's certified graph.
+The catalog never replaces an existing physical producer token or
+redirects direct calls.
+
+Final-link certification includes the sorted catalog names and the bytes
+of the input objects and archives. Windows DLL launchers and archive-only
+browser images do not install this catalog.
 
 ## User-value allocation
 

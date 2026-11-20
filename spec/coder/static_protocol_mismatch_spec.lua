@@ -235,7 +235,7 @@ local function assert_absent(path)
         "unexpected public output " .. path)
 end
 
-describe("forged static section/callable protocol mismatch", function()
+describe("selected archive protocol validation", function()
     local workspace
 
     before_each(function()
@@ -249,7 +249,7 @@ describe("forged static section/callable protocol mismatch", function()
         if workspace then remove_tree(workspace) end
     end)
 
-    it("rejects the selected archive before library or executable publication",
+    it("rejects mismatched archive metadata before executable publication",
        function()
         if platform.windows then
             pending("Titan archive providers require ELF or Mach-O")
@@ -370,14 +370,11 @@ function read(): integer
 end
 ]])
         ok, output, why, code = compile(
-            workspace, consumer_source, "-v", "--static", "consumer.lib")
+            workspace, consumer_source, "-v", "consumer.lib")
         assert.falsy(ok, output)
         assert.truthy(output:find(selected_archive, 1, true), output)
         assert.truthy(output:find(
-            "staged provider pair for 'consumer.lib'", 1, true), output)
-        assert.truthy(output:find(
-            "type metadata for module 'protocol.api' differs", 1, true),
-            output)
+            "install its paired shared provider", 1, true), output)
         assert_absent(workspace .. "/consumer/lib.so")
         assert_absent(workspace .. "/consumer/lib.a")
         assert_absent(workspace .. "/consumer/lib.lua")
@@ -402,7 +399,7 @@ end
         assert_absent(workspace .. "/app")
     end)
 
-    it("rejects every missing selected-archive protocol before publication",
+    it("rejects every missing selected-archive protocol before executable publication",
        function()
         if platform.windows then
             pending("Titan archive providers require ELF or Mach-O")
@@ -430,13 +427,6 @@ end
         local provider_entry = assert(provider_archive.entries[modname])
 
         local consumer_source = workspace .. "/source"
-        write_file(consumer_source .. "/consumer/lib.titan", [[
-local api = import "protocol.api"
-
-function read(): integer
-    return api.stable(42)
-end
-]])
         write_file(consumer_source .. "/app.titan", [[
 local api = import "protocol.api"
 
@@ -480,20 +470,6 @@ end
             assert.equal(provider_entry.types, forged_entry.types)
 
             ok, output = compile(
-                workspace, consumer_source, "-v", "--static",
-                "consumer.lib")
-            assert.falsy(ok, protocol.name ..
-                " omission unexpectedly published a library pair:\n" ..
-                output)
-            assert.truthy(output:find(protocol.symbol, 1, true),
-                protocol.name .. " library diagnostic:\n" .. output)
-            assert_absent(workspace .. "/consumer/lib.so")
-            assert_absent(workspace .. "/consumer/lib.a")
-            assert_absent(workspace .. "/consumer/lib.lua")
-            assert_absent(workspace .. "/protocol/api.so")
-            assert_absent(workspace .. "/protocol/api.lua")
-
-            ok, output = compile(
                 workspace, consumer_source, "-v", "--static", "app")
             assert.falsy(ok, protocol.name ..
                 " omission unexpectedly published an executable:\n" ..
@@ -506,5 +482,56 @@ end
                 protocol.name .. " executable diagnostic:\n" .. output)
             assert_absent(workspace .. "/app")
         end
+    end)
+
+    it("accepts a legacy module by default but requires its inventory for strict static use", function()
+        if platform.windows then
+            pending("Titan archive providers require ELF or Mach-O")
+            return
+        end
+        local modname = "legacy"
+        local provider = workspace .. "/provider"
+        local provider_source = provider .. "/src"
+        write_file(provider_source .. "/legacy.titan", "const answer = 42\n")
+        local ok, output = compile(provider, provider_source, "-v", modname)
+        assert.truthy(ok, output)
+
+        local entry = scan_archive(provider .. "/legacy.a").entries[modname]
+        assert.same({}, entry.imports)
+        local legacy_payload = assert(staticmetadata.render(modname, entry.abi,
+            entry.types, entry.layouts))
+        local provider_c = provider_source .. "/legacy.c"
+        local csource = read_file(provider_c)
+        local _, first, last = metadata_initializer(csource, modname)
+        local legacy_c, legacy_o = workspace .. "/legacy.c", workspace .. "/legacy.o"
+        write_file(legacy_c, csource:sub(1, first - 1) ..
+            assert(staticmetadata.c_initializer(legacy_payload)) .. csource:sub(last + 1))
+        local argv = replace_argument(compile_command(output, provider_c), provider_c, legacy_c)
+        ok, output = run(replace_output(argv, legacy_o), workspace)
+        assert.truthy(ok, output)
+        local archive = workspace .. "/legacy.a"
+        make_archive(archive, legacy_o)
+        assert.is_nil(scan_archive(archive).entries[modname].imports)
+
+        local source = workspace .. "/src"
+        write_file(source .. "/app.titan", [[
+local legacy = import "legacy"
+
+function main(args: {string}): integer
+    return legacy.answer - 42
+end
+]])
+        for _, flags in ipairs({ { "--static" }, { "--static", "-c" } }) do
+            ok, output = compile(workspace, source, "app", table.unpack(flags))
+            assert.is_false(ok, output)
+            assert.truthy(output:find(archive, 1, true), output)
+            assert.truthy(output:find("module 'legacy' lacks an import inventory; rebuild the archive",
+                1, true), output)
+            assert_absent(workspace .. "/app")
+        end
+        ok, output = compile(workspace, source, "app")
+        assert.truthy(ok, output)
+        ok, output = run({ workspace .. "/app" }, workspace)
+        assert.truthy(ok, output)
     end)
 end)

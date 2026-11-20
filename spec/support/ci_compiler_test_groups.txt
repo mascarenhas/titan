@@ -158,6 +158,7 @@ compiler spec/coder/interfaces_spec.lua 10.678 41.375
 compiler spec/coder/jobserver_spec.lua 35.270 -
 compiler spec/coder/line_directives_spec.lua 1.122 6.580
 stdlib spec/coder/link_certification_spec.lua 1.000 19.630
+stdlib spec/coder/linked_provider_composition_spec.lua 1.000 84.558
 compiler spec/coder/lto_spec.lua 4.471 7.261
 compiler spec/coder/map_metamethods_spec.lua 1.220 4.781
 stdlib spec/coder/multi_module_grouping_spec.lua 2.325 3.802

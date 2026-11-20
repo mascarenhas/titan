@@ -144,7 +144,7 @@ describe("static facade with a producer-dynamic nominal owner", function()
         if workspace then remove_tree(workspace) end
     end)
 
-    it("uses a visible owner archive only for type recovery", function()
+    it("uses a producer-dynamic owner as a transitive archive only in strict static mode", function()
         if platform.windows then
             pending("Titan archive providers require ELF or Mach-O")
             return
@@ -202,11 +202,9 @@ end
         assert.truthy(facade.entries["dynamic.facade"].types:find(
             "dynamic.owner.Box", 1, true))
 
-        -- The facade records its producer-selected DSO fallback for this edge.
-        -- Leave only the same-interface owner archive visible while compiling
-        -- the consumer: neither the producer DSO nor source may accidentally
-        -- satisfy contextual type recovery. The archive must still remain a
-        -- type-only input rather than becoming an ordinary link input.
+        assert.same({ "dynamic.owner" }, facade.entries["dynamic.facade"].imports)
+        -- Hide both the source and producer's shared provider. Static
+        -- closure must diagnose the absent archive before native linking.
         local hidden_owner_dso = workspace .. "/dynamic/owner.runtime-image"
         assert.truthy(os.rename(owner_dso, hidden_owner_dso))
         assert.truthy(os.remove(
@@ -227,9 +225,9 @@ end
         ok, output = compile(
             workspace, source_root, "--static", "app")
         assert.falsy(ok)
-        assert.truthy(output:find(
-            "invalid type 'dynamic.owner.Box'", 1, true),
-            output)
+        assert.truthy(output:find("--static requires an archive", 1, true), output)
+        assert.truthy(output:find("dynamic.owner", 1, true), output)
+        assert.truthy(output:find("dynamic.facade", 1, true), output)
         assert.is_nil(lfs.attributes(workspace .. "/app", "mode"))
 
         write_file(owner_archive, owner_archive_bytes)
@@ -238,53 +236,18 @@ end
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
-        local generated = read_file(source_root .. "/app.c")
-        assert.truthy(generated:find(
-            'titan_module_provider(L, "dynamic.owner", NULL)', 1, true),
-            generated)
-        assert.match(
-            'titan_module_symbol%s*%(%s*L,%s*dynamic_owner_provider,%s*' ..
-                symbol_literal("dynamic_owner_\\u2133_Box_\\u2131_add_titanmethod") ..
-                '%s*%)',
-            generated)
-        assert.truthy(generated:find(
-            'lua_getfield(L, LUA_REGISTRYINDEX, "Titan module dynamic.owner")',
-            1, true), generated)
-
-        local final_link
-        for line in output:gmatch("[^\r\n]+") do
-            if line:find("/synthetic/app__entrypoint.o", 1, true) and
-               not line:find("/synthetic/app__entrypoint.c", 1, true) then
-                assert.is_nil(final_link, output)
-                final_link = line
-            end
-        end
-        assert.truthy(final_link, output)
-        assert.truthy(final_link:find(facade_archive, 1, true), final_link)
-        assert.falsy(final_link:find(owner_archive, 1, true), final_link)
-        assert.falsy(final_link:find(owner_dso, 1, true), final_link)
-        assert.falsy(output:find(owner_archive, 1, true), output)
-
-        -- This fresh executable has no canonical owner, so it needs the
-        -- producer-selected DSO fallback at runtime. The fallback can only
-        -- come from that DSO: the type-only archive and the sibling facade
-        -- image are gone, and providers ship without Lua shims.
-        assert.truthy(os.remove(owner_archive))
+        assert.truthy(output:find(owner_archive, 1, true), output)
         assert.truthy(os.remove(workspace .. "/dynamic/facade.so"))
-        -- The cutover ships no generated shims beside a provider; assert that
-        -- rather than staging files that no longer exist.
-        assert.is_nil(lfs.attributes(workspace .. "/dynamic/facade.lua"))
-        assert.is_nil(lfs.attributes(workspace .. "/dynamic/owner.lua"))
-        ok, output, why, code =
-            run({ workspace .. "/app" }, workspace)
-        assert.falsy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        assert.truthy(output:find("dynamic/owner.so", 1, true), output)
+        ok, output = run({ workspace .. "/app" }, workspace)
+        assert.truthy(ok, output)
 
+        -- In a default application an archive-only facade still satisfies
+        -- the written import, but its unselected external owner stays a DSO.
         assert.truthy(os.rename(hidden_owner_dso, owner_dso))
-        ok, output, why, code =
-            run({ workspace .. "/app" }, workspace)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
+        ok, output = compile(workspace, source_root, "-v", "app")
+        assert.truthy(ok, output)
+        assert.falsy(output:find(owner_archive, 1, true), output)
+        ok, output = run({ workspace .. "/app" }, workspace)
+        assert.truthy(ok, output)
     end)
 end)
