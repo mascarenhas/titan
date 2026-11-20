@@ -9808,7 +9808,9 @@ const broken: integer = "not an integer"
         local filename = binary .. "/meter.a"
         local record = types.Record(quantity.fqtn, {
             types.Field(quantity.fqtn, "count", types.Integer(), 0, false),
-        }, {}, {}, 1)
+        }, {
+            new = types.StaticMethod(quantity.fqtn, "new", { types.Integer() }, { quantity }, nil, nil, { "count" }),
+        }, {}, 1)
         local meter = types.Module("meter", { types.ModuleMember("meter", "Quantity", record, nil) })
         write_file(source .. "/meter.titan", "record Quantity alternative: integer end\n")
         write_file(source .. "/early.titan", 'local meter = import "meter"\nlocal via = import "via"\n')
@@ -9823,7 +9825,7 @@ const broken: integer = "not an integer"
             local loader = driver.defaultloader({}, { context = context })
             local modtype, errors = checker.checkimport(client, loader)
             assert.truthy(modtype, errors)
-            assert.same({}, errors)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
             assert.equal("static", driver.imported.meter.kind)
             assert.equal(filename, driver.imported.meter.static_archive)
             assert.equal("count", types.registry[quantity.fqtn].fields[1].name)

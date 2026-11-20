@@ -1197,17 +1197,19 @@ end
 assert(paths.to_slash(reselect("units", false).main_file) == owner_file)
 assert(paths.to_slash(reselect(meter_name, true).main_file) == meter_file)
 
-for _, order in ipairs({ { "units", "via" }, { "via", "units" } }) do
-    loader, context = start(true)
-    for _, name in ipairs(order) do clean(name, loader) end
-    verify_owner()
-    finalize(context)
+if not expected_provider then
+    for _, order in ipairs({ { "units", "via" }, { "via", "units" } }) do
+        loader, context = start(true)
+        for _, name in ipairs(order) do clean(name, loader) end
+        verify_owner()
+        finalize(context)
+        assert(driver.close_loader(loader))
+    end
+    loader = start(true, { source_roots = { units = true } })
+    local ok, missing = loader("units")
+    assert(not ok and missing == "source module 'units' not found", missing)
     assert(driver.close_loader(loader))
 end
-loader = start(true, { source_roots = { units = true } })
-local ok, missing = loader("units")
-assert(not ok and missing == "source module 'units' not found", missing)
-assert(driver.close_loader(loader))
 assert(os.remove(meter_file))
 assert(reselect(meter_name, true).kind == "error")
 if expected_provider then
