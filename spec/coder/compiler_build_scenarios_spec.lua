@@ -958,6 +958,20 @@ function main(args: {string}): integer
   return model.Cell(42).serial - 42
 end
 ]])
+        put_source("wrapper/wrap.titan", [[
+local via = import "via"
+
+function count(): integer
+  return via.measure().count
+end
+]])
+        put_source("app/wrapped.titan", [[
+local wrap = import "wrap"
+
+function main(args: {string}): integer
+  return wrap.count() - 7
+end
+]])
         local collector = require("spec.support.luacov_children").new(
             REPOSITORY, REPOSITORY, workspace .. "/child-coverage")
         local function built(tree, output, ...)
@@ -1029,6 +1043,45 @@ end
         assert.not_matches("titan_linked_entries", launcher_source(control, "model_only"), 1, true)
         run("model_only", control)
         publish(build_dir .. "/library")
+        local wrapper = build_dir .. "/wrapper"
+        local objects = built("wrapper", wrapper, "-c", "wrap")
+        assert.equal(1, #objects.module_compiles, objects.raw)
+        assert.is_false(exists(wrapper .. "/wrap" .. SHARED_SUFFIX))
+        assert.is_false(exists(wrapper .. "/wrap.a"))
+        for _, dependency in ipairs({ "meter", "units" }) do
+            assert.is_false(exists(wrapper .. "/" .. dependency .. ".o"))
+        end
+        local object = wrapper .. "/wrap.o"
+        local metadata = assert(objectmetadata.read(read(object), object)).object_metadata
+        assert.same({ "meter" }, metadata.source_requirements)
+        assert.equal("global", metadata.bindings.units)
+        assert.is_nil(metadata.bindings.meter)
+
+        local wrapped_library = built("wrapper", wrapper, "wrap")
+        assert.truthy(wrapped_library.object_hits.wrap, wrapped_library.raw)
+        assert.same({}, wrapped_library.module_compiles)
+        wrapped_library = built("wrapper", wrapper, "wrap")
+        assert.truthy(wrapped_library.object_hits.wrap, wrapped_library.raw)
+        assert.truthy(next(wrapped_library.link_hits), wrapped_library.raw)
+        assert.same({}, wrapped_library.module_compiles)
+        local image = wrapper .. "/wrap" .. SHARED_SUFFIX
+        local inspected, exports = run_command(platform.windows and
+            { "llvm-readobj", "--coff-exports", image } or { "nm", "-g", image }, workspace)
+        assert.is_true(inspected, exports)
+        assert.matches("wrap_init", exports, 1, true)
+        for _, dependency in ipairs({ "meter", "units", "via" }) do
+            assert.not_matches(dependency .. "_init", exports, 1, true)
+        end
+        install(wrapper, "wrap" .. SHARED_SUFFIX)
+        if not platform.windows then
+            local archive = assert(staticmetadata.scan_archive(wrapper .. "/wrap.a"))
+            assert.same({ "wrap" }, archive.key_order)
+            assert.same({ "meter" }, archive.entries.wrap.source_requirements)
+            install(wrapper, "wrap.a")
+        end
+        local wrapped = build_dir .. "/wrapped"
+        built("app", wrapped, "wrapped")
+        run("wrapped", wrapped)
         local dynamic = build_dir .. "/dynamic"
         local cold = built("app", dynamic, "nominal")
         assert.truthy(cold.object_misses.units, cold.raw)

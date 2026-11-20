@@ -847,14 +847,46 @@ end
             assert.is_nil(lfs.attributes(root .. "/" .. output .. "/units.o"))
             write(root .. "/providers/" .. name .. ".a", archive)
         end
-        write(root .. "/app/demo.titan", [[
+        write(root .. "/wrapper/wrap.titan", [[
 local left = import "left"
+
+type Ticket = left.Ticket
+
+function next(): Ticket
+  return left.next()
+end
+
+function code(ticket: Ticket): integer
+  return ticket:code()
+end
+]])
+        local wrapper = run_at("wrapper", "built-wrap", nil, "--incremental", "-v", "wrap")
+        assert.is_true(wrapper.ok, wrapper.output)
+        local wrapped = read(root .. "/built-wrap/wrap.a")
+        local archive = assert(staticmetadata.scan_bytes(wrapped, "wrap", {
+            target = fixtures.fingerprint(),
+        }))
+        -- Browser archives retain compiled dependencies, but not the
+        -- installed sources behind the checked requirement.
+        assert.same({ "left", "wrap" }, archive.key_order)
+        assert.same({ "counter" }, archive.entries.wrap.source_requirements)
+        for _, name in ipairs({ "counter", "units" }) do
+            assert.is_nil(lfs.attributes(root .. "/built-wrap/" .. name .. ".o"))
+        end
+        wrapper = run_at("wrapper", "built-wrap", nil, "--incremental", "-v", "wrap")
+        assert.is_true(wrapper.ok, wrapper.output)
+        assert.matches("Titan object hit wrap:", wrapper.output, 1, true)
+        assert.matches("Titan link hit", wrapper.output, 1, true)
+        write(root .. "/providers/wrap.a", wrapped)
+        assert(os.remove(root .. "/providers/left.a"))
+        write(root .. "/app/demo.titan", [[
+local wrap = import "wrap"
 local right = import "right"
 
 function main(args: {string}): integer
-  local first = left.next()
-  if first.serial ~= 41 or first:code() ~= 141 or right.current() ~= 41 then return 1 end
-  local second = left.next()
+  local first = wrap.next()
+  if first.serial ~= 41 or wrap.code(first) ~= 141 or right.current() ~= 41 then return 1 end
+  local second = wrap.next()
   if second.serial ~= 42 or second:code() ~= 142 or right.current() ~= 42 then return 2 end
   return 0
 end

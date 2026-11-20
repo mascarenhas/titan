@@ -186,14 +186,18 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    detects cross-boundary cycles (`cyclic source requirement: ...`) across all
    targets. In a library or prospective-library `-c` build (non-`main`,
    non-`--test`, non-`--static`, where preflight sets `plan.link_kind =
-   "library"`), `perf.plan_source_obligations` loads only compiled-provider
-   source requirements whose nominal owners appear in the provider's public
-   interface (`perf.exposed_source_owners`), and `perf.classify_library_sources`
-   marks modules outside the owned authored closure with `module.check_only =
-   true` (separating `check_only_sources` from `check_only_binaries`, which
-   stay out of the library link while contributing verified `"global"` bindings
-   and public layouts when owned code uses their types) while rejecting
-   explicit `.titan` imports across the installed-source library boundary.
+   "library"`), `perf.plan_source_obligations` starts from the same reached
+   per-member `source_requirements` frontiers (without archive demand),
+   requiring actual source for each recorded obligation while resolving each
+   loaded source's own imports through ordinary lookup so transitive nominal
+   owners defined deeper than a compiled provider's folded frontier remain
+   available for typechecking; `perf.classify_library_sources` then marks
+   modules outside the owned authored closure with `module.check_only = true`
+   (separating `check_only_sources` from `check_only_binaries`, which stay out
+   of the library link while contributing verified `"global"` bindings and public
+   layouts when owned code uses their types), keeps the published folded
+   frontier unchanged, and rejects explicit `.titan` imports across the
+   installed-source library boundary.
    `build.run` dispatches `check_only` source modules to workers without
    invalidating `.o` files or reserving outputs; `compile_planned_module`
    returns an in-memory encoded interface (`objectmetadata.encode` with erased

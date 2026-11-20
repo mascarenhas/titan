@@ -13886,24 +13886,9 @@ function perf.planned_main(modules, options)
     return main
 end
 
--- Compiled interfaces contain only public declarations. Discover which
--- source obligations are also needed to recover the exposed nominals.
-function perf.exposed_source_owners(modtype, requirements)
-    local wanted, owners, seen = {}, {}, {}
-    for _, name in ipairs(requirements) do wanted[name] = true end
-    local function visit(node)
-        if type(node) ~= "table" or seen[node] then return end
-        seen[node] = true
-        local fqtn = node._tag == "Type.Nominal" and node.fqtn or
-            node._tag == "Type.GenericAlias" and node.target_owner_fqtn
-        local owner = fqtn and fqtn:match("^(.*)%.[^.]+$")
-        if owner and wanted[owner] then owners[owner] = true end
-        for _, child in pairs(node) do visit(child) end
-    end
-    visit(modtype)
-    return owners
-end
-
+-- A requirement names the start of a source closure. Even a library must
+-- check that closure: exported nominals can belong to any of its modules.
+-- Ownership is classified after discovery.
 function perf.plan_source_obligations(context, plan, link_kind, native)
     local ordered = require("titan-compiler.coder.core").coder._sorted_keys
     local missing
@@ -13911,12 +13896,9 @@ function perf.plan_source_obligations(context, plan, link_kind, native)
     while true do
         local requirements = {}
         for _, name in ipairs(ordered(plan.modules)) do
-            local selected = plan.modules[name]
-            if selected.source_requirements then
-                local needed = link_kind and selected.source_requirements or
-                    ordered(perf.exposed_source_owners(driver.imported[name].type,
-                        selected.source_requirements))
-                for _, dependency in ipairs(needed) do
+            local required = plan.modules[name].source_requirements
+            if required then
+                for _, dependency in ipairs(required) do
                     requirements[dependency] = requirements[dependency] or name
                 end
             end
