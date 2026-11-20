@@ -503,7 +503,7 @@ The author-facing packaging guide and complete rockspec example live in
   an archive-only dependency or compile source, while Unix `--static`
   standalone and `--test` executables embed the full reached Titan dependency
   closure from `.a` archives alongside source compiled in the application (with
-  no fallback to shared Titan providers and a link-time diagnostic when an
+  no fallback to shared Titan providers and a build error when an
   external prebuilt dependency lacks an archive and is not satisfied by
   application-compiled source; `--static` governs Titan modules and does not
   force `libc` or external native libraries to link statically). Relative payload entry names must use unambiguous portable

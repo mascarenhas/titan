@@ -361,8 +361,8 @@ selects the active compiler's slice.
 Build a library or canonical bundle by listing its source roots, for example
 `titanc --tree src -o out pkg.left pkg.right`. The pair contains those
 modules and their source helpers from authored `--tree` roots, not any
-selected external compiled provider. A dependency found only as installed
-source is refused, as described above
+selected external compiled provider. A dependency selected from the implicit
+installed source fallback is refused, as described above
 ([titan#427](https://github.com/mascarenhas/titan/issues/427)). An external
 compiled dependency must have a shared provider to build the pair; an archive
 alone is not sufficient. `--static` is not a library-production mode.
