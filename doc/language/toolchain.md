@@ -258,7 +258,16 @@ browser builds). `--test-dir` scans only the specified directory inside an
 authored `--tree` root and never scans the installed SDK automatically.
 Whenever a build selects an installed source through the fallback,
 `-o`/`--output` is required so all generated files land in the consumer's
-output directory by logical module name.
+output directory by logical module name. Separately from the positional-root
+rule above, compiling an ordinary binary library fails if a dependency resolves
+only through the implicit installed source fallback (avoiding silently copying
+another rock's module into the library's provider; install that dependency's
+compiled provider or publish the library as source-only—see
+[Source-only modules](modules.md#source-only-modules) and
+[titan#427](https://github.com/mascarenhas/titan/issues/427)). Same-repo
+authored sources under `--tree` still build together into a library, and
+standalone (ordinary or `--static`) applications and `--test` builds still
+compile installed fallback sources into `--output`.
 
 Within each compiled format, lookup is **path-root first, shallowest prefix to
 exact module**. For logical module `a.b.c`, one directory is probed as:

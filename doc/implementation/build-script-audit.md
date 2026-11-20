@@ -493,7 +493,9 @@ The author-facing packaging guide and complete rockspec example live in
   no `dist/bin/`. Normal native module packages build their own provider pair
   without `--static` (`.so`/`.a` on Unix, `.dll` only on Windows) and declare
   package dependencies rather than embedding the standard library or other
-  dependencies; native `--static` library builds are reserved for canonical
+  dependencies (and compiling a binary library fails if a dependency resolves
+  only through the implicit installed source fallback; see
+  [Source-only modules](../language/modules.md#source-only-modules)); native `--static` library builds are reserved for canonical
   bundles of related modules (such as the standard library, which other
   packages never embed), while Unix `--static` standalone and `--test`
   executables embed the complete transitive Titan dependency closure from `.a`

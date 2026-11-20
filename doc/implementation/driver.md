@@ -71,7 +71,14 @@ All modules, including the standard library, use the same two path strings:
   installed source through that implicit fallback requires `-o`/`--output` so
   generated files land under the consumer's output tree and `titanc` neither
   writes nor locks in the implicit fallback root; builds that do not select an
-  installed source keep their existing behavior. Explicit
+  installed source keep their existing behavior. Separately from the
+  positional-root restriction, compiling an ordinary binary library rejects a
+  dependency that resolves only through the implicit installed source fallback
+  rather than copying another rock's module into the library's provider
+  (same-repo authored `--tree` sources still build into a library together,
+  and ordinary/`--static` executables and `--test` builds still compile
+  installed fallback sources into `--output`; see
+  [titan#427](https://github.com/mascarenhas/titan/issues/427)). Explicit
   `driver.resolve_source(context, modname, source_path)` calls, closed-world
   and explicit analysis roots, and `--test-dir` remain exact and never scan the
   installed SDK automatically.
