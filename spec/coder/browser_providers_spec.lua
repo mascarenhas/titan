@@ -847,6 +847,72 @@ end
             assert.is_nil(lfs.attributes(root .. "/" .. output .. "/units.o"))
             write(root .. "/providers/" .. name .. ".a", archive)
         end
+
+        -- Publish the archive above with the real toolchain, then check its
+        -- public nominal through a relocated semantic SDK, not the compiler's
+        -- native installation or the browser archive directory for source.
+        local selected_prefix = root .. "/semantic SDK"
+        local selected_paths = fixtures.paths(selected_prefix)
+        local published_paths = fixtures.paths(info.prefix)
+        for _, filename in ipairs({ "analysis-target", "titan.a", "absent-modules" }) do
+            write(selected_paths.titan_bin .. "/" .. filename,
+                read(published_paths.titan_bin .. "/" .. filename))
+        end
+        local selected_sources = selected_prefix .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION
+        write(selected_sources .. "/counter.native.titan", "not Titan for the browser\n")
+        write(selected_sources .. "/counter.browser.titan", read(source))
+        write(selected_sources .. "/units.browser.titan", [[
+record Ticket
+  serial: integer
+end
+
+function Ticket:code(): integer
+  return self.serial + 100
+end
+]])
+        write(root .. "/semantic/inspect.titan", [[
+local left = import "left"
+function serial(): integer return left.next().serial end
+]])
+        local snippet = string.format([=[
+local driver = require "titan-compiler.driver"
+local checker = require "titan-compiler.checker"
+local types = require "titan-compiler.types"
+local strategy = require("titan-compiler.io").new_sync()
+function strategy:run(argv)
+    error("semantic archive checking attempted to run " .. table.concat(argv, " "))
+end
+function strategy:executable() return false end
+local handle = assert(driver.browser_analysis_target(%q, { io = strategy }))
+local context = driver.new_resolver_context({
+    target = "browser", analysis_only = true, browser_analysis_target = handle,
+    io = strategy, transient_caches = true,
+})
+driver.TITAN_SOURCE_PATH = %q
+local loader = driver.defaultloader({}, { context = context })
+local modtype, errors = checker.checkimport("inspect", loader)
+assert(modtype, errors)
+assert(#errors == 0, table.concat(errors, "\n"))
+local finalized, diagnostics = driver.finalize_resolver_context(context)
+assert(finalized, diagnostics and table.concat(diagnostics, "\n"))
+local entries = driver.imported
+assert(entries.left.kind == "static" and entries.left.static_archive == %q)
+assert(entries.left.layout_inventory == nil and entries.left.deps.counter)
+assert(entries.counter.filename == %q and entries.counter.deps.units)
+assert(entries.units.filename == %q and entries.units.ast._analysis_only)
+assert(types.registry["units.Ticket"].fields[1].name == "serial")
+assert(driver.close_loader(loader))
+]=], selected_prefix, root .. "/semantic", root .. "/providers/left.a",
+            selected_sources .. "/counter.browser.titan", selected_sources .. "/units.browser.titan")
+        local argv = lua_argv()
+        argv[#argv + 1], argv[#argv + 2] = "-e", snippet
+        local checked = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
+        assert.is_true(checked.ok, checked.output or checked.diagnostic)
+        for _, name in ipairs({ "counter", "units" }) do
+            assert.is_nil(lfs.attributes(selected_sources .. "/" .. name .. ".o"))
+            assert.is_nil(lfs.attributes(selected_sources .. "/" .. name .. ".c"))
+        end
+
         write(root .. "/wrapper/wrap.titan", [[
 local left = import "left"
 

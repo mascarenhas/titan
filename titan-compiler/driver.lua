@@ -3035,7 +3035,39 @@ local function source_resolution_in_root(root, modname, context)
     }
 end
 
-local function resolve_source(paths, modname, context)
+function perf.semantic_source_root(context)
+    local browser = context.browser_semantics
+    if browser then
+        return path.join(browser.paths.root, "lib/titan/" .. driver.TITAN_LIBRARY_VERSION)
+    end
+    return driver.INSTALL_PATHS and driver.INSTALL_PATHS.titan_bin
+end
+
+function perf.source_requirement_error(exposer, name, err)
+    return "module '" .. exposer .. "' requires source for '" .. name ..
+        "': install its source package, add its checkout to --tree, " ..
+        "or rebuild the referring library against its compiled provider (" ..
+        tostring(err) .. ")"
+end
+
+perf.source_requirement_request = {}
+function perf.load_source_requirement(loader, exposer, name, selected, previous)
+    if selected and (selected.kind == "dynamic" or selected.kind == "static") then
+        local provider = selected.static_archive or selected.archive or selected.filename or selected.file
+        return nil, "module '" .. exposer .. "' requires source for '" .. name ..
+            "', which also resolved to compiled provider '" .. provider ..
+            "'; remove the conflicting provider or rebuild the referring library against it"
+    end
+    if previous then return nil, perf.source_requirement_error(exposer, name, previous) end
+    local ok, result, errors = loader(name, perf.source_requirement_request)
+    if not ok or #errors ~= 0 then
+        local detail = ok and table.concat(errors, "\n") or result
+        return nil, perf.source_requirement_error(exposer, name, detail), detail
+    end
+    return true
+end
+
+local function resolve_source(paths, modname, context, semantic_fallback)
     local target, target_error = driver.context_target(context)
     if not target then return nil, target_error end
     context.source_labels = context.source_labels or driver.target_selection_labels(target)
@@ -3043,8 +3075,10 @@ local function resolve_source(paths, modname, context)
         local source, err = source_resolution_in_root(root, modname, context)
         if source or err then return source, err end
     end
-    if not paths and context.installed_source_root then
-        local source, err = source_resolution_in_root(context.installed_source_root, modname, context)
+    local installed = not paths and (context.installed_source_root or
+        semantic_fallback and perf.semantic_source_root(context))
+    if installed then
+        local source, err = source_resolution_in_root(installed, modname, context)
         if (source or err) and context.authored_source_roots and context.authored_source_roots[modname] then
             return nil, "module '" .. modname .. "' is installed in the SDK; " ..
                 "titanc builds only authored roots (pass --tree to a checkout of it)"
@@ -4701,16 +4735,16 @@ local function probe_compiled_interface(modname, binf, options)
                 "' has invalid nominal layout metadata for module '" ..
                 modname .. "': " .. tostring(layout_err)
         end
-        local symbol = prefix .. "_source_requirements"
-        local fn, load_error, stage = loadlib(binf, symbol)
-        if fn then
-            local bytes, err = one_metadata_result(fn, "compiled module '" .. symbol .. "'")
-            if not bytes then return "error", err end
-            source_requirements, err = staticmetadata.decode_source_requirements(modname, bytes)
-            if not source_requirements then return "error", binf .. ":" .. symbol .. ": " .. err end
-        elseif stage ~= nil and stage ~= "init" then
-            return "error", "cannot inspect '" .. symbol .. "' in '" .. binf .. "': " .. tostring(load_error)
-        end
+    end
+    local symbol = prefix .. "_source_requirements"
+    local fn, load_error, stage = loadlib(binf, symbol)
+    if fn then
+        local bytes, err = one_metadata_result(fn, "compiled module '" .. symbol .. "'")
+        if not bytes then return "error", err end
+        source_requirements, err = staticmetadata.decode_source_requirements(modname, bytes)
+        if not source_requirements then return "error", binf .. ":" .. symbol .. ": " .. err end
+    elseif stage ~= nil and stage ~= "init" then
+        return "error", "cannot inspect '" .. symbol .. "' in '" .. binf .. "': " .. tostring(load_error)
     end
     -- Provider-relative binding lives on the module view. Keep it separate
     -- from the shared decoded graph, including when two paths name one inode.
@@ -5446,6 +5480,14 @@ function driver.defaultloader(static_deps, options)
             or type(worker_plan.modules) ~= "table") then
         error("worker_plan must be a build plan descriptor", 2)
     end
+    -- titanc's in-process --print-ast check also borrows this loader, but
+    -- its source election has already been made by the build preflight.
+    local semantic_source_recovery = not planning and not worker_plan and
+        not options.incremental and not options.coverage and not context.authored_source_roots and
+        not context.completion_closed_world
+    local source_requirement_depth = 0
+    local source_frontiers = {}
+    local checked_requirements = {}
     local object_loaded = {}
     local source_overrides = options.source_overrides or {}
     local known_source_modules = options.known_source_modules or {}
@@ -6489,7 +6531,7 @@ function driver.defaultloader(static_deps, options)
         -- A string failure (a constituent vanished after it was read) leaves
         -- the object uncertified, so it can only miss later.
         local source_certificate
-        if not source.contents and not context.analysis_only then
+        if not source.contents and not context.analysis_only and source_requirement_depth == 0 then
             local contents = {}
             for index, filename in ipairs(source.files) do
                 contents[filename] = inputs[index]
@@ -6527,6 +6569,9 @@ function driver.defaultloader(static_deps, options)
                 modname, tostring(manifest_error))
         else
             entry.source_manifest = source_manifest
+        end
+        if semantic_source_recovery and #errors > 0 then
+            entry._check_errors = errors
         end
         driver.imported[modname] = entry
         static_deps[modname] = true
@@ -6599,10 +6644,121 @@ function driver.defaultloader(static_deps, options)
         return entry.public_type
     end
 
+    local function matches_required_source(entry, source)
+        if type(entry) ~= "table" or entry.kind ~= "source"
+                or type(entry.source_files) ~= "table"
+                or entry.filename ~= source.main or #entry.source_files ~= #source.files then
+            return false
+        end
+        for index, filename in ipairs(source.files) do
+            if entry.source_files[index] ~= filename then return false end
+        end
+        return true
+    end
+
+    local function publish_requirement_edges(exposing)
+        -- Publish the edge on the selected member that led here, not on the
+        -- source module whose checker happened to request its interface.
+        local consumer = exposing.requirement_consumer or exposing
+        consumer.deps = consumer.deps or {}
+        for _, required in ipairs(exposing.source_requirements) do
+            consumer.deps[required] = true
+        end
+    end
+
+    -- These are dependency roots recorded by this exact compiled member.
+    -- Let the ordinary loader check their imports; never look for the
+    -- nominal's logical owner in the source tree by name.
+    local function check_source_frontier(exposing, name, identity, active_loader)
+        publish_requirement_edges(exposing)
+
+        local key = identity .. "\0" .. name
+        local frontier = source_frontiers[key]
+        if frontier then
+            if frontier.checking then
+                return nil, "circular reference while checking required source of '" .. name .. "'"
+            end
+            return frontier.reached, frontier.error
+        end
+        frontier = { checking = true }
+        source_frontiers[key] = frontier
+
+        dependency_stack[#dependency_stack + 1] = false
+        source_requirement_depth = source_requirement_depth + 1
+        local err
+        local roots = exposing.source_requirements
+        for _, required in ipairs(roots) do
+            local selected = driver.imported[required]
+            local checked = checked_requirements[required]
+            if not checked or checked.error or checked.entry ~= selected then
+                local ok, failure, detail = perf.load_source_requirement(
+                    active_loader, name, required, selected, checked and checked.error)
+                if ok then
+                    checked_requirements[required] = { entry = driver.imported[required] }
+                else
+                    if detail then checked_requirements[required] = { error = detail } end
+                    err = failure
+                end
+            end
+            if err then break end
+        end
+
+        local reached = {}
+        local function visit(dependency)
+            if reached[dependency] then return true end
+            local entry = driver.imported[dependency]
+            if not entry then
+                -- A clean retained source entry can carry dependencies
+                -- which this attempt has not yet materialized.
+                local modtype, errors = checker.checkimport(dependency, active_loader)
+                if not modtype then return nil, errors end
+                if #errors ~= 0 then return nil, table.concat(errors, "\n") end
+                entry = driver.imported[dependency]
+            elseif entry == CIRCULAR_MARK then
+                return nil, "circular reference to module '" .. dependency .. "'"
+            elseif entry._check_errors then
+                return nil, table.concat(entry._check_errors, "\n")
+            end
+            reached[dependency] = entry
+            if entry.ast then
+                -- Raw source deps track static inputs; use written imports
+                -- here to include selected dynamic providers as well.
+                for _, node in ipairs(entry.ast) do
+                    if node._tag == "Ast.TopLevelImport" and not node._ignore then
+                        local ok, child_error = visit(node.modname)
+                        if not ok then return nil, child_error end
+                    end
+                end
+            elseif entry.deps then
+                for child in pairs(entry.deps) do
+                    local ok, child_error = visit(child)
+                    if not ok then return nil, child_error end
+                end
+            end
+            return true
+        end
+        if not err then
+            for _, required in ipairs(roots) do
+                local ok, closure_error = visit(required)
+                if not ok then
+                    err = perf.source_requirement_error(name, required, closure_error)
+                    break
+                end
+            end
+        end
+        source_requirement_depth = source_requirement_depth - 1
+        dependency_stack[#dependency_stack] = nil
+        frontier.checking = nil
+        frontier.error = err
+        if err then return nil, err end
+        frontier.reached = reached
+        return reached
+    end
+
     local function recover_contextual_owner(modname, request, active_loader)
         local exposer = request and request.exposer
-        local exposing_name = type(exposer) == "table" and exposer.name or
-            exposer
+        local exposing_name = type(exposer) == "table" and
+            (exposer.name or exposer.type.name) or exposer
         local exposing = type(exposer) == "table" and exposer or
             (exposing_name and driver.imported[exposing_name])
         if not exposing or exposing == CIRCULAR_MARK or
@@ -6630,21 +6786,25 @@ function driver.defaultloader(static_deps, options)
         local cached = context.contextual_types[cache_key]
         if cached then
             if cached.error then return false, cached.error end
+            if cached.info and cached.info.kind == "external_source" then
+                publish_requirement_edges(exposing)
+                return true, cached.type, {}, cached.info
+            end
             context.native_interface_types[modname] = cached.type
             remember_nominal_layouts(context, cached.layout_inventory)
             remember_used_compiled_interface(
                 context, modname, cached.type)
-            return true, cached.type, {}
+            return true, cached.type, {}, cached.info
         end
 
         -- `layouts`/`linked` describe the recovered owner for object
         -- certificates: its provider's encoded layouts and whether the
         -- exposer carries it into the same image.
         local function remember_type(
-                modtype, resolved, ordinary_lookup, inventory, layouts, linked)
+                modtype, resolved, ordinary_lookup, inventory, layouts, linked, info)
             inventory = inventory or resolved.layout_inventory
             context.contextual_types[cache_key] = {
-                type = modtype, layout_inventory = inventory,
+                type = modtype, layout_inventory = inventory, info = info,
             }
             remember_nominal_layouts(context, inventory,
                 resolved.static_archive or resolved.filename)
@@ -6665,7 +6825,19 @@ function driver.defaultloader(static_deps, options)
                     linked = linked,
                 }
             end
-            return true, modtype, {}
+            return true, modtype, {}, info
+        end
+
+        local function carried_member(resolved, modtype, metadata)
+            if semantic_source_recovery and not exposing.dormant and metadata.source_requirements then
+                return { nominal_exposer = {
+                    name = modname, kind = resolved.kind, type = modtype,
+                    filename = resolved.filename, static_archive = resolved.static_archive,
+                    static_provider = resolved.static_provider,
+                    source_requirements = metadata.source_requirements,
+                    requirement_consumer = exposing.requirement_consumer or exposing,
+                } }
+            end
         end
 
         if exposing.kind == "static" or exposing.kind == "embedded" then
@@ -6682,7 +6854,8 @@ function driver.defaultloader(static_deps, options)
                 end
                 return remember_type(entry.type, exposing, false,
                     entry.layout_inventory, entry.layouts,
-                    exposing.kind == "static" and not semantic_only)
+                    exposing.kind == "static" and not semantic_only,
+                    carried_member(exposing, entry.type, entry))
             end
         elseif exposing.kind == "dynamic" then
             local status, value, metadata =
@@ -6691,7 +6864,8 @@ function driver.defaultloader(static_deps, options)
                 add_native_constraint(context, modname, "dynamic-carried",
                     exposing.filename, exposing_name)
                 return remember_type(value, exposing, false,
-                    metadata.layout_inventory, metadata.layouts, false)
+                    metadata.layout_inventory, metadata.layouts, false,
+                    carried_member(exposing, value, metadata))
             elseif status == "error" then
                 context.contextual_types[cache_key] = { error = value }
                 return false, value
@@ -6710,7 +6884,53 @@ function driver.defaultloader(static_deps, options)
             if loaded == false then return false, err end
             ordinary = driver.imported[modname]
         end
-        if ordinary and ordinary ~= CIRCULAR_MARK then
+        if ordinary == CIRCULAR_MARK then ordinary = nil end
+        local requirements = semantic_source_recovery and exposing.source_requirements
+        local required_owner
+        if requirements then
+            for _, required in ipairs(requirements) do
+                if required == modname then
+                    required_owner = true
+                    break
+                end
+            end
+        end
+
+        -- Keep the historical binary-only recovery when it succeeds. A
+        -- directly required name, or a source owner already selected by an
+        -- independent import, still needs its authority from the frontier.
+        local resolved, compiled_err
+        if not ordinary and not required_owner then
+            resolved, compiled_err = driver.find_dependency_interface(
+                driver.TITAN_BIN_PATH, modname, context)
+        end
+        if requirements and (required_owner or ordinary and ordinary.kind == "source" or
+                not ordinary and not resolved and not compiled_err) then
+            local reached, err = check_source_frontier(
+                exposing, exposing_name, physical_identity, active_loader)
+            if not reached then
+                request.source_requirement_error = true
+                return false, err
+            end
+            local selected = reached[modname]
+            if selected then
+                if selected.kind ~= "source" then
+                    return remember_type(selected.type, selected, true)
+                end
+                local modtype, projection_error = public_source_interface(modname, selected)
+                if not modtype then
+                    request.source_requirement_error = true
+                    return false, projection_error
+                end
+                -- A checked source owner has no binary provenance or
+                -- producer-dynamic constraint. Its public references use
+                -- its own checked imports, not the binary exposer.
+                local info = { kind = "external_source", nominal_exposer = modname }
+                context.contextual_types[cache_key] = { type = modtype, info = info }
+                return true, modtype, {}, info
+            end
+        end
+        if ordinary then
             -- Recover the independently known interface without changing its
             -- selection. The native constraint records the fallback edge.
             if exposing.kind ~= "embedded" then
@@ -6727,11 +6947,6 @@ function driver.defaultloader(static_deps, options)
             return remember_type(modtype, ordinary, true)
         end
 
-        -- The exposing compiled object already chose how to bind this owner.
-        -- Reading another interface is type recovery only: it must not create
-        -- ordinary resolver state or add an archive link input.
-        local resolved, compiled_err = driver.find_dependency_interface(
-            driver.TITAN_BIN_PATH, modname, context)
         if not resolved then
             local err = compiled_err or
                 ("module '" .. modname .. "' not found while recovering " ..
@@ -6802,10 +7017,10 @@ function driver.defaultloader(static_deps, options)
             if not rebound then return false, rebound_error end
         end
         if not context.completion_closed_world and request and request.kind == "nominal-owner" then
-            local contextual_ok, contextual_type, contextual_errors =
+            local contextual_ok, contextual_type, contextual_errors, contextual_info =
                 recover_contextual_owner(modname, request, loader)
             if contextual_ok ~= nil then
-                return contextual_ok, contextual_type, contextual_errors
+                return contextual_ok, contextual_type, contextual_errors, contextual_info
             end
         end
         if driver.imported[modname] == CIRCULAR_MARK then
@@ -6841,7 +7056,9 @@ function driver.defaultloader(static_deps, options)
         -- source implementation. The latter is an edge-local request: it may
         -- replace an already cached binary selection, and a clean source miss
         -- is terminal instead of falling back to a provider.
-        local source_required = source_roots[modname] == true or
+        local requirement_request = request == perf.source_requirement_request
+        local recorded_requirement = semantic_source_recovery and requirement_request
+        local source_required = source_roots[modname] == true or requirement_request or
             (request and request.kind == "source-import")
         local source_preferred = source_required or context.source_first or
             source_overrides[modname] ~= nil
@@ -6855,7 +7072,7 @@ function driver.defaultloader(static_deps, options)
             if context.completion_closed_world then
                 return nil, "source module '" .. modname .. "' is absent from completion catalog"
             end
-            if source_required then
+            if source_required and not recorded_requirement then
                 source, source_err =
                     cached_interface_source_descriptor(modname)
                 if source == false then
@@ -6865,16 +7082,18 @@ function driver.defaultloader(static_deps, options)
                     return source
                 end
             end
-            source, source_err = resolve_source(nil, modname, context)
+            source, source_err = resolve_source(nil, modname, context, source_requirement_depth > 0)
             return source, source_err
         end
         local function load_source(candidate)
             if candidate.kind == "blocked" then
                 return false, blocked_source_error(modname, candidate)
             end
-            local relocated, relocation_error = driver.relocate_source_output(
-                modname, candidate, options.output_root)
-            if not relocated then return false, relocation_error end
+            if source_requirement_depth == 0 then
+                local relocated, relocation_error = driver.relocate_source_output(
+                    modname, candidate, options.output_root)
+                if not relocated then return false, relocation_error end
+            end
             if options.coverage then
                 local prepared, coverage_error = require("titan-compiler.coverage").source(
                     options.coverage, modname, candidate)
@@ -6900,11 +7119,24 @@ function driver.defaultloader(static_deps, options)
             return ok, modt, errors, info
         end
 
+        local allow_cached_source = true
+        if recorded_requirement then
+            local candidate, candidate_error = find_source()
+            if candidate_error then return false, candidate_error end
+            if not candidate then return false, driver.missing_module_message(context, modname, true) end
+            if candidate.kind == "blocked" then return false, blocked_source_error(modname, candidate) end
+            local existing = driver.imported[modname]
+            if existing and not matches_required_source(existing, candidate) then
+                driver.imported[modname] = nil
+            end
+            allow_cached_source = matches_required_source(cached_source_entries[modname], candidate)
+        end
+
         -- Analysis manifests retain the declared source interface. Raw entries
         -- checked for native compilation remain usable by native clients. Only caller-
         -- certified clean modules are eligible; dirty roots, overrides and
         -- source-first builds always check source again.
-        if (not driver.imported[modname] or driver.imported[modname]._analysis_manifest)
+        if allow_cached_source and (not driver.imported[modname] or driver.imported[modname]._analysis_manifest)
            and not context.source_first
            and source_roots[modname] ~= true
            and source_overrides[modname] == nil then
@@ -7011,7 +7243,7 @@ function driver.defaultloader(static_deps, options)
                 info.ffi_header_descriptor = mod.ffi_header_descriptor or mod.ast and mod.ast._ffi_header
                 info.source_permissions = source_import_permissions(mod)
             end
-            return true, mod.type, {}, info
+            return true, mod.type, semantic_source_recovery and mod._check_errors or {}, info
         end
 
         if source_preferred then
@@ -7054,6 +7286,7 @@ function driver.defaultloader(static_deps, options)
     end
     loader = function(modname, request)
         if not (context.check_only_sources and context.check_only_sources[modname])
+                or request == perf.source_requirement_request
                 or (request and request.kind == "source-import") then
             return load(modname, request)
         end
@@ -7073,6 +7306,7 @@ function driver.defaultloader(static_deps, options)
                 modname, source, record, loader, published)
         end,
         planning = planning,
+        semantic_source_recovery = semantic_source_recovery,
     }
     return loader
 end
@@ -7219,22 +7453,11 @@ function driver.resolution_plan(context)
         planning.open = true
         local names = require("titan-compiler.coder.core").coder._sorted_keys(requirements)
         for _, name in ipairs(names) do
-            local selected = modules[name]
-            if selected and (selected.kind == "dynamic" or selected.kind == "static") then
-                planning.open = false
-                return nil, "module '" .. requirements[name] .. "' requires source for '" ..
-                    name .. "', which also resolved to compiled provider '" ..
-                    (selected.archive or selected.file) .. "'; remove the conflicting provider " ..
-                    "or rebuild the referring library against it"
-            end
-            local ok, err = context.loader(name, { kind = "source-import" })
+            local ok, err = perf.load_source_requirement(
+                context.loader, requirements[name], name, modules[name])
             if not ok then
                 planning.open = false
-                return nil, "module '" .. requirements[name] ..
-                    "' requires source for '" .. name ..
-                    "': install its source package, add its checkout to --tree, " ..
-                    "or rebuild the referring library against its compiled provider (" ..
-                    tostring(err) .. ")"
+                return nil, err
             end
         end
         planning.open = false
@@ -8058,7 +8281,7 @@ function driver.resolve_external_modules(
         end
 
         if not results[name] then
-            local source, source_error = resolve_source(nil, name, context)
+            local source, source_error = resolve_source(nil, name, context, not context.completion_closed_world)
             if source_error then
                 results[name] = {
                     kind = "error",
@@ -8369,12 +8592,7 @@ function driver.finalize_resolver_context(context)
             local mod = dynamic_names[name]
             local registered, register_error =
                 checker.register_module_interface(
-                    name, mod.type, context.loader, {
-                        name = name,
-                        kind = "dynamic",
-                        type = mod.type,
-                        filename = mod.filename,
-                    })
+                    name, mod.type, context.loader, mod)
             if not registered then return nil, {register_error} end
         end
     end
@@ -8383,20 +8601,28 @@ function driver.finalize_resolver_context(context)
     -- members. Browser and non-executable resolver clients retain the full
     -- carried-interface replay.
     if context.loader then
+        local binding = loader_contexts[context.loader]
+        local recover_sources = binding and binding.semantic_source_recovery
         local demand_only = not context.analysis_only and context.target ~= "browser" and
             (context.link_kind == "program" or context.link_kind == "test")
         for _, provider in ipairs(selected_static_providers) do
             local names = provider.key_order or
                 require("titan-compiler.coder.core").coder._sorted_keys(provider.entries)
             for _, name in ipairs(names) do
-                if not demand_only or selected_static_modules[name] then
-                    local entry = provider.entries[name]
+                local entry = provider.entries[name]
+                local selected = selected_static_modules[name]
+                -- A carried sibling is not an ordinary semantic demand.
+                -- Physical ownership of every archive member is still
+                -- validated below, even if its private frontier is dormant.
+                if selected or not demand_only and not (recover_sources and entry.source_requirements) then
+                    local exposer = selected or {
+                        name = name, kind = "static", type = entry.type,
+                        filename = provider.archive, static_archive = provider.archive,
+                        static_provider = provider,
+                        dormant = recover_sources,
+                    }
                     local registered, register_error = checker.register_module_interface(
-                        name, entry.type, context.loader, {
-                            name = name, kind = "static", type = entry.type,
-                            filename = provider.archive, static_archive = provider.archive,
-                            static_provider = provider,
-                        })
+                        name, entry.type, context.loader, exposer)
                     if not registered then return nil, {register_error} end
                 end
             end

@@ -1043,6 +1043,189 @@ end
         assert.not_matches("titan_linked_entries", launcher_source(control, "model_only"), 1, true)
         run("model_only", control)
         publish(build_dir .. "/library")
+
+        -- The saved compiler API consumes the same published provider as the
+        -- executable below, without a planner, output directory or private SDK
+        -- lookup configuration. A later compiled meter cannot stand in for
+        -- the producer's recorded source edge.
+        put_source("replacement/meter.titan", "const binary_only = true\n")
+        local replacement = build_dir .. "/replacement"
+        built("replacement", replacement, "meter")
+        install(replacement, "meter" .. SHARED_SUFFIX)
+        local client = put_source("semantic/consumer.titan", [[
+local via = import "via"
+function inspect(): integer
+  return via.measure().count
+end
+]])
+        local api_fixture = workspace .. "/semantic.lua"
+        write(api_fixture, [=[
+local checker = require "titan-compiler.checker"
+local completion = require "titan-compiler.completion"
+local driver = require "titan-compiler.driver"
+local paths = require "titan-compiler.path"
+local types = require "titan-compiler.types"
+local source_root, installed, client = ...
+local meter_file = installed .. "/meter.titan"
+local owner_file = installed .. "/units.titan"
+driver.TITAN_SOURCE_PATH, driver.TITAN_BIN_PATH = source_root, installed
+
+local function read(filename)
+    local file <close> = assert(io.open(filename, "rb"))
+    return assert(file:read("a"))
+end
+local function write(filename, bytes)
+    local file <close> = assert(io.open(filename, "wb"))
+    assert(file:write(bytes))
+end
+local function start(analysis, options, context_options)
+    driver.imported, types.registry = {}, {}
+    context_options = context_options or {}
+    context_options.analysis_only = analysis
+    context_options.transient_caches = true
+    local context = driver.new_resolver_context(context_options)
+    assert(context.installed_source_root == nil and context.output_root == nil)
+    options = options or {}
+    options.context = context
+    return driver.defaultloader({}, options), context
+end
+local function clean(name, loader)
+    local modtype, errors = checker.checkimport(name, loader)
+    assert(modtype, errors)
+    assert(#errors == 0, table.concat(errors, "\n"))
+    return modtype
+end
+local function finalize(context)
+    local result, errors = driver.finalize_resolver_context(context)
+    assert(result, errors and table.concat(errors, "\n"))
+end
+local function verify_owner()
+    local provider, meter, units = driver.imported.via, driver.imported.meter, driver.imported.units
+    assert(provider.kind == "dynamic" and provider.source_requirements[1] == "meter"
+        and #provider.source_requirements == 1)
+    assert(meter.ast and meter.deps.units and paths.to_slash(meter.filename) == meter_file)
+    assert(units.ast and paths.to_slash(units.source_files[1]) == owner_file)
+    assert(paths.to_slash(units.ast[2].loc.filename) == owner_file)
+    local quantity = assert(types.registry["units.Quantity"])
+    assert(quantity.fields[1].name == "count" and quantity.fields[1].type._tag == "Type.Integer")
+end
+
+local loader, context = start(false)
+clean("via", loader)
+verify_owner()
+finalize(context)
+assert(driver.close_loader(loader))
+
+loader, context = start(true)
+local consumer = clean("consumer", loader)
+assert(consumer.members.inspect.type.rettypes[1]._tag == "Type.Integer")
+verify_owner()
+assert(driver.imported.consumer.ast._analysis_only)
+assert(driver.imported.via.deps.meter and not driver.imported.via.deps.units)
+finalize(context)
+for _, provenance in pairs(context.contextual_resolutions) do
+    assert(provenance.owner ~= "units")
+end
+local binaries = driver.completion_binary_catalog(context)
+local saved_sources = {}
+for _, name in ipairs({ "meter", "units" }) do
+    local payload = assert(driver.encode_project_entry(driver.imported[name]))
+    saved_sources[name] = assert(driver.decode_project_entry(payload))
+end
+assert(driver.close_loader(loader))
+
+local text = read(client)
+local start_of_field = assert(text:find("count", 1, true))
+local prepared = assert(completion.prepare(client, text, start_of_field + 1))
+local io_strategy = require("titan-compiler.io").new_sync()
+local read_file = io_strategy.read_file
+function io_strategy:read_file(filename, ...)
+    assert(not filename:match("%.titan$"), "completion read " .. filename)
+    return read_file(self, filename, ...)
+end
+local native = require "titan"
+local loadlib = native._loadlib
+native._loadlib = function() error("completion inspected a DSO") end
+loader = start(true, {
+    cached_binary_interfaces = binaries, cached_source_entries = saved_sources,
+    source_roots = { consumer = true },
+    source_overrides = { consumer = { kind = "generated", main = client, files = { client },
+        contents = { [client] = prepared.text } } },
+}, { completion_closed_world = true, completion = prepared.request, io = io_strategy })
+assert(loader("consumer"))
+local candidates = assert(driver.imported.consumer.completion).candidates
+local found
+for _, candidate in ipairs(candidates) do
+    if candidate.name == "count" then found = candidate end
+    assert(candidate.name ~= "data")
+end
+assert(found and found.detail == "integer")
+assert(driver.close_loader(loader))
+native._loadlib = loadlib
+
+local meter = read(meter_file)
+local function reselect(name, source_required)
+    local probe = driver.new_resolver_context({ analysis_only = true })
+    local resolved = driver.resolve_external_modules({ [name] = source_required }, {}, probe)[name]
+    assert(driver.close_resolver_context(probe))
+    return resolved
+end
+local function reject(detail)
+    local attempt = start(true)
+    assert(attempt("via"))
+    assert(driver.imported.meter == nil)
+    for _ = 1, 2 do
+        local modtype, err = checker.checkimport("via", attempt)
+        assert(not modtype and err:find("module 'via' requires source for 'meter'", 1, true), err)
+        assert(err:find(detail, 1, true), err)
+    end
+    assert(driver.close_loader(attempt))
+end
+assert(paths.to_slash(reselect("units", false).main_file) == owner_file)
+assert(paths.to_slash(reselect("meter", true).main_file) == meter_file)
+assert(os.remove(meter_file))
+assert(reselect("meter", true).kind == "error")
+assert(reselect("meter", false).kind == "dynamic")
+reject("source module 'meter' not found")
+write(meter_file, "record\n")
+reject("meter.titan:")
+write(meter_file, "const broken: integer = {}\n")
+reject("meter.titan:")
+write(meter_file, 'local via = import "via"\n')
+reject("circular reference")
+write(meter_file, meter)
+
+local override = source_root .. "/meter.titan"
+write(override, meter .. "\nconst authored = true\n")
+assert(paths.to_slash(reselect("meter", true).main_file) == override)
+loader, context = start(true, { cached_source_entries = saved_sources })
+clean("consumer", loader)
+assert(paths.to_slash(driver.imported.meter.filename) == override)
+assert(driver.imported.meter.type.members.authored and driver.imported.meter.ast)
+finalize(context)
+assert(driver.close_loader(loader))
+assert(os.remove(override))
+
+loader, context = start(true, { cached_source_entries = saved_sources })
+clean("consumer", loader)
+assert(paths.to_slash(driver.imported.units.filename) == owner_file)
+assert(not driver.imported.units.ast and driver.imported.units._analysis_manifest)
+finalize(context)
+assert(driver.close_loader(loader))
+]=])
+        local semantic_inputs = collect_artifacts(lib)
+        local argv, env = compiler_argv({
+            frontend = api_fixture, args = { source_dir .. "/semantic", lib, client },
+            env = { TITAN_ROOT = sdk, PATH = tool_path },
+            init_code = collector:init_code(),
+        })
+        local ok, diagnostics = run_command(argv, workspace, env)
+        assert.is_true(ok, diagnostics)
+        assert.same(semantic_inputs, collect_artifacts(lib))
+        assert.same({}, collect_artifacts(source_dir .. "/semantic"))
+        assert.is_false(exists(lib .. "/.titan-build.lock"))
+        assert(os.remove(lib .. "/meter" .. SHARED_SUFFIX))
+
         local wrapper = build_dir .. "/wrapper"
         local objects = built("wrapper", wrapper, "-c", "wrap")
         assert.equal(1, #objects.module_compiles, objects.raw)

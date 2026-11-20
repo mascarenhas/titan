@@ -1739,7 +1739,7 @@ describe("Windows native ABI bootstrap", function()
         assert.equal("valid", status)
         assert.equal(serialized, types.serialize(module))
         assert.same({ "native query", "resolve winabi_abi", "resolve winabi_types",
-            "Lua ABI", "Lua types" }, events)
+            "Lua ABI", "Lua types", "resolve winabi_source_requirements" }, events)
     end)
 
     it("rejects a native ABI mismatch without resolving Lua entries", function()
@@ -1794,7 +1794,7 @@ describe("Windows native ABI bootstrap", function()
         titan._abivalue = function() error("Unix must retain the Lua ABI protocol") end
         assert.equal("valid", probe())
         assert.same({ "resolve winabi_abi", "resolve winabi_types",
-            "Lua ABI", "Lua types" }, events)
+            "Lua ABI", "Lua types", "resolve winabi_source_requirements" }, events)
     end)
 end)
 
@@ -1824,12 +1824,13 @@ describe("independent nominal layout metadata", function()
     local previous_loadlib
     local serialized = types.serialize(types.Module("physical", {}, {}))
     local layouts
-    local requested
+    local requested, requirement, requirement_stage
 
     before_each(function()
         previous_loadlib = titan._loadlib
         layouts = assert(require("titan-compiler.nominallayout").encode("physical", {}))
         requested = {}
+        requirement, requirement_stage = nil, "init"
         titan._loadlib = function(_, symbol)
             requested[#requested + 1] = symbol
             if symbol == "physical_abi" then
@@ -1838,6 +1839,9 @@ describe("independent nominal layout metadata", function()
                 return function() return serialized end
             elseif symbol == "physical_layouts" and layouts then
                 return function() return layouts end
+            elseif symbol == "physical_source_requirements" then
+                if requirement ~= nil then return function() return requirement end end
+                return nil, "requirements export unavailable", requirement_stage
             end
             return nil, "undefined symbol", "init"
         end
@@ -1863,7 +1867,34 @@ describe("independent nominal layout metadata", function()
         assert.is_nil(metadata.layouts)
         assert.is_nil(metadata.layout_inventory)
         assert.is_nil(metadata.source_requirements)
-        assert.same({ "physical_abi", "physical_types" }, requested)
+        assert.same({ "physical_abi", "physical_types", "physical_source_requirements" }, requested)
+    end)
+
+    posix_model_it("validates optional source-requirement exports in analysis", function()
+        local function probe()
+            return driver.probe_compiled_interface("physical", "physical.so", { analysis_only = true })
+        end
+        requirement = "meter\nunits"
+        local status, _, metadata = probe()
+        assert.equal("valid", status)
+        assert.same({ "meter", "units" }, metadata.source_requirements)
+        assert.is_nil(metadata.layout_inventory)
+
+        requirement = false
+        local err
+        status, err = probe()
+        assert.equal("error", status)
+        assert.matches("must return exactly one string", err, 1, true)
+
+        requirement = "meter\nmeter"
+        status, err = probe()
+        assert.equal("error", status)
+        assert.matches("physical.so:physical_source_requirements", err, 1, true)
+
+        requirement, requirement_stage = nil, "open"
+        status, err = probe()
+        assert.equal("error", status)
+        assert.matches("cannot inspect 'physical_source_requirements'", err, 1, true)
     end)
 
     posix_model_it("rejects absent and invalid physical plans before native access", function()
@@ -9659,8 +9690,10 @@ end
         assert.equal(rel, semantic.file)
         assert.is_nil(cached.layouts)
         assert.is_nil(cached.layout_inventory)
-        assert.is_nil(cached.source_requirements)
-        assert.same({ "provider_layer_abi", "provider_layer_types" }, queries)
+        assert.same({ required }, cached.source_requirements)
+        assert.same({ "provider_layer_abi", "provider_layer_types", "provider_layer_source_requirements" }, queries)
+        assert(require("titan-compiler.checker").checkimport(name, analysis_loader))
+        assert.is_nil(driver.imported[required])
         assert(driver.close_loader(analysis_loader))
 
         write_file(source .. "/wrap.titan", 'local layer = import "provider.layer"\n')
@@ -9719,6 +9752,77 @@ function main(args: {string}): integer return 0 end
         assert.same({ "units", "meter", "app" }, app.order)
         assert.is_nil(app.modules.meter.check_only)
         assert.is_nil(app.modules.units.check_only)
+    end)
+
+    it("recovers only reached archive members' recorded source frontiers", function()
+        local checker = require "titan-compiler.checker"
+        local context = new_context({ analysis_only = true, prefer_static = true })
+        local active, dormant = "front.active", "front.dormant"
+        local owner = types.Nominal("units.Quantity")
+        local archive = binary .. "/front.a"
+        cache_static_provider(context, archive, {
+            [active] = result_module(active, owner),
+            [dormant] = result_module(dormant, owner),
+            unrelated = result_module("unrelated", types.Nominal("orphan.Quantity")),
+        }, {
+            [active] = { source_requirements = { "meter" } },
+            [dormant] = { source_requirements = { "absent" } },
+        })
+        write_file(source .. "/meter.titan", 'local units = import "units"\n')
+        write_file(source .. "/units.titan", "record Quantity count: integer end\n")
+        write_file(source .. "/orphan.titan", "record Quantity count: integer end\n")
+        local loader = driver.defaultloader({}, { context = context })
+        assert(checker.checkimport("units", loader))
+        assert(checker.checkimport(active, loader))
+        assert.same({ meter = true }, driver.imported[active].deps)
+        assert.same({ units = true }, driver.imported.meter.deps)
+        assert(driver.finalize_resolver_context(context))
+        assert.is_nil(driver.imported[dormant])
+        assert.is_nil(driver.imported.absent)
+        assert.is_nil(driver.imported.orphan)
+        local modtype, err = checker.checkimport(dormant, loader)
+        assert.is_nil(modtype)
+        assert.matches("module 'front.dormant' requires source for 'absent'", err, 1, true)
+        assert(driver.close_loader(loader))
+    end)
+
+    it("uses the reached logical member's requirements within a carried archive", function()
+        local checker = require "titan-compiler.checker"
+        local context = new_context({ analysis_only = true, prefer_static = true })
+        local first, second, carried = "nested.first", "nested.second", "nested.carried"
+        local box, quantity = types.Nominal(carried .. ".Box"), types.Nominal("units.Quantity")
+        local record = types.Record(box.fqtn, {
+            types.Field(box.fqtn, "quantity", quantity, 0, false),
+        }, {
+            new = types.StaticMethod(box.fqtn, "new", { quantity }, { box }, nil, nil, { "quantity" }),
+        }, {}, 1)
+        local carried_type = types.Module(carried, {
+            types.ModuleMember(carried, "Box", record, nil),
+        })
+        local archive = binary .. "/nested.a"
+        cache_static_provider(context, archive, {
+            [first] = result_module(first, box),
+            [second] = result_module(second, box),
+            [carried] = carried_type,
+        }, {
+            [first] = { source_requirements = { "not_needed" } },
+            [carried] = { source_requirements = { "meter" } },
+        })
+        write_file(source .. "/meter.titan", 'local units = import "units"\n')
+        write_file(source .. "/units.titan", "record Quantity count: integer end\n")
+        local loader = driver.defaultloader({}, { context = context })
+        for _, name in ipairs({ first, second }) do
+            local modtype, errors = checker.checkimport(name, loader)
+            assert.truthy(modtype, errors)
+            assert.same({}, errors)
+            assert.same({ meter = true }, driver.imported[name].deps)
+        end
+        assert.equal("count", types.registry["units.Quantity"].fields[1].name)
+        assert.is_nil(driver.imported[carried])
+        assert.is_nil(driver.imported.not_needed)
+        local finalized, errors = driver.finalize_resolver_context(context)
+        assert.truthy(finalized, errors and table.concat(errors, "\n"))
+        assert(driver.close_loader(loader))
     end)
 
     it("does not alter an analysis-cached DSO selection when native promotion fails", function()

@@ -5,8 +5,8 @@ local function recovery_interface_key(modname, exposer)
     exposer = exposer or modname
     local exposer_key
     if type(exposer) == "table" then
-        exposer_key = exposer.static_archive or exposer.filename or
-            exposer.name or tostring(exposer)
+        exposer_key = (exposer.static_archive or exposer.filename or "") ..
+            "\0" .. (exposer.name or exposer.type and exposer.type.name or tostring(exposer))
     else
         exposer_key = tostring(exposer)
     end
@@ -107,6 +107,9 @@ function checker._recover_referenced_module(
         memo.module = module
     else
         memo.error = err
+        if request.source_requirement_error then
+            seen["\0source-requirement-error"] = err
+        end
     end
     return memo
 end
@@ -117,6 +120,8 @@ function checker._recover_referenced_owner(
     if not modname or modname == "" then return nil, nil end
     local memo = checker._recover_referenced_module(
         modname, loader, seen, exposing_module, interface_seen)
+    local requirement_error = seen["\0source-requirement-error"]
+    if requirement_error then return nil, requirement_error, true end
     local owner = checker._recovered_nominal_owner(memo.module, fqtn)
     if memo.module then
         if not owner then
@@ -264,9 +269,11 @@ function register_referenced_nominals(
 
     local ok, err = true, nil
     if tag == "Type.Nominal" then
-        local owner, recovery_error = checker._recover_referenced_owner(
+        local owner, recovery_error, requirement_failed = checker._recover_referenced_owner(
             t.fqtn, loader, seen, exposing_module, interface_seen)
-        if owner then
+        if requirement_failed then
+            ok, err = nil, recovery_error
+        elseif owner then
             local expected = #(owner.typeparams or {})
             if #(t.args or {}) ~= expected then
                 ok, err = nil, "recovered nominal '" .. t.fqtn ..
@@ -745,7 +752,8 @@ function checker.checkimport(modname, loader, request)
     local ok, type_or_error, errors, import_info = loader(modname, request)
     if not ok then return nil, type_or_error end
     local registered, register_error = checker.register_module_interface(
-        modname, type_or_error, loader, request and request.exposer,
+        modname, type_or_error, loader,
+        import_info and import_info.nominal_exposer or request and request.exposer,
         request and request.interface_seen,
         import_info and import_info.kind == "source"
             and type_or_error._source == true,
