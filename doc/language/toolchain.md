@@ -187,11 +187,11 @@ Paths relative to `out/` on Linux and macOS:
   `out/app/main.wasm.map` (see [Browser target](browser-target.md)).
 - Omitting `-o` writes generated C, objects, and headers beside each source
   file and places final outputs relative to the working directory. However,
-  when a build actually selects an installed `.titan` source through the SDK
-  source fallback (`<root>/lib/titan/0.6`), `-o`/`--output` is required:
-  `titanc` refuses (naming the logical module) instead of writing or locking
-  inside the installed SDK. Builds that do not select an installed source keep
-  their existing behavior.
+  when a build actually selects an installed `.titan` source through the
+  implicit SDK source fallback (`<root>/lib/titan/0.6`), `-o`/`--output` is
+  required: `titanc` refuses (naming the logical module) rather than writing
+  or locking in that implicit fallback root. Builds that do not select an
+  installed source keep their existing behavior.
 
 `--output` selects write locations only; it does not add `out` to provider
 search paths. To consume a library built under `out`, add `out` to
