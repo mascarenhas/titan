@@ -246,7 +246,6 @@ function refresh_spread_subject_force(node, context)
 
     written._type = source
     force = tryforce(written)
-    force._spread_subject_force = true
     node.exp = force
     node._spread_kind = kind
     return elem
@@ -290,7 +289,6 @@ function check_spread_marker(node, st, errors)
         kind, elem = spread_subject_container(candidate)
         if kind and typ._tag == "Type.Option" then
             subject = tryforce(subject)
-            subject._spread_subject_force = true
             node._spread_subject_force = true
             typ = subject._type
         elseif not kind then

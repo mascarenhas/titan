@@ -1440,6 +1440,36 @@ function coder._checked_adjustment_plan_impl(
     elseif kind == "callable" then
         coder._checked_callable_plan_impl(
             adjustment, source, target, use, seen or {})
+    elseif kind == "container_option_boundary" then
+        local option = assert(adjustment.option,
+            use .. " lacks its surface Option step")
+        local coercion = option.coercion
+        local inner = coercion and coercion.inner
+        assert(option.kind == "direct_coercion" and inner
+               and (coercion.op == "option_force" or coercion.op == "option_wrap")
+               and (inner.kind == "identity"
+                    or (inner.kind == "gradual_view" and inner.op == "structural")),
+            use .. " does not preserve the Option payload carrier")
+        local force = coercion.op == "option_force"
+        local payload = force and option.target or option.source
+        assert(type(payload) == "table"
+               and (payload._tag == "Type.Array" or payload._tag == "Type.Map"),
+            use .. " lacks a concrete Array or Map payload")
+        local from, to = adjustment.from_carrier, adjustment.to_carrier
+        assert(from or to, use .. " lacks an erased container view")
+        local function check_view(view, from_type, to_type, value_op)
+            assert(type(view) == "table" and view.kind == "gradual_view"
+                   and ((view.op == "structural"
+                         and types.same_container_view_representation(from_type, to_type))
+                        or (force and view.op == value_op)),
+                use .. " lacks a permitted container carrier view")
+            coder._checked_adjustment_plan_impl(view, from_type, to_type, use, seen)
+        end
+        if from then check_view(from, source, option.source, "project") end
+        if to then check_view(to, option.target, target, "inject") end
+        coder._checked_adjustment_plan_impl(
+            option, from and from.target or source, to and to.source or target,
+            use, seen)
     elseif kind == "written_cast" then
         coder._checked_written_cast_plan(
             adjustment, source, target, use .. " written cast")

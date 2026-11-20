@@ -769,6 +769,385 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("forces generic Array results once and keeps their backing object",
+    function()
+        h.run_coder([[
+            local evaluations = 0
+
+            local function optional<|T|>(items: {T}?): {T}?
+                evaluations = evaluations + 1
+                return items
+            end
+
+            function consume(present: boolean): (integer, integer)
+                local input: {integer}? = nil
+                if present then input = {5} end
+                local array = optional<|integer|>(input)
+                local first = array[1]
+                array[1] = 7
+                return first, input[1]
+            end
+
+            function preserved(): {integer}?
+                local array? = optional<|integer|>(nil)
+                return array
+            end
+
+            function parenthesized(): integer
+                return ((optional<|integer|>({11})))[1]
+            end
+
+            function calls(): integer
+                return evaluations
+            end
+        ]], [[
+            local first, changed = test.consume(true)
+            assert(first == 5 and changed == 7)
+            assert(test.calls() == 1)
+            local ok, err = pcall(test.consume, false)
+            assert(not ok and err:find("expected { integer } but found nil", 1, true),
+                tostring(err))
+            assert(test.calls() == 2)
+            assert(test.preserved() == nil)
+            assert(test.parenthesized() == 11)
+            assert(test.calls() == 4)
+        ]])
+    end)
+
+    it("checks generic Array elements at the read, not at the presence check",
+    function()
+        h.run_coder([[
+            local observed = 0
+
+            local function polluted<|T|>(): {T}?
+                local raw: value = "wrong"
+                return {raw as T}
+            end
+
+            function read(): integer
+                local array = polluted<|integer|>()
+                observed = #array
+                return array[1]
+            end
+
+            function observed_length(): integer return observed end
+        ]], [[
+            local ok, err = pcall(test.read)
+            assert(not ok and err:find("expected integer", 1, true), tostring(err))
+            assert(test.observed_length() == 1)
+        ]])
+    end)
+
+    it("forces and wraps generic containers in fields and argument slots",
+    function()
+        h.run_coder([[
+            local record Cell<|T|>
+                items: {T}?
+            end
+
+            local function array<|T|>(items: {T}): {T} return items end
+            local function map<|T|>(items: {string: T}): {string: T} return items end
+            local function maybe_map<|T|>(
+                items: {string: T}?
+            ): {string: T}?
+                return items
+            end
+            local function required<|T|>(items: {T}): T return items[1] end
+            local function optional<|T|>(items: {string: T}?): T
+                return items["item"]
+            end
+
+            function fields(): (integer, integer)
+                local initial: {integer} = {13}
+                local replacement: {integer} = {17}
+                local cell = Cell<|integer|>(array<|integer|>(initial))
+                local first = required<|integer|>(cell.items)
+                cell.items = array<|integer|>(replacement)
+                cell.items[1] = 19
+                return first, replacement[1]
+            end
+
+            function maps(): (integer, integer)
+                local items: {string: integer} = {["item"] = 23}
+                local first = optional<|integer|>(map<|integer|>(items))
+                local present = maybe_map<|integer|>(items)
+                present["item"] = 29
+                return first, items["item"]
+            end
+        ]], [[
+            local initial, changed = test.fields()
+            assert(initial == 13 and changed == 19)
+            local first, alias = test.maps()
+            assert(first == 23 and alias == 29)
+        ]])
+    end)
+
+    it("forces extra and finite flexible container results after erasure",
+    function()
+        h.run_coder([[
+            local function pair<|T|>(items: {{T}}?): (integer, {{T}}?)
+                return 12, items
+            end
+
+            local function flex<|T|>(items: {T}?): (...: {T}?)
+                return items
+            end
+
+            function extra(): integer
+                local rows: {{integer}}? = {{5}}
+                local head, tail = pair<|integer|>(rows)
+                return head + tail[1][1]
+            end
+
+            function finite(present: boolean): integer
+                local items: {integer}? = nil
+                if present then items = {7} end
+                local first = flex<|integer|>(items)
+                return first[1]
+            end
+        ]], [[
+            assert(test.extra() == 17)
+            assert(test.finite(true) == 7)
+            local ok, err = pcall(test.finite, false)
+            assert(not ok and err:find("expected { integer } but found nil", 1, true),
+                tostring(err))
+        ]])
+    end)
+
+    it("keeps each open generic result's presence adjustment at its sink",
+    function()
+        h.run_coder([[
+            local function optional<|T|>(
+                count: integer, first: T, second: T
+            ): (...: {T}?)
+                if count == 0 then return end
+                if count == 1 then return {first}, nil end
+                return {first}, {second}
+            end
+
+            local function required<|T|>(item: T): (...: {T})
+                return {item}
+            end
+
+            local function sum(...: {integer}): integer
+                if #... == 0 then return 0 end
+                return ...[1][1] + ...[2][1]
+            end
+
+            local function head(...: {integer}?): integer return ...[1][1] end
+
+            function via_args(count: integer): integer
+                return sum(optional<|integer|>(count, 20, 22))
+            end
+
+            function via_return(): (...: {integer})
+                return optional<|integer|>(2, 20, 22)
+            end
+
+            function via_constructor(): {{integer}}
+                return {optional<|integer|>(2, 20, 22)}
+            end
+
+            function wrapped(): integer
+                return head(required<|integer|>(17))
+            end
+        ]], [[
+            assert(test.via_args(0) == 0)
+            assert(test.via_args(2) == 42)
+            local ok, err = pcall(test.via_args, 1)
+            assert(not ok and err:find("expected { integer } but found nil", 1, true),
+                tostring(err))
+            local first, second = test.via_return()
+            assert(first[1] == 20 and second[1] == 22)
+            local rows = test.via_constructor()
+            assert(#rows == 2 and rows[1][1] == 20 and rows[2][1] == 22)
+            assert(test.wrapped() == 17)
+        ]])
+    end)
+
+    it("keeps the closed Option step at an erased variadic parameter",
+    function()
+        h.run_coder([[
+            local function optional(present: boolean): (...: {integer}?)
+                if not present then return nil end
+                return {5}
+            end
+
+            local function required(): (...: {integer}) return {7} end
+
+            local function both<|T|>(present: boolean, item: T): (...: {T}?)
+                if not present then return nil end
+                return {item}
+            end
+
+            local function take<|T|>(...: {T}): T return ...[1][1] end
+            local function wrap<|T|>(...: {T}?): T return ...[1][1] end
+
+            function forced(present: boolean): integer
+                return take<|integer|>(optional(present))
+            end
+
+            function wrapped(): integer
+                return wrap<|integer|>(required())
+            end
+
+            function both_erased(present: boolean): integer
+                return take<|integer|>(both<|integer|>(present, 11))
+            end
+        ]], [[
+            assert(test.forced(true) == 5)
+            local ok, err = pcall(test.forced, false)
+            assert(not ok and err:find("expected { integer } but found nil", 1, true),
+                tostring(err))
+            assert(test.wrapped() == 7)
+            assert(test.both_erased(true) == 11)
+            ok, err = pcall(test.both_erased, false)
+            assert(not ok and err:find("expected { integer } but found nil", 1, true),
+                tostring(err))
+        ]])
+    end)
+
+    it("forces closed Array and Map slots before forwarding through value",
+    function()
+        h.run_coder([[
+            local function optional(present: boolean): (...: {integer}?)
+                if not present then return nil end
+                return {5}
+            end
+
+            local function optional_array<|T|>(item: T): (...: {T}?)
+                return {item}
+            end
+
+            local function raw<|T|>(item: T): (...: T?) return item end
+            local function unforced<|T|>(item: T): (...: T) return item end
+
+            local function count<|T|>(...: T): integer return #... end
+            local function one<|T|>(_: T): integer return 1 end
+
+            function fixed(items: {integer}?): integer
+                return one<|{integer}|>(items)
+            end
+
+            function open(present: boolean): integer
+                return count<|{integer}|>(optional(present))
+            end
+
+            function from_array_carrier(): integer
+                return count<|{integer}|>(optional_array<|integer|>(5))
+            end
+
+            function from_value_array(item: value): integer
+                return count<|{integer}|>(raw<|{integer}|>(item))
+            end
+
+            function from_value_map(item: value): integer
+                return count<|{string: integer}|>(raw<|{string: integer}|>(item))
+            end
+
+            function raw_flow(item: value): integer
+                return count<|{integer}|>(unforced<|{integer}|>(item))
+            end
+
+            function polluted(): {value} return {"wrong element"} end
+        ]], [[
+            local function rejects(call, fragment, ...)
+                local ok, err = pcall(call, ...)
+                assert(not ok and err:find(fragment, 1, true), tostring(err))
+            end
+
+            local array = test.polluted()
+            assert(test.fixed(array) == 1)
+            assert(test.open(true) == 1)
+            assert(test.from_array_carrier() == 1)
+            rejects(test.fixed, "expected { integer } but found nil", nil)
+            rejects(test.open, "expected { integer } but found nil", false)
+            rejects(test.from_value_array, "expected { integer } but found nil", nil)
+            rejects(test.from_value_map, "expected { string : integer } but found nil", nil)
+            rejects(test.from_value_array, "found string", "wrong outer")
+            rejects(test.from_value_map, "found string", "wrong outer")
+            assert(test.from_value_array(array) == 1)
+            assert(test.from_value_map({item = "wrong element"}) == 1)
+            assert(test.raw_flow("wrong outer") == 1)
+        ]])
+    end)
+
+    it("preserves checked maybe-const Array views in open Option adjustments",
+    function()
+        h.run_coder([[
+            local function optional(items: {value}?): (...: {value}?)
+                return items
+            end
+
+            local function generic_optional<|T|>(items: {T}?): (...: {T}?)
+                return items
+            end
+
+            local function required(items: {value}): (...: {value})
+                return items
+            end
+
+            local function head<|T|>(...: T): T return ...[1] end
+            local function wrap<|T|>(...: (const? { T })?): (const? { T })?
+                return ...[1]
+            end
+
+            function force(items: {value}?): const? { integer }
+                return head<|const? { integer }|>(optional(items))
+            end
+
+            function generic_force(items: {value}?): const? { integer }
+                return head<|const? { integer }|>(generic_optional<|value|>(items))
+            end
+
+            function wrapped(items: {value}): (const? { integer })?
+                return wrap<|integer|>(required(items))
+            end
+
+            function input(): {value} return {7} end
+        ]], [[
+            local items = test.input()
+            assert(rawequal(test.force(items), items))
+            assert(rawequal(test.generic_force(items), items))
+            assert(rawequal(test.wrapped(items), items))
+            items[1] = 11
+            assert(test.force(items)[1] == 11)
+            local ok, err = pcall(test.force, nil)
+            assert(not ok and err:find("found nil", 1, true), tostring(err))
+            ok, err = pcall(test.generic_force, nil)
+            assert(not ok and err:find("found nil", 1, true), tostring(err))
+        ]])
+    end)
+
+    it("forces a generic container result in a generic-for setup tuple",
+    function()
+        h.run_coder([[
+            local function supply<|T|>(items: {T}?): ({T}?, integer)
+                return items, 0
+            end
+
+            local function step(items: {integer}, control: integer): integer?
+                if control == 0 then return items[1] end
+                return nil
+            end
+
+            function run(items: {integer}?): integer
+                local total = 0
+                for item in step, supply<|integer|>(items) do
+                    total = total + item
+                end
+                return total
+            end
+
+            function input(): {integer} return {42} end
+        ]], [[
+            assert(test.run(test.input()) == 42)
+            local ok, err = pcall(test.run, nil)
+            assert(not ok and err:find("expected { integer } but found nil", 1, true),
+                tostring(err))
+        ]])
+    end)
+
     it("infers optional Map arguments before their ordinary presence check", function()
         h.run_coder([[
             local entered: integer = 0

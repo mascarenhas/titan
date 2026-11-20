@@ -69,6 +69,22 @@ function types.Array(elem, isconst)
     return raw_Array(elem, isconst)
 end
 
+-- This proves representation only, not that a view is allowed. A typed
+-- container already has the outer kind and qualifier that its view needs.
+function types.same_container_view_representation(source, target)
+    if type(source) ~= "table" or type(target) ~= "table" then return false end
+    if source._tag == "Type.Option" and target._tag == "Type.Option" then
+        source, target = source.base, target.base
+        if type(source) ~= "table" or type(target) ~= "table" then return false end
+    end
+    return source._tag == target._tag
+        and (target._tag == "Type.Map"
+            or (target._tag == "Type.Array"
+                and types.valid_array_constness(source.isconst)
+                and types.valid_array_constness(target.isconst)
+                and source.isconst.tag == target.isconst.tag))
+end
+
 local function boolean_constness(value, role)
     if type(value) ~= "boolean" then
         error(role .. " const qualifier must be a boolean", 3)

@@ -786,6 +786,56 @@ describe("Array, Map, and vararg spread expressions (code generator)", function(
         ]])
     end)
 
+    it("forces a closed generic spread subject before evaluating its bounds",
+    function()
+        run_coder([[
+            local record Cell<|T|>
+                items: {integer: T}?
+            end
+
+            local order = 0
+
+            local function mark(digit: integer): integer
+                order = order * 10 + digit
+                return digit
+            end
+
+            local function subject<|T|>(items: {T}?): {T}?
+                mark(1)
+                return items
+            end
+
+            function array(present: boolean): {integer}
+                order = 0
+                local items: {integer}? = nil
+                if present then items = {10, 20, 30} end
+                return {...(subject<|integer|>(items))[mark(2), mark(3)]}
+            end
+
+            function map(present: boolean): {integer}
+                local items: {integer: integer}? = nil
+                if present then items = {[1] = 41, [2] = 42} end
+                local cell = Cell<|integer|>(items)
+                return {...cell.items[1, 2]}
+            end
+
+            function evaluation_order(): integer return order end
+        ]], [[
+            local items = test.array(true)
+            assert(#items == 2 and items[1] == 20 and items[2] == 30)
+            assert(test.evaluation_order() == 123)
+            local ok, err = pcall(test.array, false)
+            assert(not ok and err:find("expected { integer } but found nil", 1, true),
+                tostring(err))
+            assert(test.evaluation_order() == 1)
+            local entries = test.map(true)
+            assert(#entries == 2 and entries[1] == 41 and entries[2] == 42)
+            ok, err = pcall(test.map, false)
+            assert(not ok and err:find("expected { integer : integer } but found nil",
+                1, true), tostring(err))
+        ]])
+    end)
+
     it("supplies the four-slot generic-for setup tuple", function()
         run_coder([[
             function step(state: value, control: value): value

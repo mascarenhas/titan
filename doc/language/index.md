@@ -60,7 +60,7 @@ print(m.sum_list(m.sample())) --> 10
 | 7 | [Records and Methods](records.md) | Nominal records, `Record(...)` shorthand and custom `new`, mutable/`const`/`local` fields, instance methods, static functions, and optional receivers. |
 | 8 | [Tagged Unions and Pattern Matching](unions.md) | Closed nominal unions, positional and named payload parts, variant constructors, `case ... when ... else`, and non-fallthrough coverage analysis. |
 | 9 | [Interfaces](interfaces.md) | Nominal behavioral views, `const` field snapshots, structural satisfaction at conversion sites, `io` interfaces in practice, and `is`/`as` downcasts. |
-| 10 | [Generics](generics.md) | Type parameters `<\|T\|>` on records, unions, Interfaces, and functions, Interface constraints, local inference, erasure, and dynamic boundaries. |
+| 10 | [Generics](generics.md) | Type parameters `<\|T\|>` on records, unions, Interfaces, and functions, Interface constraints, local inference, erasure, dynamic boundaries, and [optional generic containers](generics.md#optional-arrays-and-maps). |
 | 11 | [Type Aliases, Options, and Dynamic `value`](types.md) | Transparent `type` aliases, `T?` auto-unwrapping and `?` bindings, checked dynamism with `value`, strict projections, and conversion boundaries. |
 | 12 | [Errors and Resource Cleanup](error-handling.md) | Choosing options versus `raise`, lexical `defer` cleanup, `catch` with `error` and `traceback`, re-raising, and `titan.backtrace()`. |
 

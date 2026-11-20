@@ -473,11 +473,17 @@ semantic relation, and must not synthesize an unannotated semantic
 Written gradual and callable casts use the same plan-consuming adjustment
 lowering as implicit sinks. Array and Map views preserve their carrier; a
 written non-exact callable `as` conditionally realizes a wrapper, while its
-`is` twin remains allocation-free. An Option view performs its immediate
-strict present-payload observation. The `is` lowering consumes the same
+`is` twin remains allocation-free. A structural Option view observes its
+present payload unless the typed source already proves the required outer
+container kind and qualifier. The `is` lowering consumes the same
 `WrittenCastPlan` as `as`, including partial float-to-integer and recursively
 composed Option coercions; it produces the non-raising acceptance predicate
 rather than assuming every statically admitted cast is total.
+
+The [container Option boundary plan](generics.md#container-views-and-presence)
+is used for open element runs. The coder validates its monomorphic steps and
+their adjoining types before emitting them. It never finds an intermediate
+type or constructs an assignment plan itself.
 
 ## Comparison
 
