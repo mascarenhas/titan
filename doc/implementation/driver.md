@@ -127,6 +127,18 @@ All modules, including the standard library, use the same two path strings:
   nothing).
   `titanc --print-ast` preserves compiled `plan.modules` and pre-checks
   `plan.semantic_sources` in-process after resetting `driver.imported`.
+  Unplanned open-world semantic callers—such as the [language-server compiler
+  API](#language-server-compiler-api) and direct `driver.defaultloader` +
+  `checker.checkimport` callers without a build plan—append
+  `perf.semantic_source_root(context)` for ordinary non-root dependency imports
+  (after a clean binary miss in the default policy; `source_first` uses the
+  source pass first) as well as inside [contextual source-requirement
+  recovery](#contextual-source-requirement-recovery), without requiring
+  `--output`, while `source_roots`, explicit `driver.resolve_source(...,
+  source_path)` queries, closed catalogs, and build inputs
+  (`driver.relocate_source_output`, and library build planning's ban on private
+  `.titan` collaboration across the installed package boundary) keep their
+  stricter rules.
   Mechanically, `titanc` sets `context.authored_source_roots` to the positional
   plus `--test-dir` roots; `resolve_source` checks it only after every authored
   root misses and the implicit SDK fallback would match, returning the named
@@ -572,9 +584,12 @@ the argument and does nothing.
   source_requirements }` and archive entries carry
   `{ kind = "static", type, filename, relative, static_archive,
   static_provider, layouts, layout_inventory, source_requirements }` (where
-  `source_requirements` is optional, archive direct `imports` remain on
-  `static_provider.entries[modname]`, and semantic-only `analysis_only` DSO
-  probes skip `_layouts` and `_source_requirements`); trusted host-inventory
+  `source_requirements` is optional and archive direct `imports` remain on
+  `static_provider.entries[modname]`; `analysis_only` DSO probes skip
+  `_layouts` and do not query `_compatibility`, while reading optional
+  `_source_requirements` after verifying ABI and `_types`, and semantic archive
+  decoding retains per-member `source_requirements`, including on browser
+  project archives); trusted host-inventory
   entries carry `{ kind = "embedded", type, filename, embedded_provider }`.
   When a later native (`not context.analysis_only`) resolver reuses a cached
   `dynamic` or `static` entry lacking `layout_inventory`, `defaultloader`
@@ -640,15 +655,24 @@ error objects. Loader-owned options are:
 
 The closure proceeds in this order:
 
-1. A contextual nominal-owner request first follows the exposing compiled
-   interface's producer choice. A carried static or embedded owner is recovered
-   from that same inventory; a DSO-carried owner is probed from that same DSO;
-   otherwise a compiled lookup may recover type information without committing
-   ordinary resolver state or selecting an archive. Each successful recovery
-   also adds one metadata-only `context.contextual_resolutions` entry with
-   logical owner, exposer, compiled kind, physical provider file, and whether
-   ordinary lookup supplied a separate provider. It does not add the owner to
-   `driver.imported` or select it for linking.
+1. A contextual nominal-owner request first checks the exposing compiled
+   interface's own provider: a carried static or embedded owner is read from
+   that inventory, and a DSO-carried owner is probed from that same DSO (each
+   propagating its own `source_requirements` when active). Next, an
+   already-selected `driver.imported` (or planned worker) entry is checked; if
+   absent and the owner is not directly listed in the exposer's
+   `source_requirements`, ordinary compiled lookup (`find_dependency_interface`)
+   runs first without committing resolver state or selecting an archive. In
+   unplanned open-world semantic checks, a directly required owner, an
+   already-selected source owner, or a clean compiled miss then enters the
+   exposer's recorded `source_requirements` frontier on demand ([Contextual
+   source-requirement recovery](#contextual-source-requirement-recovery)).
+   Compiled-provider recoveries record one metadata-only
+   `context.contextual_resolutions` entry (logical owner, exposer, compiled
+   kind, physical provider file, and whether ordinary lookup supplied a separate
+   provider) without adding the owner to `driver.imported` or selecting it for
+   linking; recovered source owners never enter binary
+   `context.contextual_resolutions`.
 2. The loader derives `source_required` for command-line roots and explicit
    `.titan` requests, and `source_preferred` from that requirement, test mode's
    invocation-wide `source_first`, or a source override. A preferred source may
@@ -715,15 +739,19 @@ physically carried by the deduplicated selected archives. It passes that
 complete set to every `coder.generate` call and passes the selected archives
 once to native linking.
 
-Finalization also filters `context.contextual_resolutions` against the final
-compiled exposer selection. The exposer's physical file must still match the
-one observed during checking. A carried owner must share that provider; an
-ordinary-fallback owner may retain its separately resolved provider. This keeps
-simple nominal aliases whose canonical registry nodes do not replay recovery,
-while dropping provisional metadata made obsolete by a later source-root or
-provider selection. Long-lived semantic clients read the filtered table only
-after successful finalization and use it for cache graph edges, not native link
-inputs.
+Finalization replays selected compiled exposers with their `source_requirements`
+intact (skipping dormant archive siblings that carry `source_requirements`
+during semantic recovery while still validating every archive member's physical
+ownership; see [Contextual source-requirement
+recovery](#contextual-source-requirement-recovery)) and filters
+`context.contextual_resolutions` against the final compiled exposer selection.
+The exposer's physical file must still match the one observed during checking. A
+carried owner must share that provider; an ordinary-fallback owner may retain
+its separately resolved provider. This keeps simple nominal aliases whose
+canonical registry nodes do not replay recovery, while dropping provisional
+metadata made obsolete by a later source-root or provider selection. Long-lived
+semantic clients read the filtered table only after successful finalization and
+use it for binary cache graph edges, not native link inputs.
 
 `coder.generate` binds source and selected static names directly through
 `extern` symbols and DSO-selected dependencies through the handle-scoped
@@ -734,6 +762,64 @@ wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring)). Generated
 `_types` functions persist none of this provenance or the transient DSO path.
 Folder layout does not add a loader protocol; the relevant filesystem options
 are `source_roots` and the shared resolver `context`.
+
+#### Contextual source-requirement recovery
+
+* **How sources are chosen.** Active only in unplanned open-world
+  `defaultloader` calls (outside `plan_mode`, `worker_plan`, `incremental`,
+  `coverage`, `context.authored_source_roots`, and `completion_closed_world`),
+  this path enters an exposing member's recorded `source_requirements` lazily
+  on demand—never on raw provider loads, unrelated imports, private-only
+  requirements with no nominal demand, or dormant archive siblings. Each
+  directly recorded requirement demands actual source (sharing the strict
+  conflict/missing-source rule with `plan.load_sources`, and reusing a cached
+  or imported source entry only when its main and ordered `source_files` still
+  match the freshly selected source); if an ordinary import of that same name
+  would select a compiled provider, the same conflict diagnostic is reported
+  regardless of import order. For non-root dependency imports (even when
+  imported before a compiled exposer, retaining normal compiled-first or
+  source-first policy) as well as inside the frontier, source lookup appends
+  `perf.semantic_source_root(context)`—`<handle-prefix>/lib/titan/0.6` from
+  `context.browser_semantics.paths.root` on browser analysis (never native host
+  globals or `lib/titan-browser`) and otherwise
+  `driver.INSTALL_PATHS.titan_bin`—and skips `--output` relocation (for
+  installed-SDK and frontier sources) and frontier source certificates, writing
+  no compiled/publication outputs or installed-SDK files (semantic FFI header
+  checks and host caches still use their own private temporaries and storage;
+  requested `source_roots`, explicit `driver.resolve_source(..., source_path)`
+  queries, closed catalogs, and planned builds never use this fallback, while an
+  open-world non-root explicit `.titan` import can select real installed source
+  —never a binary—distinct from library build planning's rule rejecting private
+  collaboration across the installed package boundary). Loaded required sources resolve their own ordinary imports by
+  normal source/binary precedence—so an unmarked transitive owner such as
+  `units` may resolve from an eligible compiled provider or from source—and
+  recovery never falls back to an unrestricted disk source search for an
+  arbitrary owner name. Obligation failures surface as checking errors (rather
+  than being masked into a use-site `type '...' not found` diagnostic), and
+  stored source diagnostics are replayed only when validating a recorded
+  requirement—never re-emitted on ordinary cached re-imports.
+* **What the host retains and finalizes.** Only reached frontiers publish
+  external `source` entries in `driver.imported` (with their real ordered
+  `source_files` and observations) and record the required names on the
+  selected compiled member's `.deps` (never on the consuming authored source).
+  A reached source owner returns its public projection without entering binary
+  `context.contextual_resolutions` or adding a producer-dynamic native
+  constraint; a reached compiled owner uses the ordinary contextual binary
+  path. Carried static/DSO members keep their own logical identity for their
+  recorded `source_requirements` frontier while attributing `.deps`, binary
+  `context.contextual_resolutions`, and native constraints to the selected
+  physical exposer (re-publishing edges per selected consumer on cached hits),
+  so `finalize_resolver_context` retains those binary graph rows while
+  preserving selected members' `source_requirements` and skipping dormant
+  archive siblings that carry `source_requirements` (still validating every
+  archive member's physical ownership).
+* **How freshness works.** Frontier and requirement outcomes are memoized for
+  one loader attempt only, with no filesystem watcher, cross-attempt miss
+  cache, or live DSO unload guarantee. On a saved refresh, the host calls
+  [`driver.resolve_external_modules`](#driverresolve_external_modulesrequests-known_sources-options),
+  restores only clean retained entries, and rechecks dirty consumers;
+  `completion_closed_world` consumes captured descriptors only and never
+  consults disk on a miss.
 
 #### Interface recovery and the closed validator
 
@@ -851,7 +937,13 @@ and physical provenance own the process-wide nominal cache generation; each
 resolver keeps its own mutable profile and provider graphs. No native
 embedded inventories or dynamically loaded Titan providers participate.
 The SDK archive has first lookup priority; project archives use ordinary
-browser lookup.
+browser lookup and retain per-member optional `source_requirements` in semantic
+decoding. For open-world non-root source fallback, [contextual
+source-requirement recovery](#contextual-source-requirement-recovery), and
+[`driver.resolve_external_modules`](#driverresolve_external_modulesrequests-known_sources-options),
+the handle supplies `<handle-prefix>/lib/titan/0.6` directly from its own SDK
+root (never native host globals or `lib/titan-browser`, and never electing
+native compiled providers).
 The captured completion catalog includes the SDK archive's interfaces even
 before any saved import selects its modules. A project source overlapping one
 module suppresses that whole provider from the default catalog. Capturing the
@@ -1376,6 +1468,13 @@ analysis and is described in [Completion](completion.md).
   snapshots and their detached owner registry remain available for compact
   manifests and completion. Checking still performs semantic elaboration,
   validation and FFI dependency capture; this is not a parser-only mode.
+  In open-world saved analysis (without `completion_closed_world`),
+  `defaultloader` performs lazy [contextual source-requirement
+  recovery](#contextual-source-requirement-recovery) without writing
+  compiled/publication outputs or writing into the installed SDK tree (semantic
+  FFI header checks and host caches still use their own private temporaries and
+  storage). `completion_closed_world` consumes captured descriptors only and
+  never consults disk on a miss.
   Native compilation leaves this option unset and receives the lowered AST
   required for code generation. Analysis ASTs are not code-generation input.
 * `cached_source_entries` contains caller-certified clean `source` entries:
@@ -1514,9 +1613,21 @@ caller-owned. An omitted argument, or a raw `{ io = ... }` table, raises
 `resolver options require an explicit context`, and a stale or never-activated
 borrowed context is rejected before any work. Source flat/folder stat and
 enumeration, compiled-provider occupancy, canonical roots, and static archive
-bytes all use that context's strategy. An embedded result reports
-`{ kind = "embedded", provider_file = <host executable> }` without opening
-that path.
+bytes all use that context's strategy. On open-world contexts
+(`not context.completion_closed_world`), `resolve_source` appends
+`perf.semantic_source_root(context)` (authored `driver.TITAN_SOURCE_PATH`
+roots, then `<root>/lib/titan/0.6` or the browser handle's
+`<handle-prefix>/lib/titan/0.6` for `.titan` source only). The two request edge
+kinds remain distinct: `true` (source-required) bypasses compiled providers and
+searches authored roots then that SDK source root, whereas `false` (ordinary)
+tries compiled providers first and falls back to source only on a clean binary
+miss. Because an unmodified language-server host submits remembered
+compiled-entry `.deps` as ordinary (`false`) edges, introducing a selectable
+binary for a required source can conservatively invalidate and recheck a
+previously recovered source on refresh, while actual semantic recovery still
+demands real source and rejects the conflicting binary. An embedded result
+reports `{ kind = "embedded", provider_file = <host executable> }` without
+opening that path.
 
 ## Compiling one module: `driver.compile`
 
@@ -3179,7 +3290,7 @@ concepts.
 | `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | detected from checkout files unless `TITAN_ROOT` is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. Detection is lazy (`driver.initialize_layout`); before resolver initialization the module exposes only a provisional lexical checkout layout. |
 | `driver.INSTALL_PATHS` | `driver.installed_paths(root)` | `root`, `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua` (`liblua55.a` on Windows), `titan_bin`, and `sdk_digests`; bundled `libuv.a` is deliberately not an installed SDK path. The browser table, `installed_paths(root, "browser")`, lives only in a browser descriptor ([Installed paths](browser-target.md#installed-paths)). |
 | `driver.TITAN_BIN_PATH` / `driver.DEFAULT_TITAN_BIN_PATH` | `TITAN_PATH_0_6`, then `TITAN_PATH`, else `nil` / `.;<root>/lib/titan/0.6`, or `.` without a root | Configured and default compile-time Titan paths; `driver.titan_bin_path_entries` expands them. |
-| `driver.TITAN_SOURCE_PATH` | `"."` (`titanc --tree`) | Semicolon-separated authored source roots; positional CLI roots and `--test-dir` search only authored roots, while ordinary imports append read-only `<root>/lib/titan/0.6` on native and browser targets (requiring `--output` when an installed source is selected). |
+| `driver.TITAN_SOURCE_PATH` | `"."` (`titanc --tree`) | Semicolon-separated authored source roots; positional CLI roots and `--test-dir` search only authored roots, while ordinary imports and [contextual source-requirement recovery](#contextual-source-requirement-recovery) append read-only `<root>/lib/titan/0.6` on native and browser targets (builds require `--output` when an installed source is selected). |
 | `driver.LUA_SOURCE_PATH` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode | Lua internal source/header tree; checkout-only override by `titanc --lua`. |
 | `driver.INCLUDE_PATH` | `<root>/include` in installed mode | SDK headers used by generated C and foreign imports; see [the runtime support library](#the-runtime-support-library-titan-runtime). |
 | `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime and libbacktrace locations. |

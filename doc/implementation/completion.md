@@ -123,7 +123,10 @@ and running `completion_finish`
 
 The binary kind is `embedded`, `dynamic`, or `static`. The closed catalog rejects
 missing dependencies and source-required imports of captured binaries. It never
-falls back to newer filesystem source or providers. Saved indexing obtains the
+falls back to newer filesystem source or providers, and never consults disk to
+re-acquire a captured binary's `source_requirements` frontier (any source-backed
+nominal owner exposed by a captured binary must come from the captured checked
+source entries and registry). Saved indexing obtains the
 eligible embedded and already selected binary inventory through
 `driver.completion_binary_catalog(context)` after source/provider precedence is
 settled. Capture every module carried by each finalized selected static
