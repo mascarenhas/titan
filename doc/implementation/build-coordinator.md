@@ -177,6 +177,9 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    Native executable preflight follows each selected archive member's
    [declared imports](static-compiled-modules.md#demanded-archive-closure)
    before workers start or the final link can certify.
+   A browser `--test` link checks the SDK's runtime assets before planning
+   the synthetic runner's implicit `titan.test` import. Compile-only builds
+   do not add that import or require the final-link assets.
 2. **Stage-1 local certification.** When `request.incremental` is true and the
    source descriptor is not in-memory, `plan_source` (`driver.lua`)
    calls `driver.incremental_configuration(context)` and

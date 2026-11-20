@@ -844,11 +844,15 @@ assert(driver.close_resolver_context(context))
             prepare(info)
             write(root .. "/src/pkg/program.titan",
                 "function main(args: {string}): integer return 0 end\n")
+            local output = root .. "/out/pkg/" .. (mode == "test" and "left" or "program")
             local result = mode == "test" and run_cli(nil, "--test", "pkg.left") or
                 run_cli(nil, "pkg.program")
             assert.is_false(result.ok)
             assert.matches("browser SDK is incomplete: missing", result.output, 1, true)
             assert.is_nil(lfs.attributes(root .. "/out/.titan-links"))
+            for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map", ".wasm.trace" }) do
+                assert.is_nil(lfs.attributes(output .. suffix), output .. suffix)
+            end
         end)
     end
 end)
