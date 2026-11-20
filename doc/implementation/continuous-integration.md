@@ -20,22 +20,42 @@ executions: `build-compiler`, `sanitizer`, and
 [`browser-stdlib`](#browser-stdlib-job) shards, and the six-cell
 [`browser-playwright`](#browser-playwright-job) matrix (`validation` and
 `production` profiles across `chromium`, `firefox`, and `webkit`) start in
-parallel. Preparation has a 30-minute timeout, compiler pairs and
-`browser-packaging` 45 minutes, native coverage, the other browser jobs, and
-the `browser-playwright` cells 60 minutes, and the independent cold sanitizer
-build 75 minutes.
+parallel.
 
-Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
-The native coverage, sanitizer, and browser jobs each use a four-vCPU runner
-with 16GB RAM and override both limits to four. Large instrumented test units
-in the sanitizer job exceed the smaller runner's 8GB RAM.
-Under these caps, native Make prerequisites and the standard-library and
+All Linux jobs use the [standard GitHub-hosted `ubuntu-24.04`
+runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories)
+for public repositories: four vCPUs, 16 GB RAM, and about 14 GB of guaranteed
+free SSD space.
+
+| Jobs | Make and Titan job slots | Timeout |
+| --- | ---: | ---: |
+| `build-compiler` | 2 | 30 min |
+| `test-linux-compiler` | 2 | 45 min |
+| `browser-packaging` | 4 | 45 min |
+| `browser-toolchain`, `browser-stdlib`, `browser-playwright`, `native-coverage` | 4 | 60 min |
+| `sanitizer` | 4 | 75 min |
+
+No lane previously required a runner larger than four vCPUs and 16 GB.
+Sanitizer compilation has the tightest memory margin: a local `act` run
+peaked near 97% of its 16 GiB cgroup limit. That is not a measurement of
+memory available on the hosted VM. The job graph and timeout limits stay
+unchanged; use hosted step durations and failure logs before changing either.
+
+After checkout and before any cache restore, all four browser jobs,
+`native-coverage`, and `sanitizer` run **Free disk space for build outputs**.
+On GitHub-hosted runners only, it removes the image's unused Android SDK
+(including its NDKs) at `/usr/local/lib/android/sdk` and logs `df -h` for
+the workspace and runner temp directory before and after. This makes room
+for emsdk, browser downloads, native dependency caches, and large test
+and link outputs without removing build tools the jobs need.
+
+Native Make prerequisites and the standard-library and
 native-test module objects overlap in one Make pool: every `titanc` recipe is a
 `+` recipe that shares it ([Make job pool and titanc
 recipes](build-script-audit.md#make-job-pool-and-titanc-recipes)), and each
 compiler process overlaps only its generated-C compilations inside it. The
-explicit caps keep the Makefile's default four-slot pool from oversubscribing
-the two-vCPU runners. Compiler shards override nested Make/Titan work to one
+compiler jobs retain the two-slot cap rather than inheriting Make's default
+of four. Compiler shards override nested Make/Titan work to one
 slot outside their exclusive phase and run at most two workers per runner; the
 native coverage job's two installed-stdlib integration workers take two slots
 each.
@@ -199,9 +219,9 @@ to write the record; the workflow hardcodes no fork revision. Pins live in
 `TITAN_CHROME_VERSION`, `TITAN_CHROME_SHA256`, `TITAN_CHROME_ROOT`), because
 `emsdk_env.sh` unsets every `EMSDK_*` variable it does not set itself, and each
 job sets `permissions.id-token: write` for its own Codecov upload. All three
-jobs begin with the same seven steps:
+jobs use the same seven setup stages after the disk-space step:
 
-1. **Emscripten.** `ubicloud/cache@v4` restores `.emsdk` under the key
+1. **Emscripten.** `actions/cache@v4` restores `.emsdk` under the key
    `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
    (the installer, not the pin); `emsdk install 6.0.13` and `emsdk activate
    6.0.13` are idempotent, so a restored installation only re-verifies. The
@@ -213,7 +233,7 @@ jobs begin with the same seven steps:
    executable as `TITAN_NODE`. Browser commands use that path even after
    `emsdk_env.sh` changes `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
    only action runtimes, not the runtime that executes Titan images.
-3. **Chrome for Testing.** `ubicloud/cache@v4` restores the headless shell
+3. **Chrome for Testing.** `actions/cache@v4` restores the headless shell
    under `ubuntu-24.04-<arch>-chrome-headless-shell-156.0.8078.80-<sha256>-v1`
    (the ZIP digest is part of the cache key so re-pinning cannot restore an
    old binary). A miss downloads the pinned linux64 `chrome-headless-shell`
@@ -455,7 +475,7 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
    `make lua-browser PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`,
    asserting the installed `titan-browser-trace.js` and `titan-browser-bridge.js`
    and that `build-profile` holds the cell's profile.
-3. **Playwright engine provisioning and supervisor check.** `ubicloud/cache@v4`
+3. **Playwright engine provisioning and supervisor check.** `actions/cache@v4`
    restores `PLAYWRIGHT_BROWSERS_PATH` (`.playwright-browsers`) under
    `ubuntu-24.04-<arch>-playwright-1.64.1-<engine>-v1`; `npm install --prefix
    "$TITAN_PLAYWRIGHT_ROOT"` (`out/playwright-tools`) installs
@@ -705,11 +725,8 @@ changes what the cached tree must contain.
 
 ## Sanitizer ownership and failure diagnostics
 
-The disposable Linux sanitizer runner removes its unused preinstalled Android
-SDK at `/usr/local/lib/android/sdk` before building, and reports disk space
-before and after. Instrumented providers and static child fixtures need room
-for their link outputs. Make-owned runtime/provider archives, generated code,
-and diagnostic snapshots remain available throughout the gates.
+Make-owned runtime/provider archives, generated code, and diagnostic
+snapshots remain available throughout the gates.
 
 The sanitizer owns an independent ASan+UBSan Lua, libbacktrace, libuv, llhttp,
 OpenSSL, and Titan tree; it never consumes the ordinary compiler artifact.

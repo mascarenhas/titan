@@ -151,7 +151,7 @@ jobs:
         run: lua -v
 
       - name: Restore macOS C-probe results
-        uses: ubicloud/cache@v4
+        uses: actions/cache@v4
         with:
           path: .lua/var/cache/titan-probes/2
           key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-macos-${{ github.sha }}

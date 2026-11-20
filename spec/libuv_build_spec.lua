@@ -5845,6 +5845,8 @@ printf '%s\n' "${schedule[@]}"
                 "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
             assert.equal(8, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
+            assert.equal(8, count_literal(linux_workflow,
+                "\n    runs-on: ubuntu-24.04\n"), linux_workflow)
             assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
                 macos_workflow)
             for _, job_name in ipairs({
@@ -5892,7 +5894,7 @@ printf '%s\n' "${schedule[@]}"
 
             for _, contract in ipairs({
                 "name: compiler dependencies (ubuntu-24.04)",
-                "runs-on: ubicloud-standard-2", "timeout-minutes: 30",
+                "timeout-minutes: 30",
                 "contents: read", "\n      CC: gcc-14\n",
                 "\n      LUA_CC: gcc-14\n", "make lua luarocks",
                 "luarocks make --only-deps", "luarocks test --prepare",
@@ -6013,11 +6015,11 @@ printf '%s\n' "${schedule[@]}"
 
             -- browser-packaging restores the emsdk and Playwright caches.
             assert.equal(15, count_literal(workflow,
-                "uses: ubicloud/cache@v4"), workflow)
+                "uses: actions/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
-                "uses: ubicloud/cache/restore@v4"), workflow)
+                "uses: actions/cache/restore@v4"), workflow)
             assert.equal(2, count_literal(workflow,
-                "uses: ubicloud/cache/save@v4"), workflow)
+                "uses: actions/cache/save@v4"), workflow)
             assert.equal(4, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/2"), workflow)
             assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
@@ -6040,14 +6042,14 @@ printf '%s\n' "${schedule[@]}"
             local regular_cache_step = named_step(native_coverage_job,
                 "Restore regular Linux C-probe results")
             for _, contract in ipairs({
-                "id: regular-probe-cache", "uses: ubicloud/cache/restore@v4",
+                "id: regular-probe-cache", "uses: actions/cache/restore@v4",
                 "-test-linux-stdlib-",
             }) do
                 assert.truthy(regular_cache_step:find(contract, 1, true), contract)
             end
             local regular_save_step = named_step(native_coverage_job,
                 "Save regular Linux C-probe results")
-            assert.truthy(regular_save_step:find("uses: ubicloud/cache/save@v4", 1, true))
+            assert.truthy(regular_save_step:find("uses: actions/cache/save@v4", 1, true))
             assert.truthy(regular_save_step:find(
                 "${{ steps.regular-probe-cache.outputs.cache-primary-key }}", 1, true))
             local rock_install = named_step(native_coverage_job,
@@ -6091,8 +6093,6 @@ printf '%s\n' "${schedule[@]}"
                 "fail-fast: false"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "needs: build-compiler"), compiler_job)
-            assert.equal(1, count_literal(compiler_job,
-                "runs-on: ubicloud-standard-2"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "timeout-minutes: 45"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -6179,7 +6179,7 @@ printf '%s\n' "${schedule[@]}"
 
             for _, job in ipairs({ browser_job, browser_stdlib_job }) do
                 for _, contract in ipairs({
-                    "\n    needs: build-compiler\n", "runs-on: ubicloud-standard-4",
+                    "\n    needs: build-compiler\n",
                     "timeout-minutes: 60",
                     'TITAN_EMSDK_VERSION: "6.0.13"',
                     "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
@@ -6446,7 +6446,7 @@ printf '%s\n' "${schedule[@]}"
                 '-sASSERTIONS="$assertions"'), trace_units)
 
             for _, contract in ipairs({
-                "needs: build-compiler", "runs-on: ubicloud-standard-4",
+                "needs: build-compiler",
                 "timeout-minutes: 60",
                 "profile: [validation, production]",
                 "engine: [chromium, firefox, webkit]",
@@ -6686,7 +6686,7 @@ printf '%s\n' "${schedule[@]}"
 
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",
-                "needs: build-compiler", "runs-on: ubicloud-standard-4",
+                "needs: build-compiler",
                 'MAKEFLAGS: "-j4"', 'TITAN_JOBS: "4"',
                 "timeout-minutes: 60", "\n      CC: gcc-14\n",
                 "\n      GCOV: gcov-14\n", "gcc-14 clang-format python3-venv",
@@ -7083,8 +7083,6 @@ printf '%s\n' "${schedule[@]}"
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "runs-on: ubicloud-standard-4"), sanitizer_job)
-            assert.equal(1, count_literal(sanitizer_job,
                 'MAKEFLAGS: "-j4"'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 'TITAN_JOBS: "4"'), sanitizer_job)
@@ -7134,7 +7132,7 @@ printf '%s\n' "${schedule[@]}"
                 'cc_version="$(cc -dumpfullversion -dumpversion)"',
                 'system_packages="$(dpkg-query',
                 "id: sanitizer-native-cache",
-                "uses: ubicloud/cache/restore@v4",
+                "uses: actions/cache/restore@v4",
                 "path: |",
                 "lua-${{ env.SANITIZER_LUA_VERSION }}",
                 "libbacktrace",
@@ -7147,7 +7145,7 @@ printf '%s\n' "${schedule[@]}"
                 "test -f sqlite3-build/libtitan-sqlite3.a",
                 "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}",
                 "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz",
-                "uses: ubicloud/cache/save@v4",
+                "uses: actions/cache/save@v4",
                 "steps.sanitizer-native-cache.outputs.cache-primary-key",
                 "steps.sanitizer-native-cache.outputs.cache-hit != 'true'",
                 'test ! -e "$PREFIX/bin/luarocks"',
