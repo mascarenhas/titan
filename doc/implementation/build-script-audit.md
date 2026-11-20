@@ -490,19 +490,22 @@ The author-facing packaging guide and complete rockspec example live in
   namespaces under `<rock-version-dir>/dist/`: `dist/modules/` maps to
   `<tree>/lib/titan/<Titan major.minor>/`, optional `dist/include/` maps to
   `<tree>/include/`, and optional `dist/lib/` maps to `<tree>/lib/`. There is
-  no `dist/bin/`. Normal native module packages build their own provider pair
-  without `--static` (`.so`/`.a` on Unix, `.dll` only on Windows) and declare
-  package dependencies rather than embedding the standard library or other
-  dependencies (and compiling a binary library fails if a dependency resolves
-  only through the implicit installed source fallback; see
-  [Source-only modules](../language/modules.md#source-only-modules)); native `--static` library builds are reserved for canonical
-  bundles of related modules (such as the standard library, which other
-  packages never embed), while Unix `--static` standalone and `--test`
-  executables embed the complete transitive Titan dependency closure from `.a`
-  archives alongside compiled authored sources (with no fallback to shared
-  Titan providers and a link-time diagnostic on a missing archive, governing
-  Titan modules rather than static linkage of `libc` or external native
-  libraries). Relative payload entry names must use unambiguous portable
+  no `dist/bin/`. Normal native module packages and canonical multi-root bundles build their own
+  provider pair in ordinary library mode with explicit logical roots (`.so`/`.a`
+  on Unix, `.dll` only on Windows) and declare package dependencies rather than
+  incorporating the standard library or other external Titan dependencies (and
+  compiling a binary library fails if a dependency resolves only through the
+  implicit installed source fallback; see
+  [Source-only modules](../language/modules.md#source-only-modules)).
+  `--static` is rejected on every final no-main library output, including
+  canonical bundles (`-c --static` remains available for individual objects
+  targeting a later executable). Dynamic/default applications may fall back to
+  an archive-only dependency or compile source, while Unix `--static`
+  standalone and `--test` executables embed the full reached Titan dependency
+  closure from `.a` archives alongside source compiled in the application (with
+  no fallback to shared Titan providers and a link-time diagnostic on a missing
+  archive; `--static` governs Titan modules and does not force `libc` or
+  external native libraries to link statically). Relative payload entry names must use unambiguous portable
   ASCII ordinary file components (spaces are allowed; Windows reserved or
   ambiguous spellings, symlinks, and path/case aliases are refused, and
   ownership keys compare ASCII case-insensitively). This restriction applies
