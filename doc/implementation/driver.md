@@ -568,11 +568,22 @@ the argument and does nothing.
   reports an error, and object-backed entries ([Object-backed source
   modules](incremental-compilation.md)) add `compiled`, `has_main`,
   `test_functions`, and `external_symbols`. DSO entries carry
-  `{ kind = "dynamic", type, filename, relative, layouts, layout_inventory }`;
-  archive entries carry `{ kind = "static", type, filename, relative,
-  static_archive, static_provider, layouts, layout_inventory }`; trusted
-  host-inventory entries carry `{ kind = "embedded", type, filename,
-  embedded_provider }`. Tests and long-lived tools reset this cache together
+  `{ kind = "dynamic", type, filename, relative, layouts, layout_inventory,
+  source_requirements }` and archive entries carry
+  `{ kind = "static", type, filename, relative, static_archive,
+  static_provider, layouts, layout_inventory, source_requirements }` (where
+  `source_requirements` is optional, archive direct `imports` remain on
+  `static_provider.entries[modname]`, and semantic-only `analysis_only` DSO
+  probes skip `_layouts` and `_source_requirements`); trusted host-inventory
+  entries carry `{ kind = "embedded", type, filename, embedded_provider }`.
+  When a later native (`not context.analysis_only`) resolver reuses a cached
+  `dynamic` or `static` entry lacking `layout_inventory`, `defaultloader`
+  revalidates that same physical provider and checks that its serialized public
+  interface (`types.serialize_semantic`) still matches before attaching raw
+  `layouts`, decoded `layout_inventory`, and optional `source_requirements` via
+  `perf.attach_provider_metadata` (retaining the rescanned `static_provider`
+  for an archive, without mutating the entry on failure or reading runtime
+  `_compatibility`). Tests and long-lived tools reset this cache together
   with `types.registry`. Both belong to one target identity at a time. The
   first activation in a process adopts the pair a host installed before it, so
   an embedding host may install or restore its own `driver.imported` and
