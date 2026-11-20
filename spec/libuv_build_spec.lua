@@ -6742,7 +6742,7 @@ printf '%s\n' "${schedule[@]}"
                 local suite = named_job(hosted, "test-" .. platform_id)
                 local events = assert(hosted:match("\non:(.-)\npermissions:"))
                 assert.equal(1, count_literal(events, '\n  push:\n    branches: ["**"]\n'), events)
-                assert.equal(1, count_literal(events, '\n  pull_request:\n    branches: ["**"]\n'), events)
+                assert.falsy(events:find("\n  pull_request:", 1, true), events)
                 assert.equal(1, count_literal(events, "\n  workflow_dispatch:\n"), events)
                 assert.equal(1, count_literal(suite, "\n    runs-on: " .. runner .. "\n"), suite)
                 assert.equal(1, count_literal(suite, "fail-fast: false"), suite)

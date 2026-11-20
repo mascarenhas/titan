@@ -839,10 +839,10 @@ Local Clang sanitizer lanes do not exercise the normalization.
 
 ## Hosted macOS and Windows
 
-These are separate native workflows: both run on pushes and pull requests for
-all branches, and both can be dispatched manually. They use the `validation`
-profile and run no browser, sanitizer, or coverage lanes. The hosted runner
-labels select these public-repository budgets:
+Like Linux CI, these separate native workflows run on pushes to all branches,
+not on pull request events. Both can also be dispatched manually. They use the
+`validation` profile and run no browser, sanitizer, or coverage lanes. The
+hosted runner labels select these public-repository budgets:
 
 | Workflow | Runner | Build slots | Parallel test cells |
 | --- | --- | ---: | --- |
@@ -914,8 +914,8 @@ The C-probe cache restores separately before building the rock, using a
 stable platform/toolchain prefix and a fresh key for each run and attempt.
 The same native or full cell saves it after installation, before any
 OpenSSL-mode switch. Build logs show the restore results. Standard GitHub
-cache visibility applies: a PR's merge-ref cache does not warm a later
-default-branch run.
+cache visibility applies: feature branches can restore default-branch caches,
+but caches saved on feature branches do not warm the default branch.
 
 Hosted and local validation are separate evidence. Record the exact source,
 architecture, SDK profile, and all relevant dependency modes when using a local
