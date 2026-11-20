@@ -13339,6 +13339,34 @@ describe("target-aware source resolver", function()
             paths.to_slash(assert(driver.resolve_source(context("browser"), "only")).main))
     end)
 
+    it("selects installed browser sources only after authored roots", function()
+        put("sdk/choice.native.titan")
+        put("sdk/choice.browser.titan")
+        put("sdk/choice.shared.titan")
+        put("sdk/native_only.native.titan")
+        put("sdk/native_only.so", "not a browser provider")
+        put("sdk/native_only.a", "not a browser archive")
+        put("early/other.titan")
+        put("late/choice.titan")
+        local ctx = context("browser")
+        ctx.installed_source_root = root .. "/sdk"
+        driver.TITAN_SOURCE_PATH = root .. "/early;" .. root .. "/late"
+        assert.equal(root .. "/late/choice.titan",
+            paths.to_slash(assert(driver.resolve_source(ctx, "choice")).main))
+        assert(os.remove(root .. "/late/choice.titan"))
+        assert.is_nil(driver.resolve_source(ctx, "choice", driver.TITAN_SOURCE_PATH))
+        local selected = assert(driver.resolve_source(ctx, "choice"))
+        assert.equal(root .. "/sdk/choice.browser.titan", paths.to_slash(selected.main))
+        assert(driver.relocate_source_output("choice", selected, root .. "/build"))
+        assert.equal(root .. "/build/choice.titan", paths.to_slash(selected.native_output))
+        assert.is_nil(driver.resolve_source(ctx, "native_only"))
+        driver.TITAN_BIN_PATH = "."
+        local loader = driver.defaultloader({}, { context = ctx, output_root = root .. "/build" })
+        local loaded, message = loader("native_only")
+        assert.is_false(loaded)
+        assert.equal("module 'native_only' not found", message)
+    end)
+
     local stdlib_root = paths.to_slash(lfs.currentdir())
     local excluded_stdlib = {
         { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" },

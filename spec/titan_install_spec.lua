@@ -520,3 +520,150 @@ assert(os.remove(arg[0]))
         assert.equal("third-party SSL", read(prefix .. "/include/openssl/ssl.h"))
     end)
 end)
+
+describe("Titan module publication preflight", function()
+    local workspace, prefix, rocks, sdk, installer
+
+    local function stage(rock, path)
+        directory(rocks .. "/" .. rock .. "/1.0-1")
+        local private = rocks .. "/" .. rock .. "/1.0-1"
+        write(private .. "/rock_manifest", "rock_manifest = {}\n")
+        write(private .. "/dist/" .. path, "payload")
+        return private
+    end
+
+    local function reject(private, diagnostic)
+        local ok, result = pcall(installer.publish_module, sdk, private)
+        assert.is_false(ok)
+        assert.matches(diagnostic, result, 1, true)
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/include/valid.h"))
+    end
+
+    before_each(function()
+        workspace = temporary.name()
+        assert(os.remove(workspace))
+        directory(workspace)
+        local previous = assert(lfs.currentdir())
+        assert(lfs.chdir(workspace))
+        workspace = assert(lfs.currentdir()):gsub("\\", "/")
+        assert(lfs.chdir(previous))
+        prefix = workspace .. "/SDK"
+        rocks = prefix .. "/lib/luarocks/rocks-5.5"
+        sdk = rocks .. "/titan/0.6.0-1"
+        write(sdk .. "/installer/location.lua", string.format(
+            "return { tree = %q, lua_dir = %q, luarocks = %q }\n", prefix, prefix, "unused"))
+        installer = assert(loadfile("scripts/titan_install.lua"))()
+    end)
+
+    after_each(function() remove_tree(workspace) end)
+
+    for _, path in ipairs({
+        "include/Titan.h", "include/titan/ffi.h/config", "include/OpenSSL/local.h",
+        "include/uv.h", "include/sqlite3.h", "include/lua.h", "include/titan",
+        "modules/TITAN.so", "modules/titan.so.dSYM/file", "modules/libtitan.a",
+        "modules/sdk-digests", "modules/_titan_browser/windows_job.dll",
+        "lib/liblua55.a", "lib/libbacktrace.a", "lib/libuv.dll.a",
+        "lib/Lua/module.so", "lib/luarocks/rocks-5.5/payload",
+        "lib/titan/0.6/bypass.titan", "lib/titan-browser/0.6/foo.a",
+        "lib/browser/include/lua.h",
+    }) do
+        it("rejects reserved path " .. path .. " even when absent", function()
+            local private = stage("first", path)
+            stage("first", "include/valid.h")
+            reject(private, "reserved SDK path")
+            assert.is_nil(lfs.symlinkattributes(prefix .. "/lib/titan/.module-rocks"))
+        end)
+    end
+
+    it("rejects stage roots that are not publication namespaces", function()
+        local private = stage("first", "bin/command")
+        stage("first", "include/valid.h")
+        reject(private, "unexpected module staging directory")
+    end)
+
+    it("rejects case aliases, identical foreign files, and directory/file conflicts", function()
+        local private = stage("first", "include/shared/header.h")
+        stage("first", "include/valid.h")
+        write(prefix .. "/include/Shared/header.h", "payload")
+        reject(private, "path alias")
+        remove_tree(prefix .. "/include/Shared")
+        write(prefix .. "/include/shared/header.h", "payload")
+        reject(private, "module destination already exists")
+        remove_tree(prefix .. "/include/shared")
+        directory(prefix .. "/include/shared/header.h")
+        reject(private, "not an ordinary file")
+        remove_tree(prefix .. "/include/shared")
+        write(prefix .. "/include/shared", "blocking file")
+        reject(private, "not an ordinary directory")
+    end)
+
+    it("reserves missing owned files and their ancestors across installs", function()
+        local owner = stage("first", "include/Shared/missing.h")
+        assert(installer.publish_module(sdk, owner))
+        remove_tree(prefix .. "/include/Shared")
+        local intruder = stage("second", "include/Shared/missing.h")
+        stage("second", "include/valid.h")
+        reject(intruder, "owned by first")
+        remove_tree(intruder .. "/dist/include/Shared")
+        stage("second", "include/shared/new.h")
+        reject(intruder, "module path conflicts")
+        remove_tree(intruder .. "/dist/include/shared")
+        stage("second", "include/Shared/missing.h/new.h")
+        reject(intruder, "owned by first")
+    end)
+
+    it("rejects alternate platform spellings in stage entries", function()
+        if package.config:sub(1, 1) == "\\" then
+            pending("Windows prohibits creating these filenames")
+            return
+        end
+        for _, name in ipairs({ "NUL.h", "x:stream", "ends. ", "FILE~1.h", "x\\..\\escape", "café" }) do
+            local private = stage("first", "include/" .. name)
+            stage("first", "include/valid.h")
+            reject(private, "invalid module payload path")
+            remove_tree(private)
+        end
+    end)
+
+    it("does not traverse symlinked payloads or destination parents", function()
+        local private = stage("first", "include/nested/header.h")
+        stage("first", "include/valid.h")
+        local outside = workspace .. "/outside"
+        write(outside .. "/header.h", "untouchable")
+        directory(prefix .. "/include")
+        local link = prefix .. "/include/nested"
+        if not lfs.link(outside, link, true) then
+            pending("directory symlink creation is unavailable")
+            return
+        end
+        reject(private, "not an ordinary directory")
+        assert(lfs.rmdir(link) or os.remove(link))
+        local staged = private .. "/dist/include/nested"
+        remove_tree(staged)
+        assert(lfs.link(outside, staged, true))
+        reject(private, "module payload is not an ordinary file")
+        assert.equal("untouchable", read(outside .. "/header.h"))
+        assert(lfs.rmdir(staged) or os.remove(staged))
+    end)
+
+    it("keeps an ownership record after an interrupted publication", function()
+        local uv = require "luv"
+        local private = stage("first", "include/a.h")
+        stage("first", "include/z.h")
+        local open = io.open
+        io.open = function(path, mode)
+            if path == private .. "/dist/include/z.h" then return nil, "injected read failure" end
+            return open(path, mode)
+        end
+        local ok, message = pcall(installer.publish_module, sdk, private)
+        io.open = open
+        assert.is_false(ok)
+        assert.matches("injected read failure", message, 1, true)
+        assert.equal("payload", read(prefix .. "/include/a.h"))
+        assert.is_nil(uv.fs_stat(prefix .. "/include/z.h"))
+        -- Retry publication without leaving an unowned already copied file.
+        assert(installer.publish_module(sdk, private))
+        assert.equal("payload", read(prefix .. "/include/a.h"))
+        assert.equal("payload", read(prefix .. "/include/z.h"))
+    end)
+end)

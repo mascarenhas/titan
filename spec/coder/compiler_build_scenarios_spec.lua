@@ -431,6 +431,10 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
                 REPOSITORY .. "/titan-runtime/bootstrap/?" .. SHARED_SUFFIX .. ";"),
             frontend,
         }
+        if options.init_code and options.init_code ~= "" then
+            table.insert(argv, 5, options.init_code)
+            table.insert(argv, 5, "-e")
+        end
         for _, arg in ipairs(options.args or {}) do
             argv[#argv + 1] = arg
         end
@@ -631,6 +635,102 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
 
     after_each(function()
         remove(workspace)
+    end)
+
+    it("uses installed source modules without treating the SDK as an output or test-discovery root", function()
+        local uv = require("luv")
+        local sdk = workspace .. "/isolated SDK"
+        local release_dir = "lib/titan/" .. driver.TITAN_LIBRARY_VERSION
+        local lib = sdk .. "/" .. release_dir
+        local function copy(relative)
+            local source, target = prefix .. "/" .. relative, sdk .. "/" .. relative
+            if lfs.attributes(source, "mode") == "directory" then
+                mkdir(target)
+                for name in lfs.dir(source) do
+                    if name ~= "." and name ~= ".." then copy(relative .. "/" .. name) end
+                end
+            else
+                mkdir(assert(target:match("^(.*)/[^/]+$")))
+                assert(uv.fs_copyfile(source, target))
+            end
+        end
+        copy("include")
+        copy("etc/titan/build-profile")
+        copy("lib/libbacktrace.a")
+        copy(platform.windows and "lib/liblua55.a" or "lib/liblua.a")
+        copy(release_dir .. "/libtitan.a")
+        copy(release_dir .. "/titan" .. SHARED_SUFFIX)
+        if not platform.windows then
+            copy("src/lua-5.5.1")
+            copy(release_dir .. "/titan.a")
+        end
+        local module = lib .. "/fruit/pick/pick.titan"
+        write(module, "function answer(): integer return add(40) end\n")
+        write(lib .. "/fruit/pick/internal.titan",
+            "local function add(n: integer): integer return n + 2 end\n")
+        write(lib .. "/sdk_test.titan", "this must not be discovered\n")
+        put_source("consumer.titan", [[
+local pick = import "fruit.pick"
+function main(args: {string}): integer return pick.answer() - 42 end
+]])
+        put_source("plain.titan", "function answer(): integer return 42 end\n")
+        put_source("fixture_test.titan", [[
+local test = import "test"
+local pick = import "fruit.pick"
+function test_installed(context: test.Context)
+    test.assert(pick.answer() == 42)
+end
+]])
+        local collector = require("spec.support.luacov_children").new(
+            REPOSITORY, REPOSITORY, workspace .. "/child-coverage")
+        local init_code = collector:init_code()
+        local function compile(cwd, ...)
+            local argv, env = compiler_argv({
+                args = { "-v", "--incremental", ... }, env = { TITAN_ROOT = sdk }, init_code = init_code,
+            })
+            return run_command(argv, cwd, env)
+        end
+        local ok, output = compile(source_dir, "consumer")
+        assert.is_false(ok, output)
+        assert.matches("installed source module 'fruit.pick' requires --output DIR", output, 1, true)
+        ok, output = compile(source_dir, "-c", "plain")
+        assert.is_true(ok, output)
+        assert.is_true(exists(source_dir .. "/plain.o"))
+        assert.is_false(exists(lib .. "/.titan-build.lock"))
+
+        ok, output = compile(source_dir, "-o", build_dir, "consumer")
+        assert.is_true(ok, output)
+        assert.is_true(exists(build_dir .. "/fruit/pick/pick.o"))
+        local app = executable_path(build_dir .. "/consumer")
+        local ran, result = run_executable(app)
+        assert.is_true(ran, result)
+        ok, output = compile(workspace, "--tree", source_dir, "-o", build_dir, "consumer")
+        assert.is_true(ok, output)
+        assert.matches("Titan object hit fruit.pick", output, 1, true)
+        ok, output = compile(workspace, "--tree", source_dir, "consumer")
+        assert.is_false(ok, output)
+        assert.matches("installed source module 'fruit.pick' requires --output DIR", output, 1, true)
+        write(module, "function answer(): integer return add(41) end\n")
+        ok, output = compile(workspace, "--tree", source_dir, "-o", build_dir, "consumer")
+        assert.is_true(ok, output)
+        assert.matches("Titan object miss fruit.pick", output, 1, true)
+        local _, _, reason, status = run_executable(app)
+        assert.equal("exit", reason)
+        assert.equal(1, status)
+
+        local second = workspace .. "/second"
+        write(second .. "/fruit/pick.titan", "function answer(): integer return 42 end\n")
+        ok, output = compile(workspace, "--tree", source_dir .. ";" .. second,
+            "--test", "--test-dir", source_dir, "-o", build_dir .. "/test")
+        assert.is_true(ok, output)
+        local tests = executable_path(build_dir .. "/test/fixture_test")
+        ran, result = run_executable(tests)
+        assert.is_true(ran, result)
+        assert.matches("[  PASSED  ] 1 test.", result, 1, true)
+        assert.is_false(exists(lib .. "/fruit/pick/pick.o"))
+        assert.is_false(exists(lib .. "/fruit/pick/pick.c"))
+        assert.is_false(exists(lib .. "/.titan-build.lock"))
+        collector:collect()
     end)
 
     it("builds and incrementally updates application and test executables across closure, header, flag, profile, link, discovery, and recovery scenarios", function()

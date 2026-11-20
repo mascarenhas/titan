@@ -41,6 +41,12 @@ local function same(left, right)
     return left == right
 end
 
+local function installation(package_dir)
+    package_dir = physical(package_dir)
+    local location = assert(loadfile(package_dir .. "/installer/location.lua", "t", {}))()
+    return package_dir, physical(assert(location.tree)), location
+end
+
 -- Windows also accepts backslash separators, so split on both there before
 -- rejecting dot components.
 local function contained(root, relative)
@@ -70,12 +76,43 @@ local function quote(value)
     return "'" .. value:gsub("'", "'\"'\"'") .. "'"
 end
 
-local function execute(argv)
+local function execute(argv, stdout)
     local words = {}
     for _, word in ipairs(argv) do words[#words + 1] = quote(word) end
     local line = table.concat(words, " ")
+    if stdout then line = line .. " > " .. quote(stdout) end
     if windows then line = "type NUL && " .. line end
     return os.execute(line)
+end
+
+local function luarocks_command(location, destination, program, ...)
+    if not program then
+        program = assert(location.luarocks)
+        if lfs.attributes(program, "mode") ~= "file" then
+            program = windows and "luarocks.exe" or "luarocks"
+        end
+    end
+    return { program, "--lua-version", "5.5", "--lua-dir", assert(location.lua_dir),
+        "--tree", destination, ... }
+end
+
+local function prune(destination, paths)
+    local directories, ordered = {}, {}
+    for _, relative in ipairs(paths) do
+        local directory = parent(relative)
+        while directory and not directories[directory] do
+            directories[directory] = true
+            ordered[#ordered + 1] = directory
+            directory = parent(directory)
+        end
+    end
+    table.sort(ordered, function(left, right) return #left > #right end)
+    for _, directory in ipairs(ordered) do
+        local path = destination .. "/" .. directory
+        if lfs.symlinkattributes(path, "mode") == "directory" then
+            lfs.rmdir(path) -- Shared directories are pruned only if empty.
+        end
+    end
 end
 
 local function files(root, relative, result)
@@ -368,9 +405,8 @@ installer.browser_sdk_owned = {
 }
 
 function installer.uninstall(package_dir, program)
-    package_dir = physical(package_dir)
-    local location = assert(loadfile(package_dir .. "/installer/location.lua", "t", {}))()
-    local destination = physical(assert(location.tree))
+    local destination, location
+    package_dir, destination, location = installation(package_dir)
     local inventory, releases = {}, {}
     -- Capture every matching version's inventory while LuaRocks still owns it.
     -- The running helper and lfs are already loaded before those files disappear.
@@ -408,21 +444,14 @@ function installer.uninstall(package_dir, program)
         assert(mode == nil or mode == "file" or mode == "link",
             "cleanup destination is not a file: " .. destination .. "/" .. relative)
     end
-    if not program then
-        program = assert(location.luarocks)
-        if lfs.attributes(program, "mode") ~= "file" then
-            program = windows and "luarocks.exe" or "luarocks"
-        end
-    end
-    local removed, why, status = execute({ program,
-        "--lua-version", "5.5", "--lua-dir", assert(location.lua_dir),
-        "--tree", destination, "remove", "titan" })
+    local removed, why, status = execute(luarocks_command(location, destination, program, "remove", "titan"))
     if removed ~= true and removed ~= 0 then
         return nil, "LuaRocks removal failed (" .. tostring(why) .. " " ..
             tostring(status) .. "); Titan SDK files were preserved"
     end
-    local directories = {}
+    local paths = {}
     for relative in pairs(inventory) do
+        paths[#paths + 1] = relative
         local path = destination .. "/" .. relative
         local mode = lfs.symlinkattributes(path, "mode")
         if mode then
@@ -435,19 +464,381 @@ function installer.uninstall(package_dir, program)
                     "the rock to restore its cleanup command, then run titan-uninstall again."
             end
         end
-        local directory = parent(path)
-        while directory and directory ~= destination do
-            directories[directory] = true
-            directory = parent(directory)
+    end
+    prune(destination, paths)
+    return true
+end
+
+local rocks_directory = "lib/luarocks/rocks-5.5"
+local module_inventory = "lib/titan/.module-rocks"
+local module_marker = "titan-module-published"
+
+local function fold(name)
+    return (name:gsub("[A-Z]", string.lower))
+end
+
+local function portable_component(name)
+    -- Win32 also aliases device basenames before the first extension.
+    local stem = fold(name:match("^[^.]*")):gsub(" +$", "")
+    return name ~= "" and not name:find('[^ -~]') and
+        not name:find('[<>:"/\\|?*]') and not name:find("[ .]$") and
+        not stem:find("~%d+$") and stem ~= "con" and stem ~= "prn" and
+        stem ~= "aux" and stem ~= "nul" and stem ~= "conin$" and stem ~= "conout$" and
+        not stem:match("^com%d$") and not stem:match("^lpt%d$")
+end
+
+local function rock_name(name)
+    assert(type(name) == "string" and name:match("^[A-Za-z0-9][A-Za-z0-9_.-]*$") and
+        portable_component(name), "invalid rock name: " .. tostring(name))
+    name = fold(name)
+    assert(name ~= "titan", "use titan-uninstall without a rock name to remove Titan itself")
+    assert(not name:match("%.rock$") and not name:match("%.rockspec$"),
+        "expected a rock name, not a rock filename: " .. name)
+    return name
+end
+
+local function rock_version(version)
+    assert(type(version) == "string" and version:match("^[A-Za-z0-9][A-Za-z0-9_.-]*%-%d+$") and
+        portable_component(version), "expected an exact LuaRocks version (including revision): " ..
+        tostring(version))
+    return version
+end
+
+-- Includes targets the SDK may create or retire even when absent from this
+-- installation (e.g. bundled OpenSSL headers and Windows import libraries).
+local reserved = {
+    ["include/openssl"] = true, ["include/uv"] = true, ["include/uv.h"] = true,
+    ["include/llhttp.h"] = true, ["include/sqlite3.h"] = true,
+    ["include/backtrace.h"] = true, ["include/backtrace-supported.h"] = true,
+    ["include/titan_longjmp.h"] = true,
+    ["lib/libbacktrace.a"] = true, ["lib/libtitan.a"] = true, ["lib/libuv.a"] = true,
+    ["lib/libuv.dll.a"] = true, ["lib/libllhttp.dll.a"] = true, ["lib/libsqlite3.dll.a"] = true,
+    ["lib/libcrypto.dll.a"] = true, ["lib/libssl.dll.a"] = true,
+    ["lib/browser"] = true, ["lib/lua"] = true, ["lib/luarocks"] = true,
+    ["lib/titan"] = true, ["lib/titan-browser"] = true,
+}
+
+local function module_path(relative)
+    for part in (relative .. "/"):gmatch("([^/]*)/") do
+        assert(portable_component(part), "invalid module payload path: " .. relative)
+    end
+    local key = fold(relative)
+    local modules = key:match("^lib/titan/%d+[.]%d+/(.+)$")
+    local base = modules and modules:match("^[^/]+") or key:match("^[^/]+/[^/]+")
+    assert(base and (modules or key:match("^include/") or key:match("^lib/")),
+        "invalid module destination: " .. relative)
+    if modules then
+        local root = key:sub(1, #key - #modules) .. base
+        assert(not titan_owned(root) and not sdk_digests_path(root) and
+            base ~= "titan.so.dsym" and base ~= "_titan_browser" and base ~= "titan" and
+            base ~= "titan.titan", "reserved SDK path: " .. relative)
+    else
+        local path = key
+        while path and path:find("/", 1, true) do
+            assert(not reserved[path] and not titan_owned(path) and not lua_owned(path, true),
+                "reserved SDK path: " .. relative)
+            path = parent(path)
+        end
+        -- The SDK's header directory may be shared, but not renamed or
+        -- replaced with a file even if one side has no children yet.
+        assert(key ~= "include/titan" and
+            (not key:match("^include/titan/") or relative:match("^include/titan/")),
+            "reserved SDK path: " .. relative)
+    end
+end
+
+local function lstat(uv, path)
+    local stat, err, code = uv.fs_lstat(path)
+    assert(stat or code == "ENOENT", err)
+    return stat
+end
+
+local function regular(stat)
+    return stat and stat.type == "file" and stat.nlink == 1
+end
+
+local function scan(uv, path)
+    local request = assert(uv.fs_scandir(path))
+    return function() return uv.fs_scandir_next(request) end
+end
+
+-- Check each spelling against directory entries as well as lstat. Lookup
+-- alone cannot distinguish a case alias on case-insensitive filesystems, or
+-- see a differently cased sibling on case-sensitive ones.
+local function inspect_paths(uv, root)
+    local entries = {}
+    return function(relative, kind)
+        local path = root
+        local rest = relative
+        for part in relative:gmatch("[^/]+") do
+            local children = entries[path]
+            if not children then
+                children = {}
+                for name in scan(uv, path) do
+                    local key = fold(name)
+                    children[key] = children[key] == nil and name or false
+                end
+                entries[path] = children
+            end
+            path = path .. "/" .. part
+            local name = children[fold(part)]
+            local stat = lstat(uv, path)
+            assert(name == part or (name == nil and not stat), "path alias at " .. path)
+            if not stat then return false end
+            local last = rest == part
+            local expected = last and kind or "directory"
+            assert((expected == "file" and regular(stat)) or
+                (expected == "directory" and stat.type == "directory"),
+                "not an ordinary " .. expected .. ": " .. path)
+            if last then return true end
+            rest = rest:sub(#part + 2)
         end
     end
-    local ordered = {}
-    for directory in pairs(directories) do ordered[#ordered + 1] = directory end
-    table.sort(ordered, function(left, right) return #left > #right end)
-    for _, directory in ipairs(ordered) do
-        if lfs.symlinkattributes(directory, "mode") == "directory" then
-            lfs.rmdir(directory) -- Shared directories are pruned only if empty.
+end
+
+-- A plain text ownership record is retained independently of the rock. While
+-- replacing a projection, it reserves the old and new paths so that a failed
+-- copy/deletion or LuaRocks hook rollback cannot strand unowned files.
+local function read_record(path)
+    local input <close> = assert(io.open(path, "rb"))
+    local active, pending = input:read("l", "l")
+    assert(active and pending and (active ~= "" or pending ~= ""),
+        "invalid module inventory: " .. path)
+    local record = {
+        active = active ~= "" and rock_version(active) or nil,
+        pending = pending ~= "" and rock_version(pending) or nil,
+        paths = {},
+    }
+    for relative in input:lines() do record.paths[#record.paths + 1] = relative end
+    return record
+end
+
+local function write_atomic(uv, path, data)
+    local fd, temporary = uv.fs_mkstemp(path .. ".tmp-XXXXXX")
+    assert(fd, temporary)
+    local guard <close> = setmetatable({}, { __close = function()
+        if fd then uv.fs_close(fd) end
+        uv.fs_unlink(temporary)
+    end })
+    assert(uv.fs_write(fd, data, 0) == #data, "cannot write " .. path)
+    assert(uv.fs_close(fd))
+    fd = nil
+    assert(uv.fs_rename(temporary, path))
+end
+
+local function write_record(uv, path, active, pending, paths)
+    write_atomic(uv, path, active .. "\n" .. pending .. "\n" ..
+        table.concat(paths, "\n") .. "\n")
+end
+
+local function index_files(index, rock, paths)
+    for _, relative in ipairs(paths) do
+        module_path(relative)
+        local path, owner = relative, rock
+        while path do
+            local key = fold(path)
+            local entry = index[key]
+            assert(not entry or (entry.path == path and entry.owner == owner),
+                "module path conflicts with " .. (entry and entry.path or "") ..
+                (entry and entry.owner and " owned by " .. entry.owner or "") .. ": " .. relative)
+            if entry and not owner then break end
+            if not entry then index[key] = { path = path, owner = owner } end
+            path, owner = parent(path), nil
         end
+    end
+end
+
+local function module_context(package_dir)
+    local destination, location
+    package_dir, destination, location = installation(package_dir)
+    local release = assert(package_dir:match("/titan/(%d+[.]%d+)[.][^/]+$"),
+        "cannot locate the installed Titan library release")
+    local uv = require "luv"
+    local inspect = inspect_paths(uv, destination)
+    local rocks = destination .. "/" .. rocks_directory
+    assert(inspect(rocks_directory, "directory"), "cannot locate the LuaRocks installation tree")
+    assert(same(assert(parent(parent(package_dir))), rocks),
+        "Titan's launcher does not belong to the recorded LuaRocks tree")
+    return {
+        destination = destination, location = location, release = release, uv = uv,
+        inspect = inspect, inventory = destination .. "/" .. module_inventory,
+    }
+end
+
+local function inventory(ctx)
+    local records, index = {}, {}
+    if ctx.inspect(module_inventory, "directory") then
+        for name in scan(ctx.uv, ctx.inventory) do
+            local rock = fold(name):match("^(.*)%.paths$")
+            if rock then
+                assert(rock_name(rock) .. ".paths" == name, "invalid module inventory name: " .. name)
+                assert(ctx.inspect(module_inventory .. "/" .. name, "file"))
+                local record = read_record(ctx.inventory .. "/" .. name)
+                index_files(index, rock, record.paths)
+                records[rock] = record
+            end
+        end
+    end
+    return records, index
+end
+
+local function staged_files(uv, root, release)
+    local paths, sources = {}, {}
+    local function walk(source, destination)
+        for name in scan(uv, source) do
+            assert(portable_component(name), "invalid module payload path: " .. source .. "/" .. name)
+            local from, to = source .. "/" .. name, destination .. "/" .. name
+            assert(destination ~= "lib" or not reserved["lib/" .. fold(name)],
+                "reserved SDK path: " .. to)
+            local stat = lstat(uv, from)
+            if stat and stat.type == "directory" then
+                walk(from, to)
+            else
+                assert(regular(stat), "module payload is not an ordinary file: " .. from)
+                paths[#paths + 1], sources[to] = to, from
+            end
+        end
+    end
+    local roots = { include = "include", lib = "lib", modules = "lib/titan/" .. release }
+    for name in scan(uv, root) do
+        local source, destination = root .. "/" .. name, roots[name]
+        assert(destination, "unexpected module staging directory: " .. source)
+        assert(lstat(uv, source).type == "directory", "not an ordinary directory: " .. source)
+        walk(source, destination)
+    end
+    assert(#paths > 0, "no files to publish under " .. root)
+    table.sort(paths)
+    return paths, sources
+end
+
+local function preflight(ctx, rock, index, paths)
+    for _, relative in ipairs(paths) do
+        if ctx.inspect(relative, "file") then
+            local owner = index[fold(relative)]
+            assert(owner and owner.path == relative and owner.owner == rock,
+                "module destination already exists: " .. ctx.destination .. "/" .. relative)
+        end
+    end
+end
+
+local function cleanup_files(ctx, paths)
+    for _, relative in ipairs(paths) do
+        local path = ctx.destination .. "/" .. relative
+        local ok, err, code = ctx.uv.fs_unlink(path)
+        assert(ok or code == "ENOENT", "cannot remove " .. path .. ": " .. tostring(err))
+    end
+    prune(ctx.destination, paths)
+end
+
+function installer.publish_module(package_dir, private_rock)
+    local ctx = module_context(package_dir)
+    private_rock = slash(private_rock)
+    local absolute = windows and (private_rock:match("^[A-Za-z]:/") or
+        private_rock:match("^//[^/]")) or not windows and private_rock:sub(1, 1) == "/"
+    local tree, name, version = private_rock:match("^(.*)/lib/luarocks/rocks%-5%.5/([^/]+)/([^/]+)$")
+    if tree == "" or (windows and tree and tree:match("^[A-Za-z]:$")) then
+        tree = tree .. "/"
+    end
+    assert(absolute and tree and same(tree, ctx.destination),
+        "--path must name a LuaRocks 5.5 rock version directory in this Titan installation tree")
+    local rock = rock_name(name)
+    assert(rock == name, "--path must use the installed rock name")
+    rock_version(version)
+    local relative = rocks_directory .. "/" .. rock .. "/" .. version
+    assert(ctx.inspect(relative .. "/rock_manifest", "file"), "--path does not name an installed rock")
+    assert(ctx.inspect(relative .. "/dist", "directory"), "missing module staging directory: " .. private_rock .. "/dist")
+    local private = ctx.destination .. "/" .. relative
+    local paths, sources = staged_files(ctx.uv, private .. "/dist", ctx.release)
+    local records, index = inventory(ctx)
+    local previous = records[rock]
+    preflight(ctx, rock, index, paths)
+    index_files(index, rock, paths)
+    local combined, stale = {}, {}
+    for _, path in ipairs(paths) do combined[#combined + 1] = path end
+    if previous then
+        preflight(ctx, rock, index, previous.paths)
+        for _, path in ipairs(previous.paths) do
+            if not sources[path] then
+                combined[#combined + 1] = path
+                stale[#stale + 1] = path
+            end
+        end
+    end
+    ctx.inspect(relative .. "/" .. module_marker, "file")
+    local record = ctx.inventory .. "/" .. rock .. ".paths"
+    ctx.inspect(module_inventory .. "/" .. rock .. ".paths", "file")
+    mkdir(ctx.inventory)
+    write_record(ctx.uv, record, previous and previous.active or "", version, combined)
+    for _, path in ipairs(paths) do
+        copy(sources[path], ctx.destination .. "/" .. path, path:match("[.]so$"))
+    end
+    cleanup_files(ctx, stale)
+    write_atomic(ctx.uv, private .. "/" .. module_marker, rock .. " " .. version .. "\n")
+    write_record(ctx.uv, record, version, "", paths)
+    return true
+end
+
+local function expect_exact_version(ctx, rock, version)
+    -- LuaRocks compares parsed versions, not their spelling (e.g. 1.01
+    -- and 1.1). Ask the same executable which versions its remove would
+    -- match. This also works with standalone LuaRocks on Windows.
+    local uv = ctx.uv
+    local fd, temporary = uv.fs_mkstemp(assert(uv.os_tmpdir()) .. "/titan-rock-list-XXXXXX")
+    assert(fd, temporary)
+    local guard <close> = setmetatable({}, { __close = function() uv.fs_unlink(temporary) end })
+    assert(uv.fs_close(fd))
+    local listed = execute(luarocks_command(ctx.location, ctx.destination, nil,
+        "list", "--porcelain", rock, version), temporary)
+    assert(listed, "could not list installed LuaRocks versions")
+    local exact = false
+    for line in io.lines(temporary) do
+        local name, listed_version = line:match("^([^\t]+)\t([^\t]+)\t")
+        if name == rock then
+            assert(listed_version == version,
+                "LuaRocks cannot remove " .. version .. " without also matching " .. listed_version)
+            exact = true
+        end
+    end
+    assert(exact, "LuaRocks could not find the installed version of " .. rock .. ": " .. version)
+end
+
+function installer.uninstall_module(package_dir, name, version)
+    local rock = rock_name(name)
+    if version then rock_version(version) end
+    local ctx = module_context(package_dir)
+    local records, index = inventory(ctx)
+    local record = records[rock]
+    local active = record and (record.active or record.pending)
+    version = version or active
+    if not version then
+        assert(not ctx.inspect(rocks_directory .. "/" .. rock, "directory"),
+            "no active Titan module publication for " .. rock)
+        return true
+    end
+    local relative = rocks_directory .. "/" .. rock .. "/" .. version
+    local installed = ctx.inspect(relative, "directory")
+    if installed then
+        local marker = relative .. "/" .. module_marker
+        assert(ctx.inspect(marker, "file"),
+            "not a published Titan module rock: " .. rock .. " " .. version)
+        local input <close> = assert(io.open(ctx.destination .. "/" .. marker, "rb"))
+        assert(input:read("a") == rock .. " " .. version .. "\n",
+            "not a published Titan module rock: " .. rock .. " " .. version)
+    end
+    if version == active then preflight(ctx, rock, index, record.paths) end
+    if installed then
+        expect_exact_version(ctx, rock, version)
+        local removed, why, status = execute(luarocks_command(ctx.location, ctx.destination,
+            nil, "remove", rock, version))
+        if removed ~= true and removed ~= 0 then
+            return nil, "LuaRocks removal failed (" .. tostring(why) .. " " ..
+                tostring(status) .. "); Titan module files were preserved"
+        end
+    end
+    if version == active then
+        cleanup_files(ctx, record.paths)
+        assert(ctx.uv.fs_unlink(ctx.inventory .. "/" .. rock .. ".paths"))
+        lfs.rmdir(ctx.inventory)
     end
     return true
 end
