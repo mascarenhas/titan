@@ -344,6 +344,11 @@ If a library exposes another module's nominal type, the owner can be part of
 the same archive, separately linked into the executable, or loaded dynamically.
 Titan still rejects conflicting physical copies and checks the declarations
 that a prebuilt importer uses before initializing a dynamically bound owner.
+When a native executable and a separate shared library both import an
+external owner, the first import to initialize it supplies the module
+instance for that state. Later imports verify that instance rather than
+opening a second copy.
+
 Linking an archive does not by itself make its uninitialized modules available
 to Lua `require` or to independent Lua states.
 

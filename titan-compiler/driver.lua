@@ -8160,20 +8160,32 @@ function driver.finalize_resolver_context(context)
         end
     end
 
+    local native_executable = not context.analysis_only and context.target ~= "browser" and
+        (context.link_kind == "program" or context.link_kind == "test")
     -- A test's synthetic main is not necessarily present at certification.
     -- In an ordinary program with only a source root and DSOs, there is no
     -- second linked owner to elect.
-    local elect_linked = (context.target == "linux" or context.target == "darwin") and
-        (context.link_kind == "test" or
-         context.link_kind == "program" and
-         (next(physical_owner) ~= nil or
-          next(dynamic_names) ~= nil and next(source_names, (next(source_names))) ~= nil))
+    local elect_linked = native_executable and context.target ~= "windows" and
+        (context.link_kind == "test" or next(physical_owner) ~= nil or
+         next(dynamic_names) ~= nil and next(source_names, (next(source_names))) ~= nil)
     local rebound_owners
     for owner, keyed in pairs(context.native_constraints) do
-        -- Only an executable can satisfy an external fallback from an
-        -- already linked owner. A DSO that claims the owner stays distinct.
+        -- A non-carried fallback and an independently selected executable
+        -- import can bind to the same verified canonical owner.
         local direct_provider = physical_owner[owner]
         local linked_owner = elect_linked and (direct_provider or source_names[owner])
+        local shared_dynamic_owner = native_executable and
+            not direct_provider and not source_names[owner] and dynamic_names[owner]
+        if shared_dynamic_owner then
+            -- A foreign fallback must not initialize a different copy
+            -- before an in-image carried edge gets to check its token.
+            for _, constraint in pairs(keyed) do
+                if constraint.binding == "dynamic-carried" then
+                    shared_dynamic_owner = false
+                    break
+                end
+            end
+        end
         local dynamic_provider
         for _, constraint in pairs(keyed) do
             if constraint.binding == "direct-carried" then
@@ -8185,9 +8197,14 @@ function driver.finalize_resolver_context(context)
                         tostring(constraint.provider) .. "'"
                 end
                 direct_provider = constraint.provider
-            elseif linked_owner and constraint.binding == "dynamic-global" then
-                rebound_owners = rebound_owners or {}
-                rebound_owners[owner] = true
+            elseif (linked_owner or shared_dynamic_owner) and
+                   constraint.binding == "dynamic-global" then
+                -- The fallback reaches the same checked canonical owner.
+                -- Only linked owners can change a unit's binding to direct.
+                if linked_owner then
+                    rebound_owners = rebound_owners or {}
+                    rebound_owners[owner] = true
+                end
             else
                 if dynamic_provider and dynamic_provider ~= constraint.provider then
                     errors[#errors + 1] = "logical owner '" .. owner ..

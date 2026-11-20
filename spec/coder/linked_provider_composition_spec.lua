@@ -113,6 +113,18 @@ describe("linked provider composition", function()
         return result.output
     end
 
+    local function run_dynamic(name)
+        local executable = fixture.output .. "/" .. name
+        local search = fixture.root .. "/package;" .. stdlib
+        if platform.windows then
+            executable = assert(driver.windows_program_paths(name, nil, nil,
+                fixture.output)).executable
+            search = fixture.output .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION
+                .. ";" .. search
+        end
+        return fixture:run({ executable }, { TITAN_PATH_0_6 = search })
+    end
+
     local function run_deployed(relative)
         local deploy = fixture.root .. "/deployment"
         support.mkdir(deploy)
@@ -123,6 +135,70 @@ describe("linked provider composition", function()
             "TITAN_PATH_0_6=" .. deploy, program })
     end
 
+    it("shares the first compatible DSO owner across both import orders", function()
+        local suffix = platform.windows and ".dll" or ".so"
+        file("dependency/dep/owner.titan", owner)
+        built("dependency", "package", nil, "dep.owner")
+        file("extension/facade.titan", facade)
+        built("extension", "package", "package", "facade")
+
+        -- The facade retains dep/owner's filename, but the app independently
+        -- selects the grouped dep provider (root-major, then shallow-first).
+        file("replacement/dep/owner.titan", (owner:gsub("count = 1", "count = 10")))
+        file("replacement/dep/sibling.titan", "const unused = 1\n")
+        built("replacement", "package", nil, "dep.owner", "dep.sibling")
+        assert.equal("file", lfs.attributes(fixture.root .. "/package/dep/owner" .. suffix, "mode"))
+        assert.equal("file", lfs.attributes(fixture.root .. "/package/dep" .. suffix, "mode"))
+
+        for _, mode in ipairs({ "facade_first", "owner_first" }) do
+            local imports = { 'local facade = import "facade"', 'local owner = import "dep.owner"' }
+            local first_serial = 2
+            if mode == "owner_first" then
+                imports[1], imports[2] = imports[2], imports[1]
+                first_serial = 11
+            end
+            file("app/" .. mode .. ".titan", table.concat(imports, "\n") ..
+                string.format([[
+
+function main(args: {string}): integer
+  local first = facade.make()
+  if first.serial ~= %d or first:code() ~= %d then return 1 end
+  local second = owner.next()
+  if second.serial ~= %d or second:code() ~= %d then return 2 end
+  return 0
+end
+]], first_serial, first_serial + 39, first_serial + 1, first_serial + 40))
+            built("app", mode, "package", mode)
+            local result = run_dynamic(mode)
+            assert.is_true(result.ok, mode .. ": " .. result.output)
+        end
+    end)
+
+    it("shares an independently imported standard nominal owner in a default program", function()
+        file("author/rx.titan", [[
+local strings = import "string"
+
+function digits(): strings.Regex
+  return strings.compile_regex("[0-9]+")
+end
+]])
+        file("app/check.titan", [[
+local rx = import "rx"
+local strings = import "string"
+
+function main(args: {string}): integer
+  local found? = rx.digits():match("ab42")
+  if not found then return 1 end
+  if strings.rep("42", 1) == found:whole() then return 0 end
+  return 2
+end
+]])
+        built("author", "package", nil, "rx")
+        built("app", "dynamic", "package", "check")
+        local result = run_dynamic("check")
+        assert.is_true(result.ok, result.output)
+    end)
+
     it("consumes the same stock-stdlib provider pair in native applications and tests", function()
         file("author/cui.titan", cui)
         file("app/demo.titan", demo)
@@ -130,15 +206,7 @@ describe("linked provider composition", function()
         assert.equal("file", lfs.attributes(fixture.root .. "/package/cui" ..
             (platform.windows and ".dll" or ".so"), "mode"))
         built("app", "dynamic", "package", "demo")
-        local executable = fixture.output .. "/demo"
-        local search = fixture.root .. "/package;" .. stdlib .. ";;"
-        if platform.windows then
-            executable = assert(driver.windows_program_paths("demo", nil, nil,
-                fixture.output)).executable
-            search = fixture.output .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION
-                .. ";" .. search
-        end
-        local result = fixture:run({ executable }, { TITAN_PATH_0_6 = search })
+        local result = run_dynamic("demo")
         assert.is_true(result.ok, result.output)
         assert.equal("=========\n= Titan =\n=========\n", result.output)
         if platform.windows then
@@ -358,5 +426,45 @@ end
         assert.is_false(result.ok, result.output)
         assert.truthy(result.output:find(
             "logical owner 'dep.owner' is required both directly", 1, true), result.output)
+
+        result = compile("app", "dynamic-conflict", "package", "conflict")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find(
+            "requires its producer-chosen dynamic identity", 1, true), result.output)
+
+        -- The carried owner can still be imported from that same DSO. A
+        -- second facade with an external edge must not defeat its claim.
+        file("group/dep/owner.titan", owner)
+        file("group/dep/carried.titan", facade)
+        built("group", "package", nil, "dep.owner", "dep.carried")
+        file("app/same_handle.titan", [[
+local carried = import "dep.carried"
+local owner = import "dep.owner"
+
+function main(args: {string}): integer
+  if carried.make():code() == 41 and owner.next().serial == 3 then return 0 end
+  return 1
+end
+]])
+        built("app", "same-handle", "package", "same_handle")
+        result = run_dynamic("same_handle")
+        assert.is_true(result.ok, result.output)
+
+        file("other/external.titan", facade)
+        built("other", "package", "package", "external")
+        file("app/competing.titan", [[
+local external = import "external"
+local carried = import "dep.carried"
+local owner = import "dep.owner"
+
+function main(args: {string}): integer
+  return 0
+end
+]])
+        result = compile("app", "competing", "package", "competing")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find(
+            "has producer-dynamic exposures from conflicting providers", 1, true),
+            result.output)
     end)
 end)

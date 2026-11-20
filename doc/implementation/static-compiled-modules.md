@@ -418,10 +418,13 @@ Finalization rejects overlapping logical membership, mangled-prefix and
 native symbol collisions, and incompatible physical owner constraints.
 Without a qualifying owner, combinations of direct and dynamic identity
 claims, dynamic exposures from different providers, and independent
-resolution of a producer-dynamic owner are still errors. A native program
-or test can satisfy a non-carried dynamic constraint with a direct owner
-already in the link plan; this does not replace an owner claimed by a
-different DSO. Preflight never changes which provider won ordinary lookup.
+resolution of a producer-dynamic owner are still errors. An executable
+can satisfy a non-carried dynamic constraint with a linked owner (Linux
+and macOS) or, when no obligation claims the owner as physically carried,
+an independently selected shared provider. In the latter case both
+consumers verify the canonical provider in the existing import order.
+Neither case substitutes for an owner physically carried by a different
+DSO. Preflight never changes which provider won ordinary lookup.
 Library-mode repackaging retains its physical ownership checks.
 
 Public `Type.Module` metadata does not expose private imports. An object's
