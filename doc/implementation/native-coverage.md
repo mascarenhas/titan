@@ -70,8 +70,8 @@ executable; library-only provider links are rejected. Compile-only coverage
 remains available for incremental object DAGs.
 
 After the requested source graph resolves, automatic selection includes
-authored source modules with no top-level `test_` functions; source-only
-modules resolved through the implicit SDK fallback (`<root>/lib/titan/0.6`) and
+authored source modules with no top-level `test_` functions; modules resolved
+from source through the implicit SDK fallback (`<root>/lib/titan/0.6`) and
 any module containing a test are excluded (a test-bearing module is excluded as
 a whole). Repeated `--coverage-module` globs replace automatic selection over
 the resolved source graph instead, opting a matching installed fallback source

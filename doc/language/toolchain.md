@@ -646,8 +646,8 @@ A passing run prints an executable-line summary and writes annotated output to
 ### Source selection and artifacts
 
 - By default, `--coverage` instruments every authored source-imported module in
-  the build graph that defines no top-level `test_*` function. Source-only
-  modules resolved through the implicit SDK fallback (`<root>/lib/titan/0.6`),
+  the build graph that defines no top-level `test_*` function. Modules resolved
+  from source through the implicit SDK fallback (`<root>/lib/titan/0.6`),
   prebuilt providers, and modules containing any `test_` function are excluded.
   To include an untested authored module in the denominator, import it from a
   test root.
