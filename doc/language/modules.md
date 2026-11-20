@@ -413,11 +413,12 @@ The `.titan` suffix is a compiler directive, not part of the logical module name
 
 Local fields and methods on values of an imported nominal type work naturally (`state.hidden`, `state:advance()`), and visible local `const` fields or local methods can satisfy a public Interface at conversion sites inside the collaborating module.
 
-Three boundaries keep this mechanism predictable:
+Four boundaries keep this mechanism predictable:
 
 1. **Visibility is direct, not transitive.** If `middle` writes `import "owner.titan"` and `consumer` imports `middle`, `consumer` gains no access to `owner`'s locals unless `consumer` also writes `import "owner.titan"`.
 2. **C header environments flow transitively across `.titan` imports.** Every source module's `foreign import` directives and `foreign type` typedefs are inherited by explicit `.titan` importers, so private collaborating APIs can pass C types without repeating headers. Ordinary and binary imports never inherit C headers.
-3. **Compiled providers and Lua stay public-only.** Neither `.so`/`.a` imports nor Lua's `require` can observe `local` declarations.
+3. **Compiled providers and Lua stay public-only.** Neither `.so`/`.a`/`.dll` imports nor Lua's `require` can observe `local` declarations.
+4. **Libraries cannot collaborate privately across the installed source fallback.** Explicit `.titan` imports are for authored source collaboration under `--tree` (or inside applications and `--test` builds). A library build (including plain non-`main` `-c`) rejects an explicit `.titan` import that resolves from the read-only implicit installed SDK fallback `<root>/lib/titan/0.6`; use an ordinary public `import` or include that source in an authored `--tree` checkout.
 
 Because `.titan` names a logical module rather than a filename, `import "app.linux.titan"` requests logical module `app.linux`, not the Linux variant of `app`. Explicit source imports always select whichever target composition is active for the build.
 
@@ -669,7 +670,96 @@ When compiling a consumer from an authored root (`main` below), positional `tita
 titanc --output build --exe build/demo main
 ```
 
-Whenever a build actually selects an installed `.titan` source through that implicit fallback, `-o`/`--output` is required so generated C, objects, and headers stay under the consumer's output tree and `titanc` neither writes nor locks inside the implicit SDK root; omitting `--output` fails with an error naming the module and asking for `--output DIR`. Builds that do not select an installed source keep their existing behavior. Compiling an ordinary binary library fails if a dependency is selected from the implicit installed source fallback (including under `--source-first` when a paired compiled provider is also installed) rather than copying another rock's module into the library's provider: install or use that dependency's compiled provider (building without `--source-first` if one is already installed), or publish your library as source-only until [titan#427](https://github.com/mascarenhas/titan/issues/427) allows a library to depend on an installed source compiled once by the final program. (Without `-o`/`--output`, the generic missing-`--output` diagnostic can appear first; passing `-o` does not permit vendoring an installed source into a binary library.) Same-repo authored sources under `--tree` (or default `.`) still compile together into one library, and standalone (ordinary or `--static`) applications and `--test` builds still compile installed fallback source dependencies into the caller's `--output` directory. Ordinary Lua `require` loads compiled providers (`.so`/`.dll`), not uncompiled `.titan` sources.
+Whenever a build actually selects an installed `.titan` source through that implicit fallback—even when a library build only checks it—`-o`/`--output` is required so generated C, objects, and headers stay under the caller's output tree and `titanc` neither writes nor locks inside the implicit SDK root; omitting `--output` fails with an error naming the module and asking for `--output DIR`. Builds that do not select an installed source keep their existing behavior.
+
+A compiled library may import an installed source-only module through an ordinary public `import` (including under `--source-first` when both a compiled provider and an installed source exist). The library typechecks against that module's public interface without compiling, embedding, or owning it—nor pulling in that module's private helpers or native dependencies—so the published library provider contains only its authored roots and authored helpers from `--tree`. Explicit `.titan` private collaboration across that installed-source library boundary is rejected; use an ordinary public `import` or an authored `--tree` checkout instead.
+
+When a consumer application or `--test` executable (dynamic native, Unix `--static`, Windows DLL, or `--target browser`) imports one or more prebuilt libraries that depend on installed source-only modules—directly or through another compiled library—`titanc` compiles each required source module **once** into the consumer's `--output` directory, with no redundant `import` required in the application. Every library shares that single compiled module and its state through the checked public ABI, initialized lazily in written import order; unreached siblings in a multi-module library impose no source build. Each such obligation requires **actual source** in the consuming build (searched in authored `--tree` roots first, then `<root>/lib/titan/0.6`); a later installed compiled binary never satisfies it silently, and an independently carried physical owner for the same logical module is a conflict. If no allowed source is found, `titanc` names the missing module and referring library and directs you to install the source rock, supply a checkout with `--tree`, or rebuild the referring library against the binary distribution. Because obligations record only the external source module names, compatible implementation or private-dependency edits to the installed source require rebuilding only the consuming application; if a compiled intermediate library changes which source-only modules it requires, rebuild compiled libraries that forward those obligations (`--incremental` detects the change automatically). Ordinary Lua `require` hosts have no Lua-side Titan compiler: they load compiled providers (`.so`/`.dll`) and cannot compile `.titan` sources on the fly.
+
+#### Depending on an installed source-only module from a compiled library
+
+Assuming `titan-cui` is installed as a source-only rock from the recipe above (so `cui.titan` is present under `<tree>/lib/titan/0.6/`), another compiled library can import `cui` and publish without owning it. Write `titan-banner/src/banner.titan`:
+
+```titan
+local cui = import "cui"
+
+function title(name: string): string
+  return cui.box("Welcome, " .. name)
+end
+```
+
+Write `titan-banner/titan-banner-0.1.0-1.rockspec`, declaring `"titan-cui ~> 0.1"` in `dependencies` and staging only `banner`'s own provider files:
+
+```lua
+rockspec_format = "3.0"
+package = "titan-banner"
+version = "0.1.0-1"
+source = { url = "git+https://example.invalid/titan-banner.git", tag = "v0.1.0" }
+description = { summary = "Banner helper built on source-only cui", license = "MIT" }
+dependencies = { "lua ~> 5.5", "titan ~> 0.6", "titan-cui ~> 0.1" }
+build = {
+   type = "command",
+   build_command = '"$(SCRIPTS_DIR)/titanc" --incremental --tree src --output build banner',
+   install_command = 'mkdir -p "$(PREFIX)/dist/modules" && cp -p build/banner.so build/banner.a "$(PREFIX)/dist/modules/"',
+   platforms = {
+      windows = {
+         build_command = '"$(SCRIPTS_DIR)\\titanc.exe" --incremental --tree src --output build banner',
+         install_command = '(if not exist "$(PREFIX)\\dist\\modules" mkdir "$(PREFIX)\\dist\\modules") && copy /Y build\\banner.dll "$(PREFIX)\\dist\\modules\\banner.dll"'
+      }
+   }
+}
+hooks = {
+   post_install = '"$(SCRIPTS_DIR)/titan-install" --path "$(PREFIX)"',
+   platforms = {
+      windows = {
+         post_install = '"$(SCRIPTS_DIR)\\titan-install.bat" --path "$(PREFIX)"'
+      }
+   }
+}
+```
+
+Install `titan-banner` locally:
+
+```sh
+(cd titan-banner && luarocks make titan-banner-0.1.0-1.rockspec)
+```
+
+In a separate `app/` directory, write `app/main.titan` importing only `banner` (not `cui`):
+
+```titan
+local banner = import "banner"
+local io = import "io"
+
+function main(args: {string}): integer
+  io.print(banner.title("Titan"))
+  return 0
+end
+```
+
+Compile and run dynamically or with Unix `--static`; `titanc` compiles `cui` once into `app`'s `--output` tree:
+
+```sh
+(cd app &&
+  titanc --output build --exe build/app main &&
+  ./build/app &&
+  titanc --static --output build-static --exe build-static/app main &&
+  ./build-static/app)
+```
+
+Each invocation prints:
+
+```text
+==================
+= Welcome, Titan =
+==================
+```
+
+Remove the dependent rock before the source-only rock it depends on:
+
+```sh
+titan-uninstall titan-banner
+titan-uninstall titan-cui
+```
 
 ### Publishing, packing, and upgrades
 
@@ -677,7 +767,7 @@ Keep three packaging concepts distinct:
 
 1. **Source distribution (`.rockspec` / `.src.rock`):** A `.rockspec` describes how to fetch and build the package; running `luarocks pack titan-cui-0.1.0-1.rockspec` fetches the pinned `source` URL and tag and packs both the rockspec and sources into `titan-cui-0.1.0-1.src.rock`. To publish through your LuaRocks account, run `luarocks upload titan-cui-0.1.0-1.rockspec` (which packs a `.src.rock` by default; pass a prepacked `titan-cui-0.1.0-1.src.rock` only as the optional second argument—do not run `upload` during local verification). Consumers then run `luarocks install titan-cui` to build on their own platform.
 2. **Package-built native provider:** Compiled during `luarocks install` (or `luarocks make`) and published to `<tree>/lib/titan/0.6/` (`cui.so`/`cui.a` on Unix, `cui.dll` on Windows), usable by both Titan `import` and Lua `require`.
-3. **Installed source-only module:** `.titan` source published to `<tree>/lib/titan/0.6/`, compiled into each Titan consumer's `--output` directory (not loaded directly by Lua `require`).
+3. **Installed source-only module:** `.titan` source published to `<tree>/lib/titan/0.6/`. Compiled libraries can typecheck against it and depend on it without owning it, and each consuming Titan application or `--test` executable compiles it once into its `--output` directory (bare Lua `require` cannot compile `.titan` sources).
 
 If you pack an already installed native rock with `luarocks pack titan-cui 0.1.0-1`, LuaRocks archives the retained `$(PREFIX)` directory (including `dist/`), and installing that `.rock` runs `hooks.post_install` without recompiling. Because `dist/modules/` sits outside LuaRocks' `lib` deployment, `luarocks pack` can name a native Titan rock `.all.rock`. Rename it to the architecture reported by `luarocks config arch` (for example `titan-cui-0.1.0-1.linux-x86_64.rock`) before sharing, and treat it as tied to the OS, CPU architecture, Lua version, Titan ABI, and build profile.
 

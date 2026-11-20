@@ -42,13 +42,16 @@ Incremental object lookup and missing-header restoration consume that mapped
 stem, so they never pick up source-adjacent objects from another configuration.
 Without an output root the resolver keeps the source-adjacent canonical paths,
 except when a build selects an installed `.titan` source through the read-only
-implicit SDK source fallback (`<root>/lib/titan/0.6`): `titanc` then refuses
-(naming the logical module and asking for `--output DIR`) rather than writing
-generated files or taking a build lock in that implicit fallback root. With
-`--output`, generated C, objects, and headers for that installed source map
-under the consumer's output directory by logical module name, and builds that
-do not select an installed source keep their existing behavior. Routing changes
-neither serialized interfaces nor the generated-code ABI.
+implicit SDK source fallback (`<root>/lib/titan/0.6`)—including when a library
+build only checks it: `titanc` then refuses (naming the logical module and
+asking for `--output DIR`) rather than writing generated files or taking a
+build lock in that implicit fallback root. With `--output`, generated C,
+objects, and headers for an installed source compiled by an application or
+`--test` build map under the consumer's output directory by logical module name
+(library builds check the installed source without emitting objects or headers
+for it), and builds that do not select an installed source keep their existing
+behavior. Routing changes neither serialized interfaces nor the generated-code
+ABI.
 
 Final providers keep common-prefix naming below the output root; library mode
 writes no Lua loader files, and a [browser](browser-target.md) library writes

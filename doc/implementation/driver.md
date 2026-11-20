@@ -68,31 +68,35 @@ All modules, including the standard library, use the same two path strings:
   browser targets (browser builds search that directory for `.titan` source
   only, selecting `.browser.titan` and shared `.titan` variants normally;
   native providers there are never eligible for browser builds). Selecting an
-  installed source through that implicit fallback requires `-o`/`--output` so
-  generated files land under the consumer's output tree and `titanc` neither
-  writes nor locks in the implicit fallback root; builds that do not select an
-  installed source keep their existing behavior. Separately from the
-  positional-root restriction, compiling an ordinary binary library rejects a
-  dependency selected from the implicit installed source fallback (including
-  under `--source-first` when a paired provider is also installed) rather than
-  copying another rock's module into the library's provider (same-repo authored
-  `--tree` sources still build into a library together, and
-  ordinary/`--static` executables and `--test` builds still compile installed
-  fallback sources into `--output`; see
-  [titan#427](https://github.com/mascarenhas/titan/issues/427)). Without `-o`,
-  source output relocation can report the generic missing-`--output` diagnostic
-  first, and passing `-o` still does not permit vendoring an installed source
-  into a binary library. Mechanically, `titanc` sets
+  installed source through that implicit fallback—even when a library build
+  only checks it—requires `-o`/`--output` so generated files land under the
+  caller's output tree and `titanc` neither writes nor locks in the implicit
+  fallback root; builds that do not select an installed source keep their
+  existing behavior. In a library build (including plain non-`main`,
+  non-`--test`, non-`--static` `-c`), an ordinary public `import` selected from
+  the implicit installed source fallback (including under `--source-first`) is
+  classified as an external source dependency: the library checks it in
+  isolation to obtain its closed public interface and public nominal layouts
+  without compiling, embedding, or reserving outputs for it, and prunes
+  checking-only transitive dependencies behind that edge from library link
+  inputs and certificates. An explicit `.titan` source-collaboration import
+  from an owned library module into the implicit installed source fallback is
+  rejected (authored collaboration under `--tree` and application/`--test`
+  explicit source imports remain valid). Each owned logical member folds its
+  external source obligations (stopping at the installed source boundary and
+  forwarding obligations from owned authored helpers and imported compiled
+  members) into optional private `source_requirements` metadata, omitted when
+  empty. Consuming applications and `--test` builds materialize reached logical
+  members' `source_requirements` once per logical name in the preflighted plan
+  before worker scheduling and certification—requiring actual source (authored
+  `--tree` roots first, then `<root>/lib/titan/0.6`, with no silent binary
+  substitution)—and diagnose missing source, physical ownership conflicts, and
+  cross-boundary cycles deterministically. Mechanically, `titanc` sets
   `context.authored_source_roots` to the positional plus `--test-dir` roots;
   `resolve_source` checks it only after every authored root misses and the
   implicit SDK fallback would match, returning the named `--tree` diagnostic
   (workers receive planned or overridden descriptors and never resolve roots,
-  and language-server/analysis contexts leave the field unset). In library
-  mode, `preflight_build_outputs` inspects planned source descriptors for the
-  `installed` origin, records the installed-source library refusal, and rejects
-  no-main non-compile-only builds before provider planning or worker dispatch,
-  and `titanc` repeats the check after the checker's final `main`
-  classification to guard against shape-based preflight detection. Explicit
+  and language-server/analysis contexts leave the field unset). Explicit
   `driver.resolve_source(context, modname, source_path)` calls, closed-world
   and explicit analysis roots, and `--test-dir` remain exact and never scan the
   installed SDK automatically.
@@ -2255,8 +2259,8 @@ error alerts):
   the integer returned by the Titan `main` becomes the **process exit status**:
   `ret = lua_tointeger(L, -1); lua_close(L); return ret;`.
 * **`pmain`** first publishes the original `argc` integer and `argv` pointer
-  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`. On Linux and macOS a
-  program or test can also install its private
+  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`. When needed, a native
+  program or test (on Linux, macOS, and Windows) also installs its private
   [linked provider set](codegen-overview.md#the-linked-provider-set) here,
   without publishing Lua loaders. It then calls global
   `require("$MODNAME")` and retrieves and retains that module's `main`

@@ -175,8 +175,20 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    before any source byte is read. Selecting a later source module rebinds
    any overlapping static archive (`rebind_overlapping_static_providers`).
    Native executable preflight follows each selected archive member's
-   [declared imports](static-compiled-modules.md#demanded-archive-closure)
-   before workers start or the final link can certify.
+   [declared imports](static-compiled-modules.md#demanded-archive-closure-and-source-requirements),
+   and application/`--test` preflight on all targets materializes reached
+   logical members' folded `source_requirements` (requiring actual source from
+   authored `--tree` roots first, then `<root>/lib/titan/0.6`) in the same
+   fixed point before output reservation, worker DAG scheduling, or final-link
+   certification, with unified cross-boundary cycle detection and worker DAG
+   edges from materialized sources to consumers that may recover their nominal
+   owners. In a library or prospective-library `-c` build (non-`main`,
+   non-`--test`, non-`--static`), preflight partitions owned authored modules
+   from external installed-source dependencies, rejects explicit `.titan`
+   imports across that library boundary, checks needed external sources in
+   isolation to project closed public interfaces and public nominal layouts,
+   and prunes checking-only transitive dependencies behind external sources
+   from reservations, worker dispatch, and link inputs.
    A browser `--test` link checks the SDK's runtime assets before planning
    the synthetic runner's implicit `titan.test` import. Compile-only builds
    do not add that import or require the final-link assets.
@@ -258,8 +270,10 @@ pass itself never runs the checker, code generator, or C preprocessor:
   (and, for a browser invocation, created in an empty root), and so is the
   marker of every held lock domain
   ([Output roots and the target marker](browser-target.md#output-roots-and-the-target-marker)).
-* **Reserved outputs.** Every planned source module, cached or fresh, reserves
-  `<stem>.c`/`.o` and every potential split part
+* **Reserved outputs.** Every owned planned source module (excluding external
+  installed-source dependencies checked by a library or prospective-library
+  `-c` build), cached or fresh, reserves `<stem>.c`/`.o` and every potential
+  split part
   `<stem>.part<k>.c`/`.part<k>.o` with `1 <= k < effective c_parts`, each
   unit's `.gcno` and `.gcda`, any parts recorded by a validated prior primary
   object (so a smaller split policy can still retire them), and

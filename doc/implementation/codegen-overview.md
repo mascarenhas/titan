@@ -30,10 +30,12 @@ coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
 - `modname` is the dot-separated logical module name.
 - `ast` is the module's AST *after* `checker.check` has decorated and
   rewritten it.
-- `static_deps` is the driver's finalized direct-native name set: every source
-  module compiled into the invocation plus every logical module physically
-  carried by a selected static provider. Imports selected from DSOs are
-  absent.
+- `static_deps` is the driver's finalized direct-native name set: every owned
+  source module compiled into the invocation plus every logical module
+  physically carried by a selected static provider. Imports selected from DSOs,
+  as well as external installed-source dependencies checked by a library (or
+  prospective library `-c`), are absent and use ordinary external `handle` or
+  `global` bindings.
 - `abi` is the required compiled-module ABI string.
 - `emit_line_directives` defaults to true when omitted.
 - `options` carries the coverage mode (`coverage`, `coverage_backend`), the
@@ -1287,35 +1289,52 @@ is a separate `RTLD_LAZY | RTLD_LOCAL` operation.
 
 ### The linked provider set
 
-The native coordinator walks the written imports of demanded archive
-members. The generated launcher emits one sorted array of logical names
-and hidden native resolvers for the resulting members and linked sources.
-Each archive entry is a strong reference that retains its primary object;
-the table does not reference dormant siblings.
+Application and `--test` preflight walks reached archive `imports` and reached
+`source_requirements`. When an executable or test image needs private linked
+election—on Unix for demanded archive members and linked app-owned sources
+(including materialized source-only dependencies of prebuilt libraries), on
+Windows when prebuilt DLLs need app-owned source modules carried in the
+companion application provider DLL, and on browser when selected browser
+archives declare `source_requirements`—the generated entrypoint emits one
+sorted private table of logical names and installs it into the Lua registry
+inside its protected startup before requiring the root.
 
-The launcher publishes the array bounds as one registry value inside its
-protected entry, before requiring the root. A default program containing
-only its source root and shared-provider imports needs no catalog.
-`titan_module_provider` binary-searches that array only after a canonical
-and native-preload miss on a named import. The table holds image-lifetime
-data, not initialized module userdata; binding to it still goes through
-the normal ABI and used-declaration checks. Modules still initialize in
+* **Linux and macOS:** The launcher emits one sorted array of logical names and
+  hidden native resolvers for the reached archive members and linked sources.
+  Each archive entry is a strong reference that retains its primary object; the
+  table does not reference dormant siblings. A default program containing only
+  its source root and shared-provider imports without source obligations needs
+  no catalog.
+* **Windows:** App-owned source modules live in the companion application
+  provider DLL, not the launcher EXE. When needed, the launcher installs the
+  same sorted name table pointing to that application provider DLL, so a loaded
+  library DLL resolves the app-owned module's already-exported `_abi_value`,
+  `_compatibility`, and `_init` entries and then switches to the initialized
+  canonical in-memory resolver—without passing hidden resolver pointers across
+  the PE boundary or adding general exports to the application DLL.
+* **Browser (`--target browser`):** When a selected browser archive carries
+  `source_requirements`, the browser entrypoint installs the same sorted
+  hidden-resolver table before requiring the root, also anchoring the linked
+  source objects under `wasm-ld --gc-sections`, with no new Wasm imports or
+  host JavaScript/loader changes. Ordinary browser builds without source
+  obligations omit the table.
+
+`titan_module_provider` binary-searches the installed table only after a
+canonical and native-preload miss on a named import. The table holds
+image-lifetime data, not initialized module userdata; binding to it still goes
+through the normal ABI and used-declaration checks. Modules still initialize in
 written import order. The table adds nothing to `package.preload` or
 `package.loaded`. The Lua package searcher does not consult it, and child
-states do not inherit it.
-Once initialized, a module registers its ordinary native preload as
-before, and that preload can be copied into children.
+states do not inherit it. Once initialized, a module registers its ordinary
+native preload as before, and that preload can be copied into children.
 
-For `--static`, preflight verifies the complete written import closure and
-the table anchors its archive members. The runtime still opens a named
-DSO on a catalog miss: a plugin loaded explicitly through Lua `require`
-and its own dependencies are not part of the host's certified graph.
-The catalog never replaces an existing physical producer token or
-redirects direct calls.
-
-Final-link certification includes the sorted catalog names and the bytes
-of the input objects and archives. Windows DLL launchers and archive-only
-browser images do not install this catalog.
+For Unix `--static`, preflight verifies the complete written import closure and
+the table anchors its archive members. On native platforms the runtime still
+opens a named DSO on a catalog miss: a plugin loaded explicitly through Lua
+`require` and its own dependencies are not part of the host's certified graph.
+The catalog never replaces an existing physical producer token or redirects
+direct calls. Final-link certification includes the sorted catalog names and
+the bytes of the input objects and archives.
 
 ## User-value allocation
 

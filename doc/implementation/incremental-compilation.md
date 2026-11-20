@@ -987,7 +987,13 @@ provider file bytes and timestamps never enter consumer module certificates.
   return or field types (`recover_contextual_owner` in `driver.lua`).
 * `certificate.bindings` and `certificate.providers`: the coder's native
   binding map (`"direct"`, `"handle"`, or `"global"`) and selected dynamic
-  provider map (`provider_file` for direct dynamic imports).
+  provider map (`provider_file` for direct dynamic imports). External
+  installed-source dependencies in library or prospective-library `-c` builds
+  are bound externally (`"handle"` or `"global"`), not `"direct"`.
+* `certificate.source_requirements` (omitted when empty): the module's folded
+  external source-only obligations (direct external installed-source imports,
+  plus obligations forwarded from owned authored helpers and imported compiled
+  members, stopping at each external source).
 
 In stage 2, `incremental.verdict(record, plan)` (`incremental.lua`)
 checks the decoded certificate against the final resolution `plan`:
@@ -1002,8 +1008,10 @@ checks the decoded certificate against the final resolution `plan`:
    `miss("owner-interface", name)`.
 2. For every module name in `keys(cert.bindings) ∪ keys(cert.providers)`, sorted
    bytewise, `verdict` computes the expected binding from the plan:
-   * `linked = (name == modname) or plan.linked(name)` (true when `name` is a
-     source module in the build or carried by a selected static archive);
+   * `linked = (name == modname) or plan.linked(name)` (true when `name` is an
+     owned source module compiled into the build or carried by a selected
+     static archive; false for external installed-source dependencies in
+     library mode);
    * `provider = (name ~= modname) and plan.provider_file(name) or nil`;
    * `expected = linked and "direct" or (direct[name] and provider and "handle" or "global")`;
    * `expected_provider = (not linked and direct[name]) and provider or nil`.
@@ -1013,7 +1021,13 @@ checks the decoded certificate against the final resolution `plan`:
    `miss("import-binding", "<name>: <before> -> <after>")` for a direct import
    or `miss("owner-binding", "<name>: <before> -> <after>")` for a contextual
    owner.
-3. If any dependency was pending and no earlier check missed, `verdict` returns
+3. It compares the recorded folded `source_requirements` against the plan's
+   expected obligations for `modname`, missing whenever an owned helper or
+   imported compiled provider changed which external source-only modules are
+   required (even if public types and layouts did not change), while keeping
+   library objects as hits across compatible implementation-only edits to an
+   external installed source.
+4. If any dependency was pending and no earlier check missed, `verdict` returns
    `{ status = "pending", names = pending }`; otherwise it returns
    `{ status = "hit" }`.
 

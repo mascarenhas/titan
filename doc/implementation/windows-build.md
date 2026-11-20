@@ -351,9 +351,10 @@ does not establish full compiler or standard-library support.
 ## Windows application launchers
 
 The Windows program link produces a Titan application DLL plus a small console
-EXE. The DLL receives all selected source modules and native payload; the EXE
-links only its entrypoint, manifest resource, embedded Titan runtime, and the
-controlled Lua import library. Neither output links a Titan module import
+EXE. The DLL receives all app-owned source modules (including source-only
+dependencies materialized for prebuilt library DLLs) and native payload; the
+EXE links only its entrypoint, manifest resource, embedded Titan runtime, and
+the controlled Lua import library. Neither output links a Titan module import
 library. The SDK runtime archive is `libtitan.a`; Windows links the matching
 `lib/liblua55.a` plus the separate SDK `lib/libbacktrace.a` for PE/COFF source
 attribution, omits Unix `dl` and `m`, and selects static unwind linkage with
@@ -385,7 +386,9 @@ source, and compiled resource.
 PE links disable automatic exports. `driver.windows_provider_exports` writes a
 producer-owned `.def` from every logical module physically carried into the
 DLL: `_abi_value`, `_abi`, `_types`, `_layouts`, `_compatibility`, `_init`, and
-`luaopen_*`, plus public raw foreign entries recovered from module interfaces.
+`luaopen_*`, plus public raw foreign entries recovered from module interfaces
+and—only for library modules that carry non-empty folded external source
+obligations—their optional source-requirements metadata entry.
 The list depends only on logical module names and their interfaces, which only
 part 0 of a split module carries. Part objects and module-private symbols never
 enter the `.def`, and `-Wl,--exclude-all-symbols` keeps them unexported.
@@ -406,9 +409,18 @@ The entrypoint (`driver.entrypoint_contents`) embeds the logical identity and
 `relative_provider`, never an EXE basename. Its Windows-only `package.preload`
 callback resolves that provider relative to `<exe-dir>/../lib/titan/0.6`,
 checks the native ABI, and invokes its exact Lua opener inside the protected
-entrypoint. Argument reconstruction, bootstrap hook selection, error handling,
-Lua-state closure, and exit status are shared with Unix; see [Linking a
-standalone program](driver.md#linking-a-standalone-program-drivercompile_program).
+entrypoint. When prebuilt library DLLs need app-owned source modules carried
+in the companion application provider DLL, `pmain` also installs the private
+per-state [linked provider set](codegen-overview.md#the-linked-provider-set)
+before `require("$MODNAME")`, naming those modules and the companion provider
+DLL so a loaded library DLL resolves the app DLL's already-exported
+`_abi_value`, `_compatibility`, and `_init` entries and then switches to the
+initialized canonical in-memory resolver—without passing hidden resolver
+pointers across the PE boundary, adding general exports to the application DLL,
+or altering process-wide DLL search order. Argument reconstruction, bootstrap
+hook selection, error handling, Lua-state closure, and exit status are shared
+with Unix; see [Linking a standalone
+program](driver.md#linking-a-standalone-program-drivercompile_program).
 `llvm-rc` (or the parsed `RC` command) embeds an `asInvoker`, UTF-8,
 long-path-aware manifest; no machine setting or global DLL search path changes.
 The manifest, resource source, and compiled resource are named after the

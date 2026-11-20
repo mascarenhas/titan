@@ -71,6 +71,15 @@ generated test runner imports discovered source-backed owners explicitly with
 tests that inspect a producer's locals write their own explicit `.titan`
 import. See [Native test runner](test-runner.md).
 
+In a library build (including plain non-`main`, non-`--test`, non-`--static`
+`-c`), explicit `.titan` source collaboration stays confined to authored
+`--tree` roots: an explicit `.titan` import from an owned library module that
+resolves from the read-only implicit installed SDK fallback
+`<root>/lib/titan/0.6` is rejected (private source collaboration cannot cross
+an independent installed package boundary into a published library; use an
+ordinary public `import` or an authored `--tree` checkout). Explicit `.titan`
+collaboration inside applications and `--test` builds remains permitted.
+
 A checked source module retains a compiler-only overlay on its `Type.Module`:
 
 * `source_members` and `source_type_members` hold its own local value and type

@@ -39,13 +39,14 @@ longest common sequence of complete dotted components
 | `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
 
 The comparison is component-wise: `foo` and `foobar` have no common prefix.
-Unrelated roots are rejected before code generation. Transitive source
-dependencies do not influence the provider name, but their objects are part
-of the link union and their `luaopen_*` entries are present in the image. An
-unrelated transitive dependency is not independently discoverable through
-Titan prefix lookup, at compile time or by the run-time searcher, merely
-because its object is embedded: packaging it as a public Titan binary requires
-naming it as a compatible requested root.
+Unrelated roots are rejected before code generation. Authored transitive source
+dependencies from `--tree` do not influence the provider name, but their objects
+are part of the link union and their `luaopen_*` entries are present in the
+image; external installed-source dependencies are checked without entering the
+library's link union. An unrelated transitive dependency is not independently
+discoverable through Titan prefix lookup, at compile time or by the run-time
+searcher, merely because its object is embedded: packaging it as a public Titan
+binary requires naming it as a compatible requested root.
 
 Standalone-program mode differs. When exactly one requested root has the
 required `main(args: {string}): integer`, all source objects are linked into
@@ -175,13 +176,18 @@ large. A folder module has already been assembled into one AST, so it
 naturally contributes one ordered object set: its primary object followed by
 any part objects.
 
-Library mode forms the union of every source module reachable from all
-requested roots and links each source module's objects exactly once, in
-bytewise logical-name and part order. In a native build, a compiled external
-dependency must supply a shared provider, which contributes no object.
-Library mode does not flatten another Titan archive into the pair. Browser
-providers retain archive-only composition. Native `-X` objects and archives
-keep command-line order; see [Native composition](static-compiled-modules.md#native-composition).
+Library mode forms the union of every owned authored source module reachable
+from all requested roots (stopping at external installed-source dependencies,
+which are checked for their public interface and public nominal layouts without
+entering the library's link union) and links each owned source module's objects
+exactly once, in bytewise logical-name and part order. In a native build, a
+compiled external dependency must supply a shared provider, which contributes
+no object. Native library mode does not flatten another Titan archive into the
+pair. Browser providers retain their preexisting separate archive composition
+for compiled browser archive dependencies while leaving external installed
+sources and their private dependencies outside the library archive. Native `-X`
+objects and archives keep command-line order; see [Native
+composition](static-compiled-modules.md#native-composition).
 
 Before code generation, `titanc` preflights every logical module in the link
 union. It rejects the reserved name `titan`, distinct logical names that map to
@@ -198,8 +204,11 @@ unit](codegen-overview.md#anatomy-of-a-generated-translation-unit).
 Both native provider forms contain independent copies of every logical
 protocol:
 
-* `<mangled>_abi`, semantic `<mangled>_types`, physical `<mangled>_layouts`, and
-  the separate `<mangled>_compatibility` projection;
+* `<mangled>_abi`, semantic `<mangled>_types`, physical `<mangled>_layouts`,
+  the separate `<mangled>_compatibility` projection, and (only when the module
+  has non-empty folded external source obligations) an optional private
+  source-requirements metadata entry matched against the paired archive at
+  publication;
 * `<mangled>_init` and `luaopen_<mangled>`;
 * a native export descriptor and per-state binding caches in the module payload;
 * a distinct registry-owned module `Udata`, variables, canonical closures,
