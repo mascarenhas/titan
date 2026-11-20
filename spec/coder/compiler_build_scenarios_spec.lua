@@ -1478,6 +1478,9 @@ end
         local test_child = spawn_titanc("test")
         local deadline = uv.new_timer()
         local timed_out = false
+        -- Earlier synchronous builds can leave the shared libuv loop clock
+        -- stale. Start the full deadline from the current time.
+        uv.update_time()
         deadline:start(120000, 0, function()
             timed_out = true
             for _, child in ipairs({ app_child, test_child }) do

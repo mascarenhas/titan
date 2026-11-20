@@ -2697,7 +2697,7 @@ describe("relocatable Lua build configuration", function()
             return path
         end
         for _, path in ipairs({ "Makefile.win", "scripts/install_compiler.mk", "scripts/browser.mk",
-                "scripts/titan_install.lua", "scripts/titan-uninstall",
+                "scripts/titan_install.lua", "scripts/titan-install", "scripts/titan-uninstall",
                 "spec/support/stdlib_test_modules.mk" }) do
             fixture(source, path, read_file(path))
         end
@@ -2773,6 +2773,7 @@ describe("relocatable Lua build configuration", function()
         assert.same({}, staged, "unexpected files in the retained native SDK")
         for _, copy in ipairs({
             { "titanc", "lua/titan-compiler/titanc.lua" },
+            { "scripts/titan-install", "bin/titan-install" },
             { "scripts/titan-uninstall", "bin/titan-uninstall" },
             { "scripts/titan_install.lua", "installer/titan_install.lua" },
             { "titan-compiler/driver.lua", "lua/titan-compiler/driver.lua" },
