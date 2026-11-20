@@ -211,6 +211,7 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
         if not platform.windows then
             assert.equal(inherited_descriptors, context.io._process_inherit)
         end
+        assert(request.preflight({ order = {}, modules = {} }))
         for _, name in ipairs(request.roots) do check_root(name) end
         context.loader = function() end
         return true

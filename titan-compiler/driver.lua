@@ -3045,6 +3045,10 @@ local function resolve_source(paths, modname, context)
     end
     if not paths and context.installed_source_root then
         local source, err = source_resolution_in_root(context.installed_source_root, modname, context)
+        if (source or err) and context.authored_source_roots and context.authored_source_roots[modname] then
+            return nil, "module '" .. modname .. "' is installed in the SDK; " ..
+                "titanc builds only authored roots (pass --tree to a checkout of it)"
+        end
         if source then source.installed = true end
         return source, err
     end
@@ -13341,6 +13345,11 @@ function driver.preflight_build_outputs(context, plan, options)
         local selected = plan.modules[name]
         if selected.kind == "source" then
             local source, certified = selected.source, selected.certified
+            if source.installed and not plan.installed_source_library_error then
+                plan.installed_source_library_error = "cannot build a library with dependency '" ..
+                    name .. "' from installed SDK source; select its compiled provider or " ..
+                    "ship this library as source only (see Titan issue #427)"
+            end
             local saved = certified and certified.status == "hit" and certified.record
             local info = { source = source, aliases = {}, imports = {}, saved = saved }
             modules[name] = info
@@ -13576,6 +13585,7 @@ function driver.preflight_build_outputs(context, plan, options)
             if driver.IS_DARWIN then output(executable .. ".dSYM", "standalone dSYM", "directory") end
         end
     elseif not options.compile_only then
+        if plan.installed_source_library_error then return nil, plan.installed_source_library_error end
         local provider, _, left, right = driver.common_module_provider(options.roots)
         if not provider then
             return nil, "cannot link modules into one shared library: '" ..
