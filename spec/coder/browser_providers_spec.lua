@@ -694,14 +694,14 @@ describe("browser providers real toolchain", function()
     end
     local function run_at(tree, output, corruption, ...)
         local argv = lua_argv(corruption)
-        for _, argument in ipairs({ repo .. "/titanc", "-q", "--target", "browser",
+        for _, argument in ipairs({ repo .. "/titanc", "--target", "browser",
                 "--tree", root .. "/" .. tree, "-o", root .. "/" .. output, ... }) do
             argv[#argv + 1] = argument
         end
         return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
     end
     local function run_cli(corruption, ...)
-        return run_at("src", "out", corruption, ...)
+        return run_at("src", "out", corruption, "-q", ...)
     end
     local function prepare(real_info)
         -- Only runtime/JS assets are bootstrap prerequisites; deliberately omit
@@ -773,20 +773,42 @@ describe("browser providers real toolchain", function()
             read(root .. "/out/consumer.o"), root .. "/out/consumer.o"))
         assert.equal("direct", source_record.object_metadata.bindings["pkg.left"])
     end)
-    it("links one browser variant of an installed source used by two archives", function()
+    it("links one browser variant and its exposed source nominal through two archives", function()
         local real_info, why = toolchain.require({ node = true, sdk = true })
         if not real_info then pending(why); return end
         prepare(real_info)
         stage_sdk()
         local installed = prefix .. "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION
         write(installed .. "/counter.native.titan", "const native_only = true\n")
+        write(installed .. "/units.h", "typedef struct ticket_data { int unused; } ticket_data;\n")
+        write(installed .. "/units.titan", [[
+foreign import "units.h"
+
+record Ticket
+  serial: integer
+  local data: foreign ticket_data
+end
+
+function Ticket.new(serial: integer): Ticket
+  local data = foreign ticket_data.new()
+  return { serial = serial, data = data }
+end
+
+function Ticket:code(): integer
+  return self.serial + 100
+end
+]])
         local source = installed .. "/counter.browser.titan"
         write(source, [[
+local units = import "units"
+
+type Ticket = units.Ticket
+
 serial = 0
 
-function next(): integer
+function next(): Ticket
   serial = serial + 1
-  return serial
+  return units.Ticket(serial)
 end
 
 do
@@ -798,7 +820,9 @@ end
         write(root .. "/producer/left.titan", [[
 local counter = import "counter"
 
-function next(): integer
+type Ticket = counter.Ticket
+
+function next(): Ticket
   return counter.next()
 end
 ]])
@@ -811,7 +835,7 @@ end
 ]])
         for _, name in ipairs({ "left", "right" }) do
             local output = "built-" .. name
-            local result = run_at("producer", output, nil, name)
+            local result = run_at("producer", output, nil, "-q", name)
             assert.is_true(result.ok, result.output)
             local archive = read(root .. "/" .. output .. "/" .. name .. ".a")
             local parsed = assert(staticmetadata.scan_bytes(archive, name, {
@@ -820,6 +844,7 @@ end
             assert.same({ name }, parsed.key_order)
             assert.same({ "counter" }, parsed.entries[name].source_requirements)
             assert.is_nil(lfs.attributes(root .. "/" .. output .. "/counter.o"))
+            assert.is_nil(lfs.attributes(root .. "/" .. output .. "/units.o"))
             write(root .. "/providers/" .. name .. ".a", archive)
         end
         write(root .. "/app/demo.titan", [[
@@ -827,21 +852,31 @@ local left = import "left"
 local right = import "right"
 
 function main(args: {string}): integer
-  if left.next() ~= 41 or right.current() ~= 41 then return 1 end
-  if left.next() ~= 42 or right.current() ~= 42 then return 2 end
+  local first = left.next()
+  if first.serial ~= 41 or first:code() ~= 141 or right.current() ~= 41 then return 1 end
+  local second = left.next()
+  if second.serial ~= 42 or second:code() ~= 142 or right.current() ~= 42 then return 2 end
   return 0
 end
 ]])
         local function build_and_run()
-            local result = run_at("app", "application", nil, "--incremental", "demo")
+            local result = run_at("app", "application", nil, "--incremental", "-v", "demo")
             assert.is_true(result.ok, result.output)
             return compiler_io.new_sync():run(toolchain.runner(info, "--engine", "node",
-                "--grace", "0", root .. "/application/demo.mjs"), { stderr_to_stdout = true })
+                "--grace", "0", root .. "/application/demo.mjs"), { stderr_to_stdout = true }), result.output
         end
         local result = build_and_run()
         assert.is_true(result.ok, result.output)
         assert.equal("file", lfs.attributes(root .. "/application/counter.o", "mode"))
+        assert.equal("file", lfs.attributes(root .. "/application/units.o", "mode"))
         assert.is_nil(lfs.attributes(installed .. "/counter.o"))
+        assert.is_nil(lfs.attributes(installed .. "/units.o"))
+        local warm
+        result, warm = build_and_run()
+        assert.is_true(result.ok, result.output)
+        assert.matches("Titan object hit units:", warm, 1, true)
+        assert.matches("Titan object hit counter:", warm, 1, true)
+        assert.matches("Titan link hit", warm, 1, true)
         local original = read(source)
         -- This alters the producer's slot numbering, not the used ABI.
         write(source, "const extra = 0\n" .. original)

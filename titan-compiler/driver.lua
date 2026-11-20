@@ -8510,7 +8510,9 @@ function driver.finalize_resolver_context(context)
 
     local executable = not context.analysis_only and
         (context.link_kind == "program" or context.link_kind == "test")
-    local app_sources = executable and context.application_source_requirements
+    -- Requirements activate the catalog; they name where source acquisition
+    -- starts, not which of the resulting application owners can be elected.
+    local elect_app_sources = executable and context.application_source_requirements ~= nil
     -- A test's synthetic main is not necessarily present at certification.
     -- In an ordinary program with only a source root and DSOs, there is no
     -- second linked owner to elect.
@@ -8518,13 +8520,16 @@ function driver.finalize_resolver_context(context)
         (context.target == "linux" or context.target == "darwin") and
         (context.strict_static or context.link_kind == "test" or next(physical_owner) ~= nil or
          next(dynamic_names) ~= nil and next(source_names, (next(source_names))) ~= nil)
+    local runner = (elect_linked or elect_app_sources) and
+        require("titan-compiler.test_runner").MODULE_NAME
+    local function linked_source(name)
+        return (elect_linked or elect_app_sources) and name ~= runner and source_names[name]
+    end
     local rebound_owners
     for owner, keyed in pairs(context.native_constraints) do
         local direct_provider = physical_owner[owner]
-        local linked_owner = elect_linked and
-            (selected_static_modules[owner] or source_names[owner] or
-             context.strict_static and direct_provider)
-        linked_owner = linked_owner or (app_sources and app_sources[owner] and source_names[owner])
+        local linked_owner = linked_source(owner) or (elect_linked and
+            (selected_static_modules[owner] or context.strict_static and direct_provider))
         local shared_dynamic_owner = not context.analysis_only and
             (context.target ~= "browser" or
                 check_only_binaries and check_only_binaries[owner]) and
@@ -8656,13 +8661,10 @@ function driver.finalize_resolver_context(context)
     context.native_bindings = native_bindings
     context.physical_owner = physical_owner
     context.linked_module_names = nil
-    if elect_linked or app_sources then
-        local runner = require("titan-compiler.test_runner").MODULE_NAME
+    if elect_linked or elect_app_sources then
         local names = {}
         for name in pairs(source_names) do
-            if name ~= runner and (elect_linked or app_sources[name]) then
-                names[#names + 1] = name
-            end
+            if linked_source(name) then names[#names + 1] = name end
         end
         for name, mod in pairs(selected_static_modules) do
             -- Older archives need not provide a link-visible resolver.
@@ -8725,7 +8727,7 @@ function driver.finalize_resolver_context(context)
         remember_nominal_layouts(context, provider and provider[resolution.owner])
     end
     context.application_nominal_layouts = nil
-    if app_sources then
+    if elect_app_sources then
         for name in pairs(source_names) do
             local mod = driver.imported[name]
             local inventory = perf.public_source_layout(name, mod)

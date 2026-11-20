@@ -951,6 +951,13 @@ function main(args: {string}): integer
   return 0
 end
 ]])
+        put_source("app/model_only.titan", [[
+local model = import "model"
+
+function main(args: {string}): integer
+  return model.Cell(42).serial - 42
+end
+]])
         local collector = require("spec.support.luacov_children").new(
             REPOSITORY, REPOSITORY, workspace .. "/child-coverage")
         local function built(tree, output, ...)
@@ -974,6 +981,14 @@ end
                 TITAN_ROOT = sdk, TITAN_PATH_0_6 = providers, PATH = tool_path,
             })
             assert.is_true(ok, result)
+        end
+        local function launcher_source(output, name)
+            local links = output .. "/.titan-links"
+            for entry in lfs.dir(links) do
+                local filename = links .. "/" .. entry .. "/synthetic/" .. name .. "__entrypoint.c"
+                if exists(filename) then return read(filename) end
+            end
+            error("missing generated launcher for " .. name)
         end
         local function install(output, filename)
             assert(uv.fs_copyfile(output .. "/" .. filename, lib .. "/" .. filename))
@@ -1009,10 +1024,34 @@ end
         built("owner", owner, "model")
         install(owner, "model" .. SHARED_SUFFIX)
         if not platform.windows then install(owner, "model.a") end
+        local control = build_dir .. "/no-source-requirements"
+        built("app", control, "model_only")
+        assert.not_matches("titan_linked_entries", launcher_source(control, "model_only"), 1, true)
+        run("model_only", control)
         publish(build_dir .. "/library")
         local dynamic = build_dir .. "/dynamic"
-        built("app", dynamic, "nominal")
+        local cold = built("app", dynamic, "nominal")
+        assert.truthy(cold.object_misses.units, cold.raw)
+        local launcher = launcher_source(dynamic, "nominal")
+        for _, name in ipairs({ "meter", "nominal", "units" }) do
+            local _, count = launcher:gsub('{ "' .. name .. '",', "")
+            assert.equal(1, count, name .. " must have exactly one catalog entry")
+        end
+        assert.not_matches('{ "model",', launcher, 1, true)
+        if platform.windows then
+            local image = assert(driver.windows_program_paths("nominal", nil, nil, dynamic)).provider
+            local ok, exports = run_command({ "llvm-readobj", "--coff-exports", image }, workspace)
+            assert.is_true(ok, exports)
+            assert.matches("Name: units_abi_value", exports, 1, true)
+            assert.matches("Name: units_compatibility", exports, 1, true)
+            assert.matches("Name: units_init", exports, 1, true)
+        end
         run("nominal", dynamic)
+        local warm = built("app", dynamic, "nominal")
+        assert.truthy(warm.object_hits.units, warm.raw)
+        assert.truthy(warm.object_hits.meter, warm.raw)
+        assert.truthy(next(warm.link_hits), warm.raw)
+        assert.same({}, warm.module_compiles)
         if not platform.windows then
             -- An archive chosen only while checking meter is not an owned
             -- archive dependency of via either.
