@@ -131,12 +131,14 @@ All modules, including the standard library, use the same two path strings:
   API](#language-server-compiler-api) and direct `driver.defaultloader` +
   `checker.checkimport` callers without a build plan—append
   `perf.semantic_source_root(context)` for ordinary non-root dependency imports
-  (after a clean binary miss under normal compiled-first/source-first policy) as
-  well as inside [contextual source-requirement
+  (after a clean binary miss in the default policy; `source_first` uses the
+  source pass first) as well as inside [contextual source-requirement
   recovery](#contextual-source-requirement-recovery), without requiring
   `--output`, while `source_roots`, explicit `driver.resolve_source(...,
-  source_path)` queries, closed catalogs, library private collaborators, and
-  build inputs (`driver.relocate_source_output`) keep their stricter rules.
+  source_path)` queries, closed catalogs, and build inputs
+  (`driver.relocate_source_output`, and library build planning's ban on private
+  `.titan` collaboration across the installed package boundary) keep their
+  stricter rules.
   Mechanically, `titanc` sets `context.authored_source_roots` to the positional
   plus `--test-dir` roots; `resolve_source` checks it only after every authored
   root misses and the implicit SDK fallback would match, returning the named
@@ -785,8 +787,10 @@ are `source_roots` and the shared resolver `context`.
   no compiled/publication outputs or installed-SDK files (semantic FFI header
   checks and host caches still use their own private temporaries and storage;
   requested `source_roots`, explicit `driver.resolve_source(..., source_path)`
-  queries, closed catalogs, planned builds, and private collaborators never use
-  this fallback). Loaded required sources resolve their own ordinary imports by
+  queries, closed catalogs, and planned builds never use this fallback, while an
+  open-world non-root explicit `.titan` import can select real installed source
+  —never a binary—distinct from library build planning's rule rejecting private
+  collaboration across the installed package boundary). Loaded required sources resolve their own ordinary imports by
   normal source/binary precedence—so an unmarked transitive owner such as
   `units` may resolve from an eligible compiled provider or from source—and
   recovery never falls back to an unrestricted disk source search for an
