@@ -187,13 +187,14 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    targets. In a library or prospective-library `-c` build (non-`main`,
    non-`--test`, non-`--static`, where preflight sets `plan.link_kind =
    "library"`), `perf.plan_source_obligations` starts from the same reached
-   per-member `source_requirements` frontiers (without archive demand) and
-   resolves their normal import closure so transitive nominal owners defined
-   deeper than a compiled provider's folded frontier remain available for
-   typechecking; `perf.classify_library_sources` then marks modules outside the
-   owned authored closure with `module.check_only = true` (separating
-   `check_only_sources` from `check_only_binaries`, which stay out of the
-   library link while contributing verified `"global"` bindings and public
+   per-member `source_requirements` frontiers (without archive demand),
+   requiring actual source for each recorded obligation while resolving each
+   loaded source's own imports through ordinary lookup so transitive nominal
+   owners defined deeper than a compiled provider's folded frontier remain
+   available for typechecking; `perf.classify_library_sources` then marks
+   modules outside the owned authored closure with `module.check_only = true`
+   (separating `check_only_sources` from `check_only_binaries`, which stay out
+   of the library link while contributing verified `"global"` bindings and public
    layouts when owned code uses their types), keeps the published folded
    frontier unchanged, and rejects explicit `.titan` imports across the
    installed-source library boundary.
