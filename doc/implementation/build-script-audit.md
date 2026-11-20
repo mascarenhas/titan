@@ -498,11 +498,17 @@ The author-facing packaging guide and complete rockspec example live in
   checkout root.
 * **Preflight and protected destinations:** Before writing or removing any
   published file, `titan-install` validates every destination path and rejects
-  collisions with foreign files, Titan SDK-owned paths, protected `lib/`
-  subtrees (`lib/luarocks`, `lua`, `titan`, `titan-browser`, and similar
-  namespaces that would bypass the three staging roots), file/directory
-  conflicts, and symlinks—even when a previously owned file is missing on disk.
-  Unrelated existing files are never overwritten, even if their bytes match.
+  collisions with foreign files, Titan SDK-owned paths (including the reserved
+  `include/titan/` SDK header subtree), protected `lib/` subtrees
+  (`lib/luarocks`, `lua`, `titan`, `titan-browser`, and similar namespaces that
+  would bypass the three staging roots), file/directory conflicts, and
+  symlinks—even when a previously owned file is missing on disk. Unrelated
+  existing files are never overwritten, even if their bytes match. Ownership
+  and collision checks operate strictly per physical destination file without
+  compiler or DSO metadata introspection: distinct physical representations of
+  the same logical Titan module across two rocks (for example source `.titan`
+  versus compiled providers, or flat versus folder files) are not rejected by
+  logical name.
 * **SDK-side ownership inventory and upgrade lifecycle:** LuaRocks deletes an
   existing installation of the same rock revision *before* rebuilding it
   (`luarocks/build.lua`), and `luarocks remove` has no uninstall hook. Scanning

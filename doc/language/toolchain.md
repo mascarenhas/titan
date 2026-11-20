@@ -645,14 +645,18 @@ A passing run prints an executable-line summary and writes annotated output to
 
 ### Source selection and artifacts
 
-- By default, `--coverage` instruments every source-imported module in the
-  build graph that defines no top-level `test_*` function. Prebuilt providers
-  and modules containing any `test_` function are excluded. To include an
-  untested module in the denominator, import it from a test root.
+- By default, `--coverage` instruments every authored source-imported module in
+  the build graph that defines no top-level `test_*` function. Source-only
+  modules resolved through the implicit SDK fallback (`<root>/lib/titan/0.6`),
+  prebuilt providers, and modules containing any `test_` function are excluded.
+  To include an untested authored module in the denominator, import it from a
+  test root.
 - Repeatable `--coverage-module GLOB` replaces automatic selection with a
   union of logical-module globs (`*` matches zero or more characters, `?`
-  matches one, including dots; quote globs from the shell). Prebuilt and
-  `test_`-bearing modules remain excluded, and an empty match is an error.
+  matches one, including dots; quote globs from the shell). A matching glob
+  opts an installed fallback source into instrumentation, while selected
+  compiled providers and `test_`-bearing modules remain excluded, and an empty
+  match is an error.
 - Coverage C, objects, and `.gcno`/`.gcda` files live in `.coverage/`
   subdirectories (`out/app/.coverage/calc.o`), completely separate from normal
   objects so normal and coverage builds never contaminate each other.
