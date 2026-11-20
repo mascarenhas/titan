@@ -12607,8 +12607,11 @@ end
 
 local function current_lua_executable()
     if driver.INSTALL_PATHS then
-        return root_join(driver.INSTALL_PATHS.root,
+        local installed_lua = root_join(driver.INSTALL_PATHS.root,
             platform.windows and "bin/lua.exe" or "bin/lua")
+        if platform.windows or lfs.attributes(installed_lua, "mode") == "file" then
+            return installed_lua
+        end
     end
     if platform.windows then
         local source_lua = driver.LUA_SOURCE_PATH .. "/lua.exe"
@@ -12620,9 +12623,14 @@ local function current_lua_executable()
     end
     local source_lua = driver.LUA_SOURCE_PATH .. "/lua"
     if lfs.attributes(source_lua, "mode") == "file" then return source_lua end
-    if type(arg) == "table" and type(arg[-1]) == "string" and
-       lfs.attributes(arg[-1], "mode") == "file" then
-        return arg[-1]
+    if type(arg) == "table" then
+        -- A Unix rock tree may have no Lua executable of its own. The
+        -- launcher already selected Lua; options such as -E precede arg[0],
+        -- so the interpreter is at the lowest negative index, not arg[-1].
+        local index = -1
+        while type(arg[index - 1]) == "string" do index = index - 1 end
+        local interpreter = arg[index]
+        if type(interpreter) == "string" and interpreter ~= "" then return interpreter end
     end
     return "lua"
 end

@@ -697,6 +697,16 @@ end
         assert.is_true(ok, output)
         assert.is_true(exists(source_dir .. "/plain.o"))
         assert.is_false(exists(lib .. "/.titan-build.lock"))
+        if not platform.windows then
+            -- This SDK has no bin/lua, and the invoking Lua has options before
+            -- the script name. Fresh validation must use that interpreter.
+            local provider = build_dir .. "/provider"
+            assert.is_false(exists(sdk .. "/bin/lua"))
+            ok, output = compile(source_dir, "-o", provider, "plain")
+            assert.is_true(ok, output)
+            assert.is_true(exists(provider .. "/plain.so"))
+            assert.is_true(exists(provider .. "/plain.a"))
+        end
 
         ok, output = compile(source_dir, "-o", build_dir, "consumer")
         assert.is_true(ok, output)

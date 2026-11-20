@@ -12,8 +12,7 @@ lr() { "$lua_prefix/bin/luarocks" --lua-version 5.5 --lua-dir "$lua_prefix" --tr
 # The selected tree is empty. This installs the actual Titan rock there;
 # its prepared Lua prefix provides the already installed compiler dependencies.
 lr make "$rockspec" --deps-mode=none
-# Native library publication validates the DSO with the SDK's bin/lua.
-ln -s "$lua_prefix/bin/lua" "$sdk/bin/lua"
+[[ ! -e $sdk/bin/lua ]]
 export PATH="$sdk/bin:$lua_prefix/bin:$PATH"
 export TITAN_ROOT=$sdk
 unset TITAN_PATH TITAN_PATH_0_6 LUA_INIT LUA_INIT_5_5 LUA_PATH LUA_PATH_5_5 LUA_CPATH LUA_CPATH_5_5
@@ -141,4 +140,5 @@ TITAN
 "${hash[@]}" "$sdk/include/titan.h" "$sdk/include/test-unrelated.h" "$lib/titan.so" \
     "$lib/titan.a" "$lib/libtitan.a" "$lib/test-unrelated.txt" > "$workspace/sdk.after"
 cmp "$workspace/sdk.before" "$workspace/sdk.after"
+[[ ! -e $sdk/bin/lua ]]
 printf '%s\n' 'PASS: fresh SDK, local binary/source rocks, compile/run, exact and recovery cleanup'
