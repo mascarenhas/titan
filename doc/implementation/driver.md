@@ -108,9 +108,8 @@ All modules, including the standard library, use the same two path strings:
   once per logical name via `plan.load_sources`—requiring actual source for
   those recorded obligations (authored `--tree` roots first, then
   `<root>/lib/titan/0.6`, with no silent binary substitution) while each loaded
-  source's own ordinary imports resolve through normal lookup (compiled
-  providers first, then source, feeding any further reached
-  `source_requirements` back into the fixed point). It diagnoses missing source
+  source's own ordinary imports follow the invocation's normal lookup policy,
+  feeding any further reached `source_requirements` back into the fixed point. It diagnoses missing source
   (`module '<importer>' requires source for '<name>': ...`), conflicting
   compiled providers, archives physically containing a required source, and
   cross-boundary cycles (`cyclic source requirement: ...`). Following the
