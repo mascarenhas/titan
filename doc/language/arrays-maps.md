@@ -209,7 +209,20 @@ end
 
 Rules for `const? { T }`:
 
-- `{T}`, `const { T }`, and `const? { T }` all convert implicitly to `const? { T }` (for equal or gradually consistent element types). Options propagate the same way: `({T})?` and `(const { T })?` convert to `(const? { T })?`.
+- A fresh positional or empty constructor in a `const? { T }` context,
+  including an optional one, uses `T` for its elements and builds a const
+  Array, just as in a `const { T }` context.
+- At an implicit typed sink, an Array of any qualifier can be viewed as
+  `const? { T }` if the element types are equal or gradually consistent.
+  This applies between Options (preserving `nil`), when introducing an
+  Option, and when forcing an Option (raising on `nil`). The view keeps the
+  original Array, and reads still check the target element type.
+  Forwarding a bare [`...`](functions.md#variadic-parameters) tail can carry
+  the view, but cannot introduce or force an Option per element. A collection
+  spread can apply those adjustments element by element.
+  This rule does not lift through Array elements, Map keys or values,
+  function types, or generic owner arguments. It does not add written `as`
+  or `is` conversions across Option boundaries.
 - `const? { T }` supports `#` and indexed reads, and rejects indexed writes at compile time. Passing an Array through `const? { T }` preserves the original mutable or const Array without copying or freezing it.
 - `const? { T }` does not implicitly convert back to `{T}` or `const { T }`.
 - Explicit runtime qualifier checks and downcasts inspect the Array's actual tag:

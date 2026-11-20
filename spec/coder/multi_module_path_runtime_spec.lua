@@ -94,6 +94,44 @@ end
         if workspace then remove_tree(workspace) end
     end)
 
+    local function compile_consumer(name, source)
+        if platform.windows then
+            write_file(path.join(consumer_source, name .. ".titan"), source)
+            assert_compiles(consumer_root, consumer_source, root_one, name)
+            return
+        end
+
+        -- Keep this compiler-only suite independent of titan.lua: run the
+        -- Lua boundary assertions in the executable's already-open state.
+        write_file(path.join(consumer_source, name .. ".titan"),
+            'foreign import "titan/ffi.h"\n' .. source .. [[
+
+function main(args: {string}): integer
+    local chunk = args[1]
+    if ffi.luaL_loadstring(L, chunk) ~= ffi.LUA_OK then
+        ffi.lua_error(L)
+    end
+    ffi.lua_callk(L, 0, 0, 0, nil)
+    return 0
+end
+]])
+        assert_compiles(consumer_root, consumer_source, root_one, "--static", name)
+    end
+
+    local function run_consumer(name, script)
+        if platform.windows then
+            assert_runs(consumer_root, { titan_path = consumer_root .. ";" .. root_one }, script)
+            return
+        end
+        local ok, output, why, code = run({
+            "env", "-i", "PATH=/usr/bin:/bin", "TITAN_PATH_0_6=" .. consumer_source,
+            "TITAN_ROOT=" .. workspace, "TITANC=" .. path.join(workspace, "no-compiler"),
+            path.join(consumer_root, name), script,
+        }, consumer_root)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+    end
+
     it("uses the earlier exact provider for checking and Titan imports",
        function()
         assert.equal("file", lfs.attributes(
@@ -187,7 +225,7 @@ end
             assert.equal("file", lfs.attributes(path.join(root_one, "staticarray/api.a"), "mode"))
         end
 
-        write_file(path.join(consumer_source, "static_array_consumer.titan"), [[
+        compile_consumer("static_array_consumer", [[
 local api = import "staticarray.api"
 
 function roundtrip(): {value}
@@ -196,9 +234,6 @@ function roundtrip(): {value}
     return api.echo(xs)
 end
 ]])
-        local arguments = platform.windows and { "static_array_consumer" } or
-            { "--static", "static_array_consumer" }
-        assert_compiles(consumer_root, consumer_source, root_one, table.unpack(arguments))
 
         local generated = read_file(
             path.join(consumer_source, "static_array_consumer.c"))
@@ -212,8 +247,7 @@ end
                 "extern Udata *staticarray_api_init", 1, true), generated)
         end
 
-        assert_runs(consumer_root,
-            { titan_path = consumer_root .. ";" .. root_one }, [[
+        run_consumer("static_array_consumer", [[
 local consumer = require "static_array_consumer"
 local xs = consumer.roundtrip()
 assert(type(xs) == "userdata")
@@ -256,7 +290,7 @@ end
             assert.equal("file", lfs.attributes(path.join(root_one, "staticentry/api.a"), "mode"))
         end
 
-        write_file(path.join(consumer_source, "static_entry_consumer.titan"), [[
+        compile_consumer("static_entry_consumer", [[
 local provider = import "staticentry.api"
 
 function direct_depth(p: function (): integer): integer
@@ -282,9 +316,6 @@ function boundary_function(): function (integer): value
     return provider.boundary
 end
 ]])
-        local arguments = platform.windows and { "static_entry_consumer" } or
-            { "--static", "static_entry_consumer" }
-        assert_compiles(consumer_root, consumer_source, root_one, table.unpack(arguments))
 
         local generated = read_file(
             path.join(consumer_source, "static_entry_consumer.c"))
@@ -298,9 +329,7 @@ end
                 "extern Udata *staticentry_api_init", 1, true), generated)
         end
 
-        assert_runs(consumer_root,
-            { titan_path = consumer_root .. ";" .. root_one },
-            DEPTH_PROBE .. [[
+        run_consumer("static_entry_consumer", DEPTH_PROBE .. [[
 local consumer = require "static_entry_consumer"
 
 -- A direct static call and an exact-tag first-class call both use the
@@ -378,7 +407,7 @@ end
         assert.is_nil(lfs.attributes(
             path.join(root_one, "prefix/messages.a"), "mode"))
 
-        write_file(path.join(consumer_source, "prefix_union_consumer.titan"), [[
+        compile_consumer("prefix_union_consumer", [[
 local m = import "prefix.messages"
 local moved = m.Message.move({ x = 1.0, y = 2.0 })
 
@@ -408,9 +437,6 @@ function hidden_else(): integer
     end
 end
 ]])
-        local arguments = platform.windows and { "prefix_union_consumer" } or
-            { "--static", "prefix_union_consumer" }
-        assert_compiles(consumer_root, consumer_source, root_one, table.unpack(arguments))
 
         local generated = read_file(
             path.join(consumer_source, "prefix_union_consumer.c"))
@@ -426,8 +452,7 @@ end
         assert.truthy(generated:find(
             "case%s+1:%s+goto%s+_case_"), generated)
 
-        assert_runs(consumer_root,
-            { titan_path = consumer_root .. ";" .. root_one }, [[
+        run_consumer("prefix_union_consumer", [[
 local consumer = require "prefix_union_consumer"
 assert(consumer.total() == 45.0)
 assert(consumer.same())

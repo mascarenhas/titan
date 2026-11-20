@@ -20,7 +20,7 @@ least one module name is required unless you pass `--print-root`,
 | `--exe PATH` | Exact destination for a standalone or `--test` executable, relative to the current directory. |
 | `-t`, `--tree PATH` | Semicolon-separated authored source root directories (default: `.`). Positional roots and `--test-dir` use only these authored roots; ordinary imports search authored roots before the read-only implicit SDK root `<root>/lib/titan/0.6`. |
 | `-T`, `--target TGT` | Compilation target: host OS (`linux`, `darwin`, `windows`) or `browser` (default: `TITAN_TARGET` or host OS). |
-| `--static` | Prefer static `.a` Titan archive providers over `.so` providers. Unsupported on Windows. |
+| `--static` | Require archives for compiled dependencies of a Linux/macOS executable or test. Also valid with `-c`, even for roots without `main`. |
 | `--source-first` | Prefer available `.titan` source dependencies over compiled providers, with compiled fallback on miss. |
 | `--incremental` | Certify and reuse unchanged module objects, `--c-source` objects, and final links. |
 | `-c`, `--compile-only` | Generate objects and headers only without linking. Rebuilds all sources unless combined with `--incremental`. |
@@ -244,9 +244,9 @@ this order:
 
 | Mode | Search order |
 | --- | --- |
-| Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix only) on the Titan path -> 3. Source (folder then flat) on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` |
-| `--static` *(executables/`-c`, Unix only)* | 1. Static providers (`.a`) -> 2. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` (no shared `.so` fallback; rejected on final no-main library outputs) |
-| `--source-first` or `--test` | 1. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` -> 2. Compiled providers (fallback on miss) |
+| Default | 1. Shared providers (`.so`/`.dll`) on the Titan path -> 2. Static providers (`.a`, Unix executable builds only) on the Titan path -> 3. Source (folder then flat) on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` |
+| `--static` *(executables/`-c`, Unix only)* | 1. Static providers (`.a`) -> 2. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6`; no shared-provider fallback (rejected on final no-main library outputs) |
+| `--source-first` or `--test` | 1. Source on authored `--tree` roots, then read-only `<root>/lib/titan/0.6` -> 2. Compiled providers according to the selected mode |
 
 Authored source roots come from `--tree` (default `.`). Passing `--tree`
 replaces the default `.` without disabling the read-only implicit SDK fallback
@@ -358,15 +358,37 @@ primary object embeds its public type interface, so no sidecar file is needed.
 On macOS, `titanc` can consume universal `x86_64`/`arm64` `.a` providers and
 selects the active compiler's slice.
 
-`--static` prefers `.a` providers over `.so` providers so dependencies link
-directly into the output with direct C calls. It is a preference, not a
-system-linker `-static` flag: missing archives still fall back to `.so` or
-source, and system libraries such as libc remain dynamically linked.
+Build a library or canonical bundle by listing its source roots, for example
+`titanc --tree src -o out pkg.left pkg.right`. The pair contains those
+modules and their source helpers from authored `--tree` roots, not any
+selected external compiled provider. A dependency found only as installed
+source is refused, as described above
+([titan#427](https://github.com/mascarenhas/titan/issues/427)). An external
+compiled dependency must have a shared provider to build the pair; an archive
+alone is not sufficient. `--static` is not a library-production mode.
 
-When an archive carries a module whose public interface exposes a nominal type
-owned by another module, that owner is also linked directly if it lives inside
-the same archive; otherwise the consumer resolves the owner dynamically at run
-time and cannot independently substitute a conflicting copy of that owner.
+A default application may still use an archive when no shared provider
+claims its import. To link the full Titan dependency closure of an
+executable or test on Linux and macOS, use `titanc --static -o out app`.
+An application module already compiled from source can satisfy an import.
+Otherwise every reached compiled module, including a prebuilt library's
+private imports, must have an archive. A missing archive is a build
+error, even if its shared provider exists. Rebuild older archives that
+lack the import inventory. Dormant siblings in a multi-module archive are
+not loaded or extracted just because another member was selected.
+
+Direct imports still require the exact physical owner. A prebuilt library's
+external import can instead bind to the executable's linked copy after ABI
+and used-declaration checks, without initializing modules early or exposing
+unused modules to Lua `require`. Shared consumers of an external owner reuse
+the first initialized compatible provider in the state; physical carrying
+conflicts still fail. `--static` does not request the system linker's `-static`
+flag: system libraries such as libc can remain dynamic.
+
+The closure covers the executable's Titan `import` declarations, not
+modules explicitly loaded at runtime. A plugin loaded through Lua
+`require` can still load its own shared dependencies in a `--static`
+executable.
 
 Native payloads passed with `-X` are carried into both `.so` and `.a`
 providers in command-line order (child archives are flattened into the
@@ -446,6 +468,9 @@ initialized module rather than opening a second copy—so a dynamically loaded
 plugin importing a module already embedded in its host uses the host's
 instance. Checks run at load time; replacing a file on disk never hot-reloads
 a running Lua state.
+On Linux and macOS, a standalone executable can also supply a linked copy
+before a dynamic import opens a provider file. Replacing that file cannot
+replace the linked copy.
 
 | Declaration used by consumer | Must stay identical in replacement |
 | --- | --- |
@@ -590,6 +615,13 @@ titanc -o out --static -c --incremental app.helper
 titanc -o out --static -c --incremental app.main
 titanc -o out --static --incremental --exe out/bin/app app.main
 ```
+
+Compile-only builds with a `main` root, `--test`, or `--static` use
+executable provider checks. `-c --static` checks the complete import
+closure even for a helper without `main`. These builds write only objects
+and headers; the final link generates the launcher and executable.
+Pass the same provider-selection and compile options in both steps,
+including `--static`, `--test`, and `--coverage` when applicable.
 
 ## Build profiles, parallelism, and build output
 

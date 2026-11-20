@@ -155,8 +155,9 @@ provider afterward. Deduplication is by logical module, not provider filename,
 so two logical imports from one provider reuse one runtime handle while
 resolving different mangled symbols.
 
-Registry-first selection, copied provider descriptors, `loadlib`, and per-state
-bindings are described in [Static vs dynamic dependency
+Registry-first selection, native preloads, the executable's linked provider
+set, the `loadlib` fallback, and per-state bindings are described in
+[Static vs dynamic dependency
 wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring); the
 compatibility checks are in [Generated exports and runtime
 verification](binary-compatibility.md#generated-exports-and-runtime-verification).
@@ -175,20 +176,12 @@ naturally contributes one ordered object set: its primary object followed by
 any part objects.
 
 Library mode forms the union of every source module reachable from all
-requested roots, sorts logical names with `util.bytewise_less`, and links each
-source module's objects exactly once, part 0 first. A dependency selected from a DSO remains dynamic
-and contributes no object. A dependency selected from a static provider adds
-that physical archive once; its complete validated membership is available
-for direct native binding and is carried into both produced provider forms,
-without making all of its logical keys ordinary resolver results. Every source
-module sees the complete source union and physically carried static names as
-direct during code generation, so those references become ordinary `extern`
-calls rather than self-dlopen attempts.
-
-Selected static-provider archives are ordered bytewise by normalized absolute
-path, and user `-X` objects and archives keep command-line order. How the DSO
-force-loads them and how the archive flattens them is in [Native
-composition](static-compiled-modules.md#native-composition).
+requested roots and links each source module's objects exactly once, in
+bytewise logical-name and part order. In a native build, a compiled external
+dependency must supply a shared provider, which contributes no object.
+Library mode does not flatten another Titan archive into the pair. Browser
+providers retain archive-only composition. Native `-X` objects and archives
+keep command-line order; see [Native composition](static-compiled-modules.md#native-composition).
 
 Before code generation, `titanc` preflights every logical module in the link
 union. It rejects the reserved name `titan`, distinct logical names that map to

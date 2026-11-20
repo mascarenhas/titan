@@ -3,6 +3,7 @@ local source_selection = require "titan-compiler.source_selection"
 local lfs = require "lfs"
 local path = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
+local test_runner = require "titan-compiler.test_runner"
 
 local coverage = {}
 
@@ -49,7 +50,7 @@ end
 
 function coverage.matches(build, name, test_functions)
     if test_functions and #test_functions > 0 then return false end
-    if name == "titan.test.runner" or build.generated[name] then return false end
+    if name == test_runner.MODULE_NAME or build.generated[name] then return false end
     if #build.patterns == 0 then return not build.installed_sources[name] end
     for _, pattern in ipairs(build.patterns) do
         if name:match(pattern) then return true end

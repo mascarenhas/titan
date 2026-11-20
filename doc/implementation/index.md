@@ -82,8 +82,8 @@ Two invariants shape everything downstream of the checker:
 | [Lexer and parser](lexer-parser.md) | Scannerless LPegLabel grammar, longest-match rules, foreign-body grammar, fold captures, precedence, desugarings, error labels, and non-reentrancy. |
 | [The type checker](checker.md) | Checker entry contract, speculative C-probe barrier and authoritative recheck, symbol table, staged collection, initializers, AST rewriting, and global state. |
 | [Type relations and boundary plans](type-relations-and-boundaries.md) | Consistency versus coercion, strict guards, dynamic conversion, C scalar rules, written casts, boundary matrix, and checker-owned plans. |
-| [Const-value implementation](const-values.md) | `const` locals, fields, and Arrays: descriptors, initializer-only write authority, Interface field snapshots, linear-use freeze proofs, and Array pairs. |
-| [Generics](generics.md) | Rigid checking, local type inference, declared/erased-graph validation, Interface constraint erasure, FFI admission, metadata serialization, and async owners. |
+| [Const-value implementation](const-values.md) | `const` locals and fields, initializer-only write authority, Interface snapshots, concrete Array construction, optional maybe-const views, and linear-use freeze proofs. |
+| [Generics](generics.md) | Rigid checking, local type inference, declared/erased-graph validation, Interface constraint erasure, [container views and Option adjustment](generics.md#container-views-and-presence), FFI admission, metadata serialization, and async owners. |
 | [Interfaces](interfaces.md) | Structural satisfaction, frozen conversion and adapter plans, wrapper userdata layout, four dispatch paths, metatable identity, downcasts, and separate compilation. |
 | [Union implementation](unions.md) | Parser lowering, variant descriptors, visibility, payload eligibility, `case` checking and non-fallthrough, runtime layout, dispatch, Lua exposure, and schemas. |
 | [Record constructors](record-constructors.md) | Record-call desugaring, custom `new` overrides, private literal construction authority, provider metadata, Lua namespace calls, and stdlib usage. |
@@ -136,7 +136,8 @@ Two invariants shape everything downstream of the checker:
 | [Folder modules](folder-modules.md) | Folder main and contributor discovery, deterministic declaration order, single-AST assembly, canonical output stems, and standard-library ensembles. |
 | [Target source selection](target-source-selection.md) | `source_selection.lua` variant filename classification, `-T`/`TITAN_TARGET` selection rows, folder sweeps, cache admission, logical stems, and Make inventories. |
 | [Multi-module libraries](multi-module-libraries.md) | Common-prefix `.so`/`.a` provider selection, shared candidate search with the package searcher, canonical imports, validated publication, and the stdlib image. |
-| [Static compiled modules](static-compiled-modules.md) | Archive/object metadata sections, ELF/Mach-O/COFF/Wasm container readers, target fingerprints, static composition, browser archive validation, and link pipelining. |
+| [Static compiled modules](static-compiled-modules.md) | Archive metadata and import inventories, native dependency closure, container readers, target fingerprints, and provider validation. |
+| [The linked provider set](codegen-overview.md#the-linked-provider-set) | Private native executable catalog that retains reached archive members without initializing them or publishing Lua loaders. |
 | [Selective binary dependency verification](binary-compatibility.md) | Consumer-used compatibility projections, construction and closed-union proofs, generated load-time verification exports, and provider-owned ABI slots. |
 
 ### Standard-Library Internals

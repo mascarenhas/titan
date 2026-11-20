@@ -1619,7 +1619,7 @@ describe("generic declarations and explicit calls", function()
 
         local constructors = {}
         for index, stat in ipairs(use.block.stats) do
-            constructors[index] = peel(stat.exps[1]).args.args[1]
+            constructors[index] = peel(peel(stat.exps[1]).args.args[1])
         end
         assert.equal("float_to_integer",
             coercion(constructors[1].fields[2].exp))
@@ -2279,8 +2279,11 @@ describe("generic declarations and explicit calls", function()
 
         local fixed = toplevel(ast, "Ast.TopLevelFunc", "fixed_projection")
             .block.stats[1].exps[1]
-        assert.equal("Ast.ExpExtra", fixed.args.args[2]._tag)
-        types.assert_erased(fixed.args.args[2]._type)
+        local extra = fixed.args.args[2]
+        types.assert_erased(extra._type)
+        while extra._tag == "Ast.ExpCast" do extra = extra.exp end
+        assert.equal("Ast.ExpExtra", extra._tag)
+        assert.equal(2, extra.index)
 
         local open = toplevel(ast, "Ast.TopLevelFunc", "open_projection")
             .block.stats[1].exps[1]
@@ -3033,6 +3036,43 @@ describe("generic declarations and explicit calls", function()
             "argument 1 of call to function 'first'", 1, true), errs[3])
         assert.truthy(errs[4]:find(
             "argument 1 of call to function 'first'", 1, true), errs[4])
+    end)
+
+    it("uses the instantiated container type for ordinary Option adjustment",
+    function()
+        local ast = assert_check([[
+            local function optional<|T|>(items: {T}?): {T}? return items end
+            local function required<|T|>(items: {T}): {T} return items end
+
+            function use(array: {integer})
+                local present = optional<|integer|>(array)
+                local absent? = optional<|integer|>(nil)
+                local wrapped: {integer}? = required<|integer|>(array)
+                present[1] = 42
+            end
+        ]])
+        local block = toplevel(ast, "Ast.TopLevelFunc", "use").block
+        assert.equal("{ integer }",
+            types.tostring(declared_type(block.stats[1].decls[1])))
+        assert.equal("{ integer }?",
+            types.tostring(declared_type(block.stats[2].decls[1])))
+        assert_runtime_ast_erased(block)
+    end)
+
+    it("does not compose Option and structural views at ordinary sinks",
+    function()
+        local errs = h.check_errs([[
+            function bad(array: {value}?, map: {string: value})
+                local forced: {integer} = array
+                local wrapped: {string: integer}? = map
+            end
+        ]])
+        assert.equal(2, #errs)
+        assert.truthy(errs[1]:find(
+            "expected { integer } but found { value }?", 1, true), errs[1])
+        assert.truthy(errs[2]:find(
+            "expected { string : integer }? but found { string : value }",
+            1, true), errs[2])
     end)
 
     it("keeps complete optional evidence for a direct generic binder", function()

@@ -47,6 +47,12 @@ local function cast_has_stable_root(ctx, node)
     if adjustment and adjustment.kind == "callable" then
         return not adjustment.exact or has_stable_root(ctx, node.exp)
     end
+    if adjustment and adjustment.kind == "gradual_view"
+       and adjustment.op == "structural" then
+        -- Implicit structural casts carry an Array or Map across erasure.
+        -- The view retains its backing object, even through an Option.
+        return has_stable_root(ctx, node.exp)
+    end
     if node._written_cast and node._written_cast.tag == "just" then
         return false
     end
@@ -1290,18 +1296,31 @@ function coder._code_adjustment_value(
             ctx, adapter, raw, loc, "value callable adjustment",
             result_root)
     end
+    if adjustment.kind == "container_option_boundary" then
+        local stats, value = "", raw
+        local function apply(step)
+            if step then
+                local stepstats
+                stepstats, value = coder._code_adjustment_value(
+                    ctx, step, step.source, step.target, value, loc)
+                stats = stats .. stepstats
+            end
+        end
+        apply(adjustment.from_carrier)
+        apply(adjustment.option)
+        apply(adjustment.to_carrier)
+        return stats, value
+    end
     if adjustment.kind == "gradual_view"
         and adjustment.op == "structural" then
-        -- Arrays, Maps, and callables retain a durable view whose component
-        -- observations are guarded later. An Option has no separate mutable
-        -- backing: its present payload is the immediate component observation.
-        -- Guard it while the checker-owned view plan is still attached so a
-        -- later identity option_force/option_map cannot forget the actual base
-        -- type stored in this TValue.
+        -- A typed container's representation already proves the outer kind
+        -- and qualifier of this view, even in an Option slot. Other Options
+        -- still observe the present payload at the structural boundary.
         local asource = assert(adjustment.source)
         local atarget = assert(adjustment.target)
         if asource._tag ~= "Type.Option"
-            or atarget._tag ~= "Type.Option" then
+           or atarget._tag ~= "Type.Option"
+           or types.same_container_view_representation(asource, atarget) then
             return "", raw
         end
         assert(adjustment.guard
@@ -1409,12 +1428,9 @@ function coder._convert_result_run_element(
     end
     coder._checked_adjustment_plan(
         run.adjustment, run.elem, target, "open result adjustment")
-    if types.equals(run.elem, target) then
-        assert(run.adjustment.kind == "identity",
-            "equal open result elements lack an identity checker adjustment: "
-            .. types.tostring(run.elem) .. " -> "
-            .. types.tostring(target) .. " used "
-            .. tostring(run.adjustment.kind))
+    -- Equal carriers do not imply an identity adjustment: a concrete Option
+    -- force between two value slots still has a runtime check.
+    if run.adjustment.kind == "identity" then
         return readstats, raw
     end
     -- A non-contiguous reader may need result_root to retain its raw VM result

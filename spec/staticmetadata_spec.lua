@@ -1073,6 +1073,29 @@ describe("static compiled-module metadata", function()
     end)
 
     describe("canonical Lua payload", function()
+        it("validates canonical logical import inventories independently of types", function()
+            local payload = assert(staticmetadata.render("pkg.mod", ABI, TYPES, nil,
+                { "a.dep", "z.dep" }))
+            local entry = assert(staticmetadata.validate(payload, "archive"))
+            assert.same({ "a.dep", "z.dep" }, entry.imports)
+            local empty = assert(staticmetadata.render("pkg.mod", ABI, TYPES, nil, {}))
+            assert.same({}, assert(staticmetadata.validate(empty, "archive")).imports)
+            assert.is_nil(assert(staticmetadata.validate(PAYLOAD, "legacy")).imports)
+
+            for _, imports in ipairs({
+                "not an array", { extra = "a.dep" }, { [2] = "a.dep" },
+                { "a.dep", "a.dep" }, { "z.dep", "a.dep" }, { "pkg.mod" },
+                { "a/dep.so" }, { false },
+            }) do
+                local invalid, err = staticmetadata.render("pkg.mod", ABI, TYPES, nil, imports)
+                assert.is_nil(invalid, err)
+            end
+            local invalid, err = staticmetadata.validate(
+                (payload:gsub('"z.dep"', '"a.dep"')), "archive")
+            assert.is_nil(invalid)
+            assert.matches("imports must be distinct", err, 1, true)
+        end)
+
         it("keeps physical layouts independent from semantic-only readers", function()
             local payload = assert(staticmetadata.render("pkg.mod", ABI, TYPES, "layout-bytes"))
             local semantic = assert(staticmetadata.validate(payload, "analysis", {

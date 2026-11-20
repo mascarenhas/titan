@@ -165,8 +165,9 @@ and wrapper layout are in
 
 ## Array relations and linear-use analysis
 
-Three Array qualifiers share one runtime representation and differ in their
-proxy metatable ([Runtime Array pair](#runtime-array-pair)). The relations
+The three static Array qualifiers share one runtime representation; the
+proxy metatable distinguishes the two concrete tags
+([Runtime Array pair](#runtime-array-pair)). The relations
 (`types.lua` `assignment_adjustment` and `written_cast`) are:
 
 | Source → target | Implicit sink | Written `as` | Runtime effect |
@@ -177,13 +178,26 @@ proxy metatable ([Runtime Array pair](#runtime-array-pair)). The relations
 | `const? { S }` → `{T}` / `const { T }` | rejected | `maybe_array_cast_mutable` / `_const` | exact metatable check of the target qualifier |
 
 Every cross-qualifier row requires equal or gradually consistent element
-types; a non-equal element pair records an `element_view`. `consistent`
-itself requires equal qualifier tags, so no gradual view crosses a qualifier.
+types. Written casts and freezes attach an `element_view` when the elements
+differ. Ordinary `consistent` requires matching qualifier tags; assignment
+widening admits the outer qualifier change separately and uses consistency
+only to check the element types.
+
+The widening never copies or freezes the Array. With equal elements the
+checker emits an identity plan for both bare Array and Option-to-Option
+widening. A gradually consistent element change instead keeps the strict
+target guard on a structural view; for an Option, this checks only the
+present payload's outer representation before deferring element checks to
+reads. At an implicit sink either form of Array widening can be the inner
+operation of `option_wrap` or `option_force`. The coder validates that plan
+and reuses the Array backing without a payload conversion. The outer
+operation still introduces presence or checks for `nil`.
 Static `is` for `array_freeze` and the upcast is allocation-free
 (`allocation_free_test`) and reports admission without converting; the
 maybe-const downcasts test the runtime metatable. A `value is/as` Array plan
 tests the target qualifier's metatable, and a `const? { T }` target accepts
-either.
+either. The predicate also recognizes the corresponding backed Array in
+mixed internal slots. No `is` test allocates or retags an Array.
 
 `array_freeze` copies by default. `titan-compiler/checker/linear.lua`
 selects `freeze` only when it proves that the cast consumes the allocation's
@@ -221,8 +235,12 @@ sink. A first-class reference strips the mark
 never carries it. The protobuf decoder relies on both proofs
 ([decoding](protobuf-library.md#decoding)).
 
-A constructor checked under a const Array target is annotated as const at
-construction and needs neither conversion helper.
+The positional constructor checker selects a concrete qualifier when it
+assigns the expression's type, including during delayed generic inference.
+An expected const or maybe-const Array builds directly with the const tag
+and no freeze; an unqualified or mutable context builds a mutable Array.
+The wider view belongs to the consuming edge; the coder uses the concrete
+expression type to choose the allocator and writer.
 
 ## Runtime Array pair
 

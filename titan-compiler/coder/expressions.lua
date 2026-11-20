@@ -2861,13 +2861,14 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"
            and ((node._adjustment
-                    and node._adjustment.kind == "callable")
+                    and (node._adjustment.kind == "callable"
+                        or (node._adjustment.kind == "gradual_view"
+                            and node._adjustment.op == "structural")))
                 or (node._written_cast.tag == "just"
                     and (maybe3.get_checked(node._written_cast, "written cast").op == "gradual"
                         or maybe3.get_checked(node._written_cast, "written cast").op == "callable"))) then
-        -- A finite callable edge is an allocating target view; a written
-        -- structural gradual cast remains the existing representation view.
-        -- Both consume only the checker-owned plan attached to this cast.
+        -- Callable edges can allocate; structural Array and Map views
+        -- retain the backing object. Consume the attached checker plan.
         local adjustment
         if node._adjustment then
             adjustment = node._adjustment
@@ -3221,10 +3222,9 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         local tbase = node._type.base
         local inner = assert(coercion.inner,
             "Option injection lacks its inner checker plan")
-        local inner_adjustment =
-            coder._inner_assignment(node.exp._type, tbase, inner)
         local converted = node.exp
-        if inner.kind ~= "identity" then
+        -- A checked Array view keeps the same backing as an exact payload.
+        if inner.kind == "coercion" then
             converted = {
                 _tag = "Ast.ExpCast",
                 _written_cast = maybe3.unknown(),
@@ -3233,11 +3233,8 @@ function codeexp_dispatch(ctx, node, iscondition, target)
                 target = tbase,
                 _type = tbase,
                 _implicit_coercion = true,
-                _adjustment = inner_adjustment,
+                _adjustment = coder._inner_assignment(node.exp._type, tbase, inner),
             }
-        else
-            assert(types.equals(types.normalize(node.exp._type), types.normalize(tbase)),
-                "identity Option injection changes its base type")
         end
         local cstats, cexp = codeexp(ctx, converted)
         local ctmp, tmpname = newtmp(ctx, node._type)
@@ -3259,8 +3256,6 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         local sbase = node.exp._type.base
         local inner = assert(coercion.inner,
             "Option projection lacks its inner checker plan")
-        local inner_adjustment =
-            coder._inner_assignment(sbase, node._type, inner)
         local cstats, cexp = codeexp(ctx, node.exp)
         -- Materialize the option value first: the operand
         -- may be a non-lvalue (e.g. a direct call returning t?), so we cannot
@@ -3273,7 +3268,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
             _decl = { _cvar = basename },
         }
         local converted = synthvar
-        if inner.kind ~= "identity" then
+        if inner.kind == "coercion" then
             converted = {
                 _tag = "Ast.ExpCast",
                 _written_cast = maybe3.unknown(),
@@ -3282,11 +3277,8 @@ function codeexp_dispatch(ctx, node, iscondition, target)
                 target = node._type,
                 _type = node._type,
                 _implicit_coercion = true,
-                _adjustment = inner_adjustment,
+                _adjustment = coder._inner_assignment(sbase, node._type, inner),
             }
-        else
-            assert(types.equals(types.normalize(sbase), types.normalize(node._type)),
-                "identity Option projection changes its base type")
         end
         local convstats, convexp = codeexp(ctx, converted)
         local ctmp, tmpname = newtmp(ctx, node._type)

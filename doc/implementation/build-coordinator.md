@@ -167,12 +167,16 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    ([Source vs compiled providers](driver.md#source-vs-compiled-providers-the-selection-logic)):
    command-line roots and explicit `.titan` imports are source-required,
    `--test` and `--source-first` prefer source with compiled fallback on a
-   clean miss, and ordinary imports run the complete `.so`/`.a` passes (swapped
-   by `--static`) before falling back to source. Every source descriptor comes
-   from the target-aware tagged resolver, which selects one file per family for
-   the context's [target](target-source-selection.md#the-resolver) before any
-   source byte is read. Selecting a later source
-   module rebinds any overlapping static archive (`rebind_overlapping_static_providers`).
+   clean miss, and ordinary imports try shared providers then archives before
+   falling back to source. Strict `--static` omits the shared pass. A native
+   library output refuses archive-only external imports. Every source
+   descriptor comes from the target-aware tagged resolver, which selects one
+   file per family for the context's [target](target-source-selection.md#the-resolver)
+   before any source byte is read. Selecting a later source module rebinds
+   any overlapping static archive (`rebind_overlapping_static_providers`).
+   Native executable preflight follows each selected archive member's
+   [declared imports](static-compiled-modules.md#demanded-archive-closure)
+   before workers start or the final link can certify.
 2. **Stage-1 local certification.** When `request.incremental` is true and the
    source descriptor is not in-memory, `plan_source` (`driver.lua`)
    calls `driver.incremental_configuration(context)` and

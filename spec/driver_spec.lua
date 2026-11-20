@@ -5005,22 +5005,18 @@ end
     end)
 
     it("reserves only the provider pair for a library without generated Lua files", function()
-        local archive = root .. "/libpkg_dep.a"
-        write_file(archive, "!<arch>\n")
+        local suffix = platform.windows and ".dll" or ".so"
+        local provider = root .. "/libpkg_dep" .. suffix
+        write_file(provider, "")
         local plan = source_plan({ { "pkg.app", "function answer(): integer return 42 end\n" } })
-        plan.modules["pkg.dep"] = { kind = "static", archive = archive }
+        plan.modules["pkg.dep"] = { kind = "dynamic", file = provider }
         driver.imported["pkg.dep"] = {
-            kind = "static", static_archive = archive,
+            kind = "dynamic",
             external_symbols = coder.interface_external_symbols("pkg.dep",
                 types.Module("pkg.dep", {})),
-            static_provider = { archive = archive, entries = {
-                ["pkg.dep"] = { type = types.Module("pkg.dep", {}) },
-                ["pkg.carried"] = { type = types.Module("pkg.carried", {}) },
-            } },
         }
         assert(preflight(plan, { roots = { "pkg.app" }, output_root = root .. "/out" }))
         -- The single requested root is the provider: pkg.app, not its parent.
-        local suffix = platform.windows and ".dll" or ".so"
         assert.is_table(reserved(plan, "provider DSO", "/out/pkg/app" .. suffix))
         if not platform.windows then
             assert.is_table(reserved(plan, "provider archive", "/out/pkg/app.a"))
@@ -5029,7 +5025,7 @@ end
         for _, reservation in ipairs(plan.reservations) do
             assert.is_nil(reservation.path:match("%.lua$"), reservation.path)
         end
-        assert.is_true(contains(plan.inputs, archive))
+        assert.is_true(contains(plan.inputs, provider))
     end)
 
     it("certifies a saved module from its record's inventory and header inputs", function()

@@ -56,11 +56,11 @@ print(m.sum_list(m.sample())) --> 10
 | 3 | [Statements, Scope, and Control Flow](statements.md) | Lexical blocks, `local` and `const` bindings, assignment, `if` truthiness, `while`/`repeat`, numeric and generic `for`, `return`, and `break`. |
 | 4 | [Functions, Arguments, and Results](functions.md) | Declarations, arity adjustment, optional `T?` parameters, named calls, multiple and flexible returns, variadics, spreads, and standalone `main`. |
 | 5 | [First-Class Functions and Closures](closures.md) | Function types, functions as values, contextual lambda inference, lexical captures, bound methods, callable adjustment, and cross-state snapshots. |
-| 6 | [Arrays, Maps, and Iteration](arrays-maps.md) | Distinct `{T}` Arrays and `{K: V}` Maps, 1-based indexing and holes, `const`/`const?` Array views, Map equality, and iteration. |
+| 6 | [Arrays, Maps, and Iteration](arrays-maps.md) | Distinct Arrays and Maps, 1-based indexing and holes, concrete Array literals and optional maybe-const views, Map equality, and iteration. |
 | 7 | [Records and Methods](records.md) | Nominal records, `Record(...)` shorthand and custom `new`, mutable/`const`/`local` fields, instance methods, static functions, and optional receivers. |
 | 8 | [Tagged Unions and Pattern Matching](unions.md) | Closed nominal unions, positional and named payload parts, variant constructors, `case ... when ... else`, and non-fallthrough coverage analysis. |
 | 9 | [Interfaces](interfaces.md) | Nominal behavioral views, `const` field snapshots, structural satisfaction at conversion sites, `io` interfaces in practice, and `is`/`as` downcasts. |
-| 10 | [Generics](generics.md) | Type parameters `<\|T\|>` on records, unions, Interfaces, and functions, Interface constraints, local inference, erasure, and dynamic boundaries. |
+| 10 | [Generics](generics.md) | Type parameters `<\|T\|>` on records, unions, Interfaces, and functions, Interface constraints, local inference, erasure, dynamic boundaries, and [optional generic containers](generics.md#optional-arrays-and-maps). |
 | 11 | [Type Aliases, Options, and Dynamic `value`](types.md) | Transparent `type` aliases, `T?` auto-unwrapping and `?` bindings, checked dynamism with `value`, strict projections, and conversion boundaries. |
 | 12 | [Errors and Resource Cleanup](error-handling.md) | Choosing options versus `raise`, lexical `defer` cleanup, `catch` with `error` and `traceback`, re-raising, and `titan.backtrace()`. |
 
@@ -145,6 +145,6 @@ each module by its short name; Lua loads the same module via `titan.<name>`.
 | --- | --- | --- |
 | A.1 | [Installing Titan on Linux and macOS](installation.md) | Default prefix setup, checkout and browser SDK builds, OpenSSL/Readline options, installed layout, and uninstalling. |
 | A.2 | [Installing and Using Titan on Windows](windows-build.md) | Experimental MSYS2 CLANG64 build, Lua DLL and C helpers, DLL distribution, browser builds, and Windows notes. |
-| B | [The `titanc` Toolchain, Linking, and Coverage](toolchain.md) | Complete CLI flags, environment variables, `-o` layout, `TITAN_PATH_0_6`, providers, DSO replacement, `--incremental`, profiles, and `--coverage`. |
+| B | [The `titanc` Toolchain, Linking, and Coverage](toolchain.md) | CLI flags, environment variables, `-o` layout, `TITAN_PATH_0_6`, [shared and static provider composition](toolchain.md#paired-so--a-outputs-and---static), DSO replacement, `--incremental`, build profiles, and `--coverage`. |
 | C | [Lexical, Conversion, and Grammar Reference](grammar.md) | Reserved and contextual words, member-name rules, operator precedence, conversion boundary matrix, and complete EBNF grammar. |
 | D | [Design Principles and Lineage](philosophy.md) | The Lua performance bargain, Titan's five core design commitments, and the LabLua/Typed Lua/Pallene lineage. |
