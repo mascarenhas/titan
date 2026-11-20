@@ -963,10 +963,7 @@ function coder._checked_identity_plan(plan, source_type, target_type, use)
     local source, target =
         coder._checked_plan_pair(plan, source_type, target_type, use)
     assert(types.equals(source, target)
-           or (source._tag == "Type.Array" and target._tag == "Type.Array"
-               and target.isconst.tag == "maybe"
-               and (source.isconst.tag == "no" or source.isconst.tag == "yes" or source.isconst.tag == "maybe")
-               and types.equals(source.elem, target.elem)),
+           or types.is_array_view_widening(source, target),
         use .. " identity plan changes its operand type")
     return plan
 end

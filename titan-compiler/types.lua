@@ -3222,6 +3222,26 @@ local function relation_identity(left, right)
     return types.equals(left, right)
 end
 
+-- Same-element widening changes only the view. A matching outer Option can
+-- reuse the same slot too: both nil and either concrete Array tag are valid.
+-- This is neither equality nor gradual consistency, and does not descend into
+-- Array elements or any other container.
+local function array_view_elements(source, target)
+    if source._tag == "Type.Option" and target._tag == "Type.Option" then
+        source, target = source.base, target.base
+    end
+    if source._tag == "Type.Array" and target._tag == "Type.Array"
+       and (source.isconst.tag == "no" or source.isconst.tag == "yes")
+       and target.isconst.tag == "maybe" then
+        return source.elem, target.elem
+    end
+end
+
+function types.is_array_view_widening(source, target)
+    local from, to = array_view_elements(source, target)
+    return from ~= nil and types.equals(from, to)
+end
+
 local function sound_guardable(typ, seen)
     typ = types.normalize(typ)
     if not typ then return false end
@@ -4476,7 +4496,7 @@ local function coercion_plan(op, source, target, fields)
     return plan("coercion", fields)
 end
 
-local function coercion_impl(source, target, policy, seen)
+local function coercion_impl(source, target, policy, seen, allow_array_view)
     source, target = normalized_pair(source, target)
     if not source or not target
        or source._tag == "Type.Variant"
@@ -4593,7 +4613,9 @@ local function coercion_impl(source, target, policy, seen)
                 end
             else
                 local inner
-                if relation_identity(source, target.base) then
+                if relation_identity(source, target.base)
+                   or (allow_array_view
+                       and types.is_array_view_widening(source, target.base)) then
                     inner = plan("identity", {
                         source = source,
                         target = target.base,
@@ -4612,7 +4634,9 @@ local function coercion_impl(source, target, policy, seen)
         if types.has_tvalue_representation(source.base)
            and not optional_owner_to_pointer(source.base, target) then
             local inner
-            if relation_identity(source.base, target) then
+            if relation_identity(source.base, target)
+               or (allow_array_view
+                   and types.is_array_view_widening(source.base, target)) then
                 inner = plan("identity", {
                     source = source.base,
                     target = target,
@@ -4984,7 +5008,8 @@ function types.assignment_adjustment(source, target, policy)
        or source._tag == "Type.Variant"
        or target._tag == "Type.Variant" then
         return nil
-    elseif relation_identity(source, target) then
+    elseif relation_identity(source, target)
+       or types.is_array_view_widening(source, target) then
         return plan("identity", { source = source, target = target })
     elseif source._tag == "Type.Nominal"
        and target._tag == "Type.Nominal"
@@ -5019,53 +5044,26 @@ function types.assignment_adjustment(source, target, policy)
                 allocation_free_test = true,
             })
         end
-
-        -- Maybe-const target admits mutable, const, or maybe-const source
-        if target.isconst.tag == "maybe" and (source.isconst.tag == "no" or source.isconst.tag == "yes" or source.isconst.tag == "maybe") then
-            if types.equals(source.elem, target.elem) then
-                return plan("identity", { source = source, target = target })
-            elseif relation_consistent(source.elem, target.elem) then
-                local view = gradual_view_plan(source, target)
-                if view then return view end
-            end
-            return nil
-        end
-
-        -- Maybe-const source cannot be assigned to mutable or const target
-        if source.isconst.tag == "maybe" and target.isconst.tag ~= "maybe" then
-            return nil
-        end
     end
 
-    -- Consistent structural views preserve the existing representation,
-    -- including an outer Option. Array qualifier changes still use the
-    -- separate rules below because consistency requires matching qualifiers.
+    -- The outer Array qualifier can widen without changing the carrier,
+    -- including under one Option. Element compatibility still uses the
+    -- ordinary consistency relation, which does not cross qualifiers.
+    local from_element, to_element = array_view_elements(source, target)
+    if from_element and relation_consistent(from_element, to_element) then
+        return gradual_view_plan(source, target)
+    end
+
+    -- Consistent structural views also preserve the carrier.
     if relation_consistent(source, target) then
         local view = gradual_view_plan(source, target)
         if view then return view end
     end
 
-    -- Option(Array) assignment
-    if source._tag == "Type.Option" and target._tag == "Type.Option" then
-        if source.base._tag == "Type.Array" and target.base._tag == "Type.Array" then
-            local inner = types.assignment_adjustment(source.base, target.base, policy)
-            if inner then
-                if inner.kind == "identity" then
-                    return plan("identity", { source = source, target = target })
-                else
-                    return plan("option_adjustment", {
-                        source = source,
-                        target = target,
-                        inner = inner,
-                    })
-                end
-            end
-            return nil
-        end
-    end
-
     if policy.allow_coercion ~= false then
-        local direct = coercion_impl(source, target, policy, {})
+        -- Written casts share the direct coercion planner but do not admit
+        -- these additional Option wrap/force pairs.
+        local direct = coercion_impl(source, target, policy, {}, true)
         if direct then
             return plan("direct_coercion", {
                 source = source,
