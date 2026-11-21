@@ -719,11 +719,13 @@ local function framing_body(): string
 end
 
 -- A response first-write matrix. Each case records commitment before and
--- after its handler work and any raised framing error.
-local function framing_handler(notes: {string: string},
-                               kept: {string: http.Response}): http.Handler
+-- after its handler work and any raised framing error, then reports its path
+-- as finished: the connection can end before the handler does.
+local function framing_handler(notes: {string: string}, kept: {string: http.Response},
+                               finished: function (string): ()): http.Handler
   return function (request: http.Request, response: http.Response)
     local path = request.url.path
+    defer finished(path)
     kept[path] = response
     local before = response:is_committed()
     local failure = ""
@@ -740,9 +742,14 @@ local function framing_handler(notes: {string: string},
         response:write(framing_body())
       elseif path == "/empty-write" then
         response:write("")
+      elseif path == "/send-headers" then
+        response:set_header("Content-Length", "5")
+        response:send_headers()
+        if not response:is_committed() then raise "send_headers did not commit" end
+        response:write("hello")
       elseif path == "/continue" then
-        test.assert(not response:is_committed(), "100 Continue committed the final response")
-        test.assert(request:read() == "ping", "Expect body was not readable")
+        if response:is_committed() then raise "100 Continue committed the final response" end
+        if request:read() ~= "ping" then raise "Expect body was not readable" end
         response:set_header("Content-Length", "2")
         response:write("ok")
       elseif path == "/head" then
@@ -766,6 +773,11 @@ local function framing_handler(notes: {string: string},
       end
     catch
       failure = string.tostring(error)
+      if path == "/failed-write" then
+        -- The failed write must not roll back the reserved commitment.
+        do response:set_status(500)
+        catch failure = failure .. ";" .. string.tostring(error) end
+      end
       response:abort()
     end
     notes[path] = string.tostring(before) .. "|" .. string.tostring(response:is_committed()) ..
@@ -800,6 +812,8 @@ local function framing_cases(): {FramingCase}
                 chunked_head .. "11170\r\n" .. large .. "\r\n0\r\n\r\n", "false|true|"),
     FramingCase("/empty-write", framing_request("GET", "/empty-write"),
                 chunked_head .. "0\r\n\r\n", "false|true|"),
+    FramingCase("/send-headers", framing_request("GET", "/send-headers"),
+                fixed_head .. "hello", "false|true|"),
     FramingCase("/continue",
                 "POST /continue HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\n" ..
                 "Content-Length: 4\r\nConnection: close\r\n\r\nping",
@@ -820,7 +834,8 @@ local function framing_cases(): {FramingCase}
     FramingCase("/mismatch", framing_request("GET", "/mismatch"), fixed_head,
                 "false|true|HTTP response body does not match its Content-Length"),
     FramingCase("/failed-write", framing_request("GET", "/failed-write"), "",
-                "false|true|cannot write after Connection shutdown"),
+                "false|true|cannot write after Connection shutdown;" ..
+                "HTTP response headers have already been sent"),
   }
 end
 
@@ -829,7 +844,9 @@ end
 local function check_framing_matrix(adopt: boolean)
   local notes: {string: string} = {}
   local kept: {string: http.Response} = {}
-  local handler = framing_handler(notes, kept)
+  local finished, next_finished, close_finished = async.channel<|string|>(16)
+  runtime_test.cleanup(close_finished)
+  local handler = framing_handler(notes, kept, finished)
   if adopt then handler = adopting_handler(handler) end
   local server = http.listen("127.0.0.1", handler, 0)
   runtime_test.cleanup(function () server:close() end)
@@ -842,6 +859,7 @@ local function check_framing_matrix(adopt: boolean)
     local wire, timed_out = wire_response(port, item.request)
     test.assert(not timed_out, item.path .. " did not close its connection")
     test.assert(wire == item.response, item.path .. " sent " .. string.format("%q", wire))
+    test.assert(next_finished() == item.path, item.path .. " handler finished out of order")
     test.assert(notes[item.path] == item.note, item.path .. " observed " ..
                 string.tostring(notes[item.path]) .. ", expected " .. item.note)
     test.assert(kept[item.path]:is_committed(), item.path .. " lost its historical commitment")
@@ -896,13 +914,18 @@ local function check_request_drain(adopt: boolean)
   test.assert(not timed_out and
               wire == "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
               "a client-closed exchange drained its unread body")
+  local persistent = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nA" ..
+                     "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nB"
+  local after = "GET /after HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
   wire, timed_out = wire_response(port,
-    "POST /unread HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nskip" ..
-    "GET /after HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-  test.assert(not timed_out and
-              wire == "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nA" ..
-                      "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nB",
-              "a persistent exchange did not drain before the next request")
+    "POST /unread HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nskip" .. after)
+  test.assert(not timed_out and wire == persistent,
+              "a persistent fixed-length exchange did not drain before the next request")
+  wire, timed_out = wire_response(port,
+    "POST /unread HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ..
+    "4\r\nskip\r\n0\r\n\r\n" .. after)
+  test.assert(not timed_out and wire == persistent,
+              "a persistent chunked exchange did not drain before the next request")
 end
 
 function test_server_skips_drain_on_non_reusable_exchanges(_context: test.Context)
@@ -998,8 +1021,12 @@ end
 function test_request_addresses_end_with_their_exchange(_context: test.Context)
   runtime_test.run(function ()
     local notes: {string: string} = {}
+    -- The client sees EOF before the handler records its observations.
+    local finished, next_finished, close_finished = async.channel<|string|>(4)
+    runtime_test.cleanup(close_finished)
     local handler: http.Handler = function (request: http.Request, response: http.Response)
       local path = request.url.path
+      defer finished(path)
       if path == "/abort" then
         response:abort()
       elseif path == "/upgrade" then
@@ -1023,12 +1050,15 @@ function test_request_addresses_end_with_their_exchange(_context: test.Context)
     local upgrade_offer = "Connection: Upgrade\r\nUpgrade: probe\r\n\r\n"
     local wire, timed_out = wire_response(port, "GET /abort HTTP/1.1\r\nHost: localhost\r\n\r\n")
     test.assert(not timed_out and wire == "", "aborted exchange sent a response")
+    test.assert(next_finished() == "/abort", "abort handler did not finish")
     wire, timed_out = wire_response(port,
       "GET /upgrade HTTP/1.1\r\nHost: localhost\r\n" .. upgrade_offer)
     test.assert(not timed_out and support.contains(wire, "101 Switching Protocols"))
+    test.assert(next_finished() == "/upgrade", "upgrade handler did not finish")
     wire, timed_out = wire_response(port,
       "GET /reject HTTP/1.1\r\nHost: localhost\r\n" .. upgrade_offer)
     test.assert(not timed_out and support.contains(wire, "403 Forbidden"))
+    test.assert(next_finished() == "/reject", "reject_upgrade handler did not finish")
     test.assert(notes["/abort"] == "HTTP request exchange has ended|false",
                 "abort: " .. string.tostring(notes["/abort"]))
     test.assert(notes["/upgrade"] == "HTTP request exchange has ended|true",
