@@ -32,11 +32,11 @@ lua.exe -e "package.path='./?.lua;./?/init.lua;'..package.path" spec/fixtures/wi
 ```
 
 It checks Unicode and binary file I/O, file and directory reservations,
-replacement, cleanup, and lexical normalization of existing paths. Windows
-metadata comes from LuaFileSystem; its device/inode fields are omitted and its
-timestamps have whole-second precision. Windows `realpath` checks existence
-and normalizes the supplied spelling without resolving symbolic links. POSIX
-physical-path and hardlink-identity assertions remain in `compiler_io_spec.lua`.
+replacement, cleanup, and canonical paths for existing files and directories.
+LuaFileSystem metadata omits device/inode fields and has whole-second
+timestamps. Windows `realpath` uses libuv to resolve symbolic links and return
+the on-disk case and long names. Ordinary `..` keeps Win32 lexical semantics.
+Missing paths and dangling links report `path does not exist`.
 The smoke needs no private native helper DLL.
 
 `verify_driver.lua <private-sdk> <clang.exe> <owned-parent>` loads the installed
