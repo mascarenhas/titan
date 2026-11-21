@@ -137,7 +137,8 @@ describe("compiled-module ABI version", function()
         assert.equal(4, count_plain(linux_workflow, probes_key))
         for _, lane in ipairs({ macos_workflow, windows_workflow }) do
             assert.equal(1, count_plain(lane, cache_abi))
-            assert.equal(2, count_plain(lane, probes_path))
+            -- The probe path is defined once as a YAML anchor; the save step reuses it.
+            assert.equal(1, count_plain(lane, probes_path))
             assert.equal(2, count_plain(lane, probes_key))
         end
         for _, contract in ipairs({
