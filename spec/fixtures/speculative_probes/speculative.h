@@ -25,10 +25,10 @@ typedef int speculative_reject_row[SPEC_ROW_COUNT];
 
 typedef enum spec_color { SPEC_RED, SPEC_GREEN, SPEC_BLUE } spec_color;
 
-/* Its compiler-selected carrier is wider than lua_Integer, so each use of an
-   enumerator also asks the compiler whether that value fits. */
+/* Some compilers type small enumerators as int even when the enum carrier
+   is wider. Both values exceed int, so both need a lua_Integer range check. */
 typedef enum spec_wide_enum {
-    SPEC_WIDE_ZERO = 0,
+    SPEC_WIDE_FITS = 0x7FFFFFFFFFFFFFFFULL,
     SPEC_WIDE_HIGH = 0x8000000000000000ULL
 } spec_wide_enum;
 

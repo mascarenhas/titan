@@ -653,9 +653,10 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
 
         local git_root = (not lfs.symlinkattributes(".git", "mode") and
             os.getenv("TITAN_SOURCE_GIT_ROOT")) or "."
+        -- Pack the tracked source inventory, not untracked outputs of the
+        -- preceding SDK build or a worker's fixtures.
         local ok, output, why, code = run({
-            "git", "-C", git_root, "ls-files", "--cached", "--others",
-            "--exclude-standard", "-z",
+            "git", "-C", git_root, "ls-files", "--cached", "-z",
         })
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")

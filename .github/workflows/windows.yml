@@ -30,9 +30,6 @@ jobs:
       TITAN_PREFIX: C:/titan-ci/.lua
       TITAN_TEST_BUILD_DIR: C:/titan-stdlib-tests
       TITAN_JOBS: "4"
-      # LuaRocks passes ROCK_CFLAGS to its nested Make. Keep the native
-      # dependency flags identical before and during that invocation.
-      NATIVE_CFLAGS: "-O0 -fno-lto"
       OPENSSL_MODE: bundled
       LC_ALL: C.UTF-8
       LANG: C.UTF-8
@@ -147,6 +144,10 @@ jobs:
           echo "C-probe restore: ${{ steps.probe-cache.outputs.cache-matched-key != '' }}"
 
       - name: Build Lua, LuaRocks and the pinned native dependencies
+        # Keep the native dependency flags identical outside and inside
+        # LuaRocks' nested Make without overriding the specs' Make defaults.
+        env:
+          NATIVE_CFLAGS: &windows-native-cflags "-O0 -fno-lto"
         run: |
           set -euo pipefail
           unset LD
@@ -174,6 +175,8 @@ jobs:
 
       - name: Build and install the Windows rock
         id: install-rock
+        env:
+          NATIVE_CFLAGS: *windows-native-cflags
         run: |
           set -euo pipefail
           unset LD
@@ -207,6 +210,7 @@ jobs:
           set -euo pipefail
           unset LD
           export PATH="/clang64/bin:$PATH"
+          export LUAROCKS_CONFIG="$PREFIX/etc/luarocks/config-5.5.lua"
           supervisor=$(cygpath -m /tmp/titan-compiler-supervisor.exe)
           clang.exe -std=c99 -Wall -Wextra -Werror -municode \
             spec/fixtures/stdlib/native/windows_test_supervisor.c -o "$supervisor"

@@ -1303,13 +1303,27 @@ test "$3" = 0 || exit "$3"
         end
         local request = checked_requests()[1]
         request.mod.filename = source_root .. "/loop.titan"
-        assert(lfs.link("./loop.o", source_root .. "/loop.o", true))
-
-        local results = driver.compile_modules({ request }, JOBS, false)
-        assert.is_nil(results[1].ok)
-        assert.matches("regular nonlink file", results[1].err, 1, true)
-        assert.equal("link", lfs.symlinkattributes(source_root .. "/loop.o", "mode"))
-        assert.equal("./loop.o", lfs.symlinkattributes(source_root .. "/loop.o", "target"))
+        local link = source_root .. "/loop.o"
+        local target = platform.windows and ".\\loop.o" or "./loop.o"
+        -- Windows LFS follows the link when asked for its target, so it
+        -- cannot read back the target of a loop. libuv reads the reparse point.
+        local function read_target()
+            if platform.windows then return require("luv").fs_readlink(link) end
+            return lfs.symlinkattributes(link, "target")
+        end
+        assert(lfs.link(target, link, true))
+        local ok, failure = pcall(function()
+            local original_target = assert(read_target())
+            assert.equal(target, original_target)
+            local results = driver.compile_modules({ request }, JOBS, false)
+            assert.equal("link", lfs.symlinkattributes(link, "mode"))
+            assert.equal(original_target, assert(read_target()))
+            assert.is_nil(results[1].ok)
+            assert.matches("regular nonlink file", results[1].err, 1, true)
+        end)
+        local removed, remove_error = os.remove(link)
+        if not ok then error(failure, 0) end
+        assert(removed, remove_error)
     end)
 
     it("reports completion channel creation failures without launching", function()

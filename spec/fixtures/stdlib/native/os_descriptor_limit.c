@@ -197,11 +197,6 @@ int titan_test_tcp_stdio_bound_buffers(int accepted_fd, int peer_fd, int bytes) 
     return -1;
 }
 
-int titan_test_tcp_stdio_pending_send_bytes(int fd) {
-    (void)fd;
-    return -1;
-}
-
 int titan_test_tcp_stdio_spawn_child(
     const char *program, const char *mode, const char *arg1, const char *arg2,
     int ipv6, int alias_stderr, int *peer_fd_out, int *child_pid_out) {
@@ -227,9 +222,6 @@ int titan_test_tcp_stdio_wait_child(int child_pid, int *exit_code_out) {
 #include <netinet/in.h>
 #include <signal.h>
 #include <string.h>
-#ifndef __APPLE__
-#include <sys/ioctl.h>
-#endif
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -531,19 +523,6 @@ int titan_test_tcp_stdio_bound_buffers(int accepted_fd, int peer_fd, int bytes) 
         return -1;
     }
     return 0;
-}
-
-int titan_test_tcp_stdio_pending_send_bytes(int fd) {
-    int pending = 0;
-#ifdef __APPLE__
-    socklen_t len = sizeof(pending);
-    if (getsockopt(fd, SOL_SOCKET, SO_NWRITE, &pending, &len) != 0)
-        return -1;
-#else
-    if (ioctl(fd, TIOCOUTQ, &pending) != 0)
-        return -1;
-#endif
-    return pending;
 }
 
 int titan_test_tcp_stdio_spawn_child(

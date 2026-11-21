@@ -68,10 +68,14 @@ function test_time_defaults_normalization_and_dst(
   local inferred = system.time(2020, 7, 1, 12, 0, 0, nil)
   local standard = system.time(2020, 7, 1, 12, 0, 0, false)
   local daylight = system.time(2020, 7, 1, 12, 0, 0, true)
-  test.assert(inferred == daylight,
-              "inferred July time did not select daylight time")
-  test.assert(standard - daylight == 60 * 60,
-              "false isdst did not select standard time")
+  -- The host calendar owns DST normalization, including a hint that does
+  -- not match the timezone's rules. The three hints need not differ by an hour.
+  test.assert(inferred == support.host_july_noon(-1 as foreign int),
+              "nil isdst did not use the host's automatic result")
+  test.assert(standard == support.host_july_noon(0 as foreign int),
+              "false isdst did not use the host's standard-time hint")
+  test.assert(daylight == support.host_july_noon(1 as foreign int),
+              "true isdst did not use the host's daylight-time hint")
 
   local noon = system.time { year = 2001, month = 2, day = 3 }
   local explicit_noon = system.time(2001, 2, 3, 12, 0, 0, nil)
