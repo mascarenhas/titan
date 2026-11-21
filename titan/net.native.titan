@@ -29,6 +29,19 @@ local record InputRegistration
   local live: boolean
 end
 
+--- An immutable numeric IPv4 or IPv6 socket endpoint snapshot.
+-- @field ip Numeric IPv4 or IPv6 presentation text without brackets or scope suffix.
+-- @field port Numeric TCP port in host order (0..65535).
+-- @field ipv6 True for IPv6 (AF_INET6) endpoints, false for IPv4 (AF_INET).
+-- @field scope_id Numeric IPv6 sin6_scope_id (0 for IPv4 and unscoped IPv6).
+-- @usage standard-library-net.md#socket-addresses
+record Address
+  const ip: string
+  const port: integer
+  const ipv6: boolean
+  const scope_id: integer
+end
+
 --- An owned TCP byte stream with one waiting reader and ordered native writes.
 -- @usage standard-library-net.md#connecting-and-listening
 record Connection
@@ -46,6 +59,8 @@ record Connection
   local phase: integer
   local input_listeners: {InputRegistration}
   local pending_outputs: integer
+  local local_addr: Address?
+  local peer_addr: Address?
 end
 
 --- An owned TCP listener with one waiting acceptor.
@@ -58,6 +73,7 @@ record Server
   local clients: async.BufferedSubscription<|Connection, value|>?
   local failure: value
   local start_listen: (function (integer): integer)?
+  local local_addr: Address?
 end
 
 local record CloseOperation
@@ -122,6 +138,21 @@ local function validate(handle: uv.handle_t, loop: uv.loop_t, operation: string)
   end
 end
 
+-- Copy one queried native endpoint into an immutable public snapshot.
+local function sockaddr_to_address(raw: uv.sockaddr_t?, operation: string): Address
+  if raw == nil or not raw:is_complete() then
+    raise operation_error(uv.EINVAL, operation)
+  end
+  local family = raw:family()
+  if family ~= uv.AF_INET and family ~= uv.AF_INET6 then
+    raise operation_error(uv.EAFNOSUPPORT, operation)
+  end
+  local status, text? = uv.ip_name(raw)
+  check_status(status, operation)
+  if text == nil then raise operation_error(uv.EINVAL, operation) end
+  return Address(text, raw:port(), family == uv.AF_INET6, raw:scope_id())
+end
+
 local function closed(handle: uv.handle_t)
   local context = uv.handle_get_data(handle) as CloseOperation
   local completion = context.completion as async.Completion<|CloseOperation, nil, nil|>
@@ -180,7 +211,7 @@ local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
     excess = "", input = nil, start_read = nil, started = false,
     read_ahead_enabled = true, read_started = false,
     read_buffer = nil, phase = CONNECTION_UNCONNECTED, input_listeners = {},
-    pending_outputs = 0,
+    pending_outputs = 0, local_addr = nil, peer_addr = nil,
   }
   connection.input = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
     local stop = function ()
@@ -233,10 +264,19 @@ local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
   return connection
 end
 
-local function new_connection(loop: uv.loop_t): Connection
+-- Dialed owners record TCP_NODELAY before their socket exists; libuv applies
+-- it when connect creates the socket. Accepted owners set it after accept.
+local function new_connection(loop: uv.loop_t, enable_no_delay: boolean): Connection
   local tcp = uv.tcp_t.new()
   local connection = wrap_connection(loop, tcp, 0, nil)
   check_status(uv.tcp_init(loop, tcp), "net.tcp.init")
+  if enable_no_delay then
+    local status = uv.tcp_nodelay(tcp, 1)
+    if status < 0 then
+      abandon(connection)
+      raise operation_error(status, "net.set_no_delay")
+    end
+  end
   return connection
 end
 
@@ -402,7 +442,7 @@ local function new_server(loop: uv.loop_t): Server
   local tcp = uv.tcp_t.new()
   local handle = tcp:as_handle_t()
   local stream = tcp:as_stream_t()
-  local server = Server(tcp, handle, stream, loop, nil, nil, nil)
+  local server = Server(tcp, handle, stream, loop, nil, nil, nil, nil)
   server.clients = async.BufferedSubscription<|Connection, value|>(function (publish, _fail, _finish)
     local actions = async.SubscriptionActions<|Connection|>(function () end,
       function (drain: function (): async.SubscriptionBatch<|Connection|>)
@@ -414,9 +454,12 @@ local function new_server(loop: uv.loop_t): Server
       local client: Connection? = nil
       defer if client ~= nil then abandon(client) end
       if status < 0 then fail_server(server, operation_error(status, "net.accept")); return end
-      client = new_connection(loop)
+      client = new_connection(loop, false)
       local accepted = uv.accept(stream, client.handle_view)
       if accepted < 0 then fail_server(server, operation_error(accepted, "net.accept")); return end
+      -- An unconfigurable child is retired by the deferred abandon; the
+      -- listener survives and every published Connection has TCP_NODELAY.
+      if uv.tcp_nodelay(client.handle, 1) < 0 then return end
       client.phase = CONNECTION_CONNECTED
       if publish(client) then client = nil end
     catch
@@ -497,7 +540,7 @@ end
 function Connection.new(): Connection
   async.running()
   async.checkpoint()
-  return new_connection(async.current_loop())
+  return new_connection(async.current_loop(), true)
 end
 
 --- Connect this fresh TCP owner to one resolved address.
@@ -543,7 +586,7 @@ function connect(host: string, port: integer): Connection
   local loop = async.current_loop()
   local last_failure: value = nil
   for index = 1, #addresses do
-    local connection = new_connection(loop)
+    local connection = new_connection(loop, true)
     local transferred = false
     do
       defer if not transferred then abandon(connection) end
@@ -725,6 +768,54 @@ function Connection:shutdown()
   end
 end
 
+--- Return the local socket address of an open connected TCP connection.
+-- @return Immutable local endpoint snapshot.
+-- @usage standard-library-net.md#socket-addresses
+function Connection:local_address(): Address
+  validate(self.handle_view, self.loop, "query local address of")
+  if self.phase ~= CONNECTION_CONNECTED then
+    raise "cannot query local address of an unconnected TCP Connection"
+  end
+  if self.local_addr == nil then
+    local status, raw?, _ = uv.tcp_getsockname(self.handle)
+    check_status(status, "net.local_address")
+    self.local_addr = sockaddr_to_address(raw, "net.local_address")
+  end
+  return self.local_addr
+end
+
+--- Return the remote peer socket address of an open connected TCP connection.
+-- @return Immutable remote endpoint snapshot.
+-- @usage standard-library-net.md#socket-addresses
+function Connection:peer_address(): Address
+  validate(self.handle_view, self.loop, "query peer address of")
+  if self.phase ~= CONNECTION_CONNECTED then
+    raise "cannot query peer address of an unconnected TCP Connection"
+  end
+  if self.peer_addr == nil then
+    local status, raw?, _ = uv.tcp_getpeername(self.handle)
+    check_status(status, "net.peer_address")
+    self.peer_addr = sockaddr_to_address(raw, "net.peer_address")
+  end
+  return self.peer_addr
+end
+
+--- Enable or disable TCP_NODELAY (Nagle's algorithm); enabled by default on new and accepted connections.
+-- @param enabled True to disable Nagle buffering in the local TCP stack; false to enable Nagle coalescing.
+-- @usage standard-library-net.md#writing-shutdown-and-close
+function Connection:set_no_delay(enabled: boolean)
+  validate(self.handle_view, self.loop, "configure no-delay on")
+  if self.phase == CONNECTION_CONNECTING then
+    raise "cannot configure no-delay while TCP connect is in progress"
+  end
+  if self.phase == CONNECTION_FAILED then
+    raise "cannot configure no-delay on a failed TCP Connection"
+  end
+  local flag = 0
+  if enabled then flag = 1 end
+  check_status(uv.tcp_nodelay(self.handle, flag), "net.set_no_delay")
+end
+
 --- Detach an idle TCP connection into a manually owned transfer payload.
 -- Pending operations and input observers are rejected before ownership changes.
 -- @return Native endpoint, copied unread bytes, and receive state; adopt exactly once.
@@ -783,6 +874,8 @@ function Connection:to_transfer_payload(): string
   self.start_read = nil
   self.started = false
   self.read_buffer = nil
+  self.local_addr = nil
+  self.peer_addr = nil
   local exported = false
   defer if not exported then uv.tcp_t.discard_transfer_payload(native_payload) end
   local payload = protobuf.serialize_fields(connection_transfer_fields,
@@ -865,6 +958,8 @@ function Connection:close()
   self.input_listeners = {}
   self.excess = ""
   self.read_buffer = nil
+  self.local_addr = nil
+  self.peer_addr = nil
   if is_closed(self.handle_view) then return end
   validate(self.handle_view, self.loop, "close")
   self.input:close()
@@ -888,9 +983,23 @@ function Server:accept(): Connection
   end
 end
 
+--- Return the bound local socket address of an open TCP listener.
+-- @return Immutable local endpoint snapshot (including the OS-assigned port when bound with port 0).
+-- @usage standard-library-net.md#socket-addresses
+function Server:local_address(): Address
+  validate(self.handle_view, self.loop, "query local address of")
+  if self.local_addr == nil then
+    local status, raw?, _ = uv.tcp_getsockname(self.handle)
+    check_status(status, "net.local_address")
+    self.local_addr = sockaddr_to_address(raw, "net.local_address")
+  end
+  return self.local_addr
+end
+
 --- Close the listener and unaccepted clients, releasing a blocked acceptor.
 -- @usage standard-library-net.md#writing-shutdown-and-close
 function Server:close()
+  self.local_addr = nil
   if is_closed(self.handle_view) then return end
   validate(self.handle_view, self.loop, "close")
   self.clients:close()

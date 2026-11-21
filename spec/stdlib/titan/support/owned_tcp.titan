@@ -1,0 +1,135 @@
+-- Test-only access to fixture-owned connected TCP sockets through public UV:
+-- the kernel TCP_NODELAY option and a write-side shutdown underneath an owner.
+local async = import "async"
+local test = import "test"
+local uv = import "uv"
+foreign import "nodelay-native.h"
+
+-- Public uv.walk deliberately requires the loop's main Lua thread. An owned
+-- timer callback runs there; its Completion settles only after handle close.
+local record MainWait
+  timer: uv.timer_t
+  loop: uv.loop_t
+  action: function (): (integer)
+  done: async.Completion<|MainWait, integer, async.Error|>?
+  number: integer
+  result: integer
+  failure: async.Error?
+end
+
+local function main_closed(handle: uv.handle_t)
+  local waiter = uv.handle_get_data(handle) as MainWait
+  uv.handle_set_data(handle, nil)
+  if waiter.failure then waiter.done:reject(waiter.number, waiter.failure)
+  else waiter.done:resolve(waiter.number, waiter.result) end
+end
+
+local function main_action(timer: uv.timer_t)
+  local waiter = uv.timer_get_data(timer) as MainWait
+  do waiter.result = waiter.action()
+  catch waiter.failure = async.Error(error, traceback) end
+  uv.close(timer:as_handle_t(), main_closed)
+end
+
+local function start_main(done: async.Completion<|MainWait, integer, async.Error|>,
+                          number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done; waiter.number = number
+  test.assert(uv.timer_init(waiter.loop, waiter.timer) >= 0)
+  uv.timer_set_data(waiter.timer, waiter)
+  local status = uv.timer_start(waiter.timer, main_action, 0, 0)
+  if status < 0 then
+    waiter.failure = async.Error(uv.err_name(status), "")
+    uv.close(waiter.timer:as_handle_t(), main_closed)
+  end
+  return nil
+end
+
+local function on_main(action: function (): (integer)): integer
+  case async.await_with(MainWait(uv.timer_t.new(), async.current_loop(), action,
+                                 nil, 0, 0, nil), start_main)
+  when success(result) then return result
+  when error(failure) then failure:raise()
+  end
+  raise "unreachable main-thread fixture action"
+end
+
+-- Public connected endpoint ports identify a unique live socket on the
+-- current loop; a transferred-from source handle is already closing.
+local function connected_socket(local_port: integer, peer_port: integer): uv.tcp_t
+  local loop = async.current_loop()
+  local selected: uv.tcp_t? = nil
+  local matches = on_main(function (): integer
+    local count = 0
+    uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+      case handle
+      when tcp(owner) then
+        if handle:is_initialized() and not uv.is_closing(handle) then
+          local own_status, own? = uv.tcp_getsockname(owner)
+          local peer_status, peer? = uv.tcp_getpeername(owner)
+          if own_status >= 0 and own ~= nil and peer_status >= 0 and peer ~= nil and
+             own:port() == local_port and peer:port() == peer_port then
+            selected = owner
+            count = count + 1
+          end
+        end
+      else
+      end
+    end, nil)
+    return count
+  end)
+  test.assert(matches == 1, "connected TCP fixture lookup matched " .. matches ..
+              " sockets for local port " .. local_port .. " and peer port " .. peer_port)
+  local socket? = selected
+  return socket
+end
+
+-- Return the kernel TCP_NODELAY option (0 or 1) of the live socket with these
+-- endpoint ports, read through its borrowed descriptor.
+local function kernel_no_delay(local_port: integer, peer_port: integer): integer
+  local socket = connected_socket(local_port, peer_port)
+  local descriptor_status, descriptor? = uv.fileno(socket:as_handle_t())
+  test.assert(descriptor_status >= 0 and descriptor ~= nil,
+              "could not borrow the fixture-owned socket descriptor")
+  local status: integer = ffi.titan_test_tcp_nodelay(descriptor:to_integer())
+  test.assert(status >= 0, "getsockopt(TCP_NODELAY) failed with native status " .. status)
+  return status
+end
+
+local record ShutdownWait
+  request: uv.shutdown_t
+  stream: uv.stream_t
+  done: async.Completion<|ShutdownWait, nil, integer|>?
+  number: integer
+end
+
+local function shut_down(request: uv.shutdown_t, status: integer)
+  local waiter = request:get_data() as ShutdownWait
+  request:set_data(nil)
+  if status < 0 then waiter.done:reject(waiter.number, status)
+  else waiter.done:resolve(waiter.number, nil) end
+end
+
+local function start_shutdown(done: async.Completion<|ShutdownWait, nil, integer|>,
+                              number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done; waiter.number = number
+  waiter.request:set_data(waiter)
+  local status = uv.shutdown(waiter.request, waiter.stream, shut_down)
+  if status < 0 then
+    waiter.request:set_data(nil)
+    done:reject(number, status)
+  end
+  return nil
+end
+
+-- Complete a write-side shutdown underneath the live socket's owner, so its
+-- next write is rejected synchronously.
+local function shutdown_write(local_port: integer, peer_port: integer)
+  local socket = connected_socket(local_port, peer_port)
+  case async.await_with(
+    ShutdownWait(uv.shutdown_t.new(), socket:as_stream_t(), nil, 0), start_shutdown)
+  when success() then
+  when error(code) then raise "fixture socket shutdown failed: " .. uv.err_name(code)
+  end
+end

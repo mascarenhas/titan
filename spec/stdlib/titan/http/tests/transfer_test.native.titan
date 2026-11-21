@@ -179,3 +179,61 @@ function test_transfer_exchange_rejects_malformed_payload(_context: test.Context
     http.UpgradedStream.from_transfer_payload("\255")
   end)
 end
+
+function test_transfer_exchange_coalesced_framing_and_commitment(_context: test.Context)
+  runtime_test.run(function () check_framing_matrix(true) end)
+end
+
+function test_transfer_exchange_skips_drain_on_non_reusable_exchanges(_context: test.Context)
+  runtime_test.run(function () check_request_drain(true) end)
+end
+
+-- An adopted exchange queries its own live socket on demand, then reuses
+-- those snapshots across later keep-alive requests.
+function test_transfer_exchange_queries_live_endpoints(_context: test.Context)
+  runtime_test.run(function ()
+    local observed: {net.Address} = {}
+    local source_local: net.Address? = nil
+    local source_committed = true
+    local listener: http.Server? = nil
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      source_local = request:local_address()
+      async.yield()
+      local packet = async.TransferValue.from_value(http.Exchange(request, response))
+      transfer_common.assert_raises_contains(function () request:local_address() end,
+        "exchange has ended")
+      source_committed = response:is_committed()
+      local moved: http.Exchange = packet:to_value()
+      moved:serve(function (next_request: http.Request, next_response: http.Response)
+        observed[#observed + 1] = next_request:local_address()
+        observed[#observed + 1] = next_request:peer_address()
+        next_response:set_header("Content-Length", "2")
+        next_response:write("ok")
+        if #observed == 4 then listener:close() end
+      end)
+    end
+    listener = http.listen("127.0.0.1", handler, 0)
+    defer listener:close()
+    listener:read_ahead(false)
+    local port = listener:local_address().port
+    local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
+    task_support.cleanup_task(serving, "HTTP adopted endpoint listener")
+    local client = net.connect("127.0.0.1", port)
+    defer client:close()
+    client:write("GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
+      "GET /two HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    local output = string.writer()
+    for chunk in client:read do output:write(chunk) end
+    test.assert(support.contains(output:drain(), "\r\n\r\nok"), "adopted exchange failed")
+    async.join(serving)
+    test.assert(serving:status():has_succeeded(), "adopted endpoint listener failed")
+    test.assert(not source_committed, "a detached uncommitted response reported commitment")
+    test.assert(#observed == 4, "adopted handler saw " .. #observed .. " endpoint snapshots")
+    test.assert(observed[1] == observed[3] and observed[2] == observed[4],
+                "adopted keep-alive exchanges did not reuse cached endpoints")
+    test.assert(observed[1] ~= source_local and observed[1].port == port,
+                "adopted exchange did not query its own live socket")
+    test.assert(observed[2].port == client:local_address().port,
+                "adopted exchange reported the wrong peer")
+  end)
+end

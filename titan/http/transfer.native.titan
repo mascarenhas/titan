@@ -443,8 +443,15 @@ function Exchange:serve(handler: Handler, idle_timeout: integer?)
     if not state.active then return end
     response:close()
     if parser.upgrade then state.active = false; return end
+    -- A non-reusable exchange never reads more request body: the deferred
+    -- abort retires the connection instead of draining it.
+    if not parser.keep_alive or not response.keep_alive then
+      state.active = false
+      return
+    end
     drain_request(request_value)
     state.active = false
+    -- The drained message end can still end persistence.
     if not parser.keep_alive or not response.keep_alive then return end
     parser_reset_message(parser)
     local next_request? = read_request_with_idle_timeout(

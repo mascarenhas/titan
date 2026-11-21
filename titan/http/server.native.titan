@@ -22,6 +22,9 @@ record Request
   local ended: boolean
 end
 
+-- Largest first body write sent in the same transport write as its headers.
+local const COALESCE_BODY_BYTES = 64 * 1024
+
 --- The current exchange's response writer with validated status and framing.
 -- @usage standard-library-http.md#servers-and-handlers
 record Response
@@ -174,6 +177,34 @@ function Request:read_until(delimiter: string,
   return result
 end
 
+--- Return the local socket address of this active request's underlying TCP/TLS transport.
+-- @return Immutable local endpoint snapshot.
+-- @usage standard-library-http.md#servers-and-handlers
+function Request:local_address(): net.Address
+  if not self.exchange.active then raise "HTTP request exchange has ended" end
+  local connection = self.exchange.transport.connection
+  if connection is net.Connection then
+    return (connection as net.Connection):local_address()
+  elseif connection is ssl.Connection then
+    return (connection as ssl.Connection):local_address()
+  end
+  raise "HTTP request has no native TCP or TLS transport"
+end
+
+--- Return the remote peer socket address of this active request's underlying TCP/TLS transport.
+-- @return Immutable remote endpoint snapshot.
+-- @usage standard-library-http.md#servers-and-handlers
+function Request:peer_address(): net.Address
+  if not self.exchange.active then raise "HTTP request exchange has ended" end
+  local connection = self.exchange.transport.connection
+  if connection is net.Connection then
+    return (connection as net.Connection):peer_address()
+  elseif connection is ssl.Connection then
+    return (connection as ssl.Connection):peer_address()
+  end
+  raise "HTTP request has no native TCP or TLS transport"
+end
+
 local function drain_request(request_value: Request)
   while request_value:read() do end
 end
@@ -288,6 +319,13 @@ function Response:headers(): Headers
   return copy_headers(self.response_headers)
 end
 
+--- Report whether final response headers have been committed on this Response instance.
+-- @return True once send_headers, write, close, upgrade, or reject_upgrade has committed final headers; false beforehand (including after an interim 100 Continue).
+-- @usage standard-library-http.md#servers-and-handlers
+function Response:is_committed(): boolean
+  return self.headers_sent
+end
+
 local function prepare_response_headers(response: Response)
   response.body_allowed =
     status_allows_body(response.request_method, response.status_number)
@@ -346,6 +384,27 @@ local function prepare_response_headers(response: Response)
   end
 end
 
+-- Render validated status and headers without sending them.
+local function Response:prepare_header_writer(): string.StringWriter
+  if self.exchange.transferred then raise "HTTP response was upgraded" end
+  prepare_response_headers(self)
+  local builder = string.writer()
+  builder:write("HTTP/1.1 " .. string.tostring(self.status_number) ..
+                " " .. self.reason_text .. "\r\n")
+  builder:write(render_headers(self.response_headers))
+  builder:write("\r\n")
+  return builder
+end
+
+-- Commitment is reserved before the transport write and never rolled back,
+-- even when that write fails or is cancelled.
+local function Response:commit_writer(builder: string.StringWriter)
+  local payload = builder:drain()
+  self.exchange.output_started = true
+  self.headers_sent = true
+  self.connection:write(payload)
+end
+
 --- Validate response framing and send the status line and headers.
 -- @usage standard-library-http.md#servers-and-handlers
 function Response:send_headers()
@@ -354,15 +413,7 @@ function Response:send_headers()
   if self.exchange.transferred then raise "HTTP response was upgraded" end
   if self.headers_sent then return end
   if self.closed then raise "HTTP response is closed" end
-  prepare_response_headers(self)
-  local builder = string.writer()
-  builder:write("HTTP/1.1 " .. string.tostring(self.status_number) ..
-                " " .. self.reason_text .. "\r\n")
-  builder:write(render_headers(self.response_headers))
-  builder:write("\r\n")
-  self.exchange.output_started = true
-  self.headers_sent = true
-  self.connection:write(builder:drain())
+  self:commit_writer(self:prepare_header_writer())
 end
 
 --- Write response-body bytes, sending headers first when needed.
@@ -373,7 +424,24 @@ function Response:write(data: string)
   defer self.exchange.pending = self.exchange.pending - 1
   if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.closed then raise "HTTP response is closed" end
-  if not self.headers_sent then self:send_headers() end
+  if not self.headers_sent then
+    local builder = self:prepare_header_writer()
+    -- A small valid first body write travels with the headers.
+    if self.body_allowed and #data > 0 and #data <= COALESCE_BODY_BYTES and
+       (self.content_length == nil or #data <= self.content_length) then
+      if self.chunked then
+        builder:write(string.format("%x\r\n", #data))
+        builder:write(data)
+        builder:write("\r\n")
+      else
+        builder:write(data)
+      end
+      self:commit_writer(builder)
+      self.written = self.written + #data
+      return
+    end
+    self:commit_writer(builder)
+  end
   if not self.body_allowed then
     if #data > 0 then raise "HTTP response status does not allow a body" end
     return
@@ -398,7 +466,17 @@ function Response:close()
   self.exchange.pending = self.exchange.pending + 1
   defer self.exchange.pending = self.exchange.pending - 1
   if self.closed then return end
-  if not self.headers_sent then self:send_headers() end
+  if not self.headers_sent then
+    local builder = self:prepare_header_writer()
+    -- An empty chunked body ends together with its headers.
+    if self.chunked and self.body_allowed then
+      builder:write("0\r\n\r\n")
+      self:commit_writer(builder)
+      self.closed = true
+      return
+    end
+    self:commit_writer(builder)
+  end
   if self.content_length and self.body_allowed and
      self.written ~= (self.content_length as integer) then
     raise "HTTP response body does not match its Content-Length"
@@ -550,8 +628,15 @@ local function serve_connection(transport: Transport,
     -- An upgrade candidate rejected by the handler ends this connection at
     -- its header boundary; llhttp must never parse the protocol suffix.
     if parser.upgrade then exchange.active = false; return end
+    -- A non-reusable exchange never reads more request body: the connection
+    -- closes instead of draining it.
+    if not parser.keep_alive or not response.keep_alive then
+      exchange.active = false
+      return
+    end
     drain_request(request_value)
     exchange.active = false
+    -- The drained message end can still end persistence.
     if not parser.keep_alive or not response.keep_alive then return end
     parser_reset_message(parser)
   end
@@ -649,6 +734,15 @@ function Server:read_ahead(enabled: boolean?): boolean
     self.read_ahead_enabled = enabled
   end
   return previous
+end
+
+--- Return the bound local socket address of an open HTTP or HTTPS listener.
+-- @return Immutable local endpoint snapshot.
+-- @usage standard-library-http.md#servers-and-handlers
+function Server:local_address(): net.Address
+  if self.closed then raise "HTTP Server is closed" end
+  if self.encrypted then return self.secure:local_address() end
+  return self.plain:local_address()
 end
 
 --- Read or update the next request-header deadline, returning its previous value.

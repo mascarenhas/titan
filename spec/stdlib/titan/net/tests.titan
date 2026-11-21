@@ -12,6 +12,7 @@ local task_support = import "support.async.titan"
 local common = import "support.common.titan"
 local transfer_lua = import "lua"
 local thread = import "thread"
+local owned_tcp = import "support.owned_tcp.titan"
 
 local function expect_cancelled_net_operation(action: function (): (),
                                               label: string)
@@ -884,5 +885,272 @@ function test_net_demand_reader_cancellation_allows_replacement(context: test.Co
     test.assert(connection:read() == nil, "demand TCP reader restarted after EOF")
     async.join(writer)
     test.assert(reader:status():has_cancelled() and writer:status():has_succeeded())
+  end)
+end
+
+-- An unavailable IPv6 loopback is an environment limitation, not a failure.
+local function listen_ipv6_loopback(): net.Server
+  do
+    return net.listen("::1", 0)
+  catch
+    if error is async.OperationError then
+      local name = (error as async.OperationError).name
+      if name == "EADDRNOTAVAIL" or name == "EAFNOSUPPORT" then
+        test.skip("capability: IPv6 loopback is unavailable (" .. name .. ")")
+      end
+    end
+    raise
+  end
+end
+
+local function expect_endpoint(address: net.Address, ip: string, ipv6: boolean, label: string)
+  test.assert(address.ip == ip and address.ipv6 == ipv6 and address.scope_id == 0,
+              label .. " reported " .. address.ip)
+  test.assert(address.port > 0 and address.port <= 65535,
+              label .. " reported port " .. address.port)
+end
+
+-- An OS-assigned listener port is discoverable, and each endpoint is queried
+-- once and then cached on its live owner.
+local function check_loopback_addresses(context: test.Context, server: net.Server,
+                                        ip: string, ipv6: boolean)
+  support.cleanup_server(context, server)
+  local bound = server:local_address()
+  expect_endpoint(bound, ip, ipv6, "listener")
+  test.assert(server:local_address() == bound, "listener address was not cached")
+  local client = net.connect(ip, bound.port)
+  support.cleanup_connection(context, client)
+  local peer = server:accept()
+  support.cleanup_connection(context, peer)
+  local client_local = client:local_address()
+  local client_peer = client:peer_address()
+  expect_endpoint(client_local, ip, ipv6, "client local endpoint")
+  expect_endpoint(client_peer, ip, ipv6, "client peer endpoint")
+  test.assert(client_peer.port == bound.port, "client peer is not the listener port")
+  test.assert(client:local_address() == client_local and client:peer_address() == client_peer,
+              "connection addresses were not cached")
+  test.assert(peer:local_address().port == bound.port, "accepted local port differs from listener")
+  test.assert(peer:peer_address().port == client_local.port and peer:peer_address().ip == ip,
+              "accepted peer is not the client endpoint")
+  client:close()
+  server:close()
+  test.assert(client_local.ip == ip and client_local.port > 0 and bound.port > 0,
+              "an address snapshot changed after close")
+  common.assert_raises_contains(function () client:local_address() end,
+    "cannot query local address of a closed TCP resource")
+  common.assert_raises_contains(function () client:peer_address() end,
+    "cannot query peer address of a closed TCP resource")
+  common.assert_raises_contains(function () server:local_address() end,
+    "cannot query local address of a closed TCP resource")
+end
+
+function test_net_socket_addresses(context: test.Context)
+  context:run("ipv4", function (child: test.Context)
+    runtime_test.run(function ()
+      check_loopback_addresses(child, net.listen("127.0.0.1", 0), "127.0.0.1", false)
+    end)
+  end)
+  context:run("ipv6", function (child: test.Context)
+    runtime_test.run(function ()
+      check_loopback_addresses(child, listen_ipv6_loopback(), "::1", true)
+    end)
+  end)
+end
+
+function test_net_socket_address_rejections(context: test.Context)
+  local earlier: net.Server? = nil
+  runtime_test.run(function ()
+    local fresh = net.Connection()
+    support.cleanup_connection(context, fresh)
+    common.assert_raises_contains(function () fresh:local_address() end,
+      "cannot query local address of an unconnected TCP Connection")
+    common.assert_raises_contains(function () fresh:peer_address() end,
+      "cannot query peer address of an unconnected TCP Connection")
+
+    local server = net.listen("127.0.0.1", 0)
+    support.cleanup_server(context, server)
+    earlier = server
+    local port = server:local_address().port
+    local source = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, source)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    local source_local = source:local_address()
+    -- The native connect callback must retire before moving its endpoint.
+    async.yield()
+    local packet = async.TransferValue.from_value(source)
+    common.assert_raises_contains(function () source:local_address() end,
+      "cannot query local address of a closed TCP resource")
+    common.assert_raises_contains(function () source:peer_address() end,
+      "cannot query peer address of a closed TCP resource")
+    local target: net.Connection = packet:to_value()
+    support.cleanup_connection(context, target)
+    local target_local = target:local_address()
+    test.assert(target_local ~= source_local and target_local.port == source_local.port,
+                "adopted connection did not query its own live socket")
+    test.assert(target:peer_address().port == port, "adopted connection lost its peer")
+    target:write("adopted\0")
+    test.assert(peer:read_until("\0", true) == "adopted")
+  end)
+  runtime_test.run(function ()
+    common.assert_raises_contains(function () earlier:local_address() end,
+      "TCP resource belongs to a different async Runtime")
+  end)
+end
+
+-- The kernel option of a connection's own live socket.
+local function no_delay_of(connection: net.Connection): integer
+  return owned_tcp.kernel_no_delay(connection:local_address().port,
+                                   connection:peer_address().port)
+end
+
+local function connected_pair(context: test.Context, server: net.Server): (net.Connection, net.Connection)
+  local client = net.connect("127.0.0.1", server:local_address().port)
+  support.cleanup_connection(context, client)
+  local peer = server:accept()
+  support.cleanup_connection(context, peer)
+  return client, peer
+end
+
+-- The adopted socket keeps the source's kernel option across a thread
+-- handoff and still accepts toggling there.
+local function check_thread_preserves_no_delay(context: test.Context, server: net.Server,
+                                               enabled: boolean)
+  local source, peer = connected_pair(context, server)
+  source:set_no_delay(enabled)
+  local expected = 0
+  if enabled then expected = 1 end
+  test.assert(no_delay_of(source) == expected)
+  async.yield()
+  local payload = source:to_transfer_payload()
+  local worker = thread.spawn_one(function (bytes: string): string
+    local connection = net.Connection.from_transfer_payload(bytes)
+    defer connection:close()
+    local local_port = connection:local_address().port
+    local peer_port = connection:peer_address().port
+    local adopted = owned_tcp.kernel_no_delay(local_port, peer_port)
+    connection:set_no_delay(not enabled)
+    local toggled = owned_tcp.kernel_no_delay(local_port, peer_port)
+    connection:write("moved\0")
+    return strings.tostring(adopted) .. "," .. strings.tostring(toggled)
+  end, payload)
+  runtime_test.cleanup(function () worker:cancel(); worker:join() end)
+  test.assert(peer:read_until("\0", true) == "moved", "thread handoff lost its live socket")
+  local wanted = strings.tostring(expected) .. "," .. strings.tostring(1 - expected)
+  case worker:join()
+  when succeeded(result) then
+    test.assert(result == wanted, "thread handoff observed TCP_NODELAY " .. result ..
+                ", expected " .. wanted)
+  when failed(failure) then failure:raise()
+  else raise "TCP_NODELAY transfer worker did not succeed"
+  end
+end
+
+function test_net_no_delay_kernel_option(context: test.Context)
+  context:run("dialed_and_accepted_default_on", function (child: test.Context)
+    runtime_test.run(function ()
+      local server = net.listen("127.0.0.1", 0)
+      support.cleanup_server(child, server)
+      local client, peer = connected_pair(child, server)
+      test.assert(no_delay_of(client) == 1, "dialed connection lacked TCP_NODELAY")
+      test.assert(no_delay_of(peer) == 1, "accepted connection lacked TCP_NODELAY")
+    end)
+  end)
+  context:run("pre_dial_opt_out", function (child: test.Context)
+    runtime_test.run(function ()
+      local server = net.listen("127.0.0.1", 0)
+      support.cleanup_server(child, server)
+      local address = net.resolve("127.0.0.1", server:local_address().port)[1]
+      local client = net.Connection()
+      support.cleanup_connection(child, client)
+      client:set_no_delay(false)
+      client:connect_address(address)
+      local peer = server:accept()
+      support.cleanup_connection(child, peer)
+      test.assert(no_delay_of(client) == 0, "pre-dial opt-out did not reach the socket")
+      test.assert(no_delay_of(peer) == 1, "accepted connection lacked TCP_NODELAY")
+    end)
+  end)
+  context:run("post_connect_toggles", function (child: test.Context)
+    runtime_test.run(function ()
+      local server = net.listen("127.0.0.1", 0)
+      support.cleanup_server(child, server)
+      local client, peer = connected_pair(child, server)
+      client:set_no_delay(false)
+      peer:set_no_delay(false)
+      test.assert(no_delay_of(client) == 0 and no_delay_of(peer) == 0)
+      client:set_no_delay(true)
+      peer:set_no_delay(true)
+      test.assert(no_delay_of(client) == 1 and no_delay_of(peer) == 1)
+      client:write("still-live\0")
+      test.assert(peer:read_until("\0", true) == "still-live")
+    end)
+  end)
+  context:run("thread_preserves_off", function (child: test.Context)
+    runtime_test.run(function ()
+      local server = net.listen("127.0.0.1", 0)
+      support.cleanup_server(child, server)
+      check_thread_preserves_no_delay(child, server, false)
+    end)
+  end)
+  context:run("thread_preserves_on", function (child: test.Context)
+    runtime_test.run(function ()
+      local server = net.listen("127.0.0.1", 0)
+      support.cleanup_server(child, server)
+      check_thread_preserves_no_delay(child, server, true)
+    end)
+  end)
+end
+
+function test_net_no_delay_rejections(context: test.Context)
+  local earlier: net.Connection? = nil
+  runtime_test.run(function ()
+    local server = net.listen("127.0.0.1", 0)
+    support.cleanup_server(context, server)
+    local port = server:local_address().port
+    local address = net.resolve("127.0.0.1", port)[1]
+
+    local dialing = net.Connection()
+    support.cleanup_connection(context, dialing)
+    local connector = async.run<|nil, value|>(function (): nil
+      dialing:connect_address(address)
+      return nil
+    end)
+    task_support.cleanup_task(connector, "TCP_NODELAY dialing connector")
+    -- The connector submits its dial and waits before this Task resumes.
+    async.yield()
+    test.assert(connector:status():as_string() == "waiting", "dial did not wait for its callback")
+    common.assert_raises_contains(function () dialing:set_no_delay(false) end,
+      "cannot configure no-delay while TCP connect is in progress")
+    async.join(connector)
+    local accepted = server:accept()
+    support.cleanup_connection(context, accepted)
+    earlier = dialing
+
+    local closed_port = net.listen("127.0.0.1", 0)
+    local refused_port = closed_port:local_address().port
+    closed_port:close()
+    local failed = net.Connection()
+    support.cleanup_connection(context, failed)
+    support.expect_failure(function ()
+      failed:connect_address(net.resolve("127.0.0.1", refused_port)[1])
+    end, "dial to a closed loopback port succeeded")
+    common.assert_raises_contains(function () failed:set_no_delay(true) end,
+      "cannot configure no-delay on a failed TCP Connection")
+
+    local source, _ = connected_pair(context, server)
+    async.yield()
+    local payload = source:to_transfer_payload()
+    local target = net.Connection.from_transfer_payload(payload)
+    support.cleanup_connection(context, target)
+    common.assert_raises_contains(function () source:set_no_delay(true) end,
+      "cannot configure no-delay on a closed TCP resource")
+    target:close()
+    common.assert_raises_contains(function () target:set_no_delay(true) end,
+      "cannot configure no-delay on a closed TCP resource")
+  end)
+  runtime_test.run(function ()
+    common.assert_raises_contains(function () earlier:set_no_delay(true) end,
+      "TCP resource belongs to a different async Runtime")
   end)
 end

@@ -678,3 +678,400 @@ local function start_idle_timeout_api(first_port: integer,
     return nil
   end)
 end
+
+-- One wire request; the server is expected to close after its response. A
+-- server that keeps reading instead is reported after a bounded wait.
+local function wire_response(port: integer, request_bytes: string): (string, boolean)
+  local client = net.connect("127.0.0.1", port)
+  defer client:close()
+  local timed_out = false
+  local watchdog = async.run<|nil, value|>(function (): nil
+    timer.sleep(10000)
+    timed_out = true
+    client:close()
+    return nil
+  end)
+  defer task_support.cancel_and_join_task(watchdog, "HTTP wire response watchdog")
+  client:write(request_bytes)
+  local output = string.writer()
+  for chunk in client:read do output:write(chunk) end
+  return output:drain(), timed_out
+end
+
+local function serve_in_background(server: http.Server, label: string): async.Task<|nil, value|>
+  local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+  task_support.cleanup_task(serving, label)
+  return serving
+end
+
+-- Serve each first exchange through a fresh adopted Exchange on this state.
+local function adopting_handler(inner: http.Handler): http.Handler
+  return function (request: http.Request, response: http.Response)
+    async.yield()
+    local packet = async.TransferValue.from_value(http.Exchange(request, response))
+    local moved: http.Exchange = packet:to_value()
+    moved:serve(inner)
+  end
+end
+
+local function framing_body(): string
+  return string.rep("0123456789", 7000)
+end
+
+-- A response first-write matrix. Each case records commitment before and
+-- after its handler work and any raised framing error.
+local function framing_handler(notes: {string: string},
+                               kept: {string: http.Response}): http.Handler
+  return function (request: http.Request, response: http.Response)
+    local path = request.url.path
+    kept[path] = response
+    local before = response:is_committed()
+    local failure = ""
+    do
+      if path == "/fixed" then
+        response:set_header("Content-Length", "5")
+        response:write("hello")
+      elseif path == "/chunked" then
+        response:write("hello")
+      elseif path == "/fixed-large" then
+        response:set_header("Content-Length", "70000")
+        response:write(framing_body())
+      elseif path == "/chunked-large" then
+        response:write(framing_body())
+      elseif path == "/empty-write" then
+        response:write("")
+      elseif path == "/continue" then
+        test.assert(not response:is_committed(), "100 Continue committed the final response")
+        test.assert(request:read() == "ping", "Expect body was not readable")
+        response:set_header("Content-Length", "2")
+        response:write("ok")
+      elseif path == "/head" then
+        response:set_header("Content-Length", "5")
+        response:write("")
+      elseif path == "/204" then
+        response:set_status(204)
+      elseif path == "/205" then
+        response:set_status(205)
+      elseif path == "/304" then
+        response:set_status(304)
+      elseif path == "/overflow" then
+        response:set_header("Content-Length", "3")
+        response:write("hello")
+      elseif path == "/mismatch" then
+        response:set_header("Content-Length", "5")
+        response:close()
+      elseif path == "/failed-write" then
+        owned_tcp.shutdown_write(request:local_address().port, request:peer_address().port)
+        response:write("hello")
+      end
+    catch
+      failure = string.tostring(error)
+      response:abort()
+    end
+    notes[path] = string.tostring(before) .. "|" .. string.tostring(response:is_committed()) ..
+                  "|" .. failure
+  end
+end
+
+local record FramingCase
+  path: string
+  request: string
+  response: string
+  note: string
+end
+
+local function framing_request(method: string, path: string): string
+  return method .. " " .. path .. " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+end
+
+local function framing_cases(): {FramingCase}
+  local large = framing_body()
+  local fixed_head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+  local chunked_head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+  return {
+    FramingCase("/fixed", framing_request("GET", "/fixed"), fixed_head .. "hello",
+                "false|true|"),
+    FramingCase("/chunked", framing_request("GET", "/chunked"),
+                chunked_head .. "5\r\nhello\r\n0\r\n\r\n", "false|true|"),
+    FramingCase("/fixed-large", framing_request("GET", "/fixed-large"),
+                "HTTP/1.1 200 OK\r\nContent-Length: 70000\r\nConnection: close\r\n\r\n" .. large,
+                "false|true|"),
+    FramingCase("/chunked-large", framing_request("GET", "/chunked-large"),
+                chunked_head .. "11170\r\n" .. large .. "\r\n0\r\n\r\n", "false|true|"),
+    FramingCase("/empty-write", framing_request("GET", "/empty-write"),
+                chunked_head .. "0\r\n\r\n", "false|true|"),
+    FramingCase("/continue",
+                "POST /continue HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\n" ..
+                "Content-Length: 4\r\nConnection: close\r\n\r\nping",
+                "HTTP/1.1 100 Continue\r\n\r\n" ..
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                "false|true|"),
+    FramingCase("/head", framing_request("HEAD", "/head"), fixed_head, "false|true|"),
+    FramingCase("/204", framing_request("GET", "/204"),
+                "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n", "false|false|"),
+    FramingCase("/205", framing_request("GET", "/205"),
+                "HTTP/1.1 205 Status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "false|false|"),
+    FramingCase("/304", framing_request("GET", "/304"),
+                "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n", "false|false|"),
+    FramingCase("/overflow", framing_request("GET", "/overflow"),
+                "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n",
+                "false|true|HTTP response exceeds its Content-Length"),
+    FramingCase("/mismatch", framing_request("GET", "/mismatch"), fixed_head,
+                "false|true|HTTP response body does not match its Content-Length"),
+    FramingCase("/failed-write", framing_request("GET", "/failed-write"), "",
+                "false|true|cannot write after Connection shutdown"),
+  }
+end
+
+-- Exact wire bytes and commitment for every first-write shape, with the
+-- response committed before its transport write even when that write fails.
+local function check_framing_matrix(adopt: boolean)
+  local notes: {string: string} = {}
+  local kept: {string: http.Response} = {}
+  local handler = framing_handler(notes, kept)
+  if adopt then handler = adopting_handler(handler) end
+  local server = http.listen("127.0.0.1", handler, 0)
+  runtime_test.cleanup(function () server:close() end)
+  server:read_ahead(false)
+  local port = server:local_address().port
+  serve_in_background(server, "HTTP framing matrix listener")
+  local cases = framing_cases()
+  for index = 1, #cases do
+    local item = cases[index]
+    local wire, timed_out = wire_response(port, item.request)
+    test.assert(not timed_out, item.path .. " did not close its connection")
+    test.assert(wire == item.response, item.path .. " sent " .. string.format("%q", wire))
+    test.assert(notes[item.path] == item.note, item.path .. " observed " ..
+                string.tostring(notes[item.path]) .. ", expected " .. item.note)
+    test.assert(kept[item.path]:is_committed(), item.path .. " lost its historical commitment")
+  end
+end
+
+function test_server_coalesced_framing_and_commitment(_context: test.Context)
+  runtime_test.run(function () check_framing_matrix(false) end)
+end
+
+-- A non-reusable exchange closes instead of reading an unread request body;
+-- a persistent one still drains before the next pipelined request.
+local function drain_handler(): http.Handler
+  return function (request: http.Request, response: http.Response)
+    local path = request.url.path
+    if path == "/big-fixed" or path == "/big-chunked" then
+      response:set_status(413)
+      response:set_header("Connection", "close")
+      response:set_header("Content-Length", "0")
+    elseif path == "/client-close" then
+      response:set_header("Content-Length", "2")
+      response:write("ok")
+    elseif path == "/unread" then
+      response:set_header("Content-Length", "1")
+      response:write("A")
+    elseif path == "/after" then
+      response:set_header("Content-Length", "1")
+      response:write("B")
+    end
+  end
+end
+
+local function check_request_drain(adopt: boolean)
+  local handler = drain_handler()
+  if adopt then handler = adopting_handler(handler) end
+  local server = http.listen("127.0.0.1", handler, 0)
+  runtime_test.cleanup(function () server:close() end)
+  server:read_ahead(false)
+  local port = server:local_address().port
+  serve_in_background(server, "HTTP request drain listener")
+  -- Response framing re-sets Connection: close after the handler's headers.
+  local rejected = "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+  local wire, timed_out = wire_response(port,
+    "POST /big-fixed HTTP/1.1\r\nHost: localhost\r\nContent-Length: 104857600\r\n\r\n")
+  test.assert(not timed_out and wire == rejected, "unread fixed-length body was drained")
+  wire, timed_out = wire_response(port,
+    "POST /big-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n")
+  test.assert(not timed_out and wire == rejected, "unread chunked body was drained")
+  wire, timed_out = wire_response(port,
+    "POST /client-close HTTP/1.1\r\nHost: localhost\r\nContent-Length: 104857600\r\n" ..
+    "Connection: close\r\n\r\n")
+  test.assert(not timed_out and
+              wire == "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+              "a client-closed exchange drained its unread body")
+  wire, timed_out = wire_response(port,
+    "POST /unread HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nskip" ..
+    "GET /after HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+  test.assert(not timed_out and
+              wire == "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nA" ..
+                      "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nB",
+              "a persistent exchange did not drain before the next request")
+end
+
+function test_server_skips_drain_on_non_reusable_exchanges(_context: test.Context)
+  runtime_test.run(function () check_request_drain(false) end)
+end
+
+-- Request endpoint queries reuse the connection's cached snapshots across
+-- keep-alive exchanges and end with their exchange.
+local function check_request_addresses(server: http.Server, addresses: {net.Address},
+                                       kept: {http.Request}, ip: string, encrypted: boolean)
+  runtime_test.cleanup(function () server:close() end)
+  local bound = server:local_address()
+  test.assert(bound.ip == ip and bound.port > 0, "HTTP listener reported " .. bound.ip)
+  test.assert(server:local_address() == bound, "HTTP listener address was not cached")
+  serve_in_background(server, "HTTP address listener")
+  local channel: io.ReaderWriterCloser = (function (): io.ReaderWriterCloser
+    if encrypted then return ssl.connect(ip, bound.port, support.TRUST_ROOT) end
+    return net.connect(ip, bound.port)
+  end)()
+  runtime_test.cleanup(function () channel:close() end)
+  channel:write("GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
+                "GET /two HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+  local output = string.writer()
+  for chunk in channel:read do output:write(chunk) end
+  test.assert(support.contains(output:drain(), "\r\n\r\nok"), "HTTP address exchange failed")
+  test.assert(#addresses == 4, "HTTP handler saw " .. #addresses .. " endpoint snapshots")
+  test.assert(addresses[1] == addresses[3] and addresses[2] == addresses[4],
+              "keep-alive exchanges did not reuse cached endpoint snapshots")
+  test.assert(addresses[1].ip == ip and addresses[1].port == bound.port,
+              "request local endpoint is not the listener")
+  test.assert(addresses[2].ip == ip and addresses[2].port > 0 and
+              addresses[2].port ~= bound.port, "request peer endpoint is not the client")
+  transfer_common.assert_raises_contains(function () kept[1]:local_address() end,
+    "HTTP request exchange has ended")
+  transfer_common.assert_raises_contains(function () kept[1]:peer_address() end,
+    "HTTP request exchange has ended")
+  server:close()
+  transfer_common.assert_raises_contains(function () server:local_address() end,
+    "HTTP Server is closed")
+end
+
+local function address_handler(addresses: {net.Address}, kept: {http.Request}): http.Handler
+  return function (request: http.Request, response: http.Response)
+    addresses[#addresses + 1] = request:local_address()
+    addresses[#addresses + 1] = request:peer_address()
+    kept[1] = request
+    response:set_header("Content-Length", "2")
+    response:write("ok")
+  end
+end
+
+function test_server_and_request_socket_addresses(context: test.Context)
+  context:run("http_ipv4", function (_child: test.Context)
+    runtime_test.run(function ()
+      local addresses: {net.Address} = {}
+      local kept: {http.Request} = {}
+      local server = http.listen("127.0.0.1", address_handler(addresses, kept), 0)
+      check_request_addresses(server, addresses, kept, "127.0.0.1", false)
+    end)
+  end)
+  context:run("https_ipv4", function (_child: test.Context)
+    runtime_test.run(function ()
+      local addresses: {net.Address} = {}
+      local kept: {http.Request} = {}
+      local server = http.listen_tls("127.0.0.1", support.CERTIFICATE,
+        address_handler(addresses, kept), support.PRIVATE_KEY, 0)
+      check_request_addresses(server, addresses, kept, "127.0.0.1", true)
+    end)
+  end)
+  context:run("http_ipv6", function (_child: test.Context)
+    runtime_test.run(function ()
+      local addresses: {net.Address} = {}
+      local kept: {http.Request} = {}
+      local server: http.Server? = nil
+      do
+        server = http.listen("::1", address_handler(addresses, kept), 0)
+      catch
+        if error is async.OperationError then
+          local name = (error as async.OperationError).name
+          if name == "EADDRNOTAVAIL" or name == "EAFNOSUPPORT" then
+            test.skip("capability: IPv6 loopback is unavailable (" .. name .. ")")
+          end
+        end
+        raise
+      end
+      check_request_addresses(server, addresses, kept, "::1", false)
+    end)
+  end)
+end
+
+-- Endpoint queries end with abort, upgrade, and upgrade rejection, while
+-- commitment remains readable.
+function test_request_addresses_end_with_their_exchange(_context: test.Context)
+  runtime_test.run(function ()
+    local notes: {string: string} = {}
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      local path = request.url.path
+      if path == "/abort" then
+        response:abort()
+      elseif path == "/upgrade" then
+        local upgraded = response:upgrade(request, "probe")
+        upgraded:close()
+      elseif path == "/reject" then
+        response:reject_upgrade(request, 403)
+      end
+      local ended = ""
+      do
+        request:peer_address()
+      catch
+        ended = string.tostring(error)
+      end
+      notes[path] = ended .. "|" .. string.tostring(response:is_committed())
+    end
+    local server = http.listen("127.0.0.1", handler, 0)
+    runtime_test.cleanup(function () server:close() end)
+    local port = server:local_address().port
+    serve_in_background(server, "HTTP ended-exchange listener")
+    local upgrade_offer = "Connection: Upgrade\r\nUpgrade: probe\r\n\r\n"
+    local wire, timed_out = wire_response(port, "GET /abort HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    test.assert(not timed_out and wire == "", "aborted exchange sent a response")
+    wire, timed_out = wire_response(port,
+      "GET /upgrade HTTP/1.1\r\nHost: localhost\r\n" .. upgrade_offer)
+    test.assert(not timed_out and support.contains(wire, "101 Switching Protocols"))
+    wire, timed_out = wire_response(port,
+      "GET /reject HTTP/1.1\r\nHost: localhost\r\n" .. upgrade_offer)
+    test.assert(not timed_out and support.contains(wire, "403 Forbidden"))
+    test.assert(notes["/abort"] == "HTTP request exchange has ended|false",
+                "abort: " .. string.tostring(notes["/abort"]))
+    test.assert(notes["/upgrade"] == "HTTP request exchange has ended|true",
+                "upgrade: " .. string.tostring(notes["/upgrade"]))
+    test.assert(notes["/reject"] == "HTTP request exchange has ended|true",
+                "reject_upgrade: " .. string.tostring(notes["/reject"]))
+  end)
+end
+
+-- A small response leaves in one TLS application record with its headers;
+-- explicit send_headers still flushes the header block first.
+function test_server_coalesces_tls_response_records(_context: test.Context)
+  runtime_test.run(function ()
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      local path = request.url.path
+      if path == "/fixed" then
+        response:set_header("Content-Length", "5")
+        response:write("hello")
+      elseif path == "/chunked" then
+        response:write("hello")
+      elseif path == "/explicit" then
+        response:set_header("Content-Length", "5")
+        response:send_headers()
+        response:write("hello")
+      end
+    end
+    local server = http.listen_tls("127.0.0.1", support.CERTIFICATE, handler,
+                                   support.PRIVATE_KEY, 0)
+    runtime_test.cleanup(function () server:close() end)
+    serve_in_background(server, "HTTPS record listener")
+    local secure = ssl.connect("127.0.0.1", server:local_address().port, support.TRUST_ROOT)
+    runtime_test.cleanup(function () secure:close() end)
+    local fixed_head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"
+    local chunked_head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    secure:write("GET /fixed HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    test.assert(secure:read() == fixed_head .. "hello", "fixed response was split")
+    secure:write("GET /chunked HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    test.assert(secure:read() == chunked_head .. "5\r\nhello\r\n", "chunked response was split")
+    test.assert(secure:read() == "0\r\n\r\n", "chunked terminator was not its own record")
+    secure:write("GET /empty HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    test.assert(secure:read() == chunked_head .. "0\r\n\r\n", "empty response was split")
+    secure:write("GET /explicit HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    test.assert(secure:read() == fixed_head, "send_headers did not flush headers alone")
+    test.assert(secure:read() == "hello", "body after send_headers was not its own record")
+  end)
+end

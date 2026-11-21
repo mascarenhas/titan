@@ -15,6 +15,7 @@ local backpressure = import "ssl.backpressure_support.titan"
 local task_support = import "support.async.titan"
 local transfer_lua = import "lua"
 local uv = import "uv"
+local owned_tcp = import "support.owned_tcp.titan"
 
 function test_ssl_combined_pem_and_binary_record_exchange(
     context: test.Context)
@@ -745,5 +746,114 @@ function test_ssl_client_adoption_preserves_trust_failure_trace(context: test.Co
       async.join(peer)
       test.assert(peer:status():has_succeeded())
     end
+  end)
+end
+
+-- TLS endpoint queries and TCP_NODELAY delegate to the TCP transport, so they
+-- work before and after the lazy handshake.
+function test_ssl_socket_addresses_and_no_delay(context: test.Context)
+  runtime_test.run(function ()
+    local server = ssl.listen("127.0.0.1", 0, support.CERTIFICATE, support.PRIVATE_KEY)
+    support.cleanup_server(context, server)
+    local bound = server:local_address()
+    test.assert(bound.ip == "127.0.0.1" and not bound.ipv6 and bound.port > 0,
+                "TLS listener reported the wrong local address")
+    test.assert(server:local_address() == bound, "TLS listener address was not cached")
+    local observed: {integer} = {}
+    local peer = async.run<|value, value|>(function (): value
+      local connection = server:accept()
+      defer connection:close()
+      local before_local = connection:local_address()
+      local before_peer = connection:peer_address()
+      observed[1] = before_local.port
+      observed[2] = before_peer.port
+      observed[3] = owned_tcp.kernel_no_delay(before_local.port, before_peer.port)
+      connection:set_no_delay(false)
+      observed[4] = owned_tcp.kernel_no_delay(before_local.port, before_peer.port)
+      connection:handshake()
+      test.assert(connection:local_address() == before_local and
+                  connection:peer_address() == before_peer,
+                  "the TLS handshake replaced cached endpoints")
+      connection:set_no_delay(true)
+      observed[5] = owned_tcp.kernel_no_delay(before_local.port, before_peer.port)
+      test.assert(connection:read_until("\0", true) == "ping")
+      connection:write("pong\0")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS endpoint peer")
+    local client = ssl.connect("127.0.0.1", bound.port, support.TRUST_ROOT)
+    support.cleanup_connection(context, client)
+    local client_local = client:local_address()
+    test.assert(client:peer_address().port == bound.port, "TLS client peer is not the listener")
+    test.assert(owned_tcp.kernel_no_delay(client_local.port, bound.port) == 1,
+                "ssl.connect lacked TCP_NODELAY")
+    client:write("ping\0")
+    test.assert(client:read_until("\0", true) == "pong")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(), "TLS endpoint peer failed")
+    test.assert(observed[1] == bound.port and observed[2] == client_local.port,
+                "accepted TLS endpoints do not mirror the client")
+    test.assert(observed[3] == 1 and observed[4] == 0 and observed[5] == 1,
+                "accepted TLS TCP_NODELAY did not follow set_no_delay")
+    client:close()
+    common.assert_raises_contains(function () client:local_address() end,
+      "ssl.local_address: SSL Connection is closed")
+    common.assert_raises_contains(function () client:peer_address() end,
+      "ssl.peer_address: SSL Connection is closed")
+    common.assert_raises_contains(function () client:set_no_delay(true) end,
+      "ssl.set_no_delay: SSL Connection is closed")
+    server:close()
+    common.assert_raises_contains(function () server:local_address() end,
+      "ssl.local_address: Server is closed")
+  end)
+end
+
+-- ssl.client keeps its transport's option, and a moved engine keeps both the
+-- kernel option and live endpoint queries.
+function test_ssl_client_transport_options_survive_transfer(context: test.Context)
+  runtime_test.run(function ()
+    local server = ssl.listen("127.0.0.1", 0, support.CERTIFICATE, support.PRIVATE_KEY)
+    support.cleanup_server(context, server)
+    local port = server:local_address().port
+    local peer = async.run<|nil, value|>(function (): nil
+      local connection = server:accept()
+      defer connection:abort()
+      test.assert(connection:read_until("\0", true) == "moved")
+      connection:write("ack\0")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS option transfer peer")
+    local transport = net.connect("127.0.0.1", port)
+    transport:set_no_delay(false)
+    local source = ssl.client(transport, "localhost", support.TRUST_ROOT)
+    defer source:abort()
+    local local_port = source:local_address().port
+    test.assert(owned_tcp.kernel_no_delay(local_port, port) == 0,
+                "ssl.client changed its transport's TCP_NODELAY")
+    local packet = async.TransferValue.from_value(source)
+    common.assert_raises_contains(function () source:local_address() end,
+      "ssl.local_address: SSL Connection is closed")
+    common.assert_raises_contains(function () source:peer_address() end,
+      "ssl.peer_address: SSL Connection is closed")
+    common.assert_raises_contains(function () source:set_no_delay(true) end,
+      "ssl.set_no_delay: SSL Connection is closed")
+    local moved: ssl.Connection = packet:to_value()
+    defer moved:abort()
+    test.assert(moved:local_address().port == local_port and moved:peer_address().port == port,
+                "moved TLS connection lost its endpoints")
+    test.assert(owned_tcp.kernel_no_delay(local_port, port) == 0,
+                "TLS transfer changed TCP_NODELAY")
+    moved:set_no_delay(true)
+    test.assert(owned_tcp.kernel_no_delay(local_port, port) == 1,
+                "moved TLS connection could not enable TCP_NODELAY")
+    moved:write("moved\0")
+    test.assert(moved:read_until("\0", true) == "ack")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(), "TLS option transfer peer failed")
+    moved:abort()
+    common.assert_raises_contains(function () moved:local_address() end,
+      "ssl.local_address: SSL Connection is closed")
+    common.assert_raises_contains(function () moved:set_no_delay(false) end,
+      "ssl.set_no_delay: SSL Connection is closed")
   end)
 end
