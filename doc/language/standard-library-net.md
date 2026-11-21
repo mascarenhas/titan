@@ -65,9 +65,31 @@ function listen(host: string, port: integer,
 ```
 
 - **`resolve(host, port)`** resolves `host` (nonempty, no NUL) and `port` (`1..65535`) asynchronously and returns copied, owned IPv4/IPv6 TCP `uv.sockaddr_t` values in resolver order. Cancelling a pending resolve requests native cancellation and still waits for its callback to complete.
-- **`Connection()` / `Connection:connect_address(address)`** splits socket creation from dialing so a supervisor holds an abortable `Connection` before dialing. Create `local conn = net.Connection()`, immediately `defer conn:close()`, and call `conn:connect_address(addr)` with a complete IPv4/IPv6 address and nonzero port (performing no second DNS query). Before connect succeeds, only `connect_address`, `close`, and `has_pending_input` are valid; a failed dial leaves the endpoint unusable until closed.
+- **`Connection()` / `Connection:connect_address(address)`** splits socket creation from dialing so a supervisor holds an abortable `Connection` before dialing. Create `local conn = net.Connection()`, immediately `defer conn:close()`, and call `conn:connect_address(addr)` with a complete IPv4/IPv6 address and nonzero port (performing no second DNS query). Before dialing begins, `connect_address`, `set_no_delay`, `close`, and `has_pending_input` are valid (while dialing is in progress, `set_no_delay` is rejected); a failed dial leaves the endpoint unusable until closed.
 - **`connect(host, port)`** resolves `host` (`port` in `1..65535`) and dials IPv4/IPv6 candidates in resolver order, closing failed candidates asynchronously before trying the next.
-- **`listen(host, port, backlog?, reuse_port?)`** binds and starts a TCP listener (`Server` has no public constructor). `port` may be `0` for an ephemeral OS port (note that `Server` does not expose the bound address or port). `backlog` defaults to `128` (range `1..2147483647`). `reuse_port` defaults to `false`; when `true`, it sets `UV_TCP_REUSEPORT` so independent listeners (such as across separate processes or Lua states) can share a local address and port. Linux supports `reuse_port`; macOS and Windows raise `async.OperationError` with `name == "ENOTSUP"`.
+- **`listen(host, port, backlog?, reuse_port?)`** binds and starts a TCP listener (`Server` has no public constructor). `port` may be `0` for an ephemeral OS port; call `Server:local_address()` to inspect the OS-assigned endpoint. `backlog` defaults to `128` (range `1..2147483647`). `reuse_port` defaults to `false`; when `true`, it sets `UV_TCP_REUSEPORT` so independent listeners (such as across separate processes or Lua states) can share a local address and port. Linux supports `reuse_port`; macOS and Windows raise `async.OperationError` with `name == "ENOTSUP"`.
+
+## Socket addresses
+
+```text
+record Address
+  const ip: string
+  const port: integer
+  const ipv6: boolean
+  const scope_id: integer
+end
+function Address.new(ip: string, port: integer,
+                     ipv6: boolean, scope_id: integer): Address
+
+function Server:local_address(): Address
+function Connection:local_address(): Address
+function Connection:peer_address(): Address
+```
+
+- **`Address`** is an immutable numeric IPv4 or IPv6 socket endpoint snapshot: `ip` is the numeric IPv4 or IPv6 presentation text without brackets or scope suffix, `port` is the TCP port in host byte order (`0..65535`), `ipv6` is `true` for IPv6 and `false` for IPv4, and `scope_id` is the numeric IPv6 scope identifier (`0` for IPv4 and unscoped IPv6). Because `Address` has only scalar `const` fields and its default public constructor, `reflect`, `json`, `protobuf`, and `transfer.TransferValue` support it directly.
+- **`Server:local_address()`** returns the bound local endpoint snapshot of an open listener, including the OS-assigned port when `listen` was called with `port` `0`.
+- **`Connection:local_address()`** and **`Connection:peer_address()`** return the local and remote endpoint snapshots of an open, connected `Connection`.
+- **Live-endpoint rules and snapshots:** All three queries require an active Task on the owning `async` Runtime and reject closed or transferred-from source endpoints; `Connection:local_address()` and `Connection:peer_address()` also reject unconnected, connecting, or failed `Connection`s. An `Address` returned while the endpoint is open is an immutable snapshot that remains readable after the `Server` or `Connection` is closed. If the remote peer resets or disconnects before the first `peer_address()` call and the OS rejects the lookup, `peer_address()` raises `async.OperationError` with `operation == "net.peer_address"`. After connection transfer, `local_address()` and `peer_address()` query the adopted live socket on demand on the destination Runtime.
 
 ## Reading
 
@@ -92,11 +114,13 @@ A `Connection` starts its libuv read watcher lazily on the first `read` or `read
 
 ```text
 function Connection:write(data: string)
+function Connection:set_no_delay(enabled: boolean)
 function Connection:shutdown()
 function Connection:close()
 ```
 
 - **`write(data)`** submits an ordered native write for `data` and suspends until its callback completes, retaining the immutable string for the full duration of the write (even if the calling Task is cancelled). Overlapping writes keep independent requests and payloads; an empty write validates that the write side is open.
+- **`TCP_NODELAY` default and `set_no_delay(enabled)`:** Dialed (`Connection()`, `connect`) and accepted (`Server:accept`) `Connection`s enable `TCP_NODELAY` (`true`) by default, disabling Nagle buffering in the local TCP stack so multi-write protocols do not stall on delayed ACKs. Call `set_no_delay(false)` to enable Nagle coalescing or `set_no_delay(true)` to disable it again. `set_no_delay` requires an active Task on the owning `async` Runtime, is valid before dialing begins (`Connection()` prior to `connect_address`) and on a connected `Connection` (before or after reads, writes, or `shutdown()`), and raises on closed, transferred-from, failed, or currently connecting endpoints (surfacing OS errors as `async.OperationError` with `operation == "net.set_no_delay"`).
 - **`shutdown()`** half-closes the write direction after earlier writes complete, leaving the read side open until peer EOF, error, or `close()`. Repeated calls are idempotent.
 - **`close()`** idempotently closes both directions, stops reading, discards buffered input, wakes any waiting reader with `nil`, and rejects subsequent output. Runtime shutdown closes any `Connection` or `Server` left open.
 
@@ -107,7 +131,7 @@ function Server:accept(): Connection
 function Server:close()
 ```
 
-`Server:accept()` returns the oldest buffered accepted `Connection` or suspends until the next client connects. At most one Task may wait in `accept()` at a time; cancelling that waiter leaves the `Server` listening. Incoming connections arriving with no waiting Task remain buffered up to the listen backlog. `Server:close()` closes the listener and any buffered unaccepted clients, waking a waiting `accept()` with an error.
+`Server:accept()` returns the oldest buffered accepted `Connection` or suspends until the next client connects. Every `Connection` returned by `accept()` has `TCP_NODELAY` enabled; if configuring `TCP_NODELAY` on a newly accepted child socket fails at the OS level, that child socket is closed and discarded without failing the `Server` listener. At most one Task may wait in `accept()` at a time; cancelling that waiter leaves the `Server` listening. Incoming connections arriving with no waiting Task remain buffered up to the listen backlog. `Server:close()` closes the listener and any buffered unaccepted clients, waking a waiting `accept()` with an error.
 
 ## Errors
 
@@ -121,9 +145,9 @@ function Connection.from_transfer_payload(payload: string): Connection
 function Connection.discard_transfer_payload(payload: string): integer
 ```
 
-An idle connected `Connection` can move between independent Lua states in the same process via `async.TransferValue.from_value(conn)` and `packet:to_value()` (or the hooks directly). Both hooks are synchronous, require an active non-closing Runtime (no running Task), and preserve unread delimiter excess, buffered input, and the `read_ahead` setting.
+An idle connected `Connection` can move between independent Lua states in the same process via `async.TransferValue.from_value(conn)` and `packet:to_value()` (or the hooks directly). Both hooks are synchronous, require an active non-closing Runtime (no running Task), and preserve unread delimiter excess, buffered input, the `read_ahead` setting, and the underlying socket's `TCP_NODELAY` option (`true` by default, or `false` if disabled before transfer). On the destination Runtime, `local_address()`, `peer_address()`, and `set_no_delay(enabled)` operate on the adopted live socket.
 
 - **Eligibility:** Transfer rejects unconnected, closed, or half-closed sockets, active readers/writers/shutdowns, registered input listeners, and pending native requests (leaving the source usable). On Windows, a persistent read watcher normally keeps an overlapped read pending even when idle, raising `EBUSY`: call `conn:read_ahead(false)` before the first read, and call `async.yield()` after `connect` or the last I/O operation so native callbacks retire before encoding.
 - **Ownership and recovery:** Encoding detaches the source before delivery (making source aliases behave as closed). If serializing an enclosing composite fails after detachment, the hook closes the detached endpoint. Follow the [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules): adopt the payload exactly once or recover it locally. `Connection.discard_transfer_payload(payload)` closes an unadopted payload without needing a Runtime and returns the native close status, consuming ownership even on error.
 
-For UDP, Unix-domain/named pipes, socket options, or endpoint address queries, use the low-level [`uv`](standard-library-uv.md) module directly. For TLS over `net`, see [`ssl`](standard-library-ssl.md).
+For UDP, Unix-domain/named pipes, or other low-level socket options, use the low-level [`uv`](standard-library-uv.md) module directly. For TLS over `net`, see [`ssl`](standard-library-ssl.md).

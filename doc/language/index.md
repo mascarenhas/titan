@@ -119,9 +119,9 @@ each module by its short name; Lua loads the same module via `titan.<name>`.
 | Module | Titan `import` | Lua `require` | Targets | Purpose |
 | --- | --- | --- | --- | --- |
 | [url](standard-library-url.md) | `"url"` | `"titan.url"` | Native & Browser | Nonthrowing HTTP(S)/WS(S) URL parsing, normalization, and structured error positions. |
-| [net](standard-library-net.md) | `"net"` | `"titan.net"` | Native only | Asynchronous DNS resolution, TCP clients and servers, and byte-stream connections. |
+| [net](standard-library-net.md) | `"net"` | `"titan.net"` | Native only | Asynchronous DNS resolution, TCP clients and servers, socket addresses, and byte-stream connections. |
 | [ssl](standard-library-ssl.md) | `"ssl"` | `"titan.ssl"` | Native only | Verified TLS 1.2+ clients and certificate-backed servers layered over TCP. |
-| [http](standard-library-http.md) | `"http"` | `"titan.http"` | Native & Browser (subset) | HTTP/HTTPS client with headers and `RequestOptions`; native adds connection pools and HTTP/1.1 servers. |
+| [http](standard-library-http.md) | `"http"` | `"titan.http"` | Native & Browser (subset) | HTTP/HTTPS client with headers and `RequestOptions`; native adds connection pools, HTTP/1.1 servers, and endpoint inspection. |
 | [websocket](standard-library-websocket.md) | `"websocket"` | `"titan.websocket"` | Native & Browser (subset) | WebSocket `ws`/`wss` clients and message framing; native adds HTTP server upgrades. |
 
 #### Serialization, Databases, and Reflection
