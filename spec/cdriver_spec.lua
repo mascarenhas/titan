@@ -41,7 +41,11 @@ end
 
 local function remove_tree(files, dirs)
     for _, filename in ipairs(files or {}) do
-        os.remove(filename)
+        if platform.windows and lfs.symlinkattributes(filename, "mode") == "link" then
+            assert(lfs.rmdir(filename) or os.remove(filename))
+        else
+            os.remove(filename)
+        end
     end
     for i = #(dirs or {}), 1, -1 do
         lfs.rmdir(dirs[i])
@@ -451,17 +455,12 @@ describe("generated module C header inputs", function()
             local refreshed, origin_err, moved, reason = cdriver.revalidate_header_input(origin, { io = strategy })
             assert.is_nil(origin_err)
             local fresh, fresh_include = assert_process_file(outer, options)
-            if platform.windows then
-                assert.is_false(moved)
-                assert.equal(initial, fresh)
-            else
-                assert.is_true(moved)
-                assert.equal("provenance", reason)
-                assert.not_equal(origin.identity, refreshed.identity)
-                assert.not_equal(initial, fresh)
-                assert.not_equal(initial["struct@Shared"]._tag_provenance.ffi_scope,
-                    fresh["struct@Shared"]._tag_provenance.ffi_scope)
-            end
+            assert.is_true(moved)
+            assert.equal("provenance", reason)
+            assert.not_equal(origin.identity, refreshed.identity)
+            assert.not_equal(initial, fresh)
+            assert.not_equal(initial["struct@Shared"]._tag_provenance.ffi_scope,
+                fresh["struct@Shared"]._tag_provenance.ffi_scope)
             local found = false
             for _, dependency in ipairs(fresh_include.c_header_dependencies) do
                 if dependency.kind == "origin" and dependency.path == link then
@@ -474,7 +473,6 @@ describe("generated module C header inputs", function()
     end
 
     it("certifies directory-link origins over physically identical nested leaves", function()
-        if platform.windows then pending("Sync nominal origins are lexical on Windows"); return end
         if not require_symlink_capability() then return end
         local root = directory()
         local first, second = directory(root, "first"), directory(root, "second")
@@ -497,7 +495,7 @@ describe("generated module C header inputs", function()
         end
         assert.is_table(input)
         assert.is_table(origin)
-        assert(os.remove(link))
+        assert(lfs.rmdir(link) or os.remove(link))
         assert(lfs.link(second, link, true))
         local current, err, changed = cdriver.revalidate_header_input(input, { io = strategy })
         assert.is_nil(err)
@@ -1417,15 +1415,9 @@ describe("completed C header payload transport", function()
         assert.matches("^c%-header%-file%-v3:sha256:%x+$", first)
         local current, err, changed, reason = cdriver.revalidate_header_input(origin, { io = strategy })
         assert.is_nil(err)
-        if platform.windows then
-            -- Sync nominal origins are lexical on Windows.
-            assert.is_false(changed)
-            assert.equal(origin.identity, current.identity)
-        else
-            assert.is_true(changed)
-            assert.equal("provenance", reason)
-            assert.not_equal(origin.identity, current.identity)
-        end
+        assert.is_true(changed)
+        assert.equal("provenance", reason)
+        assert.not_equal(origin.identity, current.identity)
     end)
 end)
 
@@ -1630,7 +1622,7 @@ describe("C FFI cdriver", function()
                 { source, early, late, root })
         end)
 
-        it("preserves symlink traversal when absolutizing include paths",
+        it("uses native symlink traversal when absolutizing include paths",
         function()
             if not require_symlink_capability() then return end
             local root = tmp_dir()
@@ -1643,13 +1635,16 @@ describe("C FFI cdriver", function()
             local second_include = mkdir(second, "include")
             local lexical_dir = mkdir(root, "include")
             local link = root .. "/sdk-link"
-            assert(lfs.link("first/nested", link, true))
+            local first_target = platform.windows and first_nested or "first/nested"
+            assert(lfs.link(first_target, link, true))
 
             local outer = source .. "/outer.h"
             local first_selected = first_include .. "/selected.h"
             local second_selected = second_include .. "/selected.h"
             local lexical = lexical_dir .. "/selected.h"
-            local lookup = link .. "/../include/selected.h"
+            local authored = link .. "/../include/selected.h"
+            local lookup = platform.windows and lexical or authored
+            local selected_type = platform.windows and "double" or "int"
             local selected_contents =
                 "typedef int titan_symlink_parent_value;\n"
             write_file(outer, "#include <selected.h>\n")
@@ -1658,12 +1653,24 @@ describe("C FFI cdriver", function()
             write_file(lexical,
                 "typedef double titan_symlink_parent_value;\n")
 
+            local probe = source .. "/probe.c"
+            write_file(probe, '#include "outer.h"\n' ..
+                '_Static_assert(__builtin_types_compatible_p(titan_symlink_parent_value, ' ..
+                selected_type .. '), "native C include traversal");\n')
+            local argv = assert(cdriver.split_shell_words(platform.getenv("CC") or
+                (platform.windows and "clang.exe" or "cc")))
+            for _, word in ipairs({ "-fsyntax-only", "-I", link .. "/../include", probe }) do
+                argv[#argv + 1] = word
+            end
+            local compiled = compiler_io.new_sync():run(argv)
+            assert.truthy(compiled.started and compiled.ok, compiled.diagnostic or compiled.output)
+
             local types, include = assert_process_file("outer.h", {
                 source_dir = source,
                 compiler_include_dirs = {},
                 cppflags = { "-I", link .. "/../include" },
             })
-            assert.same({ "int" },
+            assert.same({ selected_type },
                 types.titan_symlink_parent_value.def)
             assert.equal(lookup,
                 include.c_header_dependencies[2].path)
@@ -1678,24 +1685,25 @@ describe("C FFI cdriver", function()
             assert.equal(assert(cdriver.header_input_identity(
                 "search", lookup)), first_search_identity)
 
-            local direct_types, direct_include = assert_process_file(lookup, {
+            local direct_types, direct_include = assert_process_file(authored, {
                 compiler_include_dirs = {},
             })
-            assert.same({ "int" },
+            assert.same({ selected_type },
                 direct_types.titan_symlink_parent_value.def)
             assert.equal(lookup, direct_include.resolved)
             assert.equal(lookup,
                 direct_include.c_header_dependencies[1].path)
 
-            assert(os.remove(link))
-            assert(lfs.link("second/nested", link, true))
+            assert(lfs.rmdir(link) or os.remove(link))
+            local second_target = platform.windows and second_nested or "second/nested"
+            assert(lfs.link(second_target, link, true))
             assert.equal(first_file_identity,
                 assert(cdriver.header_input_identity("file", lookup)))
             assert.equal(first_search_identity,
                 assert(cdriver.header_input_identity("search", lookup)))
 
             remove_tree(
-                { outer, first_selected, second_selected, lexical, link },
+                { probe, outer, first_selected, second_selected, lexical, link },
                 { root, first, first_nested, first_include,
                   second, second_nested, second_include,
                   lexical_dir, source })
@@ -1710,12 +1718,19 @@ describe("C FFI cdriver", function()
             local alias_nested = alias .. "/nested.h"
             local vendor_header = vendor .. "/api.h"
             local vendor_nested = vendor .. "/nested.h"
-            write_file(vendor_header, '#include "nested.h"\n')
+            local header_contents = '#include "nested.h"\n'
+            write_file(vendor_header, header_contents)
             write_file(alias_nested,
                 "typedef int titan_symlink_origin_value;\n")
             write_file(vendor_nested,
                 "typedef double titan_symlink_origin_value;\n")
-            assert(lfs.link("../vendor/api.h", alias_header, true))
+            local target = platform.windows and "..\\vendor\\api.h" or "../vendor/api.h"
+            assert(lfs.link(target, alias_header, true))
+            assert.equal("link", lfs.symlinkattributes(alias_header, "mode"))
+            do
+                local file <close> = assert(io.open(alias_header, "rb"))
+                assert.equal(header_contents, assert(file:read("*a")))
+            end
 
             local types, include = assert_process_file(alias_header, {
                 compiler_include_dirs = {},

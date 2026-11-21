@@ -87,6 +87,9 @@ local function remove_tree(target)
             end
         end
         assert(lfs.rmdir(target))
+    elseif mode == "link" and platform.windows then
+        -- A directory symlink must be removed without walking its target.
+        assert(lfs.rmdir(target) or os.remove(target))
     elseif mode then
         assert(os.remove(target))
     end

@@ -1916,15 +1916,10 @@ local function run_tcp_backpressure_and_shutdown(
     resolve(nil)
   end)
 
-  -- Advance several loop turns with peer reads still withheld so any write that
-  -- merely deferred its completion callback would settle. Because 2+ MiB exceeds
-  -- the bounded socket buffers, the send queue remains non-empty and cw/cs stay
-  -- blocked on real kernel TCP backpressure.
+  -- Keep peer reads withheld while libuv has time to report completions.
+  -- The stream rejects transfer while writes are outstanding. A momentary
+  -- kernel send-buffer count can be zero while libuv still has pending data.
   for _ = 1, 5 do async.yield() end
-  local queued_before_cancel = ffi.titan_test_tcp_stdio_pending_send_bytes(1 as foreign int) as integer
-  test.assert(queued_before_cancel > 0,
-              "expected positive pending kernel TCP send bytes under backpressure, got " ..
-              queued_before_cancel)
   test.assert(cw:status():as_string() == "waiting" and
               cs:status():as_string() == "waiting",
               "backpressured TCP write/shutdown settled before peer started reading")
@@ -1939,9 +1934,11 @@ local function run_tcp_backpressure_and_shutdown(
   for _ = 1, 5 do async.yield() end
   test.assert(cw:status():as_string() == "waiting" and
               cs:status():as_string() == "waiting" and
-              w_obs == nil and s_obs == nil and
-              (ffi.titan_test_tcp_stdio_pending_send_bytes(1 as foreign int) as integer) > 0,
+              w_obs == nil and s_obs == nil,
               "cancelled backpressured TCP write/shutdown unwound while peer was still not reading")
+  assert_raises_substring(function ()
+    async.TransferValue.from_value(system.stdout)
+  end, "stream has pending output")
 
   -- Now release peer drain and verify all bytes arrive in order followed by EOF.
   local received_all = ""

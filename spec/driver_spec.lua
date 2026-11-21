@@ -445,6 +445,55 @@ describe("Windows compiler path integration", function()
         dofile("spec/fixtures/windows_serial/verify_paths.lua")
     end)
 
+    it("rejects Windows linked output leaves without following them", function()
+        local root = "C:/fixture"
+        local loop = root .. "/loop.o"
+        local directory_link = root .. "/dirlink"
+        local output = root .. "/module.o"
+        local input = root .. "/input.o"
+        local file = { kind = "file", device = "volume", inode = "object" }
+        local link = { kind = "symlink" }
+        local directory = { kind = "directory" }
+        local entries = {
+            ["C:/"] = directory,
+            [root] = directory,
+            [loop] = link,
+            [directory_link] = link,
+            [output] = file,
+            [input] = link,
+        }
+        local followed = {}
+        compiler_io.new_sync = function()
+            return {
+                lstat = function(_, path) return (assert(entries[path], path)) end,
+                stat = function(_, path)
+                    followed[#followed + 1] = path
+                    assert.equal(input, path, "unexpected followed stat")
+                    return file
+                end,
+            }
+        end
+        for _, entry in ipairs({
+            { loop, "file", "a regular nonlink file" },
+            { directory_link, "directory", "a nonlink directory" },
+            { directory_link, "file", "a regular nonlink file" },
+        }) do
+            local ok, err = driver.validate_provider_output_paths(nil, nil, {
+                { path = entry[1], owner = "fixture output", mode = entry[2] },
+            })
+            assert.is_nil(ok)
+            assert.matches("is not " .. entry[3], err, 1, true)
+        end
+        assert.same({}, followed)
+
+        local ok, err = driver.validate_provider_output_paths(nil, { input }, {
+            { path = output, owner = "fixture output" },
+        })
+        assert.is_nil(ok)
+        assert.matches("aliases input", err, 1, true)
+        assert.same({ input }, followed)
+    end)
+
     it("serializes fully qualified Windows header paths without rewriting identities", function()
         local paths = {
             "C:/SDK 日本/include/lua.h",

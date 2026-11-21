@@ -164,6 +164,10 @@ end
 
 local tried_native_support = false
 
+local function path_missing(path)
+    return "path does not exist: " .. path
+end
+
 local function stat_attributes(path, follow)
     local support = package.loaded.titan
     if not support and not tried_native_support then
@@ -298,13 +302,13 @@ end
 function Sync:realpath(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
-
-    local attributes, attribute_err = lfs_attributes(path, true)
-    if not attributes then
-        return nil, attribute_err or ("path does not exist: " .. path)
+    if platform.windows then
+        local real, err, code = require("titan-compiler.process").library().fs_realpath(path)
+        if not real then return nil, code == "ENOENT" and path_missing(path) or err end
+        return real
     end
-    -- Windows uses lexical paths; LuaFileSystem supplies the existence check.
-    if platform.windows then return self:absolute(path) end
+    local attributes, attribute_err = lfs_attributes(path, true)
+    if not attributes then return nil, attribute_err or path_missing(path) end
     local cwd, cwd_err = self:cwd()
     if not cwd then return nil, cwd_err end
     return resolve_existing_path(path, cwd)

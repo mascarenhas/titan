@@ -2617,6 +2617,7 @@ describe("Titan code generator", function()
         local available, message = filesystem.symlink_capability()
         if not available then pending(message); return end
         local lfs = require "lfs"
+        local platform = require "titan-compiler.platform"
         local root = temporary.name()
         os.remove(root)
         assert(lfs.mkdir(root))
@@ -2635,14 +2636,16 @@ describe("Titan code generator", function()
             "struct titan_symlink_origin { int selected; };\n")
         write_file(vendor_nested,
             "struct titan_symlink_origin { int wrong; };\n")
-        write_file(vendor_header, [[
+        local vendor_contents = [[
 #include "nested.h"
 static struct titan_symlink_origin titan_symlink_origin_value = { 42 };
 static struct titan_symlink_origin *titan_symlink_origin_get(void) {
     return &titan_symlink_origin_value;
 }
-]])
-        assert(lfs.link("vendor/api.h", header, true))
+]]
+        write_file(vendor_header, vendor_contents)
+        local target = platform.windows and "vendor\\api.h" or "vendor/api.h"
+        assert(lfs.link(target, header, true))
         local suffix = root:match("[^/]+$"):gsub("%W", "_")
         local modname = "ffi_symlink_origin_" .. suffix
         local modules = {
@@ -2655,6 +2658,11 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
         }
 
         local ok, err = pcall(function()
+            assert.equal("link", lfs.symlinkattributes(header, "mode"))
+            local file = assert(io.open(header, "rb"))
+            local contents, read_error = file:read("*a")
+            assert(file:close())
+            assert.equal(vendor_contents, assert(contents, read_error))
             local generated, generate_error =
                 generate_modules(modules, modname)
             assert.truthy(generated, generate_error)

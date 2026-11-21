@@ -85,10 +85,10 @@ local function parse_decls(src)
 end
 
 describe("c preprocessor (cpp)", function()
-    it("uses native spelling for absolute lookup paths",
-    function()
-        if platform.windows then
-            -- Windows absolute paths use lexical normalization.
+    it("uses native spelling for absolute lookup paths", function()
+        local windows = platform.windows
+        platform.windows = true
+        local ok, err = pcall(function()
             assert.equal("C:/work/root/header.h",
                 cpp.absolute_lookup_path("./header.h", "C:/work//root"))
             assert.equal("C:/sdk/include/api.h",
@@ -102,8 +102,10 @@ describe("c preprocessor (cpp)", function()
             assert.equal("C:/sdk/include/api.h",
                 cpp.absolute_lookup_path(
                     "C:/sdk///link/../include/api.h", "C:/ignored"))
-            return
-        end
+        end)
+        platform.windows = windows
+        assert.truthy(ok, err)
+        if windows then return end
         assert.equal("/work//root/header.h",
             cpp.absolute_lookup_path("./header.h", "/work//root"))
         assert.equal("/sdk/link/../include/api.h",

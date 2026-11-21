@@ -1109,7 +1109,7 @@ esac
                 "make titan-native-coverage-build TITAN_VERBOSE=1" },
             { linux, "Certify identical SDK reinstall without sanitizer compilation or linking",
                 "make titan-stdlib-test-build TITAN_VERBOSE=1" },
-            { macos, "Run complete macOS tests without coverage",
+            { macos, "Run macOS stdlib tests without coverage",
                 "make titan-stdlib-test-build TITAN_VERBOSE=1" },
         }) do
             local start = assert(contract[1]:find("- name: " .. contract[2], 1, true))
@@ -5043,8 +5043,8 @@ exit "${TITAN_FIXTURE_NATIVE_STATUS:-0}"
             local fake_busted = bin .. "/busted"
             write_file(fake_busted, "#!/usr/bin/env bash\nset -u\n" ..
                 common .. [==[
-[[ $# == 4 && $1 == -o && $2 == gtest && $3 == -v ]] || exit 70
-test_file=$4
+[[ $# == 5 && $1 == -o && $2 == gtest && $3 == -v && $4 == --defer-print ]] || exit 70
+test_file=$5
 [[ $PWD != "$TITAN_FIXTURE_ORIGINAL" ]] || exit 72
 [[ ! -e .git && ! -e .lua ]] || exit 73
 [[ -z ${TITAN_FIXTURE_OMITTED:-} || ! -e $TITAN_FIXTURE_OMITTED ]] || exit 73
@@ -5764,9 +5764,7 @@ printf '%s\n' "${schedule[@]}"
             end
 
             local linux_workflow = read_file(".github/workflows/ci.yml")
-            local macos_workflow = read_file(".github/workflows/macos.yml")
-            -- Retain aggregate contracts across the independently triggered lanes.
-            local workflow = linux_workflow .. "\n" .. macos_workflow
+            local workflow = linux_workflow
             local function count_literal(text, needle)
                 local count = 0
                 local offset = 1
@@ -5829,24 +5827,18 @@ printf '%s\n' "${schedule[@]}"
             local playwright_job = named_job(linux_workflow, "browser-playwright")
             local packaging_job = named_job(linux_workflow, "browser-packaging")
             local native_coverage_job = named_job(linux_workflow, "native-coverage")
-            local macos_job = named_job(macos_workflow, "test-macos")
             local sanitizer_job = named_job(linux_workflow, "sanitizer")
 
             assert.equal(1, count_literal(linux_workflow, "\n  push:"),
                 linux_workflow)
             assert.falsy(linux_workflow:find("workflow_dispatch", 1, true),
                 linux_workflow)
-            local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
-            assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
-                macos_events)
             assert.equal(8, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
-            assert.equal(1, count_literal(macos_workflow,
-                "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
             assert.equal(8, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
-            assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
-                macos_workflow)
+            assert.equal(8, count_literal(linux_workflow,
+                "\n    runs-on: ubuntu-24.04\n"), linux_workflow)
             for _, job_name in ipairs({
                 "build-compiler", "test-linux-compiler", "browser-toolchain",
                 "browser-stdlib",
@@ -5854,8 +5846,6 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
-                assert.falsy(macos_workflow:find(
-                    "\n  " .. job_name .. ":", 1, true), job_name)
             end
             assert.equal(1, count_literal(browser_job,
                 "\n    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
@@ -5863,13 +5853,6 @@ printf '%s\n' "${schedule[@]}"
             assert.equal(1, count_literal(browser_stdlib_job,
                 "\n    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
                 browser_stdlib_job)
-            assert.equal(1, count_literal(macos_workflow, "\n  test-macos:"),
-                macos_workflow)
-            assert.falsy(linux_workflow:find("\n  test-macos:", 1, true),
-                linux_workflow)
-            assert.falsy(macos_job:find("\n    needs:", 1, true), macos_job)
-            assert.equal(1, count_literal(macos_workflow,
-                'TITAN_ABI_VERSION: "2"'), macos_workflow)
             for _, removed in ipairs({
                 "\n  test-linux-stdlib:", "\n  compiler-coverage:",
                 "prepare-linux", "test-linux-library", "ubuntu-slim",
@@ -5892,7 +5875,7 @@ printf '%s\n' "${schedule[@]}"
 
             for _, contract in ipairs({
                 "name: compiler dependencies (ubuntu-24.04)",
-                "runs-on: ubicloud-standard-2", "timeout-minutes: 30",
+                "timeout-minutes: 30",
                 "contents: read", "\n      CC: gcc-14\n",
                 "\n      LUA_CC: gcc-14\n", "make lua luarocks",
                 "luarocks make --only-deps", "luarocks test --prepare",
@@ -6012,16 +5995,16 @@ printf '%s\n' "${schedule[@]}"
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
             -- browser-packaging restores the emsdk and Playwright caches.
-            assert.equal(15, count_literal(workflow,
-                "uses: ubicloud/cache@v4"), workflow)
+            assert.equal(14, count_literal(workflow,
+                "uses: actions/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
-                "uses: ubicloud/cache/restore@v4"), workflow)
+                "uses: actions/cache/restore@v4"), workflow)
             assert.equal(2, count_literal(workflow,
-                "uses: ubicloud/cache/save@v4"), workflow)
-            assert.equal(4, count_literal(workflow,
+                "uses: actions/cache/save@v4"), workflow)
+            assert.equal(3, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/2"), workflow)
             assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
-            assert.equal(7, count_literal(workflow,
+            assert.equal(6, count_literal(workflow,
                 "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
             -- Keep the existing regular cache identity when moving its owner.
             assert.truthy(native_coverage_job:find("-test-linux-stdlib-", 1, true))
@@ -6032,22 +6015,21 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(job:find("-test-linux-stdlib-", 1, true))
             end
             assert.truthy(sanitizer_job:find("-sanitizer-", 1, true))
-            assert.truthy(macos_job:find("-test-macos-", 1, true))
-            assert.equal(3, count_literal(workflow, "-${{ github.sha }}"), workflow)
-            assert.equal(3, count_literal(workflow,
+            assert.equal(2, count_literal(workflow, "-${{ github.sha }}"), workflow)
+            assert.equal(2, count_literal(workflow,
                 "          key: titan-probes-2-"), workflow)
 
             local regular_cache_step = named_step(native_coverage_job,
                 "Restore regular Linux C-probe results")
             for _, contract in ipairs({
-                "id: regular-probe-cache", "uses: ubicloud/cache/restore@v4",
+                "id: regular-probe-cache", "uses: actions/cache/restore@v4",
                 "-test-linux-stdlib-",
             }) do
                 assert.truthy(regular_cache_step:find(contract, 1, true), contract)
             end
             local regular_save_step = named_step(native_coverage_job,
                 "Save regular Linux C-probe results")
-            assert.truthy(regular_save_step:find("uses: ubicloud/cache/save@v4", 1, true))
+            assert.truthy(regular_save_step:find("uses: actions/cache/save@v4", 1, true))
             assert.truthy(regular_save_step:find(
                 "${{ steps.regular-probe-cache.outputs.cache-primary-key }}", 1, true))
             local rock_install = named_step(native_coverage_job,
@@ -6091,8 +6073,6 @@ printf '%s\n' "${schedule[@]}"
                 "fail-fast: false"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "needs: build-compiler"), compiler_job)
-            assert.equal(1, count_literal(compiler_job,
-                "runs-on: ubicloud-standard-2"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "timeout-minutes: 45"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -6179,7 +6159,7 @@ printf '%s\n' "${schedule[@]}"
 
             for _, job in ipairs({ browser_job, browser_stdlib_job }) do
                 for _, contract in ipairs({
-                    "\n    needs: build-compiler\n", "runs-on: ubicloud-standard-4",
+                    "\n    needs: build-compiler\n",
                     "timeout-minutes: 60",
                     'TITAN_EMSDK_VERSION: "6.0.13"',
                     "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
@@ -6446,10 +6426,20 @@ printf '%s\n' "${schedule[@]}"
                 '-sASSERTIONS="$assertions"'), trace_units)
 
             for _, contract in ipairs({
-                "needs: build-compiler", "runs-on: ubicloud-standard-4",
+                "needs: build-compiler",
                 "timeout-minutes: 60",
                 "profile: [validation, production]",
                 "engine: [chromium, firefox, webkit]",
+                "exclude:\n          - profile: validation\n            engine: firefox\n" ..
+                    "          - profile: validation\n            engine: webkit\n" ..
+                    "        include:\n          - profile: validation\n            engine: firefox-webkit\n" ..
+                    "            engines: firefox webkit\n",
+                "TITAN_TRACE_ENGINES: ${{ matrix.engines || matrix.engine }}",
+                'install --with-deps "${engines[@]}"',
+                'TITAN_PLAYWRIGHT_TEST_ENGINES="${TITAN_TRACE_ENGINES// /,}"',
+                'browser-playwright-trace-$engine.log',
+                'browser-playwright-policy-$engine.log',
+                'browser-playwright-degraded-$engine.log',
                 'TITAN_PLAYWRIGHT_VERSION: "1.64.1"',
                 'TITAN_VITE_VERSION: "8.3.6"',
                 "TITAN_VITE_ROOT:",
@@ -6486,6 +6476,7 @@ printf '%s\n' "${schedule[@]}"
                 "Run the persistent bridge and opaque-Promise diagnostics")
             assert.falsy(bridge_gate:find("if:", 1, true), bridge_gate)
             for _, contract in ipairs({
+                "process.env.TITAN_TRACE_ENGINES.split(' ')",
                 "for (const assertions of [2, 0])",
                 "['integration.mjs', 0,",
                 "`assertions-${assertions}/public-states.mjs`",
@@ -6520,14 +6511,14 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(net_python:find("if: matrix.engine == 'chromium'", 1, true))
             assert.truthy(net_python:find("run: python3 --version", 1, true))
             local net_gate = named_step(playwright_job,
-                "Run live HTTP, HTTPS, and WebSocket clients on the managed engine")
+                "Run live HTTP, HTTPS, and WebSocket clients on each managed engine")
             assert.falsy(net_gate:find("if:", 1, true), net_gate)
             for _, contract in ipairs({
                 '"$TITAN_NODE" spec/fixtures/browser_net/run.mjs',
-                '--root "$TITAN_NET_OUTPUT" --engine "$TITAN_TRACE_ENGINE"',
+                '--root "$TITAN_NET_OUTPUT" --engine "$engine"',
                 '--sdk "$PREFIX/lib/titan-browser/0.6"',
                 '--runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" --persistent-webkit',
-                "browser-playwright-net.log",
+                "browser-playwright-net-$engine.log",
             }) do
                 assert.truthy(net_gate:find(contract, 1, true), contract)
             end
@@ -6552,8 +6543,8 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.truthy(docs_gate:find(contract, 1, true), contract)
             end
-            -- The complete application: every cell builds it by its section's
-            -- commands and runs the hosted test; production cells keep records.
+            -- Each job builds the application once per profile and runs it
+            -- on every managed engine; production cells keep records.
             local delivery_build = named_step(playwright_job,
                 "Build the browser chapter's complete application and its server")
             assert.falsy(delivery_build:find("if:", 1, true), delivery_build)
@@ -6562,12 +6553,21 @@ printf '%s\n' "${schedule[@]}"
             local hosted = named_step(playwright_job, "Run the complete application's hosted deployment test")
             assert.falsy(hosted:find("if:", 1, true), hosted)
             for _, contract in ipairs({
-                '"$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE"',
+                '"$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$engine"',
                 '--root "$TITAN_DELIVERY_OUTPUT" "${records[@]}"',
                 'if [ "$TITAN_BUILD_PROFILE" = production ]; then',
-                'records=(--records "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json")',
+                'records=(--records "$PWD/out/browser-records/playwright-$engine.json")',
+                "browser-playwright-delivery-$engine.log",
             }) do
                 assert.truthy(hosted:find(contract, 1, true), contract)
+            end
+            for _, body in ipairs({
+                named_step(playwright_job, "Run full Chromium and Firefox or reduced-fidelity WebKit traces"),
+                named_step(playwright_job, "Require explicit degraded-mode opt-in and preserve original failures"),
+                net_gate, hosted,
+            }) do
+                assert_ordered(body, 'read -ra engines <<< "$TITAN_TRACE_ENGINES"',
+                    'for engine in "${engines[@]}"; do', '--engine "$engine"')
             end
             local delivery_node = named_step(playwright_job, "Run the complete application under Node")
             assert.truthy(delivery_node:find("if: matrix.engine == 'chromium'", 1, true), delivery_node)
@@ -6594,13 +6594,13 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.truthy(engine_records:find(contract, 1, true), contract)
             end
-            -- Every validation cell runs the stdlib aggregate on its engine,
-            -- last, so that failing cases leave the earlier gates' receipts.
+            -- Every validation cell runs the stdlib aggregate on each of its
+            -- engines, last, so failures leave the earlier gates' receipts.
             local playwright_suite = named_step(playwright_job,
-                "Run the complete browser core stdlib suite on the managed engine")
+                "Run the complete browser core stdlib suite on each managed engine")
             for _, contract in ipairs({
                 "if: matrix.profile == 'validation'",
-                'make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE"',
+                'make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINES"',
                 'TITAN_BROWSER_TEST_RUNNER="\\"$TITAN_NODE\\" spec/browser/playwright-run.mjs --image --sdk',
                 'tee "$RUNNER_TEMP/browser-playwright-stdlib.log"',
             }) do
@@ -6686,7 +6686,7 @@ printf '%s\n' "${schedule[@]}"
 
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",
-                "needs: build-compiler", "runs-on: ubicloud-standard-4",
+                "needs: build-compiler",
                 'MAKEFLAGS: "-j4"', 'TITAN_JOBS: "4"',
                 "timeout-minutes: 60", "\n      CC: gcc-14\n",
                 "\n      GCOV: gcov-14\n", "gcc-14 clang-format python3-venv",
@@ -6753,51 +6753,99 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(codecov_policy:find("  native-stdlib:\n    paths:\n      - titan/", 1, true),
                 codecov_policy)
 
-            assert.equal(1, count_literal(macos_job,
-                "if: github.event_name == 'workflow_dispatch'"), macos_job)
-            assert.falsy(macos_job:find(
-                "if: github.event_name == 'push'", 1, true), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                'MAKEFLAGS: "-j3"'), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                'TITAN_JOBS: "3"'), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "make stdlib-test"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "make titan-stdlib-test-run"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "TITAN_TEST_TIMEOUT=15"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "ci_test_groups.sh compiler-uncovered"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "ci_stdlib_snapshot.sh save"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "ci_stdlib_snapshot.sh restore"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "ci_dependency_mode_smoke.sh"), macos_job)
-            assert.falsy(macos_job:find('luacov "', 1, true), macos_job)
-            assert.falsy(macos_job:find("id-token: write", 1, true),
-                macos_job)
-            assert.equal(2, count_literal(macos_job,
-                "ci_retry_luarocks_dependencies.sh"), macos_job)
-            assert.equal(2, count_literal(workflow,
-                "ci_retry_luarocks_dependencies.sh"), workflow)
-            assert.equal(1, count_literal(macos_job,
-                "luarocks make --only-deps"), macos_job)
-            assert.equal(2, count_literal(macos_job,
-                "luarocks make --force"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "luarocks test --prepare"), macos_job)
-            local macos_cache_index = assert(macos_job:find(
-                "- name: Restore macOS C-probe results", 1, true))
-            local macos_build_index = assert(macos_job:find(
-                "- name: Build and install the rock", macos_cache_index,
-                true))
-            local macos_tests_index = assert(macos_job:find(
-                "- name: Run complete macOS tests without coverage",
-                macos_build_index, true))
-            assert.is_true(macos_cache_index < macos_build_index)
-            assert.is_true(macos_build_index < macos_tests_index)
+            for _, platform_ci in ipairs({
+                { "macos", "macOS", "macos-15", "Build and install the rock" },
+                { "windows", "Windows", "windows-2025-vs2026", "Build and install the Windows rock" },
+            }) do
+                local platform_id, label, runner, install = table.unpack(platform_ci)
+                local hosted = read_file(".github/workflows/" .. platform_id .. ".yml")
+                local suite = named_job(hosted, "test-" .. platform_id)
+                local events = assert(hosted:match("\non:(.-)\npermissions:"))
+                assert.equal(1, count_literal(events, '\n  push:\n    branches: ["**"]\n'), events)
+                assert.falsy(events:find("\n  pull_request:", 1, true), events)
+                assert.equal(1, count_literal(events, "\n  workflow_dispatch:\n"), events)
+                assert.equal(1, count_literal(suite, "\n    runs-on: " .. runner .. "\n"), suite)
+                assert.equal(1, count_literal(suite, "fail-fast: false"), suite)
+                assert.falsy(suite:find("codecov/", 1, true), suite)
+                assert.falsy(suite:find("id-token: write", 1, true), suite)
+                assert_ordered(suite,
+                    "- name: Restore standalone-prefix LuaRocks dependencies",
+                    "- name: Restore " .. label .. " C-probe results",
+                    "- name: Report " .. label .. " cache hits",
+                    "- name: Save standalone-prefix LuaRocks dependencies",
+                    "- name: " .. install,
+                    "- name: Save " .. label .. " C-probe results",
+                    "run_parallel_compiler_tests.sh")
+                local probe_restore = named_step(suite, "Restore " .. label .. " C-probe results")
+                local probe_save = named_step(suite, "Save " .. label .. " C-probe results")
+                local probe_layout = assert(probe_restore:match("key: (titan%-probes%-2%-layout%-v%d+)%-"))
+                assert_ordered(probe_restore, "actions/cache/restore@v4",
+                    "var/cache/titan-probes/2", "${{ github.run_id }}-${{ github.run_attempt }}",
+                    "restore-keys:", probe_layout .. "-${{ steps.toolchain.outputs.identity }}-")
+                assert_ordered(probe_save, "actions/cache/save@v4",
+                    "path: *" .. platform_id .. "-probe-path", "steps.probe-cache.outputs.cache-primary-key")
+                local dependency_key_count = 0
+                for hash_key in suite:gmatch("\n          key: ([^\n]+hashFiles[^\n]+)") do
+                    assert.falsy(hash_key:find(".github/workflows/", 1, true), hash_key)
+                    assert.truthy(hash_key:match("%-layout%-v%d+%-"), hash_key)
+                    dependency_key_count = dependency_key_count + 1
+                end
+                assert.equal(platform_id == "macos" and 6 or 2, dependency_key_count, suite)
+                local rocks_cache = named_step(suite, "Restore standalone-prefix LuaRocks dependencies")
+                assert_ordered(rocks_cache, "-rocks-layout-", "hashFiles(", "'titan-0.6.0-1.rockspec'")
+                if platform_id == "macos" then
+                    local core_cache = named_step(suite, "Restore the Lua SDK and libbacktrace build")
+                    assert_ordered(core_cache, ".lua/bin/lua\n", ".lua/bin/luac\n",
+                        ".lua/include\n", ".lua/lib/liblua.a\n", ".lua/share/man\n",
+                        ".lua/src/lua-5.5.1\n", "lua-5.5.1/src/liblua.a\n", "-core-layout-",
+                        "steps.toolchain.outputs.lua-build", "steps.toolchain.outputs.libbacktrace",
+                        "hashFiles('Makefile')")
+                    local lua_build = named_step(suite, "Build the bundled Lua 5.5 source tree")
+                    assert_ordered(lua_build, 'make lua LUA_PLATFORM="$TITAN_LUA_PLATFORM"',
+                        'test -f lua-5.5.1/src/liblua.a')
+                    assert.truthy(suite:find(
+                        [[fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["native","compiler"]')]],
+                        1, true), suite)
+                    assert_ordered(suite, "make stdlib-test", "TITAN_TEST_TIMEOUT=15",
+                        "if: matrix.suite != 'native'", 'TITAN_ROCK_TEST_JOBS: "3"',
+                        "run_parallel_compiler_tests.sh compiler-uncovered",
+                        "ci_dependency_mode_smoke.sh")
+                else
+                    local native_cache = named_step(suite,
+                        "Restore the Lua SDK and pinned Windows native dependency builds")
+                    assert_ordered(native_cache, "/bin/lua.exe", "/bin/luac.exe", "/bin/lua55.dll",
+                        "/include/lua*.h", "/include/lauxlib.h", "/include/lualib.h", "/include/lua.hpp",
+                        "/lib/liblua55.a", "/share/man", "/src/lua-5.5.1", "-native-layout-",
+                        "env.OPENSSL_MODE", "steps.toolchain.outputs.native-flags", "hashFiles('Makefile.win'",
+                        "'vendor/windows-native/dependencies.tsv'", "'vendor/libbacktrace/dependencies.tsv'")
+                    local lua_build = named_step(suite, "Build Lua, LuaRocks and the pinned native dependencies")
+                    assert_ordered(lua_build, "mingw32-make -f Makefile.win lua luarocks libbacktrace native",
+                        "for header in lua.h luaconf.h lauxlib.h lualib.h lua.hpp",
+                        'test -f "$PREFIX/include/$header"')
+                    assert_ordered(suite, "matrix:\n        include:",
+                        "suite: native-aggregate", "suite: native-retained\n            group: retained",
+                        "suite: compiler-1\n            group: windows-compiler-shard-1",
+                        "suite: compiler-2\n            group: windows-compiler-shard-2", "defaults:")
+                    assert.equal(4, count_literal(suite, "- suite:"), suite)
+                    for _, step in ipairs({
+                        "Save the Lua SDK and pinned Windows native dependency builds",
+                        "Save standalone-prefix LuaRocks dependencies",
+                        "Save Windows C-probe results",
+                        "Build and run the complete Windows native stdlib aggregate",
+                    }) do
+                        local body = named_step(suite, step)
+                        assert.truthy(body:find("if: matrix.suite == 'native-aggregate'", 1, true), body)
+                    end
+                    assert_ordered(suite, "msys2/setup-msys2@v2", "msystem: CLANG64", "cache: true",
+                        "mingw32-make -f Makefile.win compiler-deps",
+                        "mingw32-make -f Makefile.win compiler",
+                        "mingw32-make -f Makefile.win titan-stdlib-test",
+                        "matrix.group != ''",
+                        'TITAN_ROCK_TEST_JOBS: "4"',
+                        "TITAN_COMPILER_GROUP: ${{ matrix.group }}",
+                        "TITAN_ROCK_TEST_SUPERVISOR")
+                end
+            end
             local sanitizer_cache_index = assert(sanitizer_job:find(
                 "- name: Restore sanitizer C-probe results", 1, true))
             local sanitizer_build_index = assert(sanitizer_job:find(
@@ -6821,7 +6869,6 @@ printf '%s\n' "${schedule[@]}"
                 "run: make openssl",
                 "Canary source-rock installation with system OpenSSL",
                 "OPENSSL_MODE=system",
-                "brew install cmake readline openssl@3 pkgconf",
                 "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
@@ -6843,7 +6890,7 @@ printf '%s\n' "${schedule[@]}"
                 'TITAN_COVERAGE_TEST_REQUIRED: "1"'), native_coverage_job)
             assert.equal(1, count_literal(native_coverage_job,
                 "clang-format --version"), native_coverage_job)
-            for _, ordinary_job in ipairs({ build_job, sanitizer_job, macos_job }) do
+            for _, ordinary_job in ipairs({ build_job, sanitizer_job }) do
                 assert.falsy(ordinary_job:find("clang-format", 1, true), ordinary_job)
             end
             assert.equal(1, count_literal(workflow,
@@ -6924,7 +6971,7 @@ printf '%s\n' "${schedule[@]}"
                 'TITAN_JOBS=1',
                 "shard_job_policy='unset MAKEFLAGS MFLAGS MAKELEVEL TITAN_JOBS'",
                 'CCACHE_TEMPDIR="$worker_root/tmp-$shard/ccache"',
-                '-o gtest -v "\\$test_file"',
+                '-o gtest -v --defer-print "\\$test_file"',
                 'printf \'[compiler shard %s] %s\\n\'',
                 "trap 'handle_signal 143' TERM",
                 'kill -TERM -- "-$pid"',
@@ -7083,8 +7130,6 @@ printf '%s\n' "${schedule[@]}"
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "runs-on: ubicloud-standard-4"), sanitizer_job)
-            assert.equal(1, count_literal(sanitizer_job,
                 'MAKEFLAGS: "-j4"'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 'TITAN_JOBS: "4"'), sanitizer_job)
@@ -7134,7 +7179,7 @@ printf '%s\n' "${schedule[@]}"
                 'cc_version="$(cc -dumpfullversion -dumpversion)"',
                 'system_packages="$(dpkg-query',
                 "id: sanitizer-native-cache",
-                "uses: ubicloud/cache/restore@v4",
+                "uses: actions/cache/restore@v4",
                 "path: |",
                 "lua-${{ env.SANITIZER_LUA_VERSION }}",
                 "libbacktrace",
@@ -7147,7 +7192,7 @@ printf '%s\n' "${schedule[@]}"
                 "test -f sqlite3-build/libtitan-sqlite3.a",
                 "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}",
                 "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz",
-                "uses: ubicloud/cache/save@v4",
+                "uses: actions/cache/save@v4",
                 "steps.sanitizer-native-cache.outputs.cache-primary-key",
                 "steps.sanitizer-native-cache.outputs.cache-hit != 'true'",
                 'test ! -e "$PREFIX/bin/luarocks"',
@@ -7750,6 +7795,43 @@ printf '%s\n' "${schedule[@]}"
             }, "compiler spec appears in both partitions")
         end)
 
+    it("partitions the hosted Windows Busted files exactly once, with exclusive specs in their own workers",
+        function()
+            local helper = "spec/support/compiler_test_groups.lua"
+            local groups = assert(loadfile(helper))()
+            local inventory = assert(groups.load())
+            local lua = installed_prefix.active() .. "/bin/" .. (platform.windows and "lua.exe" or "lua")
+            local root = make_temp_dir()
+            local tested, failure = xpcall(function()
+                local seen = {}
+                for _, group in ipairs({ "retained", "windows-compiler-shard-1", "windows-compiler-shard-2" }) do
+                    local output_dir = root .. "/" .. group
+                    assert.truthy(lfs.mkdir(output_dir))
+                    local ok, output = run_argv({lua, "-E", helper, "local-plan", "4", output_dir, group})
+                    assert.truthy(ok, output)
+                    local summary = read_file(output_dir .. "/plan.summary")
+                    assert.truthy(summary:find("effective_jobs=4\n", 1, true), summary)
+                    for entry in lfs.dir(output_dir) do
+                        if entry:match("^files%-.+%.txt$") then
+                            local exclusive = entry == "files-exclusive.txt"
+                            for path in read_file(output_dir .. "/" .. entry):gmatch("[^\n]+") do
+                                local item = assert(inventory.by_path[path], path)
+                                assert.falsy(seen[path], path)
+                                assert.equal(exclusive, item.exclusive, path)
+                                assert.equal(group == "retained", item.domain == "retained", path)
+                                seen[path] = true
+                            end
+                        end
+                    end
+                end
+                for _, item in ipairs(inventory.items) do
+                    assert.truthy(seen[item.path], item.path)
+                end
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(failure, 0) end
+        end)
+
     it("drains all files and workers after an early spec failure and reports per-file summaries",
         function()
             if platform.windows then
@@ -7808,7 +7890,11 @@ end)
                 make_spec("spec/retained_fail_spec.lua",
                     record_snippet("retained_fail", true))
                 make_spec("spec/retained_pass_spec.lua",
-                    record_snippet("retained_pass", false))
+                    record_snippet("retained_pass", false) .. [[
+it("reports pending reasons in worker output", function()
+    pending("fixture pending reason: native symlink resolution is unavailable")
+end)
+]])
                 make_spec("spec/stdlib_one_spec.lua",
                     record_snippet("stdlib_one", false))
                 make_spec("spec/compiler_a_spec.lua",
@@ -7874,6 +7960,9 @@ end)
                 assert.truthy(output:find(
                     "Per-file Busted summary: passed=6 failed=1 total=7", 1, true),
                     output)
+                assert.truthy(output:find(
+                    "fixture pending reason: native symlink resolution is unavailable",
+                    1, true), output)
                 assert.truthy(output:find(
                     "FAILED spec file: spec/retained_fail_spec.lua", 1, true),
                     output)

@@ -302,7 +302,7 @@ trap cleanup EXIT
 install_signal_handlers
 
 "$lua_cmd" -E "$workspace/spec/support/compiler_test_groups.lua" \
-    local-plan "$jobs" "$worker_root" || exit 2
+    local-plan "$jobs" "$worker_root" "${1:-all}" || exit 2
 effective_jobs=0
 exclusive_count=0
 while IFS='=' read -r key val; do
@@ -473,7 +473,9 @@ while IFS= read -r test_file || [[ -n \$test_file ]]; do
     [[ -n \$test_file ]] || continue
     file_started=\$SECONDS
     file_status=0
-    '$busted' -o gtest -v "\$test_file" < /dev/null || file_status=\$?
+    # Busted's gtest handler only prints pending reasons with --defer-print.
+    # Failure descriptions also wait for the summary, but status lines stay live.
+    '$busted' -o gtest -v --defer-print "\$test_file" < /dev/null || file_status=\$?
     file_elapsed=\$((SECONDS - file_started))
     if (( file_status != 0 )); then
         shard_status=1

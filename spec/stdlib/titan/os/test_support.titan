@@ -135,6 +135,18 @@ local function host_time(): integer
   return ffi.time(nil) as integer
 end
 
+local function host_july_noon(isdst: foreign int): integer
+  local calendar = foreign tm.new()
+  calendar.tm_year = 120 as foreign int
+  calendar.tm_mon = 6 as foreign int
+  calendar.tm_mday = 1 as foreign int
+  calendar.tm_hour = 12 as foreign int
+  calendar.tm_isdst = isdst
+  local instant = ffi.mktime(calendar) as integer
+  test.assert(instant ~= -1, "mktime could not represent July noon")
+  return instant
+end
+
 local function c_utc_format(format: string): string
   local instant = 0 as foreign time_t
   local calendar = ffi.gmtime(instant)

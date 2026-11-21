@@ -34,7 +34,6 @@ int titan_test_tcp_stdio_install_fd(int source_fd, int target_fd);
 int titan_test_tcp_stdio_close_fd(int fd);
 int titan_test_tcp_stdio_reset_close(int fd);
 int titan_test_tcp_stdio_bound_buffers(int accepted_fd, int peer_fd, int bytes);
-int titan_test_tcp_stdio_pending_send_bytes(int fd);
 int titan_test_tcp_stdio_spawn_child(
     const char *program, const char *mode, const char *arg1, const char *arg2,
     int ipv6, int alias_stderr, int *peer_fd_out, int *child_pid_out);

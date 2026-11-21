@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="doc/images/titan-logo.svg" alt="Titan logo: the moon Titan in front of Saturn, with the rings seen edge-on" width="180">
+</p>
+
 # Titan
 [![CI](https://github.com/mascarenhas/titan/actions/workflows/ci.yml/badge.svg)](https://github.com/mascarenhas/titan/actions/workflows/ci.yml)
 [![Coverage Status](https://codecov.io/gh/titan-lang/titan/coverage.svg?branch=master)](https://codecov.io/gh/titan-lang/titan/branch/master)

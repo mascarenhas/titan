@@ -71,7 +71,9 @@ describe("compiled-module ABI version", function()
         f = assert(io.open(".github/workflows/macos.yml", "r"))
         local macos_workflow = f:read("*a")
         f:close()
-        local workflow = linux_workflow .. "\n" .. macos_workflow
+        f = assert(io.open(".github/workflows/windows.yml", "r"))
+        local windows_workflow = f:read("*a")
+        f:close()
         f = assert(io.open("spec/support/async_stdlib.lua", "r"))
         local async_support = f:read("*a")
         f:close()
@@ -119,33 +121,41 @@ describe("compiled-module ABI version", function()
         assert.match("TITAN_LIBRARY_VERSION%s*:?=", makefile)
         assert.truthy(makefile:find(
             "TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)", 1, true))
-        assert.match("TITAN_PATH_0_6", workflow)
-        for _, lane in ipairs({ linux_workflow, macos_workflow }) do
-            assert.equal(1, count_plain(
-                lane, 'TITAN_ABI_VERSION: "2"'))
-        end
+        assert.match("TITAN_PATH_0_6", linux_workflow)
         local cache_abi = "abi-${{ env.TITAN_ABI_VERSION }}"
-        assert.equal(4, count_plain(workflow, cache_abi))
-        assert.equal(4, count_plain(workflow,
-            ".lua/var/cache/titan-probes/" .. cprobe_cache.VERSION))
-        assert.equal(6, count_plain(workflow,
-            "titan-probes-" .. cprobe_cache.VERSION .. "-"))
-        assert.truthy(workflow:find(
-            "Prepare the standalone prefix", 1, true))
-        assert.truthy(workflow:find(
-            "libreadline-dev libssl-dev perl", 1, true))
-        assert.falsy(workflow:find("READLINE_MODE", 1, true))
-        assert.truthy(workflow:find(
-            "make lua", 1, true))
-        assert.truthy(workflow:find(
-            "make luarocks", 1, true))
-        assert.truthy(workflow:find(
-            '"$PREFIX/bin/luarocks" remove titan --force', 1, true))
-        assert.equal(3, count_plain(workflow,
-            'runtime_archive="$PREFIX/lib/titan/0.6/libtitan.a"'))
-        assert.equal(3, count_plain(workflow,
-            'test ! -e "$PREFIX/lib/libtitan.a"'))
-        assert.not_match("ci_abi_migration_smoke", workflow)
+        local probes_path = ".lua/var/cache/titan-probes/" .. cprobe_cache.VERSION
+        local probes_key = "titan-probes-" .. cprobe_cache.VERSION .. "-"
+        for _, lane in ipairs({ linux_workflow, macos_workflow, windows_workflow }) do
+            assert.equal(1, count_plain(lane,
+                'TITAN_ABI_VERSION: "' .. runtime_abi .. '"'))
+            assert.falsy(lane:find("READLINE_MODE", 1, true))
+            assert.falsy(lane:find("ci_abi_migration_smoke", 1, true))
+        end
+        assert.equal(2, count_plain(linux_workflow, cache_abi))
+        assert.truthy(linux_workflow:find('"titan_abi=$TITAN_ABI_VERSION"', 1, true))
+        assert.equal(3, count_plain(linux_workflow, probes_path))
+        assert.equal(4, count_plain(linux_workflow, probes_key))
+        for _, lane in ipairs({ macos_workflow, windows_workflow }) do
+            assert.equal(1, count_plain(lane, cache_abi))
+            -- The probe path is defined once as a YAML anchor; the save step reuses it.
+            assert.equal(1, count_plain(lane, probes_path))
+            assert.equal(2, count_plain(lane, probes_key))
+        end
+        for _, contract in ipairs({
+            "Prepare the standalone prefix",
+            "libreadline-dev libssl-dev perl",
+            '"$PREFIX/bin/luarocks" remove titan --force',
+        }) do
+            assert.truthy(linux_workflow:find(contract, 1, true), contract)
+        end
+        for _, unix in ipairs({ { linux_workflow, 2 }, { macos_workflow, 1 } }) do
+            local lane, installs = table.unpack(unix)
+            assert.truthy(lane:find("make lua", 1, true))
+            assert.truthy(lane:find("make luarocks", 1, true))
+            assert.equal(installs, count_plain(lane,
+                'runtime_archive="$PREFIX/lib/titan/0.6/libtitan.a"'))
+            assert.equal(installs, count_plain(lane, 'test ! -e "$PREFIX/lib/libtitan.a"'))
+        end
         assert.is_nil(io.open("spec/support/ci_abi_migration_smoke.sh", "r"))
         assert.truthy(async_support:find(
             'prefix .. "/lib/titan/0.6"', 1, true))

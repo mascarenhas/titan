@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="titan-logo-title">
+  <title id="titan-logo-title">Titan</title>
+  <desc>Titan passing in front of Saturn, with the edge-on rings crossing the planet. Inspired by a NASA Cassini image.</desc>
+  <defs>
+    <radialGradient id="tl-day" cx="0.34" cy="0.36" r="0.78">
+      <stop offset="0" stop-color="#f4edc4"/>
+      <stop offset="0.45" stop-color="#e2d898"/>
+      <stop offset="0.82" stop-color="#bdb878"/>
+      <stop offset="1" stop-color="#9a9862"/>
+    </radialGradient>
+    <radialGradient id="tl-night" cx="0.1" cy="0.36" r="1">
+      <stop offset="0" stop-color="#0a0c08" stop-opacity="0"/>
+      <stop offset="0.46" stop-color="#0a0c08" stop-opacity="0"/>
+      <stop offset="0.68" stop-color="#0a0c08" stop-opacity="0.7"/>
+      <stop offset="0.84" stop-color="#050604" stop-opacity="1"/>
+    </radialGradient>
+    <radialGradient id="tl-moon" cx="0.36" cy="0.34" r="0.75">
+      <stop offset="0" stop-color="#93854b"/>
+      <stop offset="0.6" stop-color="#655934"/>
+      <stop offset="1" stop-color="#3c341d"/>
+    </radialGradient>
+    <clipPath id="tl-disk">
+      <circle cx="132" cy="124" r="94"/>
+    </clipPath>
+  </defs>
+  <circle cx="132" cy="124" r="94" fill="url(#tl-day)"/>
+  <g clip-path="url(#tl-disk)">
+    <g transform="rotate(-18 132 124)">
+      <ellipse cx="132" cy="56" rx="130" ry="13" fill="#d3e2d6" opacity="0.32"/>
+      <ellipse cx="132" cy="82" rx="130" ry="7" fill="#f7f0ca" opacity="0.4"/>
+      <ellipse cx="132" cy="104" rx="130" ry="5" fill="#b6ad6e" opacity="0.28"/>
+      <path d="M -20 124 A 152 46 0 0 0 284 124" fill="none" stroke="#1f2218" stroke-width="13" opacity="0.84"/>
+      <path d="M -24 124 A 156 64 0 0 0 288 124" fill="none" stroke="#1f2218" stroke-width="5" opacity="0.8"/>
+    </g>
+  </g>
+  <circle cx="132" cy="124" r="94.5" fill="url(#tl-night)"/>
+  <g transform="rotate(-18 132 124)">
+    <line x1="2" y1="124" x2="258" y2="124" stroke="#4a4630" stroke-width="4.6" opacity="0.6"/>
+    <line x1="2" y1="124" x2="258" y2="124" stroke="#ece5c1" stroke-width="1.8"/>
+    <line x1="2" y1="127.6" x2="258" y2="127.6" stroke="#d8d1a2" stroke-width="0.8" opacity="0.55"/>
+  </g>
+  <circle cx="90" cy="129" r="26" fill="url(#tl-moon)"/>
+  <circle cx="90" cy="129" r="26.6" fill="none" stroke="#b9ad6b" stroke-width="1.2" opacity="0.55"/>
+</svg>

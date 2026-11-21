@@ -197,10 +197,11 @@ broadly delete `.a`, `.so`, or authored C fixtures. Clean affected generated/nat
 when changing tools, flags, profile, or OpenSSL mode, following documented
 ownership boundaries. Serialize builds that share those outputs.
 
-Linux push CI and local validation are separate evidence. Complete macOS
-validation is a pre-merge gate; prefer the complete local VM run and record its
-architecture. Hosted `macos.yml` is a manual fallback: dispatch only after an
-explicit maintainer request for macOS CI; opening/updating a PR is insufficient.
+Hosted Linux, macOS, and Windows CI and local validation are separate
+evidence. Complete macOS validation remains a pre-merge gate. Record the
+architecture and exact revision of any equivalent local run. The macOS and
+Windows workflows run automatically; see [hosted
+platforms](doc/implementation/continuous-integration.md#hosted-macos-and-windows).
 Keep Windows source/output state separate from Unix, use `Makefile.win`, and
 validate filesystem/SQLite/local watchers on NTFS. A VM boot or component check
 is not complete platform validation.

@@ -27,6 +27,9 @@ local function remove_tree(path)
             if name ~= "." and name ~= ".." then remove_tree(path .. "/" .. name) end
         end
         assert(lfs.rmdir(path))
+    elseif mode == "link" and package.config:sub(1, 1) == "\\" then
+        -- Remove the directory link itself, not the linked tree.
+        assert(lfs.rmdir(path) or os.remove(path))
     elseif mode then
         assert(os.remove(path))
     end

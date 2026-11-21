@@ -46,10 +46,16 @@ local function run()
     assert(stat(a, true).size == #binary and stat(b, true).size == 6)
     assert(stat(a, false).kind == "file")
     assert(strategy:read_file(a) == binary)
-    assert(strategy:realpath(a) == paths.normalize(a))
-    local dotted = paths.join(unicode, "..", paths.basename(unicode), paths.basename(a))
-    assert(strategy:realpath(dotted) == paths.normalize(a))
-    assert(strategy:realpath(unicode) == paths.normalize(unicode))
+    local physical_parent = assert(strategy:realpath(parent))
+    local physical_unicode = paths.join(
+        physical_parent, paths.basename(root), paths.basename(unicode))
+    local physical_file = assert(strategy:realpath(a))
+    assert(paths.normalize(physical_file) ==
+        paths.join(physical_unicode, paths.basename(a)))
+    local dotted = table.concat(
+        { unicode, "..", paths.basename(unicode), paths.basename(a) }, paths.separator)
+    assert(assert(strategy:realpath(dotted)) == physical_file)
+    assert(paths.normalize(assert(strategy:realpath(unicode))) == physical_unicode)
 
     local renamed = reserve(paths.join(unicode, "renamed.bin"))
     assert(strategy:rename(a, renamed))

@@ -73,10 +73,12 @@ requires at least one `--test-dir`. Each `DIR` is resolved relative to the
 invocation working directory via `context.io:stat` and `context.io:realpath`.
 A missing, unreadable, or non-directory `DIR` fails immediately. Every `DIR`
 must lie lexically or physically inside a configured `--tree` source root
-(`driver.TITAN_SOURCE_PATH`); `testroots.discover` selects the **first**
-configured containing `--tree` root in `--tree` order to derive the directory's
-logical module prefix, rather than stripping `DIR`'s basename or choosing a
-longest prefix. Repeated or overlapping `--test-dir` arguments deduplicate.
+(`driver.TITAN_SOURCE_PATH`), matching symlinked source-tree aliases on both
+POSIX and Windows through `context.io:realpath`; `testroots.discover` selects
+the **first** configured containing `--tree` root in `--tree` order to derive
+the directory's logical module prefix, rather than stripping `DIR`'s basename
+or choosing a longest prefix. Repeated or overlapping `--test-dir` arguments
+deduplicate.
 
 For each discovery area, `testroots.discover` walks entries in bytewise order
 with `context.io:list` and `context.io:lstat`, yielding cooperatively through
@@ -658,6 +660,9 @@ local validation seconds, and an optional covered-seconds column
 name, it holds Linux CI covered+stress durations only in `compiler` rows. In
 `stdlib` rows it holds same-host serial four-CPU LuaCov diagnostic seconds of
 the CI step's files, not a CI run, and `retained` rows leave it `-`. The
+optional `windows_uncovered_seconds` column records hosted CLANG64
+validation timings without coverage. The Windows compiler shards fall back
+to local validation seconds for files not yet measured on Windows. The
 `retained` domain is the runtime/packaging set
 (`Makefile` `STDLIB_BUSTED_TESTS`, `Makefile.win`
 `TITAN_ROCK_TEST_STDLIB_SPECS`), `stdlib` is

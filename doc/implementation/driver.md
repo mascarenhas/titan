@@ -1382,7 +1382,7 @@ backend-specific records, arrays, error objects, or task handles.
 | Method | Result and contract |
 | --- | --- |
 | `cwd()` | `pathname, nil` or `nil, message`. Returns the process working directory as an absolute pathname without changing it. |
-| `realpath(path)` | `pathname, nil` or `nil, message`. Returns an absolute existing path. POSIX resolves symbolic links; the synchronous Windows implementation normalizes the lexical spelling. |
+| `realpath(path)` | `pathname, nil` or `nil, message`. Returns an absolute existing physical path, resolving symbolic links and rejecting dangling links (mapping missing paths and dangling links to `"path does not exist: <path>"`). On Windows, the synchronous strategy calls libuv `fs_realpath` directly (`titan-compiler/io.lua`); ordinary Windows path handling keeps Win32 lexical `..` traversal. |
 | `stat(path)` | `metadata, nil`, `nil, nil` for a clean missing path, or `nil, message`. Follows the final symbolic link. |
 | `lstat(path)` | The same result convention as `stat`, but describes the final symbolic link itself. |
 | `readable(path)` | One boolean. `true` means the path can be opened for binary reading; absence, invalid input, and ordinary open failures are `false`. |
@@ -1575,13 +1575,18 @@ Every successfully checked source entry also owns an ordered
 The checker unions the complete written/imported foreign-include set for that
 module, deduplicates identical `kind .. "\0" .. path` entries in first-seen
 order (so `file` and `origin` entries for the same header coexist), and rejects
-conflicting identities from one check. Paths are absolute lookup spellings: a
-relative candidate is prefixed with the captured process cwd and harmless
-standalone `.` components are removed, but `..`, repeated separators, and
-symbolic-link components remain untouched. Restat and generated C therefore
-traverse the same lookup route; retargeting a symbolic link changes the
-`search` or `origin` identity instead of leaving a cache entry pinned to its
-former target. Configured `-imacros` and `-include` inputs are part of this
+conflicting identities from one check. Paths are recorded as absolute lookup
+spellings (`c-parser/cpp.lua` `cpp.absolute_lookup_path`) that match each
+platform's native traversal: on POSIX, a relative candidate is prefixed with the
+captured process cwd and harmless standalone `.` components are removed, while
+`..`, repeated separators, and symbolic-link components remain untouched; on
+Windows, `platform.absolute` applies lexical normalization (collapsing `..` to
+match Win32 traversal, while leaving remaining symbolic-link components
+unfollowed), so Titan's preprocessor and the native C compiler select the same
+header on Windows. Restat and generated C therefore traverse the same lookup
+route; retargeting a symbolic link changes the `search` or `origin` identity
+instead of leaving a cache entry pinned to its former target. Configured
+`-imacros` and `-include` inputs are part of this
 same per-module closure, including their transitive includes and every
 candidate consulted to resolve a relative operand. Resolver-owned generated
 `.ffi.h` trees are parsed by `cdriver` as the module C environment. Their
@@ -1754,10 +1759,13 @@ native_references, objects`.
    text-mode semantics.
 5. **Preflight.** Before any invalidation or write, `driver.compile`
    validates the plan with `driver.validate_provider_output_paths`: an
-   existing output must be a regular non-link file, and no output may alias
-   another output or an input (normalized path, symlink-resolved path,
-   case-folded path, or the same existing file through a hard link) or nest
-   below one. It then records the module's public `external_symbols` and its
+   existing output must be a regular non-link file (preflight rejects a link or
+   other wrong-kind output leaf—including a self-referential link on Windows—from
+   its no-follow `lstat` metadata before following it, while input alias checks
+   still follow links for target identity), and no output may alias another
+   output or an input (normalized path, symlink-resolved path, case-folded path,
+   or the same existing file through a hard link) or nest below one. It then
+   records the module's public `external_symbols` and its
    `private_symbols` with `driver.record_module_symbols`. The CLI does the same
    for the whole link set first; see
    [batch planning](#batch-planning-drivercompile_modules).
@@ -3432,9 +3440,12 @@ shell-status behavior described in [Compiling one
 module](#compiling-one-module-drivercompile).
 
 The synchronous compiler filesystem implementation uses LuaFileSystem and Lua's
-ordinary file operations. Windows `realpath` checks that the path exists and
-returns its normalized absolute lexical spelling. It does not resolve links or
-query handle-based file identities. `stat` and `lstat` normalize LuaFileSystem's
+ordinary file operations alongside libuv `fs_realpath` for Windows canonical
+paths. Windows `realpath` resolves physical paths through libuv `fs_realpath`
+(`titan-compiler/io.lua`), following existing links and rejecting missing
+targets or dangling links with `"path does not exist: <path>"`; ordinary
+Windows path operations keep Win32 lexical `..` traversal. In the LuaFileSystem
+fallback, `stat` and `lstat` normalize LuaFileSystem's
 size, kind, mode and modification time; Windows device/inode fields are absent
 because LuaFileSystem does not expose useful Windows file identities. C-header
 validation therefore reads and hashes the file instead of using the optional

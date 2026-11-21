@@ -1,8 +1,9 @@
 # Continuous integration and platform validation
 
 The executable definitions are `.github/workflows/ci.yml`,
-`.github/workflows/macos.yml`, and `spec/support/ci_*.sh`. This chapter explains
-their ownership and ordering contracts and is the canonical description of the
+`.github/workflows/macos.yml`, `.github/workflows/windows.yml`, and
+`spec/support/ci_*.sh`. This chapter explains their ownership and ordering
+contracts and is the canonical description of the
 CI lanes. Local setup and commands are in [repository
 workflow](repository-workflow.md); test implementation, local Busted
 partitions and native coverage are in [test runner](test-runner.md) and
@@ -12,30 +13,50 @@ coverage reports upload from `out/coverage/report`.
 
 ## Linux job graph and concurrency
 
-Linux runs on pushes. Eight job definitions produce fifteen runner
+Linux runs on pushes. Eight job definitions produce fourteen runner
 executions: `build-compiler`, `sanitizer`, and
 [`browser-packaging`](#browser-packaging-job) start independently; after
 `build-compiler`, two `test-linux-compiler` shard pairs, `native-coverage`,
 [`browser-toolchain`](#browser-toolchain-job), two
-[`browser-stdlib`](#browser-stdlib-job) shards, and the six-cell
-[`browser-playwright`](#browser-playwright-job) matrix (`validation` and
-`production` profiles across `chromium`, `firefox`, and `webkit`) start in
-parallel. Preparation has a 30-minute timeout, compiler pairs and
-`browser-packaging` 45 minutes, native coverage, the other browser jobs, and
-the `browser-playwright` cells 60 minutes, and the independent cold sanitizer
-build 75 minutes.
+[`browser-stdlib`](#browser-stdlib-job) shards and five
+[`browser-playwright`](#browser-playwright-job) cells start in parallel.
+Both profiles still run Chromium, Firefox, and WebKit; the validation
+Firefox and WebKit gates share one runner.
 
-Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
-The native coverage, sanitizer, and browser jobs each use a four-vCPU runner
-with 16GB RAM and override both limits to four. Large instrumented test units
-in the sanitizer job exceed the smaller runner's 8GB RAM.
-Under these caps, native Make prerequisites and the standard-library and
+All Linux jobs use the [standard GitHub-hosted `ubuntu-24.04`
+runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories)
+for public repositories: four vCPUs, 16 GB RAM, and about 14 GB of guaranteed
+free SSD space.
+
+| Jobs | Make and Titan job slots | Timeout |
+| --- | ---: | ---: |
+| `build-compiler` | 2 | 30 min |
+| `test-linux-compiler` | 2 | 45 min |
+| `browser-packaging` | 4 | 45 min |
+| `browser-toolchain`, `browser-stdlib`, `browser-playwright`, `native-coverage` | 4 | 60 min |
+| `sanitizer` | 4 | 75 min |
+
+No lane previously required a runner larger than four vCPUs and 16 GB.
+Sanitizer compilation has the tightest memory margin: a local `act` run
+peaked near 97% of its 16 GiB cgroup limit. That is not a measurement of
+memory available on the hosted VM. The job graph and timeout limits stay
+unchanged; use hosted step durations and failure logs before changing either.
+
+After checkout and before any cache restore, all four browser jobs,
+`native-coverage`, and `sanitizer` run **Free disk space for build outputs**.
+On GitHub-hosted runners only, it removes the image's unused Android SDK
+(including its NDKs) at `/usr/local/lib/android/sdk` and logs `df -h` for
+the workspace and runner temp directory before and after. This makes room
+for emsdk, browser downloads, native dependency caches, and large test
+and link outputs without removing build tools the jobs need.
+
+Native Make prerequisites and the standard-library and
 native-test module objects overlap in one Make pool: every `titanc` recipe is a
 `+` recipe that shares it ([Make job pool and titanc
 recipes](build-script-audit.md#make-job-pool-and-titanc-recipes)), and each
 compiler process overlaps only its generated-C compilations inside it. The
-explicit caps keep the Makefile's default four-slot pool from oversubscribing
-the two-vCPU runners. Compiler shards override nested Make/Titan work to one
+compiler jobs retain the two-slot cap rather than inheriting Make's default
+of four. Compiler shards override nested Make/Titan work to one
 slot outside their exclusive phase and run at most two workers per runner; the
 native coverage job's two installed-stdlib integration workers take two slots
 each.
@@ -199,9 +220,9 @@ to write the record; the workflow hardcodes no fork revision. Pins live in
 `TITAN_CHROME_VERSION`, `TITAN_CHROME_SHA256`, `TITAN_CHROME_ROOT`), because
 `emsdk_env.sh` unsets every `EMSDK_*` variable it does not set itself, and each
 job sets `permissions.id-token: write` for its own Codecov upload. All three
-jobs begin with the same seven steps:
+jobs use the same seven setup stages after the disk-space step:
 
-1. **Emscripten.** `ubicloud/cache@v4` restores `.emsdk` under the key
+1. **Emscripten.** `actions/cache@v4` restores `.emsdk` under the key
    `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
    (the installer, not the pin); `emsdk install 6.0.13` and `emsdk activate
    6.0.13` are idempotent, so a restored installation only re-verifies. The
@@ -213,7 +234,7 @@ jobs begin with the same seven steps:
    executable as `TITAN_NODE`. Browser commands use that path even after
    `emsdk_env.sh` changes `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
    only action runtimes, not the runtime that executes Titan images.
-3. **Chrome for Testing.** `ubicloud/cache@v4` restores the headless shell
+3. **Chrome for Testing.** `actions/cache@v4` restores the headless shell
    under `ubuntu-24.04-<arch>-chrome-headless-shell-156.0.8078.80-<sha256>-v1`
    (the ZIP digest is part of the cache key so re-pinning cannot restore an
    old binary). A miss downloads the pinned linux64 `chrome-headless-shell`
@@ -433,12 +454,14 @@ installed browser SDK and a Git checkout containing the pinned objects.
 ## `browser-playwright` job
 
 `browser-playwright` (`browser traces and bridge (${{ matrix.profile }}, ${{
-matrix.engine }}, Playwright 1.64.1)`) runs the multi-engine trace, bridge,
-live network and hosted deployment gates, and in `validation` cells the
-browser stdlib suite, on Linux across a six-cell `fail-fast: false` matrix
-(`profile: [validation, production]` × `engine: [chromium, firefox,
-webkit]`), each on a four-vCPU runner with a 60-minute timeout after
-`build-compiler`:
+matrix.engine }}, Playwright 1.64.1)`) runs the trace, bridge, live network,
+and hosted deployment gates, plus the browser stdlib suite in `validation`.
+Its `fail-fast: false` matrix has three `production` cells (one per engine),
+one `validation` Chromium cell, and one `validation` Firefox and WebKit cell.
+The paired engines share a prefix and build each image once, then run each
+engine's gates. The separate cells took 17m12s and 16m49s in hosted run
+44861279745, 34m01s combined before sharing setup and image builds. Each
+cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
 
 1. **Prefix preparation (`validation` versus `production`).** `validation`
    cells restore `titan-linux-prepared.tar.gz` into `$GITHUB_WORKSPACE/.lua`.
@@ -455,19 +478,19 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
    `make lua-browser PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`,
    asserting the installed `titan-browser-trace.js` and `titan-browser-bridge.js`
    and that `build-profile` holds the cell's profile.
-3. **Playwright engine provisioning and supervisor check.** `ubicloud/cache@v4`
+3. **Playwright engine provisioning and supervisor check.** `actions/cache@v4`
    restores `PLAYWRIGHT_BROWSERS_PATH` (`.playwright-browsers`) under
-   `ubuntu-24.04-<arch>-playwright-1.64.1-<engine>-v1`; `npm install --prefix
+   `ubuntu-24.04-<arch>-playwright-1.64.1-<cell>-v1`; `npm install --prefix
    "$TITAN_PLAYWRIGHT_ROOT"` (`out/playwright-tools`) installs
    `playwright@1.64.1`, whose engines are Chromium 156.0.8078.4, Firefox 157.0,
-   and WebKit 27.2. `playwright/cli.js install --with-deps
-   "$TITAN_TRACE_ENGINE"` provisions the cell's browser and host libraries;
-   `TITAN_PLAYWRIGHT_TEST_ENGINES="$TITAN_TRACE_ENGINE" "$TITAN_NODE" --test
-   spec/browser/playwright-runner.test.mjs` verifies the supervisor against that
-   managed engine (`$RUNNER_TEMP/browser-playwright-supervisor.log`).
+   and WebKit 27.2. `playwright/cli.js install --with-deps` provisions
+   the browsers in `TITAN_TRACE_ENGINES` and their host libraries.
+   `TITAN_PLAYWRIGHT_TEST_ENGINES` passes the same engine list as CSV to
+   `"$TITAN_NODE" --test spec/browser/playwright-runner.test.mjs` to verify
+   the supervisor on each engine (`$RUNNER_TEMP/browser-playwright-supervisor.log`).
 4. **Staged trace gate (`assertions-2` and `assertions-0`).** `lua -E
    spec/browser/build-trace.lua "$TITAN_TRACE_OUTPUT"`
-   (`out/browser/trace-<profile>-<engine>`, logged to
+   (`out/browser/trace-<profile>-<cell>`, logged to
    `$RUNNER_TEMP/browser-playwright-build.log`) builds the test image and the
    uncaught and async-bootstrap program images for both assertion modes with
    the cell's installed `titanc` and stages the degraded-map variants,
@@ -476,10 +499,10 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
    image it builds against the [import manifest](browser-target.md#import-manifest)
    classes of the fixtures that image links.
 5. **Positive trace gate.** `"$TITAN_NODE" spec/browser/playwright-run.mjs --engine
-   "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 --sdk
+   "$engine" --timeout 300000 --grace 2000 --sdk
    "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT"
    "$TITAN_TRACE_OUTPUT/trace.test.mjs"`
-   (`$RUNNER_TEMP/browser-playwright-trace.log`) runs the full file/line,
+   (`$RUNNER_TEMP/browser-playwright-trace-<engine>.log`) runs the full file/line,
    contributor, wrapper-family, merge-order, descriptor-safety,
    pin/rethrow/clear, coroutine-append, post-suspension Task and entry
    (titan#334), SpiderMonkey saved-parent cutoff and 128-frame ceiling,
@@ -494,12 +517,12 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
    `manifest.degradedCases` is first run with `playwright-run.mjs ... --image
    <row.image>` without `--allow-degraded-trace` and must fail with exit status
    1, the ordinary pre-Lua initialization failure
-   (`$RUNNER_TEMP/browser-playwright-policy.log`); then
+   (`$RUNNER_TEMP/browser-playwright-policy-<engine>.log`); then
    `playwright-run.mjs ... --allow-degraded-trace ... "$TITAN_TRACE_OUTPUT/trace.test.mjs"
-   -- --degraded` (`$RUNNER_TEMP/browser-playwright-degraded.log`) verifies the
-   single load warning, the `(native Titan frames unavailable: trace table not
-   loaded)` marker, and original-error preservation.
-7. **Persistent bridge gate (all six cells).** `lua -E
+   -- --degraded` (`$RUNNER_TEMP/browser-playwright-degraded-<engine>.log`)
+   verifies the single load warning, the `(native Titan frames unavailable:
+   trace table not loaded)` marker, and original-error preservation.
+7. **Persistent bridge gate (all engines).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
    `browser.tests` image with its independent-state C helper, the failed
    initializer image, the `browser.public_state_tests` image of public
@@ -507,9 +530,9 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
    synchronous C callbacks with its C helper, and the async driver's
    responsiveness program (`responsive.titan`), each with assertions 2 and 0.
    It stages those images and the portable JavaScript fixtures in
-   `out/browser/bridge-<profile>-<engine>`. `integration.mjs` receives the
+   `out/browser/bridge-<profile>-<cell>`. `integration.mjs` receives the
    first three images, and the negative scripts only the legacy bridge image.
-   The cell's managed engine runs the full lifecycle, typed values, callbacks,
+   Each managed engine runs the full lifecycle, typed values, callbacks,
    notification, request, stdio, state-close and collection suite;
    `counter.mjs` clicks the counter's buttons on the page (`COUNTER
    {"verdict":"PASS"`), and `responsive.mjs` measures a 10 ms `setInterval`
@@ -527,36 +550,36 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
    `$RUNNER_TEMP/browser-playwright-bridge-build.log` and
    `$RUNNER_TEMP/browser-playwright-bridge.log`. The bridge images are built
    before the live network gate (step 8) and run after it.
-8. **Live network gate (all six cells).** `lua -E spec/browser/build-net.lua
+8. **Live network gate (all engines).** `lua -E spec/browser/build-net.lua
    "$TITAN_NET_OUTPUT"` (`out/browser-net`, logged to
    `$RUNNER_TEMP/browser-playwright-net-build.log`) builds the native network
    peers and the `http.browser_tests` and `websocket.browser_tests` images with
    the cell's installed `titanc`. Chromium cells then check `python3
    --version`, because the NSS trust setup needs it. `"$TITAN_NODE"
    spec/fixtures/browser_net/run.mjs --root "$TITAN_NET_OUTPUT" --engine
-   "$TITAN_TRACE_ENGINE" --sdk "$PREFIX/lib/titan-browser/0.6" --runner
+   "$engine" --sdk "$PREFIX/lib/titan-browser/0.6" --runner
    "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD"
-   --persistent-webkit` (`$RUNNER_TEMP/browser-playwright-net.log`) runs them
-   on the cell's engine against those peers
-   ([live browser network harness](browser-target.md#the-live-browser-network-harness)).
+   --persistent-webkit` runs them on each engine against those peers
+   (`$RUNNER_TEMP/browser-playwright-net-<engine>.log`; [live browser network
+   harness](browser-target.md#the-live-browser-network-harness)).
    Verified `https://` and `wss://` run on Chromium, whose isolated NSS
    database trusts the test CA; Firefox and WebKit run the
    untrusted-certificate rejections, and WebKit runs in a persistent context
    so that its HTTP cache exists.
-9. **The complete application (all six cells).** `lua -E
+9. **The complete application (all engines).** `lua -E
    spec/browser/build-delivery.lua "$TITAN_DELIVERY_OUTPUT"`
    (`out/browser-delivery`, logged to
    `$RUNNER_TEMP/browser-playwright-delivery-build.log`) builds the browser
    chapter's complete application by its section's commands, in the cell's
    profile, and the documented `http-dev-server` natively. `"$TITAN_NODE"
-   spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE"
+   spec/fixtures/browser_delivery/hosted.mjs --engine "$engine"
    --root "$TITAN_DELIVERY_OUTPUT"`
-   (`$RUNNER_TEMP/browser-playwright-delivery.log`) serves it to a page in the
-   cell's engine and checks the documented output and trace, the page's exact
-   requests, and their order against the first output and the caught error
+   (`$RUNNER_TEMP/browser-playwright-delivery-<engine>.log`) serves it to a
+   page in each engine and checks the documented output and trace, the
+   page's exact requests, and their order against the first output and the caught error
    ([documentation checks](browser-target.md#documentation-checks)).
    `production` cells add `--records
-   "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json"`: startup
+   "$PWD/out/browser-records/playwright-$engine.json"`: startup
    and responsiveness over five loads, which never fail the step. Chromium
    cells also run the image under Node with `titan-browser-run --engine node
    --timeout 120000 --root "$TITAN_DELIVERY_OUTPUT" --js-test
@@ -577,8 +600,8 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
    `application/wasm`) and the trace table once each; no external Titan
    loader is served, and a copy without the trace table must fail through the
    page's `requireTrace: true`. Its output is
-   `$RUNNER_TEMP/browser-playwright-docs.log`. Firefox and WebKit cells keep
-   their own managed engine without installing another one for this gate.
+   `$RUNNER_TEMP/browser-playwright-docs.log`. Non-Chromium cells do not
+   install an additional engine for this gate.
 11. **Production-only pins (`production` × `chromium` only).** With
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` and `TITAN_PROBE_CACHE_DISABLE=1`,
    `"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua
@@ -614,12 +637,12 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
     (`$RUNNER_TEMP/browser-playwright-records.log`; [records](browser-target.md#records)).
 14. **Complete browser core stdlib suite (`validation` only, last).** With
     emsdk sourced, `make titan-stdlib-browser-test PREFIX="$PREFIX"
-    TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE"
+    TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINES"
     TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs
     --image --sdk \"$PREFIX/lib/titan-browser/0.6\""` builds the same single
-    stdlib image as `browser-stdlib`'s `sdk` shard and runs it on the cell's
-    managed engine (`$RUNNER_TEMP/browser-playwright-stdlib.log`). It is the
-    last test step, so a failing case leaves every earlier gate's receipts.
+    stdlib image as `browser-stdlib`'s `sdk` shard and runs it on every
+    managed engine in the cell (`$RUNNER_TEMP/browser-playwright-stdlib.log`).
+    It runs last, so a failing case leaves every earlier gate's receipts.
 15. **Receipts.** On `always()`, `actions/upload-artifact` uploads
     `${{ runner.temp }}/browser-playwright-*.log`,
     `${{ runner.temp }}/browser-production-pins.log`,
@@ -687,11 +710,11 @@ runner with `MAKEFLAGS=-j4` and `TITAN_JOBS=4`.
 
 ## Cache ownership
 
-Native dependency caches belong to their consuming stdlib/sanitizer lane, not
-the compiler producer. Prefix-owned `var/cache/titan-probes/2` is restored and
-saved independently in stdlib coverage, sanitizer, and macOS lanes. Compiler
-workers remain probe-cache-free because fixtures reuse header pathnames.
-Never restore probe evidence from a less-trusted writer.
+Linux native dependency caches belong to their consuming stdlib/sanitizer lane,
+not the compiler producer. Prefix-owned `var/cache/titan-probes/2` is restored
+and saved independently by platform and lane. Compiler workers remain
+probe-cache-free because fixtures reuse header pathnames. Never restore probe
+evidence from a less-trusted writer.
 
 Regular probe keys retain the `test-linux-stdlib` namespace and include
 OS/architecture/profile, an immutable commit key, and stable restore prefix.
@@ -705,11 +728,8 @@ changes what the cached tree must contain.
 
 ## Sanitizer ownership and failure diagnostics
 
-The disposable Linux sanitizer runner removes its unused preinstalled Android
-SDK at `/usr/local/lib/android/sdk` before building, and reports disk space
-before and after. Instrumented providers and static child fixtures need room
-for their link outputs. Make-owned runtime/provider archives, generated code,
-and diagnostic snapshots remain available throughout the gates.
+Make-owned runtime/provider archives, generated code, and diagnostic
+snapshots remain available throughout the gates.
 
 The sanitizer owns an independent ASan+UBSan Lua, libbacktrace, libuv, llhttp,
 OpenSSL, and Titan tree; it never consumes the ordinary compiler artifact.
@@ -819,35 +839,104 @@ stack, so a runner-image or compiler change that stops the placement fails the
 job instead of silently removing that coverage from the `test_unwind_` gate.
 Local Clang sanitizer lanes do not exercise the normalization.
 
-## macOS pre-merge gate
+## Hosted macOS and Windows
 
-Complete macOS validation is a pre-merge check. Prefer an equivalent complete
-local VM run covering runtime, packaging, native/compiler suites, and both
-OpenSSL production modes, with exact source and architecture evidence. Intel
-evidence does not establish Apple Silicon runtime behavior. The complete run
-uses the validation profile, including both dependency-mode smokes. For the
-companion extension, put GNU Make 4.4.1 first on `PATH` ahead of Apple Make 3.81.
+Like Linux CI, these separate native workflows run on pushes to all branches,
+not on pull request events. Both can also be dispatched manually. They use the
+`validation` profile and run no browser, sanitizer, or coverage lanes. The
+hosted runner labels select these public-repository budgets:
 
-The hosted `macos.yml` fallback is manual-only. PR creation/update does not
-authorize its cost; dispatch only with an explicit maintainer request:
+| Workflow | Runner | Build slots | Push jobs |
+| --- | --- | ---: | --- |
+| macOS | `macos-15` (arm64, 3 vCPU, 7 GB RAM) | 3 | Native and compiler |
+| Windows | `windows-2025-vs2026` (x64, 4 vCPU, 16 GB RAM) | 4 | Native aggregate, retained runtime/packaging, two compiler shards |
 
-```sh
-gh workflow run macos.yml --ref <branch>
-```
+The 14 Linux, two macOS, and four Windows jobs fit the repository's
+20-job standard-runner budget for one push. Jobs from other runs may
+still compete for slots.
 
-The hosted job sets all three concurrency bounds to three (`MAKEFLAGS=-j3`,
-`TITAN_JOBS=3`, and `TITAN_TEST_JOBS=3`), so its `make stdlib-test` runs the
-native aggregate as three ordinary owner groups followed by the timing-guarded
-owners alone. Its `libuv_build_spec.lua` checks Apple Make 3.81's serial
-default through `/usr/bin/make`; the GNU Make 4.2 pool-seeding case stays
-pending there, and `TITAN_TEST_LEGACY_MAKE` names an older GNU Make for that
-check on other hosts. It retries only dependency acquisition within the same prefix;
-build and complete test execution remain single-shot. Run all uncovered
-stdlib/runtime/packaging work and the aggregate before
-`ci_test_groups.sh compiler-uncovered`. Before compiler
-fixtures, use `ci_stdlib_snapshot.sh` to preserve the runtime archive and the
-canonical provider pair with its conditional dSYM, then restore them
-before bundled/system production smokes. Retain the real x86_64/arm64 universal
-Mach-O archive lookup/repackaging proof; a host-only synthetic check is not a
-replacement. Compiler/language specs must not delete shared runtime state to
-force recompilation.
+Every cell checks out the pinned sources, prepares an isolated SDK prefix,
+and installs the checked-out Titan rock. Rebuilding the rock in each cell
+avoids transporting SDKs and CMake state with embedded paths. The platform
+compiler jobs cover both the compiler/language and installed-stdlib
+integration domains without LuaCov. macOS runs them in one job with three
+ordinary workers. Windows splits them across two jobs with four workers
+each: `compiler_test_groups.lua local-plan` balances measured hosted Windows
+file times across runners, weighting exclusive files by four because they
+occupy the entire runner. Within each job, `run_parallel_compiler_tests.sh`
+gives each ordinary worker a private checkout and one nested Make/Titan
+slot. Each exclusive file runs alone on its assigned runner.
+
+Windows separates the full native-owner aggregate and retained Busted files
+into their own jobs. In Windows run 44861279779 those phases took 11m57s and
+8m47s, respectively. The timing plan estimates about 12 minutes of Busted work
+per compiler shard, excluding checkout copies and worker startup; the previous
+combined phase took 38m07s. With warm dependency caches and excluding queue time,
+expect roughly 18–23 minutes for the aggregate, 15–20 for the retained job,
+and 20–26 for each compiler shard. These are estimates, not hosted measurements
+of the split jobs. Together the jobs on each platform run every classified
+Busted file exactly once. A failing job does not cancel the other jobs.
+
+### macOS native lane and full dispatch
+
+The runner puts Homebrew GNU Make ahead of Apple Make 3.81 and gives fixtures
+a physical temp path under `/private/tmp`. Test drivers run in the foreground,
+not under `nohup`, so SIGHUP tests exercise the default signal behavior.
+`libuv_build_spec.lua` still checks Apple Make's serial default explicitly
+through `/usr/bin/make`. The real x86_64/arm64 universal Mach-O archive
+lookup and repackaging proof still runs; a host-only check is not a replacement.
+
+The native cell runs `make stdlib-test`, with three native owner groups and
+the timing-guarded owners alone, certifies that an identical SDK reinstall
+keeps all native aggregate artifacts reusable, checks the 15-second runtime
+shutdown case, and runs the bundled/system OpenSSL production smokes. Manual
+dispatch selects the `full` cell instead of the matrix. It additionally runs
+all compiler/language and installed-stdlib integration specs in private
+checkouts before the smokes.
+
+### Windows native lane
+
+The workflow provisions MSYS2 CLANG64/UCRT through `setup-msys2` with package
+caching enabled, and uses `mingw32-make -f Makefile.win` with native Clang.
+It leaves `LD` unset, preserves MSYS2's UTF-8 locale, and stages the checkout
+on a short fixed NTFS path on `C:` rather than using a runner work drive
+that may be ReFS. The aggregate cell uses the [complete Windows aggregate
+harness](windows-build.md#test-ownership-and-keep-going), with the same
+platform and capability skip rules as local validation. Busted workers use
+the existing Windows Job Object supervisor and its private checkout and
+TEMP paths. The hosted Windows validation build uses the pinned bundled
+OpenSSL; [system OpenSSL](../language/windows-build.md#install-from-source)
+remains available for local platform validation.
+Manual dispatch runs the same four jobs and covers the full Windows suite.
+
+### Hosted platform caches
+
+`actions/cache` restores exact-key Lua, native dependency, and LuaRocks
+dependency snapshots. Keys use build inputs: the platform, architecture,
+toolchain and build location, profile and relevant flags, Lua gitlink,
+dependency versions and checksums, patches, build recipes, and rockspec
+where applicable. On macOS, libbacktrace also keys on the resolved upstream
+revision and the other native dependencies have separate caches. On Windows,
+the co-built native libraries share a key that includes the pinned source
+manifests and OpenSSL mode.
+The LuaRocks cache stops before installing the Titan rock. Only the native
+cell (the aggregate on Windows) or macOS manual `full` saves dependency
+misses; no persistent cache contains the installed Titan rock or its
+generated provider.
+
+Do not hash the workflow files themselves: changes to scheduling, tests,
+or logging should not invalidate a dependency snapshot. Each cache key
+has its own `layout-vN` token. Bump it by hand only when that cache's path
+list changes; include the same token in any restore-key prefix. Changes
+to build inputs should change the corresponding key inputs instead.
+
+The C-probe cache restores separately before building the rock, using a
+stable platform/toolchain prefix and a fresh key for each run and attempt.
+The same native or full cell saves it after installation, before any
+OpenSSL-mode switch. Build logs show the restore results. Standard GitHub
+cache visibility applies: feature branches can restore default-branch caches,
+but caches saved on feature branches do not warm the default branch.
+
+Hosted and local validation are separate evidence. Record the exact source,
+architecture, SDK profile, and all relevant dependency modes when using a local
+VM to establish platform behavior that the hosted workflow does not cover.

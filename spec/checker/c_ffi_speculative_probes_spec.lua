@@ -584,8 +584,8 @@ end
 
     it("keep a wide enumerator's range check synchronous", function()
         local modules = { wide = header_module([[
-local function zero(): integer
-  return ffi.SPEC_WIDE_ZERO as integer
+local function fits(): integer
+  return ffi.SPEC_WIDE_FITS as integer
 end
 local function high(): integer
   return ffi.SPEC_WIDE_HIGH as integer
@@ -599,7 +599,7 @@ end
         assert.equal(sync.report, batched.report)
         assert.matches("C enumerator 'SPEC_WIDE_HIGH' is outside the range of lua_Integer",
             sync.report, 1, true)
-        assert.falsy(sync.report:find("SPEC_WIDE_ZERO", 1, true))
+        assert.falsy(sync.report:find("SPEC_WIDE_FITS", 1, true))
         assert.truthy(count(batched.executions, speculative) > 0)
         -- One accepted and one rejected range check, both at their use.
         for _, outcome in ipairs({ sync, batched }) do

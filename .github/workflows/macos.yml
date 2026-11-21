@@ -1,31 +1,41 @@
 name: macOS
 
 on:
+  push:
+    branches: ["**"]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   TITAN_BUILD_PROFILE: validation
   TITAN_ABI_VERSION: "2"
 
 jobs:
-  # macOS runners are expensive, so keep the complete cross-platform gate on
-  # explicit manual dispatch. It remains independent of Linux preparation: a
-  # transient Linux build failure must not suppress a requested macOS run.
   test-macos:
-    name: test (macos-latest, macos-full)
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-latest
+    name: macOS arm64 (${{ matrix.suite }})
+    runs-on: macos-15
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["native","compiler"]') }}
+    defaults:
+      run:
+        shell: bash
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
-      # Standard macOS hosted runners expose three CPUs; the parallel native
-      # aggregate run keeps the same explicit cap.
+      # Leave memory for Apple Clang on the three-CPU, 7 GB runner.
       MAKEFLAGS: "-j3"
       TITAN_JOBS: "3"
       TITAN_TEST_JOBS: "3"
       OPENSSL_MODE: bundled
+      TITAN_LUA_PLATFORM: macosx
+      TITAN_LUA_HOST_FLAGS: "-O2 -fno-lto"
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v3"
@@ -41,15 +51,67 @@ jobs:
       OPENSSL_BUILD_PROFILE: "static-pic-hidden-minimal-v1"
 
     steps:
+      - name: Install macOS build tools
+        run: |
+          brew install make cmake readline openssl@3 pkgconf clang-format
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "TMPDIR=$(mktemp -d /private/tmp/titan-ci.XXXXXX)" >> "$GITHUB_ENV"
+          git config --global protocol.file.allow always
+
       - uses: actions/checkout@v6
         with:
           submodules: true
+          persist-credentials: false
 
-      # Reuse dependency rocks; rebuild Lua from the pinned source submodule.
-      - name: Cache standalone-prefix LuaRocks dependencies
-        uses: actions/cache@v5
+      - name: Identify Lua and native toolchain inputs
+        id: toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          gitlink=$(git rev-parse HEAD:lua-5.5.1)
+          libbacktrace=$(git ls-remote https://github.com/ianlancetaylor/libbacktrace.git HEAD)
+          libbacktrace=${libbacktrace%%[[:space:]]*}
+          [[ $libbacktrace =~ ^[0-9a-f]{40}$ ]]
+          {
+            pwd -P
+            printf '%s\n' "$PREFIX"
+            sw_vers
+            cc --version
+            xcrun --show-sdk-path
+            make --version
+            cmake --version
+            brew list --versions readline openssl@3
+          } | tee "$RUNNER_TEMP/titan-macos-toolchain"
+          digest=$(shasum -a 256 "$RUNNER_TEMP/titan-macos-toolchain" | cut -d' ' -f1)
+          lua_build=$(printf '%s\n' "$TITAN_LUA_PLATFORM" "$TITAN_LUA_HOST_FLAGS" \
+            "$(brew --prefix readline)" | shasum -a 256 | cut -d' ' -f1)
+          echo "identity=macos-15-${RUNNER_ARCH}-${TITAN_BUILD_PROFILE}-${digest}-${gitlink}" >> "$GITHUB_OUTPUT"
+          echo "lua-build=$lua_build" >> "$GITHUB_OUTPUT"
+          echo "libbacktrace=$libbacktrace" >> "$GITHUB_OUTPUT"
+
+      # Save only pre-Titan state. An exact key includes the recipes for both
+      # builds and the install path/toolchain used by their cached objects.
+      # Bump layout-v1 only when the cache path list changes.
+      - name: Restore the Lua SDK and libbacktrace build
+        id: core-cache
+        uses: actions/cache/restore@v4
         with:
-          path: |
+          path: &macos-core-paths |
+            .lua/bin/lua
+            .lua/bin/luac
+            .lua/include
+            .lua/lib/liblua.a
+            .lua/share/man
+            .lua/src/lua-5.5.1
+            lua-5.5.1/src/liblua.a
+            libbacktrace
+          key: ${{ steps.toolchain.outputs.identity }}-core-layout-v1-${{ steps.toolchain.outputs.lua-build }}-${{ steps.toolchain.outputs.libbacktrace }}-${{ hashFiles('Makefile') }}
+
+      # Bump layout-v1 only when the cache path list changes.
+      - name: Restore standalone-prefix LuaRocks dependencies
+        id: rocks-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: &macos-rocks-paths |
             .lua/bin/busted
             .lua/bin/cluacov
             .lua/bin/luacov
@@ -60,81 +122,91 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-stock-luarocks-v3-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
-          restore-keys: |
-            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-stock-luarocks-v3-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
+          key: ${{ steps.toolchain.outputs.identity }}-rocks-layout-v1-${{ steps.toolchain.outputs.lua-build }}-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile', 'titan-0.6.0-1.rockspec') }}
 
-      - name: Cache bundled libuv source and static build
-        uses: actions/cache@v5
+      # Bump layout-v1 only when the cache path list changes.
+      - name: Restore bundled libuv source and static build
+        id: libuv-cache
+        uses: actions/cache/restore@v4
         with:
-          path: |
+          path: &macos-libuv-paths |
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
-          restore-keys: |
-            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
+          key: ${{ steps.toolchain.outputs.identity }}-libuv-layout-v1-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('Makefile', 'vendor/libuv/*-spawn-close.patch') }}
 
-      - name: Cache bundled llhttp source and static build
-        uses: actions/cache@v5
+      # Bump layout-v1 only when the cache path list changes.
+      - name: Restore bundled llhttp source and static build
+        id: llhttp-cache
+        uses: actions/cache/restore@v4
         with:
-          path: |
+          path: &macos-llhttp-paths |
             llhttp-release-v${{ env.LLHTTP_VERSION }}
             llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
             llhttp-build
-          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
-          restore-keys: |
-            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
+          key: ${{ steps.toolchain.outputs.identity }}-llhttp-layout-v1-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
 
-      - name: Cache bundled SQLite amalgamation and static build
-        uses: actions/cache@v5
+      # Bump layout-v1 only when the cache path list changes.
+      - name: Restore bundled SQLite amalgamation and static build
+        id: sqlite-cache
+        uses: actions/cache/restore@v4
         with:
-          path: |
+          path: &macos-sqlite-paths |
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
             sqlite3-build
-          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
-          restore-keys: |
-            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
+          key: ${{ steps.toolchain.outputs.identity }}-sqlite3-layout-v1-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_RELEASE }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
 
-      - name: Cache bundled OpenSSL source and static build
-        uses: actions/cache@v5
+      # Bump layout-v1 only when the cache path list changes.
+      - name: Restore bundled OpenSSL source and static build
+        id: openssl-cache
+        uses: actions/cache/restore@v4
         with:
-          path: |
+          path: &macos-openssl-paths |
             openssl-${{ env.OPENSSL_VERSION }}
             openssl-${{ env.OPENSSL_VERSION }}.tar.gz
             openssl-build
-          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
-          restore-keys: |
-            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
+          key: ${{ steps.toolchain.outputs.identity }}-openssl-layout-v1-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
 
-      - name: Install system dependencies (macOS)
-        run: brew install cmake readline openssl@3 pkgconf
+      # Bump layout-v1 in both keys only when the cache path list changes.
+      - name: Restore macOS C-probe results
+        id: probe-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: &macos-probe-path .lua/var/cache/titan-probes/2
+          key: titan-probes-2-layout-v1-${{ steps.toolchain.outputs.identity }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            titan-probes-2-layout-v1-${{ steps.toolchain.outputs.identity }}-
+
+      - name: Report macOS cache hits
+        run: |
+          echo "Lua/libbacktrace: ${{ steps.core-cache.outputs.cache-hit || 'false' }}"
+          echo "LuaRocks: ${{ steps.rocks-cache.outputs.cache-hit || 'false' }}"
+          echo "libuv: ${{ steps.libuv-cache.outputs.cache-hit || 'false' }}"
+          echo "llhttp: ${{ steps.llhttp-cache.outputs.cache-hit || 'false' }}"
+          echo "SQLite: ${{ steps.sqlite-cache.outputs.cache-hit || 'false' }}"
+          echo "OpenSSL: ${{ steps.openssl-cache.outputs.cache-hit || 'false' }}"
+          echo "C-probe restore: ${{ steps.probe-cache.outputs.cache-matched-key != '' }}"
 
       - name: Build the bundled Lua 5.5 source tree
         run: |
           readline_prefix="$(brew --prefix readline)"
-          make lua LUA_PLATFORM=macosx \
-            LUA_MYCFLAGS="-O2 -fno-lto -I$readline_prefix/include" \
-            LUA_MYLDFLAGS="-O2 -fno-lto -L$readline_prefix/lib"
+          make lua LUA_PLATFORM="$TITAN_LUA_PLATFORM" \
+            LUA_MYCFLAGS="$TITAN_LUA_HOST_FLAGS -I$readline_prefix/include" \
+            LUA_MYLDFLAGS="$TITAN_LUA_HOST_FLAGS -L$readline_prefix/lib"
+          # Workers can bootstrap the checkout runtime, not just use the SDK.
+          test -f lua-5.5.1/src/liblua.a
 
-      # Every generated module and executable links the separate
-      # ./libbacktrace/.libs/libbacktrace.a (unified stack traces). CI
-      # runs LuaRocks directly rather than `make test`, so build it explicitly.
-      - name: Build the bundled libbacktrace
-        run: make libbacktrace
-
-      - name: Build the pinned bundled libuv
-        run: make libuv
-
-      - name: Build the pinned private llhttp support
-        run: make llhttp
-
-      - name: Build the pinned private SQLite support
-        run: make sqlite3
-
-      - name: Build the pinned bundled OpenSSL support
-        run: make openssl
+      - name: Build the pinned native dependencies
+        env:
+          LIBBACKTRACE_REV: ${{ steps.toolchain.outputs.libbacktrace }}
+        run: |
+          if [[ ! -d libbacktrace ]]; then
+            git clone --no-checkout https://github.com/ianlancetaylor/libbacktrace.git libbacktrace
+            git -C libbacktrace checkout --detach "$LIBBACKTRACE_REV"
+          fi
+          test "$(git -C libbacktrace rev-parse HEAD)" = "$LIBBACKTRACE_REV"
+          make libbacktrace libuv llhttp sqlite3 openssl
 
       - name: Install LuaRocks into the Titan prefix
         run: make luarocks
@@ -150,27 +222,57 @@ jobs:
       - name: Verify vendored Lua is on PATH
         run: lua -v
 
-      - name: Restore macOS C-probe results
-        uses: ubicloud/cache@v4
-        with:
-          path: .lua/var/cache/titan-probes/2
-          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-macos-${{ github.sha }}
-          restore-keys: |
-            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-macos-
-
-      # Build and install the rock so the `titan` Lua support module (ltitanlib.c,
-      # required by one coder spec via `require 'titan'`) is on the Lua path.
-      # `luarocks test` does not build the rock-under-test, only its dependencies.
-      - name: Build and install the rock
+      - name: Prepare compiler and test dependencies
         run: |
           bash spec/support/ci_retry_luarocks_dependencies.sh \
             luarocks make --only-deps
-          # The restored Lua tree is not part of the cache key. Drop the
-          # compiler modules so removals are visible, and drop the pre-cutover
-          # share/lua/5.5/titan shim directory outright.
-          rm -rf "$PREFIX/share/lua/5.5/titan-compiler" \
-            "$PREFIX/share/lua/5.5/c-parser"
-          rm -rf "$PREFIX/share/lua/5.5/titan"
+          bash spec/support/ci_retry_luarocks_dependencies.sh \
+            luarocks test --prepare
+
+      - name: Save the Lua SDK and libbacktrace build
+        if: contains(fromJSON('["native","full"]'), matrix.suite) && steps.core-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *macos-core-paths
+          key: ${{ steps.core-cache.outputs.cache-primary-key }}
+
+      - name: Save standalone-prefix LuaRocks dependencies
+        if: contains(fromJSON('["native","full"]'), matrix.suite) && steps.rocks-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *macos-rocks-paths
+          key: ${{ steps.rocks-cache.outputs.cache-primary-key }}
+
+      - name: Save bundled libuv source and static build
+        if: contains(fromJSON('["native","full"]'), matrix.suite) && steps.libuv-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *macos-libuv-paths
+          key: ${{ steps.libuv-cache.outputs.cache-primary-key }}
+
+      - name: Save bundled llhttp source and static build
+        if: contains(fromJSON('["native","full"]'), matrix.suite) && steps.llhttp-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *macos-llhttp-paths
+          key: ${{ steps.llhttp-cache.outputs.cache-primary-key }}
+
+      - name: Save bundled SQLite amalgamation and static build
+        if: contains(fromJSON('["native","full"]'), matrix.suite) && steps.sqlite-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *macos-sqlite-paths
+          key: ${{ steps.sqlite-cache.outputs.cache-primary-key }}
+
+      - name: Save bundled OpenSSL source and static build
+        if: contains(fromJSON('["native","full"]'), matrix.suite) && steps.openssl-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *macos-openssl-paths
+          key: ${{ steps.openssl-cache.outputs.cache-primary-key }}
+
+      - name: Build and install the rock
+        run: |
           luarocks make --force
           provider="$PREFIX/lib/titan/0.6/titan.so"
           static_archive="${provider%.so}.a"
@@ -180,22 +282,24 @@ jobs:
           test -f "$runtime_archive" && test ! -L "$runtime_archive"
           test ! -e "$PREFIX/lib/libtitan.a"
 
+      - name: Save macOS C-probe results
+        if: contains(fromJSON('["native","full"]'), matrix.suite)
+        uses: actions/cache/save@v4
+        with:
+          path: *macos-probe-path
+          key: ${{ steps.probe-cache.outputs.cache-primary-key }}
+
       # Exercise titanc through its real /usr/bin/env shebang. CI must provide
       # the prefix's Lua and installed compiler dependencies through PATH.
       - name: Verify titanc shebang environment
         run: titanc --help
-
-      # Test-only dependencies are not installed by `luarocks make`.
-      - name: Prepare test dependencies
-        run: |
-          bash spec/support/ci_retry_luarocks_dependencies.sh \
-            luarocks test --prepare
 
       # Build one native argv/stdio child with the pinned bundled archive and
       # reuse it while smoke-testing both standard-library link modes. The OS
       # smoke invokes this executable directly through os.spawn and also
       # exercises the shell-oriented os.popen convenience separately.
       - name: Build child-process smoke fixture
+        if: contains(fromJSON('["native","full"]'), matrix.suite)
         run: |
           process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
           mkdir -p "$process_smoke_dir"
@@ -203,10 +307,8 @@ jobs:
             .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
-      # Run the uncovered runtime/stdlib set first. Compiler specs may clean
-      # shared root outputs, so preserve the canonical image around only that
-      # later compiler pass before the production mode smoke.
-      - name: Run complete macOS tests without coverage
+      - name: Run macOS stdlib tests without coverage
+        if: contains(fromJSON('["native","full"]'), matrix.suite)
         run: |
           make stdlib-test EXTRA_TEST_FLAGS="-o gtest -v"
           luarocks make --force
@@ -222,14 +324,19 @@ jobs:
           make titan-stdlib-test-run \
             TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
             TITAN_TEST_TIMEOUT=15
-          snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
-          bash spec/support/ci_stdlib_snapshot.sh save "$snapshot"
-          bash spec/support/ci_test_groups.sh compiler-uncovered
-          bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
+
+      # On manual dispatch, the full cell also runs this step after the
+      # retained specs and native aggregate. Workers own private checkouts.
+      - name: Run compiler and language specs without coverage
+        if: matrix.suite != 'native'
+        env:
+          TITAN_ROCK_TEST_JOBS: "3"
+        run: bash spec/support/run_parallel_compiler_tests.sh compiler-uncovered
 
       # Run this after the bundled test suite. The smoke first exercises the
       # existing self-contained provider pair, then rebuilds titan.so/titan.a
       # against the platform OpenSSL package; the job can end in
       # system mode without another build.
       - name: Smoke-test bundled and system OpenSSL modes
+        if: contains(fromJSON('["native","full"]'), matrix.suite)
         run: bash spec/support/ci_dependency_mode_smoke.sh
