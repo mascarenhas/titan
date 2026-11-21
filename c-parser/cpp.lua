@@ -26,13 +26,8 @@ end
 
 function cpp.absolute_lookup_path(path, cwd, strategy)
     if platform.windows then
-        -- Keep the authored traversal in the key, so revalidation still
-        -- observes a link even if it now points somewhere else.
-        local absolute = platform.path.absolute(path, cwd)
-        if not absolute then
-            return assert(platform.absolute(path, cwd, strategy or default_io))
-        end
-        return assert(platform.path.normalize(absolute, true))
+        -- Windows absolute paths use lexical normalization.
+        return assert(platform.absolute(path, cwd, strategy or default_io))
     end
     if path:sub(1, 1) ~= SEP then path = path_join(cwd, path) end
     -- Remove only standalone '.' components. Preserve separator runs and,

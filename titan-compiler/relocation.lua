@@ -49,6 +49,8 @@ function relocation.roots(strategy, selected)
             end
             -- A symlinked root is an external physical binding, not permission
             -- to retarget an SDK/output tree while keeping its cache identity.
+            -- Windows 8.3 spellings can also differ from the resolved path.
+            -- Use long names for roots that need relocatable certificates.
             if real and same(normalized(real), normalized(absolute)) then
                 result[name] = normalized(absolute)
             end

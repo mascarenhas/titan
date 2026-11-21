@@ -673,7 +673,14 @@ describe("compiler I/O strategy", function()
         assert(lfs.link(nested, directory_link, true))
         assert.equal(assert(strategy:realpath(nested)),
             assert(strategy:realpath(directory_link)))
-        assert.equal("sibling bytes",
+        local sibling_bytes = "sibling bytes"
+        if platform.windows then
+            -- Native Win32 lookup folds dot-dot before traversing the link.
+            sibling = root .. "/sibling"
+            sibling_bytes = "lexical sibling bytes"
+            assert.is_true(strategy:write_file(sibling, sibling_bytes))
+        end
+        assert.equal(sibling_bytes,
             assert(strategy:read_file(directory_link .. "/../sibling")))
         assert.equal(assert(strategy:realpath(sibling)),
             assert(strategy:realpath(directory_link .. "/../sibling")))
@@ -695,12 +702,7 @@ describe("compiler I/O strategy", function()
         assert(lfs.link(root .. "/missing", dangling, true))
         local canonical, canonical_err = strategy:realpath(dangling)
         assert.is_nil(canonical)
-        if platform.windows then
-            assert.is_string(canonical_err)
-            assert.is_true(#canonical_err > 0)
-        else
-            assert.matches("does not exist", canonical_err, 1, true)
-        end
+        assert.matches("does not exist", canonical_err, 1, true)
     end)
 
     posix_model_it("keeps captured shell semantics while inheriting coordinator leases", function()
@@ -1180,43 +1182,38 @@ describe("Windows synchronous compiler I/O", function()
         end)
     end)
 
-    it("resolves each Windows parent traversal before querying the leaf", function()
+    it("uses native Windows realpath and distinguishes missing paths from lookup errors", function()
         local process = require "titan-compiler.process"
-        local realpaths = {
-            ["C:/checkout/link"] = "D:\\sdk\\nested",
-            ["D:/sdk/other"] = "D:\\platform\\headers",
-            ["D:/platform/file.h"] = "D:\\platform\\file.h",
+        local lookup = [[link\..\file.h]]
+        local physical = [[D:\sdk\file.h]]
+        local replies = {
+            [lookup] = { physical },
+            absent = { nil, "ENOENT: missing file", "ENOENT" },
+            dangling = { nil, "ENOENT: missing target", "ENOENT" },
+            denied = { nil, "EACCES: access denied", "EACCES" },
         }
-        local uv = {
-            cwd = function() return "C:\\checkout" end,
-            fs_realpath = function(path)
-                local real = realpaths[path]
-                if not real then return nil, "lookup failed", "ENOENT" end
-                return real
-            end,
-            fs_stat = function(path)
-                assert.truthy(path == realpaths["C:/checkout/link"]
-                    or path == realpaths["D:/sdk/other"], path)
-                return { type = "directory" }
-            end,
-        }
+        local requested = {}
+        local uv = { fs_realpath = function(path)
+            requested[#requested + 1] = path
+            return table.unpack(assert(replies[path], path), 1, 3)
+        end }
         with_overrides(platform, { windows = true }, function()
             with_overrides(process, { library = function() return uv end }, function()
-                with_native_stat(function(path, follow)
-                    assert.equal("D:/platform/file.h", path)
-                    assert.is_false(follow)
-                    return { kind = "link", mtime_ns = 0 }
-                end, function()
-                    local strategy = compiler_io.new_sync()
-                    local lookup = [[link\..\other\..\file.h]]
-                    assert.equal(realpaths["D:/platform/file.h"], assert(strategy:realpath(lookup)))
-                    assert.equal("symlink", assert(strategy:lstat(lookup)).kind)
-                    local absent, err = strategy:realpath("missing/../file.h")
-                    assert.is_nil(absent)
-                    assert.matches("does not exist", err, 1, true)
-                end)
+                local strategy = compiler_io.new_sync()
+                local real, err = strategy:realpath(lookup)
+                assert.equal(physical, real)
+                assert.is_nil(err)
+                for _, path in ipairs({ "absent", "dangling" }) do
+                    real, err = strategy:realpath(path)
+                    assert.is_nil(real)
+                    assert.equal("path does not exist: " .. path, err)
+                end
+                real, err = strategy:realpath("denied")
+                assert.is_nil(real)
+                assert.equal("EACCES: access denied", err)
             end)
         end)
+        assert.same({ lookup, "absent", "dangling", "denied" }, requested)
     end)
 
     it("passes Windows argv and options directly to the process dependency", function()

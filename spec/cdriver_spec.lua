@@ -1627,7 +1627,7 @@ describe("C FFI cdriver", function()
                 { source, early, late, root })
         end)
 
-        it("preserves symlink traversal when absolutizing include paths",
+        it("uses native symlink traversal when absolutizing include paths",
         function()
             if not require_symlink_capability() then return end
             local root = tmp_dir()
@@ -1647,7 +1647,9 @@ describe("C FFI cdriver", function()
             local first_selected = first_include .. "/selected.h"
             local second_selected = second_include .. "/selected.h"
             local lexical = lexical_dir .. "/selected.h"
-            local lookup = link .. "/../include/selected.h"
+            local authored = link .. "/../include/selected.h"
+            local lookup = platform.windows and lexical or authored
+            local selected_type = platform.windows and "double" or "int"
             local selected_contents =
                 "typedef int titan_symlink_parent_value;\n"
             write_file(outer, "#include <selected.h>\n")
@@ -1656,12 +1658,24 @@ describe("C FFI cdriver", function()
             write_file(lexical,
                 "typedef double titan_symlink_parent_value;\n")
 
+            local probe = source .. "/probe.c"
+            write_file(probe, '#include "outer.h"\n' ..
+                '_Static_assert(__builtin_types_compatible_p(titan_symlink_parent_value, ' ..
+                selected_type .. '), "native C include traversal");\n')
+            local argv = assert(cdriver.split_shell_words(platform.getenv("CC") or
+                (platform.windows and "clang.exe" or "cc")))
+            for _, word in ipairs({ "-fsyntax-only", "-I", link .. "/../include", probe }) do
+                argv[#argv + 1] = word
+            end
+            local compiled = compiler_io.new_sync():run(argv)
+            assert.truthy(compiled.started and compiled.ok, compiled.diagnostic or compiled.output)
+
             local types, include = assert_process_file("outer.h", {
                 source_dir = source,
                 compiler_include_dirs = {},
                 cppflags = { "-I", link .. "/../include" },
             })
-            assert.same({ "int" },
+            assert.same({ selected_type },
                 types.titan_symlink_parent_value.def)
             assert.equal(lookup,
                 include.c_header_dependencies[2].path)
@@ -1676,10 +1690,10 @@ describe("C FFI cdriver", function()
             assert.equal(assert(cdriver.header_input_identity(
                 "search", lookup)), first_search_identity)
 
-            local direct_types, direct_include = assert_process_file(lookup, {
+            local direct_types, direct_include = assert_process_file(authored, {
                 compiler_include_dirs = {},
             })
-            assert.same({ "int" },
+            assert.same({ selected_type },
                 direct_types.titan_symlink_parent_value.def)
             assert.equal(lookup, direct_include.resolved)
             assert.equal(lookup,
@@ -1694,7 +1708,7 @@ describe("C FFI cdriver", function()
                 assert(cdriver.header_input_identity("search", lookup)))
 
             remove_tree(
-                { outer, first_selected, second_selected, lexical, link },
+                { probe, outer, first_selected, second_selected, lexical, link },
                 { root, first, first_nested, first_include,
                   second, second_nested, second_include,
                   lexical_dir, source })
@@ -3533,6 +3547,10 @@ typedef double titan_forced_order_value;
                 },
                 compiler_include_dirs = {},
             })
+            if platform.windows then
+                forced_lookup = assert(platform.path.normalize(forced_lookup))
+                imported_lookup = assert(platform.path.normalize(imported_lookup))
+            end
             assert.same({ "int" }, types.titan_normalized_value.def)
             assert.equal(imported_lookup, include.resolved)
             assert.same({ forced_lookup, imported_lookup }, {
