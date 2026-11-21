@@ -10,8 +10,9 @@ boundary, and its build inputs.
 Each public `Connection` contains a public `net.Connection`, and each `Server`
 contains a `net.Server` and an OpenSSL server context. The module imports the
 high-level `fs` and `net` modules: explicit path reads go through
-`fs.read_file`, and network traffic uses only `net`'s public `read`, `write`,
-`shutdown`, `close`, and `accept`. It imports public `titan.uv` only for the
+`fs.read_file`, and network traffic and socket inspection/options use only
+`net`'s public `read`, `write`, `shutdown`, `close`, `accept`, `local_address`,
+`peer_address`, and `set_no_delay`. It imports public `titan.uv` only for the
 `uv.req_t?` registrar return type; it owns no libuv handle or request and adds
 no scheduler operation. Operation parents wait through public async exact
 suspension and terminal listeners, and internal I/O children perform the
@@ -54,6 +55,32 @@ the TCP transport's `add_input_listener`
 operation nor inspects decrypted data, so partial and control ciphertext count
 as input. The borrower or the ordinary transport-close path removes the
 listener.
+
+## Socket addresses and `TCP_NODELAY` delegation
+
+Socket address queries and `TCP_NODELAY` configuration delegate straight to
+`net` without touching OpenSSL:
+
+- `Server:local_address()` checks `self.closed or self.listener_closed`
+  (raising `"ssl.local_address: Server is closed"`) and returns
+  `self.listener:local_address()`.
+- `Connection:local_address()` and `Connection:peer_address()` check
+  `self.transport == nil` or terminal state (`STATE_CLOSED`, `STATE_FAILED`,
+  `STATE_TERMINATING`), raising `"ssl.local_address: SSL Connection is closed"`
+  / `"ssl.peer_address: SSL Connection is closed"`, and otherwise delegate to
+  `self.transport:local_address()` / `self.transport:peer_address()`.
+- `Connection:set_no_delay(enabled)` checks `self.transport == nil or
+  self.transport_closed` or terminal state (`STATE_CLOSED`, `STATE_FAILED`,
+  `STATE_TERMINATING`), raising `"ssl.set_no_delay: SSL Connection is closed"`,
+  and otherwise delegates to `self.transport:set_no_delay(enabled)`.
+
+None of these `Connection` methods touch `self.handle` (`SSL *`), the memory
+BIOs, or any OpenSSL engine `Operation` slot. They therefore work before and
+after a lazy `handshake()`, across `ssl.Connection` transfer, and without
+contending with active TLS reader or writer operations. `ssl.connect` and
+`ssl.Server:accept` construct their `net.Connection` directly and inherit
+default `TCP_NODELAY = true`, while `ssl.client(transport, ...)` preserves
+whatever `TCP_NODELAY` setting was already configured on `transport`.
 
 ## Contexts and trust
 
@@ -294,8 +321,10 @@ discards the TCP payload; `Connection.discard_transfer_payload` performs the
 same cleanup for a known unadopted payload without a Runtime. The destination
 decodes the schema, allocates an empty wrapper before adopting TCP, attaches
 the engine, and recovers its BIOs with `SSL_get_rbio`/`SSL_get_wbio`. Operation
-slots and waiter Arrays are fresh destination objects. Native-pending and
-half-close rejection come from the TCP layer
+slots and waiter Arrays are fresh destination objects, `connection_transfer_fields`
+carries no address or `no_delay` fields, and destination `local_address()`,
+`peer_address()`, and `set_no_delay()` delegate to the adopted TCP transport.
+Native-pending and half-close rejection come from the TCP layer
 ([networking transfer](libuv-networking.md#connection-transfer-ownership)).
 This is a same-process capability, not a serialized TLS session.
 

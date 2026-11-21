@@ -12,15 +12,19 @@ reaches their low-level owner ([TLS implementation](ssl-library.md)).
 
 ## Records
 
-| Record | Private fields |
+| Record | Fields |
 | --- | --- |
-| `Connection` | `handle` (`uv.tcp_t`) with cached `handle_view` and `stream` views, owning `loop`, delimiter `excess`, `input` (a buffered subscription of strings), `start_read`, the read flags `started`, `read_ahead_enabled` and `read_started`, the scratch `read_buffer`, `phase`, `input_listeners`, and `pending_outputs`. |
-| `Server` | `handle` with cached views, `loop`, `clients` (a buffered subscription of accepted Connections), the saved `failure` (nil until the listener fails), and `start_listen`. |
+| `Address` | Public `const` scalar fields `ip: string`, `port: integer`, `ipv6: boolean`, and `scope_id: integer`. |
+| `Connection` | Private `handle` (`uv.tcp_t`) with cached `handle_view` and `stream` views, owning `loop`, delimiter `excess`, `input` (a buffered subscription of strings), `start_read`, the read flags `started`, `read_ahead_enabled` and `read_started`, the scratch `read_buffer`, `phase`, `input_listeners`, `pending_outputs`, and lazy cached `local_addr` / `peer_addr` (`Address?`). |
+| `Server` | Private `handle` with cached views, `loop`, `clients` (a buffered subscription of accepted Connections), the saved `failure` (nil until the listener fails), `start_listen`, and lazy cached `local_addr` (`Address?`). |
 
 The views are cached once at construction; operations still query current
 native initialization, closing, and writability. `phase` is one of
 `CONNECTION_UNCONNECTED`, `CONNECTION_CONNECTING`, `CONNECTION_CONNECTED`, or
-`CONNECTION_FAILED`.
+`CONNECTION_FAILED`. `Connection` deliberately stores no cached `no_delay`
+boolean field: libuv provides `uv_tcp_nodelay` without `uv_tcp_get_nodelay`, so
+a write-only setter avoids stale Titan-side state diverging from the OS socket
+across transfer.
 
 `Connection:has_pending_input()` is a pure snapshot. It returns true when the
 connection is not connected, its handle is closed, `excess` is nonempty, or the
@@ -77,14 +81,22 @@ native stream is no longer writable.
 
 ## Dialing and listening
 
-`Connection.new` (after `async.checkpoint()`) allocates an initialized endpoint
-in the unconnected phase. `connect_address` validates Runtime, address, port,
-and cancellation before admitting the single attempt, then sets connecting
-before the native await. Successful dials and accepted sockets enter
-connected; failed or cancelled dials enter failed. Read, write and shutdown
-require connected, while close retires every phase. An independently runnable
-opening supervisor can therefore close a known endpoint before it drains its
-pending connect child.
+`new_connection(loop, enable_no_delay)` initializes the `uv.tcp_t` handle.
+`Connection.new` (after `async.checkpoint()`) and `net.connect` pass
+`enable_no_delay = true`, calling `check_status(uv.tcp_nodelay(tcp, 1),
+"net.set_no_delay")` immediately after `uv.tcp_init(loop, tcp)` while no OS
+socket exists yet (`fd == -1` on Unix, `INVALID_SOCKET` on Windows). Libuv
+records `UV_HANDLE_TCP_NODELAY` in `handle->flags` and applies
+`setsockopt(..., IPPROTO_TCP, TCP_NODELAY, 1)` automatically when
+`uv.tcp_connect` creates the socket; calling `set_no_delay(false)` before
+`connect_address` clears `UV_HANDLE_TCP_NODELAY` before socket creation.
+`connect_address` validates Runtime, address, port, and cancellation before
+admitting the single attempt, then sets connecting before the native await.
+Successful dials and accepted sockets enter connected; failed or cancelled dials
+enter failed. Read, write, shutdown, and address queries require connected,
+`set_no_delay` permits unconnected (pre-dial) and connected, and close retires
+every phase. An independently runnable opening supervisor can therefore close a
+known endpoint before it drains its pending connect child.
 
 `net.connect` composes one resolution with the same one-address method,
 trying the copied addresses in resolver order with a fresh TCP owner per
@@ -150,11 +162,22 @@ already-posted persistent read.
 
 ## Accept delivery and unread sockets
 
-A listener's connection callback creates and accepts one `Connection`, sets it
-connected, and owns it lexically until `publish(client)` returns true, which
-moves ownership into the `clients` queue. Rejection or an exception closes the
-unpublished socket; an exception also fails the server and is rethrown.
-Accepted connections start their read watcher lazily.
+A listener's connection callback creates each child with
+`new_connection(loop, false)`—leaving `UV_HANDLE_TCP_NODELAY` unset before
+`uv.accept`—and applies `uv.tcp_nodelay(client.handle, 1)` only after
+`uv.accept` succeeds. Setting `UV_HANDLE_TCP_NODELAY` beforehand would cause
+libuv's `uv__stream_open` inside `uv_accept` to propagate a child `setsockopt`
+failure as an `uv_accept` error and trigger `fail_server`, closing the
+listener. Instead, when post-accept `uv.tcp_nodelay(client.handle, 1)` returns
+a negative status, the callback returns early so its lexical
+`defer if client ~= nil then abandon(client) end` guard closes and discards
+only that unconfigurable child without calling `fail_server`, without raising
+from the UV callback, and without publishing an unconfigured `Connection`.
+Otherwise the callback sets `client.phase = CONNECTION_CONNECTED` and owns
+`client` lexically until `publish(client)` returns true, moving ownership into
+the `clients` queue. Rejection or an exception closes the unpublished socket;
+an exception also fails the server and is rethrown. Accepted connections start
+their read watcher lazily.
 
 Server failure takes precedence over unread accepted clients: it saves the
 failure, drains and closes every queued socket, closes the listening handle,
@@ -163,6 +186,47 @@ after waking; otherwise it runs the cancellation checkpoint before the
 reservation check and keeps the duplicate-wait diagnostic. Closing a server
 also drains and closes every unread connection, because a generic queue cannot
 know its values own sockets.
+
+## Socket addresses and `TCP_NODELAY`
+
+Endpoint address queries and `TCP_NODELAY` configuration use existing public
+`titan.uv` APIs (`uv.tcp_getsockname`, `uv.tcp_getpeername`, `uv.ip_name`,
+`uv.AF_INET`, `uv.AF_INET6`, `uv.sockaddr_t` `is_complete`/`family`/`port`/
+`scope_id`, and `uv.tcp_nodelay`) with zero `titan.uv` or C/FFI changes.
+
+`Address` carries `ipv6: boolean` rather than exposing OS-specific `AF_INET6`
+integer constants (`10` Linux, `30` macOS, `23` Windows). The private helper
+`sockaddr_to_address(raw, operation)` verifies `raw ~= nil and
+raw:is_complete()` (raising `uv.EINVAL`), checks `AF_INET` or `AF_INET6`
+(raising `uv.EAFNOSUPPORT`), formats `ip` with `uv.ip_name(raw)`, and returns
+`Address(text, raw:port(), family == uv.AF_INET6, raw:scope_id())`.
+
+`Server.local_addr`, `Connection.local_addr`, and `Connection.peer_addr` start
+as `nil` and populate lazily on the first query:
+
+- `Server:local_address()` validates the handle and owning Runtime, populates
+  `self.local_addr` via `uv.tcp_getsockname` (`"net.local_address"`) if `nil`,
+  and returns the cached immutable `Address`.
+- `Connection:local_address()` and `Connection:peer_address()` validate the
+  handle and owning Runtime, require `self.phase == CONNECTION_CONNECTED`,
+  populate `self.local_addr` (`uv.tcp_getsockname`, `"net.local_address"`) or
+  `self.peer_addr` (`uv.tcp_getpeername`, `"net.peer_address"`) if `nil`, and
+  return the cached `Address` with zero allocations or syscalls on repeated
+  calls. If a peer disconnects before the first `peer_address()` query and the
+  OS returns an error such as `ENOTCONN` or `EINVAL`, `check_status` surfaces
+  it as `async.OperationError` with `operation == "net.peer_address"`.
+
+`Server:close()`, `Connection:close()`, and source detachment in
+`Connection:to_transfer_payload()` clear the cached `local_addr` / `peer_addr`
+fields to `nil`; any `Address` already returned to callers remains an immutable
+snapshot.
+
+`Connection:set_no_delay(enabled)` calls `validate(self.handle_view, self.loop,
+"configure no-delay on")` (requiring an active Task on `self.loop` and
+rejecting closed or detached handles), rejects `CONNECTION_CONNECTING` and
+`CONNECTION_FAILED`, permits both `CONNECTION_UNCONNECTED` (pre-dial) and
+`CONNECTION_CONNECTED` (before or after reads, writes, or `shutdown()`), and
+invokes `check_status(uv.tcp_nodelay(self.handle, flag), "net.set_no_delay")`.
 
 ## Connection transfer ownership
 
@@ -187,20 +251,28 @@ yield once first.
 The encoder snapshots `excess`, the queued bytes and the terminal state with
 `snapshot_pending()` before stopping the watcher and calling the TCP handle
 hook. If native detachment fails, it restarts a previously active watcher.
-After detachment it clears the subscription, callback, and scratch references;
-the source handle closes asynchronously through its ordinary callback. The
-private `connection_transfer_fields` schema holds the TCP child payload, the
-copied input bytes, the terminal kind and optional `OperationError`, and the
-`started`, `read_ahead_enabled` and `read_started` flags. A lexical guard
-discards the TCP payload if serialization raises.
+After detachment it clears `local_addr`, `peer_addr`, and the subscription,
+callback, and scratch references; the source handle closes asynchronously
+through its ordinary callback. The private `connection_transfer_fields` schema
+holds the TCP child payload, the copied input bytes, the terminal kind and
+optional `OperationError`, and the `started`, `read_ahead_enabled` and
+`read_started` flags—with no address fields and no `no_delay` boolean. A
+lexical guard discards the TCP payload if serialization raises.
 `Connection.discard_transfer_payload` decodes the same schema and delegates to
 `uv.tcp_t.discard_transfer_payload` without a Runtime.
 
-`from_transfer_payload` validates the schema before adopting the endpoint,
-creates a fresh `Connection` and subscription on the destination Runtime,
-restores unread bytes and the read policy, and restarts a previously active
-reader only in read-ahead mode. No source-state callback, Task or subscription
-is copied.
+On POSIX (`dup`) and Windows (`WSADuplicateSocketW` + `WSASocketW`), the
+duplicated descriptor/socket shares the underlying kernel/Winsock socket state
+and preserves its exact `TCP_NODELAY` option (`1` by default, or `0` if
+disabled before transfer). `from_transfer_payload` validates the schema before
+adopting the endpoint through `uv_tcp_open` on a fresh `uv_tcp_t` whose
+`UV_HANDLE_TCP_NODELAY` flag is `0` (so libuv does not overwrite the inherited
+kernel option), creates a fresh `Connection` and subscription on the
+destination Runtime, restores unread bytes and the read policy, and restarts a
+previously active reader only in read-ahead mode. On the destination Runtime,
+`local_address()` and `peer_address()` populate lazily against the adopted
+handle and `set_no_delay(enabled)` updates the live socket directly. No
+source-state callback, Task or subscription is copied.
 
 ## Close and Runtime ownership
 
@@ -209,11 +281,12 @@ reports it closing; checking initialization first avoids a native query outside
 the handle's lifetime. Close methods are idempotent, while live I/O checks the
 current Task and exact owning Runtime.
 
-Connection close discards `excess` and closes its subscription. The producer's
-stop action ends native reading; its close action drains unread bytes and
-calls `close_handle`, which waits with `async.await_cleanup_with` and the named
-callback `closed`. Server close uses the same pattern and disposes queued
-connections. Cleanup waits retire ownership even when the closing Task already
+Connection close clears `local_addr`, `peer_addr`, and `excess` and closes its
+subscription. The producer's stop action ends native reading; its close action
+drains unread bytes and calls `close_handle`, which waits with
+`async.await_cleanup_with` and the named callback `closed`. Server close clears
+`local_addr`, uses the same pattern, and disposes queued connections. Cleanup
+waits retire ownership even when the closing Task already
 has sticky cancellation. Subscription close is not a join barrier for a second
 concurrent caller: the first closer owns the cleanup work.
 

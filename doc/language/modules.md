@@ -568,7 +568,7 @@ hooks = {
 }
 ```
 
-In a rockspec, `$(PREFIX)` is the *installing rock's private version directory* (for example `<tree>/lib/luarocks/rocks-5.5/titan-cui/0.1.0-1`), not your shell `$PREFIX`, the Titan SDK root, or `dist/`; `$(SCRIPTS_DIR)` is the tree's public `bin/`. In LuaRocks, `~>` is a prefix match (`"lua ~> 5.5"` matches `5.5.*`, and `"titan ~> 0.6"` matches Titan `0.6.*` releases; `TITAN_ABI_VERSION` is tracked independently of the package version).
+In a rockspec, `$(PREFIX)` is the *installing rock's private version directory* (for example `<tree>/lib/luarocks/rocks-5.5/titan-cui/0.1.0-1`), not your shell `$PREFIX`, the Titan SDK root, or `dist/`; `$(SCRIPTS_DIR)` is the tree's public `bin/`. In LuaRocks, `~>` is a prefix match (`"lua ~> 5.5"` matches `5.5.*`, and `"titan ~> 0.6"` matches Titan `0.6.*` releases; `TITAN_ABI_VERSION` is tracked independently of the package version). LuaRocks also evaluates rockspecs in an empty `_ENV` without Lua's standard globals (for example, `table.concat` is `nil`), so construct rockspec strings with literal strings and `..` concatenation instead.
 
 Install from the checkout (`luarocks make` builds locally without fetching `source.url`):
 

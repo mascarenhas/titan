@@ -241,12 +241,15 @@ record Request
 end
 function Request:read(): string?
 function Request:read_until(delimiter: string, chop: boolean?): string?
+function Request:local_address(): net.Address
+function Request:peer_address(): net.Address
 
 record Response
 function Response:set_status(status: integer, reason: string?)
 function Response:add_header(name: string, contents: string)
 function Response:set_header(name: string, contents: string)
 function Response:headers(): Headers
+function Response:is_committed(): boolean
 function Response:send_headers()
 function Response:write(data: string)
 function Response:close()
@@ -260,6 +263,7 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
                     private_key_file: string?, port: integer?,
                     backlog: integer?, idle_timeout: integer?,
                     reuse_port: boolean?): Server
+function Server:local_address(): net.Address
 function Server:idle_timeout(timeout: integer?): integer
 function Server:header_limit(limit: integer?): integer
 function Server:read_ahead(enabled: boolean?): boolean
@@ -267,11 +271,11 @@ function Server:serve()
 function Server:close()
 ```
 
-- **Listeners:** `listen` defaults to port `80`; `listen_tls` defaults to port `443` (omitted `private_key_file` reads the key from `certificate_file`). Both accept `port` in `0..65535`, default `backlog` `128` (`1..2147483647`), default `idle_timeout` `0` ms (no deadline), and `reuse_port` forwarded to [`net.listen`](standard-library-net.md#connecting-and-listening) (`ENOTSUP` on macOS/Windows).
+- **Listeners:** `listen` defaults to port `80`; `listen_tls` defaults to port `443` (omitted `private_key_file` reads the key from `certificate_file`). Both accept `port` in `0..65535`, default `backlog` `128` (`1..2147483647`), default `idle_timeout` `0` ms (no deadline), and `reuse_port` forwarded to [`net.listen`](standard-library-net.md#connecting-and-listening) (`ENOTSUP` on macOS/Windows). `Server:local_address()` returns the bound local [`net.Address`](standard-library-net.md#socket-addresses) of an open HTTP or HTTPS listener (including the OS-assigned port when bound with `port` `0`) and raises on a closed `Server`.
 - **Serving & closing:** `Server:serve()` loops accepting connections and spawns one Task per connection, processing requests serially over keep-alive. `Server:close()` is idempotent, cancellation-insensitive, and stops accepting without cancelling already-accepted connection Tasks.
 - **Idle timeout:** `Server:idle_timeout(timeout?)` queries or updates the non-negative millisecond deadline for acquiring each next request line and header block (partial headers do not reset it). Timeout closes that connection quietly; for HTTPS, cancelling the TLS read terminalizes the TLS engine so the peer sees `TLS_TRUNCATED_EOF`.
-- **Request dispatch & `Expect`:** Handlers run as soon as headers complete, with `Request.method`, raw origin-form `target` (must start with `/`), normalized `url`, `version` (`"HTTP/1.1"`), and `headers` (requiring exactly one valid `Host`). A single `Expect: 100-continue` on a non-upgrade request sends `HTTP/1.1 100 Continue` before invoking the handler; unsupported expectations receive `417 Expectation Failed`; malformed upgrade openings (any `Expect`, invalid/missing/duplicate `Host`, bad URL, or non-1.1 version) receive `400 Bad Request` before handler dispatch. Unread request bodies are drained automatically before the next keep-alive request.
-- **Response framing:** Responses start at `200 OK` (`set_status` accepts `200..999` and optional valid reason before headers are written). `headers()` returns a copy. `send_headers()` commits headers idempotently; `write()` commits headers if needed and writes body bytes. Without `Content-Length`, body-capable responses use `Transfer-Encoding: chunked`; with `Content-Length`, writes cannot exceed it and `close()` requires an exact match. `HEAD`, `204`, `205` (enforces `Content-Length: 0`), and `304` forbid nonempty bodies and strip `Transfer-Encoding`. Returning from a handler calls `close()` automatically; handler errors close only that connection. An idle peer disconnect (`EOF`, `ECONNRESET`, or unauthenticated TLS drop) before any byte of the next request closes quietly.
+- **Request dispatch, addresses, & `Expect`:** Handlers run as soon as headers complete, with `Request.method`, raw origin-form `target` (must start with `/`), normalized `url`, `version` (`"HTTP/1.1"`), and `headers` (requiring exactly one valid `Host`). `Request:local_address()` and `Request:peer_address()` return immutable [`net.Address`](standard-library-net.md#socket-addresses) snapshots from the active request's underlying TCP or TLS transport (including across keep-alive exchanges and adopted `Exchange:serve` loops) and raise once the exchange has ended (after completion, `abort()`, `upgrade()`, or source detachment). A single `Expect: 100-continue` on a non-upgrade request sends `HTTP/1.1 100 Continue` before invoking the handler; unsupported expectations receive `417 Expectation Failed`; malformed upgrade openings (any `Expect`, invalid/missing/duplicate `Host`, bad URL, or non-1.1 version) receive `400 Bad Request` before handler dispatch. Unread request bodies are drained automatically only when the connection remains reusable for a subsequent keep-alive request: when the exchange is already non-reusable—for example because the request carried `Connection: close` or the handler set `response:set_header("Connection", "close")` (such as before sending a `413` rejection)—both `Server:serve` and `Exchange:serve` skip further server-side request-body reads after `response:close()` and close the connection instead.
+- **Response framing & commitment:** Responses start at `200 OK` (`set_status` accepts `200..999` and optional valid reason before headers are written). `headers()` returns a copy. `is_committed()` reports `true` once final response headers have been committed by `send_headers()`, `write()`, `close()`, `upgrade()`, or `reject_upgrade()`, and `false` beforehand (an interim `100 Continue` does not commit final headers); commitment is reserved before the transport write begins, so `is_committed()` returns `true` even if that write subsequently fails, and remains readable as a historical flag after the exchange completes, upgrades, aborts, or detaches. `send_headers()` commits and flushes headers immediately (idempotently). When headers have not yet been sent, `write()` may coalesce the status line and headers with an initial valid body chunk into a single transport write, and `close()` may coalesce unsent headers with the terminal empty chunk on an empty chunked response; call `send_headers()` explicitly when headers must be flushed ahead of the body. Without `Content-Length`, body-capable responses use `Transfer-Encoding: chunked`; with `Content-Length`, writes cannot exceed it and `close()` requires an exact match. `HEAD`, `204`, `205` (enforces `Content-Length: 0`), and `304` forbid nonempty bodies and strip `Transfer-Encoding`. Returning from a handler calls `close()` automatically; handler errors close only that connection. An idle peer disconnect (`EOF`, `ECONNRESET`, or unauthenticated TLS drop) before any byte of the next request closes quietly.
 
 ## Strictness and limits
 
@@ -339,7 +343,7 @@ async.send(worker_handle, packet)
 ```
 
 - Call `server:read_ahead(false)` before `serve()` so newly accepted connections use demand-driven reads (avoiding pending Windows overlapped reads), and call `async.yield()` after the last I/O before encoding. Pending reads, writes, upgrades, or native requests reject handoff.
-- Encoding detaches the source endpoints and preserves request metadata, unread body/keep-alive bytes, parser state, response headers, and framing. In the destination Runtime, either complete the current exchange and call `exchange:close()`, or call `exchange:serve(handler, idle_timeout?)` to handle it and subsequent keep-alive requests (`idle_timeout` defaults to `0` and does not inherit the originating server's timeout).
+- Encoding detaches the source endpoints and preserves request metadata, unread body/keep-alive bytes, parser state, response headers, and framing. In the destination Runtime, `Request:local_address()` and `Request:peer_address()` query the adopted socket while the exchange is active; either complete the current exchange and call `exchange:close()`, or call `exchange:serve(handler, idle_timeout?)` to handle it and subsequent keep-alive requests with the same non-reusable skip-drain behavior as `Server:serve` (`idle_timeout` defaults to `0` and does not inherit the originating server's timeout).
 - `UpgradedStream` transfers an upgraded `net.Connection` or `ssl.Connection` stream plus its prefetched protocol prefix (`websocket.Connection` transfer delegates to it). Custom `io.ReaderWriterCloser` streams passed to `request_upgrade_on` are not transferable.
 - Both types follow the [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules) and provide `discard_transfer_payload(payload)` to release an unadopted payload without a Runtime (consuming ownership even on error).
 

@@ -123,7 +123,7 @@ function line_column(subject: string, position: integer): (integer, integer)
 | `.` | Any single byte (including LF) |
 | `[a-z]`, `[^0-9]` | Byte class with literal bytes, ranges, or `%name` definitions; leading `^` complements |
 | `(p)`, `p q`, `p / q` | Grouping, sequence, ordered choice |
-| `&p`, `!p` | Non-consuming positive and negative predicates |
+| `&p`, `!p` | Non-consuming positive and negative predicates (discard inner captures; eager `=>` callbacks still run) |
 | `p?`, `p*`, `p+` | Optional, zero-or-more, one-or-more (possessive) |
 | `p^n`, `p^+n`, `p^-n` | Exactly `n`, at least `n`, at most `n` (no space between `^` and `n`) |
 | `%name` | Predefined locale class or supplied `Definition` |
@@ -313,9 +313,11 @@ function optional(pattern: Pattern): Pattern
 
 `sequence()` returns `succeed()`; `choice()` returns `fail()`; both left-fold
 their arguments. `difference(a, b, c)` computes `(a - b) - c`. `lookahead` and
-`negative` are non-consuming predicates. `at_least` and `at_most` require
-nonnegative `count`; `zero_or_more(p)` is `at_least(p, 0)`, `one_or_more(p)` is
-`at_least(p, 1)`, and `optional(p)` is `at_most(p, 1)`.
+`negative` are non-consuming predicates: neither retains captures produced
+inside `pattern` in the match result, though eager `runtime` and `match_time`
+callbacks reached while evaluating `pattern` still execute. `at_least` and
+`at_most` require nonnegative `count`; `zero_or_more(p)` is `at_least(p, 0)`,
+`one_or_more(p)` is `at_least(p, 1)`, and `optional(p)` is `at_most(p, 1)`.
 
 ```titan
 local peg = import "peg"

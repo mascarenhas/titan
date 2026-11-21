@@ -446,24 +446,75 @@ received target, while `Request.url` provides the normalized routing view.
 
 The native client copies the option headers, validates Content-Length, rejects request
 Transfer-Encoding and Expect fields, and preserves supplied Connection fields.
-An explicit close token disables reuse; HTTP/1.1 is otherwise persistent. The
-optional request body is assembled with the preamble as one high-level write;
-only response bodies stream. Rejecting Expect is therefore deliberate: the
-client must not advertise a `100-continue` handshake that it does not honor. A
-supplied singleton Host is parsed by the URL module's separate-input request
-entry; this enforces authority boundaries, host, bracketed IP-literal, and
-optional-port syntax before opening the connection.
+An explicit close token disables reuse; HTTP/1.1 is otherwise persistent.
+`Client:exchange` (`client.native.titan`) assembles the request line, headers,
+`"\r\n"`, and optional request body in one `string.StringWriter` and sends them
+in a single `connection:write` call (and `request_upgrade_on` sends its
+bodyless upgrade request in one `connection:write` call); only response bodies
+stream. Because `client_connection` dials via `net.connect` / `ssl.connect`,
+fresh and pooled keep-alive client connections inherit default `TCP_NODELAY =
+true` automatically with zero changes to `client.native.titan`. Rejecting
+Expect is therefore deliberate: the client must not advertise a `100-continue`
+handshake that it does not honor. A supplied singleton Host is parsed by the
+URL module's separate-input request entry; this enforces authority boundaries,
+host, bracketed IP-literal, and optional-port syntax before opening the
+connection.
 
-The server derives response framing at first header send. A declared
-Content-Length is counted exactly; explicit Transfer-Encoding must be one
-`chunked` field; otherwise a body-capable response becomes chunked. HEAD, 204,
-205, and 304 suppress body framing and remove Transfer-Encoding. Status 204
-rejects Content-Length outright. Status 205 accepts only a zero
-Content-Length and synthesizes `Content-Length: 0` when absent. Closing emits
-the chunk terminator or verifies the declared length. llhttp's keep-alive
-decision and an explicit Connection close token decide whether the
-per-connection loop resets the parser.
+The server derives response framing at first header send and centralizes header
+preparation and commitment reservation in two private `Response` methods
+(`server.native.titan`) plus the internal coalescing threshold
+`local const COALESCE_BODY_BYTES = 64 * 1024` (64 KiB, matching
+`READ_BUFFER_IDLE_CAPACITY` in `net.native.titan`):
 
+- `Response:prepare_header_writer(): string.StringWriter` rejects upgraded
+  exchanges, runs `prepare_response_headers(self)` (validating declared
+  `Content-Length`, enforcing a single `Transfer-Encoding: chunked` when
+  supplied, defaulting body-capable responses to chunked, suppressing body
+  framing on `HEAD`/`204`/`205`/`304`, rejecting `Content-Length` on `204`, and
+  enforcing or synthesizing `Content-Length: 0` on `205`), and formats the
+  status line, rendered headers, and `"\r\n"` into a fresh `string.StringWriter`.
+  If header validation raises, `is_committed()` remains `false` and zero bytes
+  are written.
+- `Response:commit_writer(builder: string.StringWriter)` drains `builder`,
+  reserves `self.exchange.output_started = true` and `self.headers_sent = true`
+  immediately **before** `self.connection:write(payload)`, and never rolls back
+  `headers_sent` if the transport write raises or cancels (`self.written` and
+  `self.closed` stay uncommitted on write failure).
+- `Response:send_headers()` validates upgrade, already-sent, and closed state
+  and calls `self:commit_writer(self:prepare_header_writer())`.
+- `Response:write(data)` when `not self.headers_sent` calls
+  `self:prepare_header_writer()` and takes the single-write coalesced path iff
+  all four conditions hold: `self.body_allowed`, `#data > 0`,
+  `#data <= COALESCE_BODY_BYTES` (64 KiB), and `self.content_length == nil or
+  #data <= (self.content_length as integer)`. For chunked responses it appends
+  `string.format("%x\r\n", #data)`, `data`, and `"\r\n"` directly into
+  `builder` (avoiding an intermediate framed-chunk string); for fixed-length
+  responses it appends `data`; then it calls `self:commit_writer(builder)` and
+  increments `self.written`. When any of the four conditions does not hold,
+  `Response:write` calls `self:commit_writer(builder)` first and falls through
+  to the ordinary body-write path: `HEAD`/`204`/`205`/`304` commits headers
+  before raising on `#data > 0`; empty `write("")` commits headers only without
+  emitting a zero-length chunk; first-write `Content-Length` overflow commits
+  headers before raising; and `#data > 64 KiB` sends headers first, then passes
+  `data` directly to `self.connection:write(data)` with zero body copy for
+  fixed `Content-Length` or uses ordinary chunk framing for chunked responses
+  (relying on default `TCP_NODELAY = true` to avoid Nagle stalls between the
+  two writes).
+- `Response:close()` when `not self.headers_sent` calls
+  `self:prepare_header_writer()`. For an uncommitted empty chunked response
+  (`self.chunked and self.body_allowed`), it appends `"0\r\n\r\n"`, calls
+  `self:commit_writer(builder)`, and marks `self.closed = true` in a single
+  transport write. All other uncommitted closes (`HEAD`/`204`/`205`/`304`,
+  `Content-Length: 0`, or mismatched nonzero `Content-Length`) commit headers
+  first and fall through to the exact-`Content-Length` check before marking
+  `self.closed = true`.
+
+Closing an already-committed response emits the chunk terminator or verifies
+the declared length as before. Interim `100 Continue`
+(`accept_request_expectation`) sets only `output_started = true`, leaving
+`headers_sent == false` so the subsequent final response still coalesces.
+llhttp's keep-alive decision and an explicit Connection close token decide
+whether the per-connection loop drains the request body and resets the parser.
 Immediately after header parsing, the per-connection loop resolves `Expect`
 (`server.native.titan` `accept_request_expectation`) before it can call a handler that waits in `Request:read`. An OWS-trimmed,
 case-insensitive `100-continue` is accepted only as one complete singleton
@@ -513,7 +564,9 @@ timeout defaults to zero and is validated before listener creation or TLS PEM
 reads.
 
 The Server record deliberately stores separate optional `net.Server` and
-`ssl.Server` fields and branches while accepting. A tempting common Interface
+`ssl.Server` fields and branches while accepting and in `Server:local_address()`
+(which checks `self.closed` and delegates to `self.secure:local_address()` or
+`self.plain:local_address()`). A tempting common Interface
 would need an `accept(): io.ReaderWriterCloser` result, but Titan's structural
 record-to-Interface conversion does not lift through a method's result type.
 The concrete `accept(): net.Connection` and `accept(): ssl.Connection` methods
@@ -521,6 +574,18 @@ therefore cannot satisfy such an Interface by converting their returned value.
 Branching on the listener owner and converting each accepted Connection is the
 straight high-level expression of the current type model; it is not grounds
 for uv access or a native identity workaround.
+
+`Request:local_address()` and `Request:peer_address()` verify
+`self.exchange.active` (raising `"HTTP request exchange has ended"` once the
+exchange completes, upgrades, aborts, or detaches), keep
+`local connection = self.exchange.transport.connection` at static type
+`io.ReaderWriterCloser`, and use Titan's allocation-free Interface `is`/`as`
+downcast (`net.Connection` or `ssl.Connection`) to delegate directly to
+`:local_address()` or `:peer_address()` (raising `"HTTP request has no native
+TCP or TLS transport"` for other implementations). Because this never boxes to
+`value` or calls `reflect.inspect`, `Transport` and `ExchangeState` stay
+untouched and repeated calls across keep-alive turns incur zero allocations and
+zero syscalls through `net`'s lazy address cache.
 
 An uncaught parse, handler, or response-framing error exits only that
 connection Task. Deferred parser and transport closers run while the accept
@@ -536,11 +601,17 @@ draining for an aborted exchange. Its existing deferred parser/transport
 cleanup remains responsible for final retirement. An inactive retained
 response cannot affect a later keep-alive exchange or an upgraded stream.
 TCP close and TLS abort retain their cancellation-insensitive contracts.
-Ordinary header output reserves `headers_sent` before its first transport write,
-so a failed or pending header write cannot be retried with mutated status or
-fields. Informational `100 Continue` does not reserve the final response.
-Upgrade output rechecks the live exchange after its supervised writer returns,
-before transferring ownership, because a sibling may have aborted it meanwhile.
+Ordinary header output reserves `headers_sent` in `Response:commit_writer`
+before its first transport write (and upgrade output reserves it in
+`Response:write_upgrade_output`), so a failed or pending header write cannot be
+retried with mutated status or fields. `Response:is_committed()`—named to avoid
+colliding with `Response`'s private `local headers_sent: boolean` field—simply
+returns `self.headers_sent`, mirroring `Response:headers()`'s read-only
+historical observation with zero `ExchangeState` changes. Informational
+`100 Continue` sets only `output_started = true` and does not reserve the final
+response (`is_committed()` stays `false`). Upgrade output rechecks the live
+exchange after its supervised writer returns, before transferring ownership,
+because a sibling may have aborted it meanwhile.
 
 `ClientResponse:close` marks the public response closed before transferring an
 unread reusable parser/transport to bounded background draining. A completed
@@ -560,8 +631,24 @@ resource contract, not an HTTP queue or scheduler.
 
 The server implements one serial request/response cycle per connection Task.
 It does not expose a pipelining API or schedule concurrent handlers for one
-connection. A handler finishes its response and the server drains any unread
-request body before resetting the parser for the next keep-alive request.
+connection. After `response:close()` (and the `parser.upgrade` check), both
+`serve_connection` (`server.native.titan`) and `Exchange:serve`
+(`transfer.native.titan`) enforce dual pre-drain and post-drain persistence
+checks:
+
+1. **Pre-drain check:** If `not parser.keep_alive or not response.keep_alive`
+   (because the HTTP/1.1 request carried `Connection: close` or the handler
+   called `response:set_header("Connection", "close")`), the loop marks
+   `exchange.active = false` and returns immediately with zero further
+   server-side request-body reads (`serve_connection` closes via
+   `connection:close()` with best-effort TLS `close_notify`, and
+   `Exchange:serve` retires via `transport.abort()`).
+2. **Post-drain check:** Otherwise the loop runs `drain_request(request_value)`,
+   marks `exchange.active = false`, and rechecks `not parser.keep_alive or not
+   response.keep_alive` so a `parser.keep_alive` transition to `false` at
+   `EVENT_MESSAGE_COMPLETE` (during body or trailer consumption) still exits
+   instead of calling `parser_reset_message(parser)`.
+
 The retained parser suffix ([pausing](#pausing-and-streaming-ownership)) only
 preserves bytes a read happened to include; it is not a pipelining queue.
 
@@ -660,13 +747,16 @@ then delegates the transport move to the concrete public TCP/TLS hook
 source exchange transferred/inactive and close its old parser. The private
 anonymous-root protobuf schema (`exchange_transfer_fields`) contains copied
 scalar, header-array, URL and parser fields plus the known transport kind and
-child bytes. If that final encoding raises, a lexical guard discards the
-detached transport; the source stays inactive, so the original server's defer
-cannot close an adopted transport. `Exchange:serve` follows the same serial
-request/framing loop with a destination-supplied handler; subsequent
-transfers/upgrades retain the same ownership guard. Its optional non-negative
-`idle_timeout` defaults to zero and uses the shared header-acquisition helper
-only after the current handler, response closing, body draining, and keep-alive
+child bytes—with no endpoint address fields (`Request:local_address()` and
+`Request:peer_address()` query the adopted socket lazily on demand). If that
+final encoding raises, a lexical guard discards the detached transport; the
+source stays inactive, so the original server's defer cannot close an adopted
+transport. `Exchange:serve` follows the same serial request/framing loop and
+dual pre/post-drain persistence checks with a destination-supplied handler;
+subsequent transfers/upgrades retain the same ownership guard. Its optional
+non-negative `idle_timeout` defaults to zero and uses the shared
+header-acquisition helper only after the current handler, response closing,
+body draining, and keep-alive
 reset. The current exchange was already parsed before adoption; its handler and
 response are never covered by this deadline. Each later header wait gets the
 supplied absolute deadline, independent of the originating Server. Negative
