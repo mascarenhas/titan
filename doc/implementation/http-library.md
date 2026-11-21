@@ -486,7 +486,7 @@ preparation and commitment reservation in two private `Response` methods
   `self:prepare_header_writer()` and takes the single-write coalesced path iff
   all four conditions hold: `self.body_allowed`, `#data > 0`,
   `#data <= COALESCE_BODY_BYTES` (64 KiB), and `self.content_length == nil or
-  #data <= (self.content_length as integer)`. For chunked responses it appends
+  #data <= self.content_length`. For chunked responses it appends
   `string.format("%x\r\n", #data)`, `data`, and `"\r\n"` directly into
   `builder` (avoiding an intermediate framed-chunk string); for fixed-length
   responses it appends `data`; then it calls `self:commit_writer(builder)` and

@@ -83,9 +83,11 @@ native stream is no longer writable.
 
 `new_connection(loop, enable_no_delay)` initializes the `uv.tcp_t` handle.
 `Connection.new` (after `async.checkpoint()`) and `net.connect` pass
-`enable_no_delay = true`, calling `check_status(uv.tcp_nodelay(tcp, 1),
-"net.set_no_delay")` immediately after `uv.tcp_init(loop, tcp)` while no OS
-socket exists yet (`fd == -1` on Unix, `INVALID_SOCKET` on Windows). Libuv
+`enable_no_delay = true`, calling `uv.tcp_nodelay(tcp, 1)` immediately after
+`uv.tcp_init(loop, tcp)` while no OS socket exists yet (`fd == -1` on Unix,
+`INVALID_SOCKET` on Windows); if `uv.tcp_nodelay` returns a negative status,
+`new_connection` calls `abandon(connection)` to retire the initialized handle
+before raising `operation_error(status, "net.set_no_delay")`. Libuv
 records `UV_HANDLE_TCP_NODELAY` in `handle->flags` and applies
 `setsockopt(..., IPPROTO_TCP, TCP_NODELAY, 1)` automatically when
 `uv.tcp_connect` creates the socket; calling `set_no_delay(false)` before

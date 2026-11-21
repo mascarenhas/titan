@@ -10,9 +10,10 @@ boundary, and its build inputs.
 Each public `Connection` contains a public `net.Connection`, and each `Server`
 contains a `net.Server` and an OpenSSL server context. The module imports the
 high-level `fs` and `net` modules: explicit path reads go through
-`fs.read_file`, and network traffic and socket inspection/options use only
-`net`'s public `read`, `write`, `shutdown`, `close`, `accept`, `local_address`,
-`peer_address`, and `set_no_delay`. It imports public `titan.uv` only for the
+`fs.read_file`, and network traffic uses only `net`'s public `read`, `write`,
+`shutdown`, `close`, and `accept` (socket creation, observation, address
+queries, `TCP_NODELAY`, and transfer likewise delegate only through `net`'s
+public functions and methods). It imports public `titan.uv` only for the
 `uv.req_t?` registrar return type; it owns no libuv handle or request and adds
 no scheduler operation. Operation parents wait through public async exact
 suspension and terminal listeners, and internal I/O children perform the
