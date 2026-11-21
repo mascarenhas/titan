@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["native","hosted-compiler-shard-1","hosted-compiler-shard-2","hosted-compiler-shard-3","hosted-compiler-shard-4"]') }}
+        suite: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["native","compiler"]') }}
     defaults:
       run:
         shell: bash
@@ -278,13 +278,6 @@ jobs:
       - name: Verify titanc shebang environment
         run: titanc --help
 
-      - name: Run a compiler and language shard without coverage
-        if: startsWith(matrix.suite, 'hosted-compiler-shard-')
-        env:
-          TITAN_ROCK_TEST_JOBS: "2"
-          TITAN_COMPILER_GROUP: ${{ matrix.suite }}
-        run: bash spec/support/run_parallel_compiler_tests.sh "$TITAN_COMPILER_GROUP"
-
       # Build one native argv/stdio child with the pinned bundled archive and
       # reuse it while smoke-testing both standard-library link modes. The OS
       # smoke invokes this executable directly through os.spawn and also
@@ -316,12 +309,12 @@ jobs:
             TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
             TITAN_TEST_TIMEOUT=15
 
-      # The manual cell runs the full suite on one VM. Compiler workers use
-      # private checkout copies and leave the canonical provider untouched.
-      - name: Run all compiler and language specs on manual dispatch
-        if: matrix.suite == 'full'
+      # On manual dispatch, the full cell also runs this step after the
+      # retained specs and native aggregate. Workers own private checkouts.
+      - name: Run compiler and language specs without coverage
+        if: matrix.suite != 'native'
         env:
-          TITAN_ROCK_TEST_JOBS: "2"
+          TITAN_ROCK_TEST_JOBS: "3"
         run: bash spec/support/run_parallel_compiler_tests.sh compiler-uncovered
 
       # Run this after the bundled test suite. The smoke first exercises the

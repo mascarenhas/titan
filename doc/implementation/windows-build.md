@@ -1084,7 +1084,8 @@ partitions](test-runner.md#busted-partitions).
 
 The [hosted Windows workflow](continuous-integration.md#windows-native-lane)
 runs the retained Busted files and native aggregate in a native cell, with
-the compiler and installed-stdlib integration files in four parallel cells.
+the compiler and installed-stdlib integration files in a separate compiler
+cell with four isolated ordinary workers.
 The runner still uses the same NTFS and Job Object boundaries.
 
 ### Portable compiler fixtures

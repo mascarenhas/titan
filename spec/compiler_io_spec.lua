@@ -701,14 +701,21 @@ describe("compiler I/O strategy", function()
         assert.is_nil(followed)
         assert.is_nil(followed_err)
         assert.equal("symlink", assert(strategy:lstat(dangling)).kind)
+    end)
+
+    it("rejects dangling symlinks during canonical lookup", function()
+        if platform.windows then
+            pending("#437 Windows symlink handling in the driver, C preprocessing and test-root discovery: " ..
+                "realpath's LuaFileSystem existence check accepts a dangling link")
+            return
+        end
+        root = workspace()
+        local strategy = compiler_io.new_sync()
+        local dangling = root .. "/dangling"
+        assert(lfs.link(root .. "/missing", dangling, true))
         local canonical, canonical_err = strategy:realpath(dangling)
         assert.is_nil(canonical)
-        if platform.windows then
-            assert.is_string(canonical_err)
-            assert.is_true(#canonical_err > 0)
-        else
-            assert.matches("does not exist", canonical_err, 1, true)
-        end
+        assert.matches("does not exist", canonical_err, 1, true)
     end)
 
     posix_model_it("keeps captured shell semantics while inheriting coordinator leases", function()

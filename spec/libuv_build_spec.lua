@@ -6746,9 +6746,6 @@ printf '%s\n' "${schedule[@]}"
                 assert.equal(1, count_literal(events, "\n  workflow_dispatch:\n"), events)
                 assert.equal(1, count_literal(suite, "\n    runs-on: " .. runner .. "\n"), suite)
                 assert.equal(1, count_literal(suite, "fail-fast: false"), suite)
-                for shard = 1, 4 do
-                    assert.equal(1, count_literal(suite, "hosted-compiler-shard-" .. shard))
-                end
                 assert.falsy(suite:find("codecov/", 1, true), suite)
                 assert.falsy(suite:find("id-token: write", 1, true), suite)
                 assert_ordered(suite,
@@ -6767,14 +6764,21 @@ printf '%s\n' "${schedule[@]}"
                 assert_ordered(probe_save, "actions/cache/save@v4",
                     "var/cache/titan-probes/2", "steps.probe-cache.outputs.cache-primary-key")
                 if platform_id == "macos" then
+                    assert.truthy(suite:find(
+                        [[fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["native","compiler"]')]],
+                        1, true), suite)
                     assert_ordered(suite, "make stdlib-test", "TITAN_TEST_TIMEOUT=15",
-                        "if: matrix.suite == 'full'", "run_parallel_compiler_tests.sh compiler-uncovered",
+                        "if: matrix.suite != 'native'", 'TITAN_ROCK_TEST_JOBS: "3"',
+                        "run_parallel_compiler_tests.sh compiler-uncovered",
                         "ci_dependency_mode_smoke.sh")
                 else
+                    assert.truthy(suite:find("suite: [native, compiler]", 1, true), suite)
                     assert_ordered(suite, "msys2/setup-msys2@v2", "msystem: CLANG64", "cache: true",
                         "mingw32-make -f Makefile.win compiler-deps",
                         "mingw32-make -f Makefile.win compiler",
                         "mingw32-make -f Makefile.win titan-stdlib-test",
+                        'TITAN_ROCK_TEST_JOBS: "4"',
+                        "matrix.suite == 'native' && 'retained' || 'compiler-uncovered'",
                         "TITAN_ROCK_TEST_SUPERVISOR")
                 end
             end
@@ -6903,7 +6907,7 @@ printf '%s\n' "${schedule[@]}"
                 'TITAN_JOBS=1',
                 "shard_job_policy='unset MAKEFLAGS MFLAGS MAKELEVEL TITAN_JOBS'",
                 'CCACHE_TEMPDIR="$worker_root/tmp-$shard/ccache"',
-                '-o gtest -v "\\$test_file"',
+                '-o gtest -v --defer-print "\\$test_file"',
                 'printf \'[compiler shard %s] %s\\n\'',
                 "trap 'handle_signal 143' TERM",
                 'kill -TERM -- "-$pid"',

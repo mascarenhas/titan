@@ -473,7 +473,7 @@ while IFS= read -r test_file || [[ -n \$test_file ]]; do
     [[ -n \$test_file ]] || continue
     file_started=\$SECONDS
     file_status=0
-    '$busted' -o gtest -v "\$test_file" < /dev/null || file_status=\$?
+    '$busted' -o gtest -v --defer-print "\$test_file" < /dev/null || file_status=\$?
     file_elapsed=\$((SECONDS - file_started))
     if (( file_status != 0 )); then
         shard_status=1

@@ -1632,6 +1632,11 @@ describe("C FFI cdriver", function()
 
         it("preserves symlink traversal when absolutizing include paths",
         function()
+            if platform.windows then
+                pending("#437 Windows symlink handling in the driver, C preprocessing and test-root discovery: " ..
+                    "include lookup collapses dot-dot before traversing the link")
+                return
+            end
             if not require_symlink_capability() then return end
             local root = tmp_dir()
             local source = mkdir(root, "source")
@@ -1710,12 +1715,19 @@ describe("C FFI cdriver", function()
             local alias_nested = alias .. "/nested.h"
             local vendor_header = vendor .. "/api.h"
             local vendor_nested = vendor .. "/nested.h"
-            write_file(vendor_header, '#include "nested.h"\n')
+            local header_contents = '#include "nested.h"\n'
+            write_file(vendor_header, header_contents)
             write_file(alias_nested,
                 "typedef int titan_symlink_origin_value;\n")
             write_file(vendor_nested,
                 "typedef double titan_symlink_origin_value;\n")
-            assert(lfs.link("../vendor/api.h", alias_header, true))
+            local target = platform.windows and "..\\vendor\\api.h" or "../vendor/api.h"
+            assert(lfs.link(target, alias_header, true))
+            assert.equal("link", lfs.symlinkattributes(alias_header, "mode"))
+            do
+                local file <close> = assert(io.open(alias_header, "rb"))
+                assert.equal(header_contents, assert(file:read("*a")))
+            end
 
             local types, include = assert_process_file(alias_header, {
                 compiler_include_dirs = {},

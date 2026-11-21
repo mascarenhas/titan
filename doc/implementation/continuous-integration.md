@@ -844,27 +844,36 @@ not on pull request events. Both can also be dispatched manually. They use the
 `validation` profile and run no browser, sanitizer, or coverage lanes. The
 hosted runner labels select these public-repository budgets:
 
-| Workflow | Runner | Build slots | Parallel test cells |
+| Workflow | Runner | Build slots | Push jobs |
 | --- | --- | ---: | --- |
-| macOS | `macos-15` (arm64, 3 vCPU, 7 GB RAM) | 3 | Native and four compiler shards |
-| Windows | `windows-2025-vs2026` (x64, 4 vCPU, 16 GB RAM) | 4 | Native and four compiler shards |
+| macOS | `macos-15` (arm64, 3 vCPU, 7 GB RAM) | 3 | Native and compiler |
+| Windows | `windows-2025-vs2026` (x64, 4 vCPU, 16 GB RAM) | 4 | Native and compiler |
+
+The four platform jobs leave up to 16 slots for Linux within the repository's
+20-job standard-runner budget. Linux currently defines 15 runner executions
+per push. With five jobs per platform, bursts of competing jobs queued for
+13–16 minutes even though Linux execution times barely changed. Balancing
+compiler work inside one runner per platform reduces contention without
+dropping test files.
 
 Every cell checks out the pinned sources, prepares an isolated SDK prefix,
 and installs the checked-out Titan rock. Rebuilding the rock in each cell
-avoids transporting SDKs and CMake state with embedded paths. The four
-compiler cells partition the same repository test inventory used on Linux:
-the compiler and installed-stdlib integration domains, without LuaCov.
-`compiler_test_groups.lua local-plan` distributes whole files using the
-uncovered timing column; `run_parallel_compiler_tests.sh` runs each file in a
-private worker checkout and isolates the explicitly exclusive files from
-other work in that runner. Ordinary workers cap nested Make/Titan work at one
-slot. The native cell covers the retained runtime/packaging domain and the
-unfiltered native aggregate. The matrix keeps running if another cell fails.
-The cold-cache critical path is targeted at about 45 minutes before runner
-queue time. This is an estimate, not hosted evidence: full local gates on
-larger machines took about 22–25 minutes on Apple Silicon and 45–50 minutes on
-Windows. Use hosted setup, build, and test durations to check the estimate and
-rebalance only where needed.
+avoids transporting SDKs and CMake state with embedded paths. Each
+compiler job runs both the compiler/language and installed-stdlib integration
+domains without LuaCov. `compiler_test_groups.lua local-plan` balances the
+uncovered whole-file timings across three ordinary macOS workers or four
+Windows workers. `run_parallel_compiler_tests.sh` gives each worker a private
+checkout, caps its nested Make/Titan work at one slot, and runs the exclusive
+files separately from the ordinary workers. The native job covers the retained
+runtime/packaging Busted files and the unfiltered native aggregate. Together the
+jobs run every classified Busted file exactly once; a failure in one job does
+not cancel the other.
+
+Before queue time, the consolidated compiler jobs are estimated at 30–40
+minutes on macOS and 45–55 minutes on Windows on a cold cache. These are
+projections from the first hosted SDK builds and per-file test timings,
+not measurements of the consolidated jobs. Use their hosted setup, build,
+and test durations to check the estimates before rebalancing.
 
 ### macOS native lane and full dispatch
 
@@ -896,6 +905,7 @@ the existing Windows Job Object supervisor and its private checkout and
 TEMP paths. The hosted Windows validation build uses the pinned bundled
 OpenSSL; [system OpenSSL](../language/windows-build.md#install-from-source)
 remains available for local platform validation.
+Manual dispatch runs the same two jobs and covers the full Windows suite.
 
 ### Hosted platform caches
 

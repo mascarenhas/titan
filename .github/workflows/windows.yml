@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [native, hosted-compiler-shard-1, hosted-compiler-shard-2, hosted-compiler-shard-3, hosted-compiler-shard-4]
+        suite: [native, compiler]
     defaults:
       run:
         shell: msys2 {0}
@@ -201,11 +201,11 @@ jobs:
           export PATH="/clang64/bin:$PATH"
           mingw32-make -f Makefile.win titan-stdlib-test
 
-      - name: Run retained specs or a compiler and language shard without coverage
+      - name: Run retained or compiler and language specs without coverage
         if: ${{ !cancelled() && steps.install-rock.outcome == 'success' }}
         env:
-          TITAN_ROCK_TEST_JOBS: "3"
-          TITAN_COMPILER_GROUP: ${{ matrix.suite == 'native' && 'retained' || matrix.suite }}
+          TITAN_ROCK_TEST_JOBS: "4"
+          TITAN_COMPILER_GROUP: ${{ matrix.suite == 'native' && 'retained' || 'compiler-uncovered' }}
         run: |
           set -euo pipefail
           unset LD
