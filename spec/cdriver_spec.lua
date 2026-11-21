@@ -455,17 +455,12 @@ describe("generated module C header inputs", function()
             local refreshed, origin_err, moved, reason = cdriver.revalidate_header_input(origin, { io = strategy })
             assert.is_nil(origin_err)
             local fresh, fresh_include = assert_process_file(outer, options)
-            if platform.windows then
-                assert.is_false(moved)
-                assert.equal(initial, fresh)
-            else
-                assert.is_true(moved)
-                assert.equal("provenance", reason)
-                assert.not_equal(origin.identity, refreshed.identity)
-                assert.not_equal(initial, fresh)
-                assert.not_equal(initial["struct@Shared"]._tag_provenance.ffi_scope,
-                    fresh["struct@Shared"]._tag_provenance.ffi_scope)
-            end
+            assert.is_true(moved)
+            assert.equal("provenance", reason)
+            assert.not_equal(origin.identity, refreshed.identity)
+            assert.not_equal(initial, fresh)
+            assert.not_equal(initial["struct@Shared"]._tag_provenance.ffi_scope,
+                fresh["struct@Shared"]._tag_provenance.ffi_scope)
             local found = false
             for _, dependency in ipairs(fresh_include.c_header_dependencies) do
                 if dependency.kind == "origin" and dependency.path == link then

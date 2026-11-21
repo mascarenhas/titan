@@ -104,6 +104,8 @@ jobs:
             C:/titan-ci/.lua/bin/luac.exe
             C:/titan-ci/.lua/bin/lua55.dll
             C:/titan-ci/.lua/include/lua*.h
+            C:/titan-ci/.lua/include/lauxlib.h
+            C:/titan-ci/.lua/include/lualib.h
             C:/titan-ci/.lua/include/lua.hpp
             C:/titan-ci/.lua/lib/liblua55.a
             C:/titan-ci/.lua/share/man
@@ -153,6 +155,11 @@ jobs:
           unset LD
           export PATH="/clang64/bin:$PATH"
           mingw32-make -f Makefile.win lua luarocks libbacktrace native
+          # A cached interpreter skips Lua installation. Verify the public
+          # headers before preparing rocks or invoking a native fixture.
+          for header in lua.h luaconf.h lauxlib.h lualib.h lua.hpp; do
+            test -f "$PREFIX/include/$header"
+          done
           export LUAROCKS_CONFIG="$PREFIX/etc/luarocks/config-5.5.lua"
           mingw32-make -f Makefile.win compiler-deps
           "$PREFIX/bin/luarocks.exe" --lua-version=5.5 --tree="$PREFIX" test --prepare titan-0.6.0-1.rockspec

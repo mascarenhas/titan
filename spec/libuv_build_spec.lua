@@ -6764,6 +6764,8 @@ printf '%s\n' "${schedule[@]}"
                 assert_ordered(probe_save, "actions/cache/save@v4",
                     "var/cache/titan-probes/2", "steps.probe-cache.outputs.cache-primary-key")
                 if platform_id == "macos" then
+                    local core_cache = named_step(suite, "Restore the Lua SDK and libbacktrace build")
+                    assert.truthy(core_cache:find("lua-5.5.1/src/liblua.a", 1, true), core_cache)
                     assert.truthy(suite:find(
                         [[fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["native","compiler"]')]],
                         1, true), suite)
@@ -6772,6 +6774,11 @@ printf '%s\n' "${schedule[@]}"
                         "run_parallel_compiler_tests.sh compiler-uncovered",
                         "ci_dependency_mode_smoke.sh")
                 else
+                    local native_cache = named_step(suite,
+                        "Restore the Lua SDK and pinned Windows native dependency builds")
+                    for _, header in ipairs({ "lauxlib.h", "lualib.h" }) do
+                        assert.truthy(native_cache:find("/include/" .. header, 1, true), header)
+                    end
                     assert.truthy(suite:find("suite: [native, compiler]", 1, true), suite)
                     assert_ordered(suite, "msys2/setup-msys2@v2", "msystem: CLANG64", "cache: true",
                         "mingw32-make -f Makefile.win compiler-deps",

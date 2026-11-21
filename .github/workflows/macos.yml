@@ -95,6 +95,7 @@ jobs:
             .lua/lib/liblua.a
             .lua/share/man
             .lua/src/lua-5.5.1
+            lua-5.5.1/src/liblua.a
             libbacktrace
           key: ${{ steps.toolchain.outputs.identity }}-core-${{ steps.toolchain.outputs.libbacktrace }}-${{ hashFiles('Makefile', '.github/workflows/macos.yml') }}
 
@@ -180,6 +181,8 @@ jobs:
           make lua LUA_PLATFORM=macosx \
             LUA_MYCFLAGS="-O2 -fno-lto -I$readline_prefix/include" \
             LUA_MYLDFLAGS="-O2 -fno-lto -L$readline_prefix/lib"
+          # Workers can bootstrap the checkout runtime, not just use the SDK.
+          test -f lua-5.5.1/src/liblua.a
 
       - name: Build the pinned native dependencies
         env:

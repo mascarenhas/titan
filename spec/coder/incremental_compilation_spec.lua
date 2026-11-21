@@ -2172,15 +2172,10 @@ os.exit(result.ok and 0 or result.status or 1)
                     end
                     error("missing " .. kind .. " header input")
                 end
-                if platform.windows then
-                    decisions(output, saved, { [APP] = "source-content" })
-                    assert.equal(identity(before, "origin"), identity(after, "origin"))
-                else
-                    decisions(output, saved, {
-                        [base] = "c-input " .. header .. ": provenance", [APP] = "source-content",
-                    })
-                    assert.not_equal(identity(before, "origin"), identity(after, "origin"))
-                end
+                decisions(output, saved, {
+                    [base] = "c-input " .. header .. ": provenance", [APP] = "source-content",
+                })
+                assert.not_equal(identity(before, "origin"), identity(after, "origin"))
                 assert.equal(identity(before, "file"), identity(after, "file"))
                 assert.is_nil(output:find("not visible with its original identity", 1, true))
                 certified_exit(76)
