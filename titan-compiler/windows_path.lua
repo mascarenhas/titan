@@ -128,14 +128,14 @@ end
 
 -- Explicit spelling normalization, never called implicitly by absolute/join.
 -- This must not replace filesystem resolution of authored link/.. observations.
-function path.normalize(value)
+function path.normalize(value, preserve_parent)
     local parsed, message, reason = parse(value)
     if not parsed then return nil, message, reason end
     if parsed.extended then return parsed.value end
     local components = {}
     local bounded = parsed.absolute or parsed.kind == "root_relative"
     for component in parsed.tail:gmatch("[^/]+") do
-        if component == ".." then
+        if component == ".." and not preserve_parent then
             if #components > 0 and components[#components] ~= ".." then
                 components[#components] = nil
             elseif not bounded then

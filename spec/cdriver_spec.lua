@@ -41,7 +41,11 @@ end
 
 local function remove_tree(files, dirs)
     for _, filename in ipairs(files or {}) do
-        os.remove(filename)
+        if platform.windows and lfs.symlinkattributes(filename, "mode") == "link" then
+            assert(lfs.rmdir(filename) or os.remove(filename))
+        else
+            os.remove(filename)
+        end
     end
     for i = #(dirs or {}), 1, -1 do
         lfs.rmdir(dirs[i])
@@ -474,7 +478,6 @@ describe("generated module C header inputs", function()
     end
 
     it("certifies directory-link origins over physically identical nested leaves", function()
-        if platform.windows then pending("Sync nominal origins are lexical on Windows"); return end
         if not require_symlink_capability() then return end
         local root = directory()
         local first, second = directory(root, "first"), directory(root, "second")
@@ -497,7 +500,7 @@ describe("generated module C header inputs", function()
         end
         assert.is_table(input)
         assert.is_table(origin)
-        assert(os.remove(link))
+        assert(lfs.rmdir(link) or os.remove(link))
         assert(lfs.link(second, link, true))
         local current, err, changed = cdriver.revalidate_header_input(input, { io = strategy })
         assert.is_nil(err)
@@ -1417,15 +1420,9 @@ describe("completed C header payload transport", function()
         assert.matches("^c%-header%-file%-v3:sha256:%x+$", first)
         local current, err, changed, reason = cdriver.revalidate_header_input(origin, { io = strategy })
         assert.is_nil(err)
-        if platform.windows then
-            -- Sync nominal origins are lexical on Windows.
-            assert.is_false(changed)
-            assert.equal(origin.identity, current.identity)
-        else
-            assert.is_true(changed)
-            assert.equal("provenance", reason)
-            assert.not_equal(origin.identity, current.identity)
-        end
+        assert.is_true(changed)
+        assert.equal("provenance", reason)
+        assert.not_equal(origin.identity, current.identity)
     end)
 end)
 
@@ -1632,11 +1629,6 @@ describe("C FFI cdriver", function()
 
         it("preserves symlink traversal when absolutizing include paths",
         function()
-            if platform.windows then
-                pending("#437 Windows symlink handling in the driver, C preprocessing and test-root discovery: " ..
-                    "include lookup collapses dot-dot before traversing the link")
-                return
-            end
             if not require_symlink_capability() then return end
             local root = tmp_dir()
             local source = mkdir(root, "source")
@@ -1648,7 +1640,8 @@ describe("C FFI cdriver", function()
             local second_include = mkdir(second, "include")
             local lexical_dir = mkdir(root, "include")
             local link = root .. "/sdk-link"
-            assert(lfs.link("first/nested", link, true))
+            local first_target = platform.windows and first_nested or "first/nested"
+            assert(lfs.link(first_target, link, true))
 
             local outer = source .. "/outer.h"
             local first_selected = first_include .. "/selected.h"
@@ -1692,8 +1685,9 @@ describe("C FFI cdriver", function()
             assert.equal(lookup,
                 direct_include.c_header_dependencies[1].path)
 
-            assert(os.remove(link))
-            assert(lfs.link("second/nested", link, true))
+            assert(lfs.rmdir(link) or os.remove(link))
+            local second_target = platform.windows and second_nested or "second/nested"
+            assert(lfs.link(second_target, link, true))
             assert.equal(first_file_identity,
                 assert(cdriver.header_input_identity("file", lookup)))
             assert.equal(first_search_identity,
@@ -3539,10 +3533,6 @@ typedef double titan_forced_order_value;
                 },
                 compiler_include_dirs = {},
             })
-            if platform.windows then
-                forced_lookup = assert(platform.path.normalize(forced_lookup))
-                imported_lookup = assert(platform.path.normalize(imported_lookup))
-            end
             assert.same({ "int" }, types.titan_normalized_value.def)
             assert.equal(imported_lookup, include.resolved)
             assert.same({ forced_lookup, imported_lookup }, {

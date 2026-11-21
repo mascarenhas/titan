@@ -1296,11 +1296,6 @@ test "$3" = 0 || exit "$3"
     end)
 
     it("rejects a self-referential object-output symlink without replacing it", function()
-        if platform.windows then
-            pending("#437 Windows symlink handling in the driver, C preprocessing and test-root discovery: " ..
-                "output validation follows the loop before rejecting the link")
-            return
-        end
         local available, message = filesystem.symlink_capability()
         if not available then
             pending(message)
@@ -1309,14 +1304,19 @@ test "$3" = 0 || exit "$3"
         local request = checked_requests()[1]
         request.mod.filename = source_root .. "/loop.titan"
         local link = source_root .. "/loop.o"
-        local target = "./loop.o"
+        local target = platform.windows and ".\\loop.o" or "./loop.o"
+        -- Windows LuaFileSystem follows links when asked for their target.
+        local function read_target()
+            if platform.windows then return require("luv").fs_readlink(link) end
+            return lfs.symlinkattributes(link, "target")
+        end
         assert(lfs.link(target, link, true))
         local ok, failure = pcall(function()
-            local original_target = assert(lfs.symlinkattributes(link, "target"))
+            local original_target = assert(read_target())
             assert.equal(target, original_target)
             local results = driver.compile_modules({ request }, JOBS, false)
             assert.equal("link", lfs.symlinkattributes(link, "mode"))
-            assert.equal(original_target, assert(lfs.symlinkattributes(link, "target")))
+            assert.equal(original_target, assert(read_target()))
             assert.is_nil(results[1].ok)
             assert.matches("regular nonlink file", results[1].err, 1, true)
         end)

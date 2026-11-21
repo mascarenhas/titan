@@ -116,15 +116,6 @@ local function require_symlink_capability()
     return true
 end
 
-local function require_physical_symlink_resolution()
-    if platform.windows then
-        pending("#437 Windows symlink handling in the driver, C preprocessing and test-root discovery: " ..
-            "test-root containment cannot match aliases with lexical realpath")
-        return false
-    end
-    return require_symlink_capability()
-end
-
 -- Discovery contexts are platform-initialized, as `titanc` provides them, so
 -- an inventory never runs `uname`. The observed strategy is attached after
 -- initialization so a no-process inventory case measures discovery alone.
@@ -388,7 +379,7 @@ describe("automatic test-root discovery", function()
 
         it("preserves logical prefixes across different spellings of a symlinked parent",
            function()
-            if not require_physical_symlink_resolution() then return end
+            if not require_symlink_capability() then return end
             local root = make({ ["physical"] = false })
             assert(lfs.link(joined(root, "physical"), joined(root, "alias"), true))
             put(root, "alias/src/tests/alpha_tests.titan", "")
@@ -413,7 +404,7 @@ describe("automatic test-root discovery", function()
 
         it("keeps first-containing-tree order across parent symlinks",
            function()
-            if not require_physical_symlink_resolution() then return end
+            if not require_symlink_capability() then return end
             local root = make({ ["physical/src/tests/alpha_tests.titan"] = "" })
             local parent_alias = joined(root, "alias")
             assert(lfs.link(joined(root, "physical"), parent_alias, true))
@@ -1412,7 +1403,7 @@ end
     end)
 
     it("builds and certifies discovery through a differently spelled source-tree parent", function()
-        if not require_physical_symlink_resolution() then return end
+        if not require_symlink_capability() then return end
         source("suite.alpha_tests", test_source("test_alias"))
         local physical_tree = tree
         local alias_tree = joined(suite, "source-alias")

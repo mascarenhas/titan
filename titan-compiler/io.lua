@@ -164,7 +164,61 @@ end
 
 local tried_native_support = false
 
+-- Win32 normally collapses ".." before opening the path. Resolve the
+-- directory to its left first so a symlink is traversed before stepping up.
+-- Keep the final leaf spelling: lstat and quoted includes still need it.
+local function windows_lookup_path(path)
+    if not platform.windows or not path:find("..", 1, true)
+       or path:sub(1, 4) == "\\\\?\\" then return path end
+    local spelling, err = platform.path.separators(path)
+    if not spelling then return nil, err end
+    local tail = spelling:match("^[A-Za-z]:(.*)$") or spelling
+    if not ("/" .. tail .. "/"):find("/../", 1, true) then return path end
+    local uv = require("titan-compiler.process").library()
+    if not platform.path.is_absolute(spelling) then
+        local cwd
+        local drive, relative = spelling:match("^([A-Za-z]:)([^/].*)$")
+        if drive then
+            cwd, err = uv.fs_realpath(drive .. ".")
+            spelling = relative
+        else
+            cwd, err = uv.cwd()
+        end
+        if not cwd then return nil, err end
+        spelling, err = platform.path.absolute(spelling, cwd)
+        if not spelling then return nil, err end
+    end
+    spelling = assert(platform.path.normalize(spelling, true))
+    while true do
+        local first, last = spelling:find("/%.%./")
+        if not first then first, last = spelling:find("/%.%.$") end
+        if not first then return spelling end
+        local prefix = assert(platform.path.normalize(spelling:sub(1, first)))
+        local physical, real_error, code = uv.fs_realpath(prefix)
+        if not physical then return nil, real_error, code end
+        local attributes, stat_error, stat_code = uv.fs_stat(physical)
+        if not attributes then return nil, stat_error, stat_code end
+        if attributes.type ~= "directory" then
+            return nil, "parent traversal requires a directory: " .. prefix
+        end
+        local parent = platform.path.split(physical)
+        local rest = spelling:sub(last + 1)
+        spelling = rest == "" and (parent or physical)
+            or assert(platform.path.join(parent or physical, rest))
+    end
+end
+
+local function path_missing(path)
+    return "path does not exist: " .. path
+end
+
 local function stat_attributes(path, follow)
+    local lookup, lookup_error, lookup_code = windows_lookup_path(path)
+    if not lookup then
+        if lookup_code == "ENOENT" then return nil, nil end
+        return nil, lookup_error
+    end
+    path = lookup
     local support = package.loaded.titan
     if not support and not tried_native_support then
         tried_native_support = true
@@ -298,13 +352,16 @@ end
 function Sync:realpath(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
-
-    local attributes, attribute_err = lfs_attributes(path, true)
-    if not attributes then
-        return nil, attribute_err or ("path does not exist: " .. path)
+    if platform.windows then
+        local lookup, err, code = windows_lookup_path(path)
+        if not lookup then return nil, code == "ENOENT" and path_missing(path) or err end
+        local real
+        real, err, code = require("titan-compiler.process").library().fs_realpath(lookup)
+        if not real then return nil, code == "ENOENT" and path_missing(path) or err end
+        return real
     end
-    -- Windows uses lexical paths; LuaFileSystem supplies the existence check.
-    if platform.windows then return self:absolute(path) end
+    local attributes, attribute_err = lfs_attributes(path, true)
+    if not attributes then return nil, attribute_err or path_missing(path) end
     local cwd, cwd_err = self:cwd()
     if not cwd then return nil, cwd_err end
     return resolve_existing_path(path, cwd)
@@ -323,6 +380,11 @@ function Sync:lstat(path)
 end
 
 local function open_file(path, mode)
+    if mode == "rb" then
+        local lookup, err = windows_lookup_path(path)
+        if not lookup then return nil, err end
+        path = lookup
+    end
     local called, file, err = pcall(lua_io.open, path, mode)
     if not called then return nil, tostring(file) end
     if not file then return nil, operation_error("open", err) end

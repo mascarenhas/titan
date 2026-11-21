@@ -660,17 +660,8 @@ describe("compiler I/O strategy", function()
 
         assert.equal("file", assert(strategy:stat(link)).kind)
         assert.equal("symlink", assert(strategy:lstat(link)).kind)
-        if platform.windows then
-            assert.equal(assert(strategy:absolute(target)),
-                assert(strategy:realpath(target)))
-            assert.equal(assert(strategy:absolute(link)),
-                assert(strategy:realpath(link)))
-            assert.not_equal(assert(strategy:realpath(target)),
-                assert(strategy:realpath(link)))
-        else
-            assert.equal(assert(strategy:realpath(target)),
-                assert(strategy:realpath(link)))
-        end
+        assert.equal(assert(strategy:realpath(target)),
+            assert(strategy:realpath(link)))
 
         local actual = root .. "/actual"
         local nested = actual .. "/nested"
@@ -680,18 +671,10 @@ describe("compiler I/O strategy", function()
         assert.is_true(strategy:write_file(sibling, "sibling bytes"))
         local directory_link = root .. "/directory-link"
         assert(lfs.link(nested, directory_link, true))
-        if platform.windows then
-            assert.equal(assert(strategy:absolute(directory_link)),
-                assert(strategy:realpath(directory_link)))
-            assert.not_equal(assert(strategy:realpath(nested)),
-                assert(strategy:realpath(directory_link)))
-            -- Win32 resolves dot-dot before traversing the directory link.
-            sibling = root .. "/sibling"
-            assert.is_true(strategy:write_file(sibling, "lexical sibling bytes"))
-        else
-            assert.equal(assert(strategy:realpath(nested)),
-                assert(strategy:realpath(directory_link)))
-        end
+        assert.equal(assert(strategy:realpath(nested)),
+            assert(strategy:realpath(directory_link)))
+        assert.equal("sibling bytes",
+            assert(strategy:read_file(directory_link .. "/../sibling")))
         assert.equal(assert(strategy:realpath(sibling)),
             assert(strategy:realpath(directory_link .. "/../sibling")))
 
@@ -704,18 +687,20 @@ describe("compiler I/O strategy", function()
     end)
 
     it("rejects dangling symlinks during canonical lookup", function()
-        if platform.windows then
-            pending("#437 Windows symlink handling in the driver, C preprocessing and test-root discovery: " ..
-                "realpath's LuaFileSystem existence check accepts a dangling link")
-            return
-        end
+        local available, message = filesystem.symlink_capability()
+        if not available then pending(message); return end
         root = workspace()
         local strategy = compiler_io.new_sync()
         local dangling = root .. "/dangling"
         assert(lfs.link(root .. "/missing", dangling, true))
         local canonical, canonical_err = strategy:realpath(dangling)
         assert.is_nil(canonical)
-        assert.matches("does not exist", canonical_err, 1, true)
+        if platform.windows then
+            assert.is_string(canonical_err)
+            assert.is_true(#canonical_err > 0)
+        else
+            assert.matches("does not exist", canonical_err, 1, true)
+        end
     end)
 
     posix_model_it("keeps captured shell semantics while inheriting coordinator leases", function()
@@ -1145,7 +1130,7 @@ describe("Windows synchronous compiler I/O", function()
         end
     end)
 
-    coarse_stat_it("uses LuaFileSystem metadata and lexical existing paths on Windows", function()
+    coarse_stat_it("uses LuaFileSystem metadata and propagates absence on Windows", function()
         local attributes = { mode = "file", permissions = "rw-rw-rw-",
             size = 4294967419, dev = 7, ino = 0, modification = 1790816523 }
         local metadata = { kind = "file", mode = 0x81B6, size = 4294967419,
@@ -1181,21 +1166,55 @@ describe("Windows synchronous compiler I/O", function()
                 assert.same({ "stat", "file" }, calls[1])
                 assert.same({ "lstat", "file" }, calls[2])
                 assert.equal("symlink", assert(strategy:lstat("symlink")).kind)
-                assert.equal(paths.normalize("C:/owned/file"),
-                    strategy:realpath([[C:\owned\child\..\file]]))
                 for _, path in ipairs({ "absent", "absent-parent/child" }) do
                     local absent, err = strategy:stat(path)
                     assert.is_nil(absent); assert.is_nil(err)
                     absent, err = strategy:lstat(path)
                     assert.is_nil(absent); assert.is_nil(err)
-                    local canonical, canonical_err = strategy:realpath(path)
-                    assert.is_nil(canonical)
-                    assert.matches("does not exist", canonical_err, 1, true)
                 end
                 local absent, err = strategy:stat("denied")
                 assert.is_nil(absent); assert.equal("access denied", err)
                 absent, err = strategy:lstat("denied")
                 assert.is_nil(absent); assert.equal("access denied", err)
+            end)
+        end)
+    end)
+
+    it("resolves each Windows parent traversal before querying the leaf", function()
+        local process = require "titan-compiler.process"
+        local realpaths = {
+            ["C:/checkout/link"] = "D:\\sdk\\nested",
+            ["D:/sdk/other"] = "D:\\platform\\headers",
+            ["D:/platform/file.h"] = "D:\\platform\\file.h",
+        }
+        local uv = {
+            cwd = function() return "C:\\checkout" end,
+            fs_realpath = function(path)
+                local real = realpaths[path]
+                if not real then return nil, "lookup failed", "ENOENT" end
+                return real
+            end,
+            fs_stat = function(path)
+                assert.truthy(path == realpaths["C:/checkout/link"]
+                    or path == realpaths["D:/sdk/other"], path)
+                return { type = "directory" }
+            end,
+        }
+        with_overrides(platform, { windows = true }, function()
+            with_overrides(process, { library = function() return uv end }, function()
+                with_native_stat(function(path, follow)
+                    assert.equal("D:/platform/file.h", path)
+                    assert.is_false(follow)
+                    return { kind = "link", mtime_ns = 0 }
+                end, function()
+                    local strategy = compiler_io.new_sync()
+                    local lookup = [[link\..\other\..\file.h]]
+                    assert.equal(realpaths["D:/platform/file.h"], assert(strategy:realpath(lookup)))
+                    assert.equal("symlink", assert(strategy:lstat(lookup)).kind)
+                    local absent, err = strategy:realpath("missing/../file.h")
+                    assert.is_nil(absent)
+                    assert.matches("does not exist", err, 1, true)
+                end)
             end)
         end)
     end)

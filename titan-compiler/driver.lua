@@ -13896,22 +13896,35 @@ function perf.new_output_path_index(label, reservations, strategy)
         return followed
     end
 
-    local function observe(path)
+    local function wrong_kind(path, owner, mode)
+        local expected = mode == "directory" and
+            "a nonlink directory" or "a regular nonlink file"
+        return label .. " '" .. path .. "' for " .. owner .. " is not " .. expected
+    end
+
+    local function observe(path, owner, mode)
         local raw, raw_error = absolute_filename(path, strategy)
         if not raw then return nil, raw_error end
         local cached = observations[raw]
         if cached then return cached end
+        local normalized = normalize_absolute_path(raw)
         local attr, err = attrs(raw)
         if err then return nil, err end
+        local existing_mode = file_mode(attr)
+        if windows_io and mode and existing_mode and existing_mode ~= mode then
+            -- Input alias checks need followed identity; a rejected output
+            -- leaf does not. In particular, a cyclic link cannot be followed.
+            return nil, wrong_kind(normalized, owner, mode)
+        end
         local followed
         followed, err = follow(raw, attr)
         if err then return nil, err end
         cached = {
             path = path,
             raw = raw,
-            normalized = normalize_absolute_path(raw),
+            normalized = normalized,
             physical = physical_absolute_filename(raw, attrs),
-            existing_mode = file_mode(attr),
+            existing_mode = existing_mode,
             -- The Windows I/O boundary omits weak LFS IDs but preserves the
             -- precise native IDs, which also identify aliases of held locks.
             device = followed and (windows_io and followed.device or followed.dev) or nil,
@@ -14010,16 +14023,13 @@ function perf.new_output_path_index(label, reservations, strategy)
 
     local index = { outputs = outputs }
     function index.add(path, owner, mode)
-        local observation, err = observe(path)
+        local observation, err = observe(path, owner, mode)
         if not observation then return nil, err end
         local ok
         ok, err = ancestors(observation.normalized)
         if not ok then return nil, err end
         if observation.existing_mode and observation.existing_mode ~= mode then
-            local expected = mode == "directory" and
-                "a nonlink directory" or "a regular nonlink file"
-            return nil, label .. " '" .. observation.normalized .. "' for " ..
-                owner .. " is not " .. expected
+            return nil, wrong_kind(observation.normalized, owner, mode)
         end
         local previous, alias = match(observation)
         if previous then
