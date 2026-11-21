@@ -73,10 +73,12 @@ requires at least one `--test-dir`. Each `DIR` is resolved relative to the
 invocation working directory via `context.io:stat` and `context.io:realpath`.
 A missing, unreadable, or non-directory `DIR` fails immediately. Every `DIR`
 must lie lexically or physically inside a configured `--tree` source root
-(`driver.TITAN_SOURCE_PATH`); `testroots.discover` selects the **first**
-configured containing `--tree` root in `--tree` order to derive the directory's
-logical module prefix, rather than stripping `DIR`'s basename or choosing a
-longest prefix. Repeated or overlapping `--test-dir` arguments deduplicate.
+(`driver.TITAN_SOURCE_PATH`), matching symlinked source-tree aliases on both
+POSIX and Windows through `context.io:realpath`; `testroots.discover` selects
+the **first** configured containing `--tree` root in `--tree` order to derive
+the directory's logical module prefix, rather than stripping `DIR`'s basename
+or choosing a longest prefix. Repeated or overlapping `--test-dir` arguments
+deduplicate.
 
 For each discovery area, `testroots.discover` walks entries in bytewise order
 with `context.io:list` and `context.io:lstat`, yielding cooperatively through
