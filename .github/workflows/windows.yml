@@ -38,6 +38,7 @@ jobs:
       TITAN_TEST_BUILD_DIR: C:/titan-stdlib-tests
       TITAN_JOBS: "4"
       OPENSSL_MODE: bundled
+      TITAN_NATIVE_CFLAGS: "-O0 -fno-lto"
       LC_ALL: C.UTF-8
       LANG: C.UTF-8
 
@@ -93,15 +94,19 @@ jobs:
           gitlink=$(git rev-parse HEAD:lua-5.5.1)
           digest=$({
             cygpath -m "$PWD"
+            cygpath -m "$PREFIX"
             cygpath -m /clang64
             uname -r
             pacman -Q
           } | tee /tmp/titan-windows-toolchain | sha256sum | cut -d' ' -f1)
           cat /tmp/titan-windows-toolchain
+          native_flags=$(printf '%s\n' "$TITAN_NATIVE_CFLAGS" | sha256sum | cut -d' ' -f1)
           echo "identity=windows-2025-vs2026-${RUNNER_ARCH}-CLANG64-${TITAN_BUILD_PROFILE}-${digest}-${gitlink}" >> "$(cygpath -u "$GITHUB_OUTPUT")"
+          echo "native-flags=$native_flags" >> "$(cygpath -u "$GITHUB_OUTPUT")"
 
       # The three component DLLs share a CMake tree, and the source manifest
       # pins those libraries and OpenSSL. Cache the native trees as one unit.
+      # Bump layout-v1 only when the cache path list changes.
       - name: Restore the Lua SDK and pinned Windows native dependency builds
         id: native-cache
         uses: actions/cache/restore@v4
@@ -120,8 +125,9 @@ jobs:
             C:/titan-ci/out/windows-validation/lua-5.5.1
             C:/titan-ci/out/windows-validation/native-src
             C:/titan-ci/out/windows-validation/native
-          key: ${{ steps.toolchain.outputs.identity }}-native-${{ env.OPENSSL_MODE }}-${{ hashFiles('Makefile.win', 'scripts/*windows*native*', 'scripts/*windows*libbacktrace*', 'scripts/windows_build_profile.sh', 'vendor/windows-native/**', 'vendor/libbacktrace/**', 'vendor/libuv/*.patch', 'vendor/lua/*', '.github/workflows/windows.yml') }}
+          key: ${{ steps.toolchain.outputs.identity }}-native-layout-v1-${{ env.OPENSSL_MODE }}-${{ steps.toolchain.outputs.native-flags }}-${{ hashFiles('Makefile.win', 'scripts/prepare_windows_native.pl', 'scripts/build_windows_native.sh', 'scripts/build_windows_libbacktrace.sh', 'scripts/windows_build_profile.sh', 'vendor/windows-native/CMakeLists.txt', 'vendor/windows-native/dependencies.tsv', 'vendor/libbacktrace/dependencies.tsv', 'vendor/libbacktrace/*.patch', 'vendor/libuv/*-windows-*.patch', 'vendor/lua/*.manifest', 'vendor/lua/*.rc') }}
 
+      # Bump layout-v1 only when the cache path list changes.
       - name: Restore standalone-prefix LuaRocks dependencies
         id: rocks-cache
         uses: actions/cache/restore@v4
@@ -135,16 +141,17 @@ jobs:
             C:/titan-ci/.lua/lib/lua/5.5
             C:/titan-ci/.lua/lib/luarocks
             C:/titan-ci/.lua/share/lua/5.5
-          key: ${{ steps.toolchain.outputs.identity }}-rocks-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile.win', 'scripts/install_windows_luarocks.sh', 'titan-0.6.0-1.rockspec') }}
+          key: ${{ steps.toolchain.outputs.identity }}-rocks-layout-v1-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile.win', 'scripts/install_windows_luarocks.sh', 'titan-0.6.0-1.rockspec') }}
 
+      # Bump layout-v1 in both keys only when the cache path list changes.
       - name: Restore Windows C-probe results
         id: probe-cache
         uses: actions/cache/restore@v4
         with:
-          path: C:/titan-ci/.lua/var/cache/titan-probes/2
-          key: titan-probes-2-${{ steps.toolchain.outputs.identity }}-${{ env.OPENSSL_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: &windows-probe-path C:/titan-ci/.lua/var/cache/titan-probes/2
+          key: titan-probes-2-layout-v1-${{ steps.toolchain.outputs.identity }}-${{ env.OPENSSL_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            titan-probes-2-${{ steps.toolchain.outputs.identity }}-${{ env.OPENSSL_MODE }}-
+            titan-probes-2-layout-v1-${{ steps.toolchain.outputs.identity }}-${{ env.OPENSSL_MODE }}-
 
       - name: Report Windows cache hits
         run: |
@@ -156,7 +163,7 @@ jobs:
         # Keep the native dependency flags identical outside and inside
         # LuaRocks' nested Make without overriding the specs' Make defaults.
         env:
-          NATIVE_CFLAGS: &windows-native-cflags "-O0 -fno-lto"
+          NATIVE_CFLAGS: &windows-native-cflags ${{ env.TITAN_NATIVE_CFLAGS }}
         run: |
           set -euo pipefail
           unset LD
@@ -204,7 +211,7 @@ jobs:
         if: matrix.suite == 'native-aggregate'
         uses: actions/cache/save@v4
         with:
-          path: C:/titan-ci/.lua/var/cache/titan-probes/2
+          path: *windows-probe-path
           key: ${{ steps.probe-cache.outputs.cache-primary-key }}
 
       - name: Build and run the complete Windows native stdlib aggregate

@@ -34,6 +34,8 @@ jobs:
       TITAN_JOBS: "3"
       TITAN_TEST_JOBS: "3"
       OPENSSL_MODE: bundled
+      TITAN_LUA_PLATFORM: macosx
+      TITAN_LUA_HOST_FLAGS: "-O2 -fno-lto"
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v3"
@@ -71,6 +73,7 @@ jobs:
           [[ $libbacktrace =~ ^[0-9a-f]{40}$ ]]
           {
             pwd -P
+            printf '%s\n' "$PREFIX"
             sw_vers
             cc --version
             xcrun --show-sdk-path
@@ -79,11 +82,15 @@ jobs:
             brew list --versions readline openssl@3
           } | tee "$RUNNER_TEMP/titan-macos-toolchain"
           digest=$(shasum -a 256 "$RUNNER_TEMP/titan-macos-toolchain" | cut -d' ' -f1)
+          lua_build=$(printf '%s\n' "$TITAN_LUA_PLATFORM" "$TITAN_LUA_HOST_FLAGS" \
+            "$(brew --prefix readline)" | shasum -a 256 | cut -d' ' -f1)
           echo "identity=macos-15-${RUNNER_ARCH}-${TITAN_BUILD_PROFILE}-${digest}-${gitlink}" >> "$GITHUB_OUTPUT"
+          echo "lua-build=$lua_build" >> "$GITHUB_OUTPUT"
           echo "libbacktrace=$libbacktrace" >> "$GITHUB_OUTPUT"
 
       # Save only pre-Titan state. An exact key includes the recipes for both
       # builds and the install path/toolchain used by their cached objects.
+      # Bump layout-v1 only when the cache path list changes.
       - name: Restore the Lua SDK and libbacktrace build
         id: core-cache
         uses: actions/cache/restore@v4
@@ -97,8 +104,9 @@ jobs:
             .lua/src/lua-5.5.1
             lua-5.5.1/src/liblua.a
             libbacktrace
-          key: ${{ steps.toolchain.outputs.identity }}-core-${{ steps.toolchain.outputs.libbacktrace }}-${{ hashFiles('Makefile', '.github/workflows/macos.yml') }}
+          key: ${{ steps.toolchain.outputs.identity }}-core-layout-v1-${{ steps.toolchain.outputs.lua-build }}-${{ steps.toolchain.outputs.libbacktrace }}-${{ hashFiles('Makefile') }}
 
+      # Bump layout-v1 only when the cache path list changes.
       - name: Restore standalone-prefix LuaRocks dependencies
         id: rocks-cache
         uses: actions/cache/restore@v4
@@ -114,8 +122,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ${{ steps.toolchain.outputs.identity }}-rocks-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile', '.github/workflows/macos.yml', 'titan-0.6.0-1.rockspec') }}
+          key: ${{ steps.toolchain.outputs.identity }}-rocks-layout-v1-${{ steps.toolchain.outputs.lua-build }}-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile', 'titan-0.6.0-1.rockspec') }}
 
+      # Bump layout-v1 only when the cache path list changes.
       - name: Restore bundled libuv source and static build
         id: libuv-cache
         uses: actions/cache/restore@v4
@@ -124,8 +133,9 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: ${{ steps.toolchain.outputs.identity }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('Makefile', 'vendor/libuv/*.patch') }}
+          key: ${{ steps.toolchain.outputs.identity }}-libuv-layout-v1-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('Makefile', 'vendor/libuv/*-spawn-close.patch') }}
 
+      # Bump layout-v1 only when the cache path list changes.
       - name: Restore bundled llhttp source and static build
         id: llhttp-cache
         uses: actions/cache/restore@v4
@@ -134,8 +144,9 @@ jobs:
             llhttp-release-v${{ env.LLHTTP_VERSION }}
             llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
             llhttp-build
-          key: ${{ steps.toolchain.outputs.identity }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
+          key: ${{ steps.toolchain.outputs.identity }}-llhttp-layout-v1-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
 
+      # Bump layout-v1 only when the cache path list changes.
       - name: Restore bundled SQLite amalgamation and static build
         id: sqlite-cache
         uses: actions/cache/restore@v4
@@ -144,8 +155,9 @@ jobs:
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
             sqlite3-build
-          key: ${{ steps.toolchain.outputs.identity }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
+          key: ${{ steps.toolchain.outputs.identity }}-sqlite3-layout-v1-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_RELEASE }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
 
+      # Bump layout-v1 only when the cache path list changes.
       - name: Restore bundled OpenSSL source and static build
         id: openssl-cache
         uses: actions/cache/restore@v4
@@ -154,16 +166,17 @@ jobs:
             openssl-${{ env.OPENSSL_VERSION }}
             openssl-${{ env.OPENSSL_VERSION }}.tar.gz
             openssl-build
-          key: ${{ steps.toolchain.outputs.identity }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
+          key: ${{ steps.toolchain.outputs.identity }}-openssl-layout-v1-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
 
+      # Bump layout-v1 in both keys only when the cache path list changes.
       - name: Restore macOS C-probe results
         id: probe-cache
         uses: actions/cache/restore@v4
         with:
-          path: .lua/var/cache/titan-probes/2
-          key: titan-probes-2-${{ steps.toolchain.outputs.identity }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: &macos-probe-path .lua/var/cache/titan-probes/2
+          key: titan-probes-2-layout-v1-${{ steps.toolchain.outputs.identity }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            titan-probes-2-${{ steps.toolchain.outputs.identity }}-
+            titan-probes-2-layout-v1-${{ steps.toolchain.outputs.identity }}-
 
       - name: Report macOS cache hits
         run: |
@@ -178,9 +191,9 @@ jobs:
       - name: Build the bundled Lua 5.5 source tree
         run: |
           readline_prefix="$(brew --prefix readline)"
-          make lua LUA_PLATFORM=macosx \
-            LUA_MYCFLAGS="-O2 -fno-lto -I$readline_prefix/include" \
-            LUA_MYLDFLAGS="-O2 -fno-lto -L$readline_prefix/lib"
+          make lua LUA_PLATFORM="$TITAN_LUA_PLATFORM" \
+            LUA_MYCFLAGS="$TITAN_LUA_HOST_FLAGS -I$readline_prefix/include" \
+            LUA_MYLDFLAGS="$TITAN_LUA_HOST_FLAGS -L$readline_prefix/lib"
           # Workers can bootstrap the checkout runtime, not just use the SDK.
           test -f lua-5.5.1/src/liblua.a
 
@@ -273,7 +286,7 @@ jobs:
         if: contains(fromJSON('["native","full"]'), matrix.suite)
         uses: actions/cache/save@v4
         with:
-          path: .lua/var/cache/titan-probes/2
+          path: *macos-probe-path
           key: ${{ steps.probe-cache.outputs.cache-primary-key }}
 
       # Exercise titanc through its real /usr/bin/env shebang. CI must provide

@@ -912,16 +912,23 @@ Manual dispatch runs the same four jobs and covers the full Windows suite.
 ### Hosted platform caches
 
 `actions/cache` restores exact-key Lua, native dependency, and LuaRocks
-dependency snapshots. Keys include platform, architecture, profile, the
-actual toolchain identity and build location, the Lua gitlink, and the
-relevant dependency pins and recipe hashes. On macOS, libbacktrace also keys
-on the resolved upstream revision and the other native dependencies have
-separate caches. On Windows the native libraries share a build tree: its key
-includes both pinned source manifests, patches, build recipes, and OpenSSL mode.
+dependency snapshots. Keys use build inputs: the platform, architecture,
+toolchain and build location, profile and relevant flags, Lua gitlink,
+dependency versions and checksums, patches, build recipes, and rockspec
+where applicable. On macOS, libbacktrace also keys on the resolved upstream
+revision and the other native dependencies have separate caches. On Windows,
+the co-built native libraries share a key that includes the pinned source
+manifests and OpenSSL mode.
 The LuaRocks cache stops before installing the Titan rock. Only the native
 cell (the aggregate on Windows) or macOS manual `full` saves dependency
 misses; no persistent cache contains the installed Titan rock or its
 generated provider.
+
+Do not hash the workflow files themselves: changes to scheduling, tests,
+or logging should not invalidate a dependency snapshot. Each cache key
+has its own `layout-vN` token. Bump it by hand only when that cache's path
+list changes; include the same token in any restore-key prefix. Changes
+to build inputs should change the corresponding key inputs instead.
 
 The C-probe cache restores separately before building the rock, using a
 stable platform/toolchain prefix and a fresh key for each run and attempt.

@@ -6778,14 +6778,31 @@ printf '%s\n' "${schedule[@]}"
                     "run_parallel_compiler_tests.sh")
                 local probe_restore = named_step(suite, "Restore " .. label .. " C-probe results")
                 local probe_save = named_step(suite, "Save " .. label .. " C-probe results")
+                local probe_layout = assert(probe_restore:match("key: (titan%-probes%-2%-layout%-v%d+)%-"))
                 assert_ordered(probe_restore, "actions/cache/restore@v4",
                     "var/cache/titan-probes/2", "${{ github.run_id }}-${{ github.run_attempt }}",
-                    "restore-keys:")
+                    "restore-keys:", probe_layout .. "-${{ steps.toolchain.outputs.identity }}-")
                 assert_ordered(probe_save, "actions/cache/save@v4",
-                    "var/cache/titan-probes/2", "steps.probe-cache.outputs.cache-primary-key")
+                    "path: *" .. platform_id .. "-probe-path", "steps.probe-cache.outputs.cache-primary-key")
+                local dependency_key_count = 0
+                for hash_key in suite:gmatch("\n          key: ([^\n]+hashFiles[^\n]+)") do
+                    assert.falsy(hash_key:find(".github/workflows/", 1, true), hash_key)
+                    assert.truthy(hash_key:match("%-layout%-v%d+%-"), hash_key)
+                    dependency_key_count = dependency_key_count + 1
+                end
+                assert.equal(platform_id == "macos" and 6 or 2, dependency_key_count, suite)
+                local rocks_cache = named_step(suite, "Restore standalone-prefix LuaRocks dependencies")
+                assert_ordered(rocks_cache, "-rocks-layout-", "hashFiles(", "'titan-0.6.0-1.rockspec'")
                 if platform_id == "macos" then
                     local core_cache = named_step(suite, "Restore the Lua SDK and libbacktrace build")
-                    assert.truthy(core_cache:find("lua-5.5.1/src/liblua.a", 1, true), core_cache)
+                    assert_ordered(core_cache, ".lua/bin/lua\n", ".lua/bin/luac\n",
+                        ".lua/include\n", ".lua/lib/liblua.a\n", ".lua/share/man\n",
+                        ".lua/src/lua-5.5.1\n", "lua-5.5.1/src/liblua.a\n", "-core-layout-",
+                        "steps.toolchain.outputs.lua-build", "steps.toolchain.outputs.libbacktrace",
+                        "hashFiles('Makefile')")
+                    local lua_build = named_step(suite, "Build the bundled Lua 5.5 source tree")
+                    assert_ordered(lua_build, 'make lua LUA_PLATFORM="$TITAN_LUA_PLATFORM"',
+                        'test -f lua-5.5.1/src/liblua.a')
                     assert.truthy(suite:find(
                         [[fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["native","compiler"]')]],
                         1, true), suite)
@@ -6796,9 +6813,15 @@ printf '%s\n' "${schedule[@]}"
                 else
                     local native_cache = named_step(suite,
                         "Restore the Lua SDK and pinned Windows native dependency builds")
-                    for _, header in ipairs({ "lauxlib.h", "lualib.h" }) do
-                        assert.truthy(native_cache:find("/include/" .. header, 1, true), header)
-                    end
+                    assert_ordered(native_cache, "/bin/lua.exe", "/bin/luac.exe", "/bin/lua55.dll",
+                        "/include/lua*.h", "/include/lauxlib.h", "/include/lualib.h", "/include/lua.hpp",
+                        "/lib/liblua55.a", "/share/man", "/src/lua-5.5.1", "-native-layout-",
+                        "env.OPENSSL_MODE", "steps.toolchain.outputs.native-flags", "hashFiles('Makefile.win'",
+                        "'vendor/windows-native/dependencies.tsv'", "'vendor/libbacktrace/dependencies.tsv'")
+                    local lua_build = named_step(suite, "Build Lua, LuaRocks and the pinned native dependencies")
+                    assert_ordered(lua_build, "mingw32-make -f Makefile.win lua luarocks libbacktrace native",
+                        "for header in lua.h luaconf.h lauxlib.h lualib.h lua.hpp",
+                        'test -f "$PREFIX/include/$header"')
                     assert_ordered(suite, "matrix:\n        include:",
                         "suite: native-aggregate", "suite: native-retained\n            group: retained",
                         "suite: compiler-1\n            group: windows-compiler-shard-1",
