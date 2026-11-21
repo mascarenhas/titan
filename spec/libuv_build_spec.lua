@@ -5043,8 +5043,8 @@ exit "${TITAN_FIXTURE_NATIVE_STATUS:-0}"
             local fake_busted = bin .. "/busted"
             write_file(fake_busted, "#!/usr/bin/env bash\nset -u\n" ..
                 common .. [==[
-[[ $# == 4 && $1 == -o && $2 == gtest && $3 == -v ]] || exit 70
-test_file=$4
+[[ $# == 5 && $1 == -o && $2 == gtest && $3 == -v && $4 == --defer-print ]] || exit 70
+test_file=$5
 [[ $PWD != "$TITAN_FIXTURE_ORIGINAL" ]] || exit 72
 [[ ! -e .git && ! -e .lua ]] || exit 73
 [[ -z ${TITAN_FIXTURE_OMITTED:-} || ! -e $TITAN_FIXTURE_OMITTED ]] || exit 73
@@ -7789,7 +7789,11 @@ end)
                 make_spec("spec/retained_fail_spec.lua",
                     record_snippet("retained_fail", true))
                 make_spec("spec/retained_pass_spec.lua",
-                    record_snippet("retained_pass", false))
+                    record_snippet("retained_pass", false) .. [[
+it("reports pending reasons in worker output", function()
+    pending("fixture pending reason: native symlink resolution is unavailable")
+end)
+]])
                 make_spec("spec/stdlib_one_spec.lua",
                     record_snippet("stdlib_one", false))
                 make_spec("spec/compiler_a_spec.lua",
@@ -7855,6 +7859,9 @@ end)
                 assert.truthy(output:find(
                     "Per-file Busted summary: passed=6 failed=1 total=7", 1, true),
                     output)
+                assert.truthy(output:find(
+                    "fixture pending reason: native symlink resolution is unavailable",
+                    1, true), output)
                 assert.truthy(output:find(
                     "FAILED spec file: spec/retained_fail_spec.lua", 1, true),
                     output)
