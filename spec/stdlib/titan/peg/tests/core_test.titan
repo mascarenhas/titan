@@ -605,3 +605,120 @@ function test_core_locale_and_stack_controls(context: test.Context)
     pattern.set_max_stack(21474837)
   end)
 end
+
+-- Each Pattern keeps its wrapped native match program after the first
+-- attempt. Reusing it must never carry results, captures, labels, or
+-- arguments between attempts, nor change what the Pattern composes into.
+function test_core_repeated_matches_reuse_one_pattern(context: test.Context)
+  context:run("outcomes_interleave", function(_child: test.Context)
+    local outcomes = pattern.choice(
+      pattern.literal("ok"),
+      pattern.sequence(pattern.literal("x"), pattern.throw("bad")))
+    local round = 1
+    while round <= 3 do
+      test.assert(outcomes:match("ok") == 3, "repeated success changed")
+      local failed, fail_label, fail_position = outcomes:match("zz", 2)
+      test.assert(failed == nil and fail_label == "fail" and fail_position == 2,
+                  "repeated ordinary failure changed")
+      local thrown, throw_label, throw_position = outcomes:match("xy")
+      test.assert(thrown == nil and throw_label == "bad" and throw_position == 2,
+                  "repeated labeled throw changed")
+      test.assert(outcomes:match("--ok", 3) == 5, "repeated init changed")
+      round = round + 1
+    end
+  end)
+
+  context:run("captures_and_arguments", function(_child: test.Context)
+    local nils = pattern.constant(nil, "last")
+    local word = pattern.capture(pattern.one_or_more(pattern.ranges("az")))
+    local argument = pattern.argument(1)
+    local round = 1
+    while round <= 3 do
+      test.assert(support.result_count(nils:match("")) == 2,
+                  "repeated nil capture lost its arity")
+      local leading, last = nils:match("")
+      test.assert(leading == nil and last == "last")
+      test.assert(word:match("alpha!") == "alpha" and word:match("be") == "be",
+                  "a capture leaked between attempts")
+      local supplied = "argument " .. support.decimal_text(round)
+      test.assert(argument:match("", nil, supplied) == supplied,
+                  "an argument capture leaked between attempts")
+      round = round + 1
+    end
+    support.assert_raises("absent extra argument #1", function()
+      argument:match("")
+    end)
+    test.assert(argument:match("", nil, "after") == "after")
+  end)
+
+  context:run("capture_limit", function(_child: test.Context)
+    local two_hundred = pattern.succeed()
+    local index = 1
+    while index <= 200 do
+      two_hundred = pattern.sequence(two_hundred, pattern.constant(index))
+      index = index + 1
+    end
+    local too_many = pattern.sequence(two_hundred, pattern.constant(201))
+    local round = 1
+    while round <= 2 do
+      test.assert(support.result_count(two_hundred:match("")) == 200)
+      local captures: {value} = {two_hundred:match("")}
+      test.assert(captures[1] == 1 and captures[200] == 200)
+      support.assert_raises("too many flexible return values", function()
+        too_many:match("")
+      end)
+      round = round + 1
+    end
+  end)
+
+  context:run("multi_kilobyte_search", function(_child: test.Context)
+    local needle = pattern.capture(pattern.literal("needle"))
+    local haystack = support.repeat_text("x", 8192) .. "needle" ..
+      support.repeat_text("y", 100) .. "needle"
+    local round = 1
+    while round <= 3 do
+      local first? = pattern.match(haystack, needle)
+      test.assert(first ~= nil and first.first == 8193 and first.last == 8198,
+                  "repeated search moved its first match")
+      local found: value = first:values()
+      test.assert(found == "needle")
+      local second? = pattern.match(haystack, needle, 8194)
+      test.assert(second ~= nil and second.first == 8299, "search from init moved")
+      test.assert(pattern.match(haystack, needle, 8300) == nil,
+                  "exhausted search found a stale match")
+      round = round + 1
+    end
+    local committed = pattern.sequence(pattern.literal("y"), pattern.throw("stop"))
+    test.assert(pattern.match(haystack, committed) == nil, "a committed label resumed search")
+    test.assert(pattern.match(haystack, committed) == nil)
+  end)
+
+  context:run("composition_after_matching", function(_child: test.Context)
+    local prefix = pattern.literal("ab")
+    test.assert(prefix:match("ab") == 3)
+    local composed = pattern.sequence(prefix, pattern.capture(pattern.literal("c")))
+    test.assert(support.result_count(composed:match("abc")) == 1,
+                "a matched Pattern composed its match wrapper")
+    test.assert(composed:match("abc") == "c")
+    test.assert(pattern.choice(pattern.literal("z"), prefix):match("ab") == 3)
+    local defined = pattern.compile("%prefix 'c'", {pattern.define("prefix", prefix)})
+    test.assert(defined:match("abc") == 4, "a matched Pattern defined its match wrapper")
+    test.assert(prefix:match("ab") == 3 and prefix:match("ax") == nil)
+  end)
+
+  context:run("reentrant_match", function(_child: test.Context)
+    local depth = 0
+    local inner_result: value = nil
+    local reentrant: pattern.Pattern? = nil
+    local callback: function (string, integer, string): (...: value) =
+      function(_subject, position, _whole)
+        depth = depth + 1
+        if depth == 1 then inner_result = reentrant:match("[x") end
+        return position
+      end
+    reentrant = pattern.sequence(pattern.literal("["), pattern.runtime(callback))
+    test.assert(reentrant:match("[[") == 2, "outer match changed under reentry")
+    test.assert(depth == 2 and inner_result == 2,
+                "the same Pattern did not match while already matching")
+  end)
+end
