@@ -660,6 +660,9 @@ local validation seconds, and an optional covered-seconds column
 name, it holds Linux CI covered+stress durations only in `compiler` rows. In
 `stdlib` rows it holds same-host serial four-CPU LuaCov diagnostic seconds of
 the CI step's files, not a CI run, and `retained` rows leave it `-`. The
+optional `windows_uncovered_seconds` column records hosted CLANG64
+validation timings without coverage. The Windows compiler shards fall back
+to local validation seconds for files not yet measured on Windows. The
 `retained` domain is the runtime/packaging set
 (`Makefile` `STDLIB_BUSTED_TESTS`, `Makefile.win`
 `TITAN_ROCK_TEST_STDLIB_SPECS`), `stdlib` is

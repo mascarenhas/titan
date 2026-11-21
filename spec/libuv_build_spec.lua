@@ -6430,6 +6430,16 @@ printf '%s\n' "${schedule[@]}"
                 "timeout-minutes: 60",
                 "profile: [validation, production]",
                 "engine: [chromium, firefox, webkit]",
+                "exclude:\n          - profile: validation\n            engine: firefox\n" ..
+                    "          - profile: validation\n            engine: webkit\n" ..
+                    "        include:\n          - profile: validation\n            engine: firefox-webkit\n" ..
+                    "            engines: firefox webkit\n",
+                "TITAN_TRACE_ENGINES: ${{ matrix.engines || matrix.engine }}",
+                'install --with-deps "${engines[@]}"',
+                'TITAN_PLAYWRIGHT_TEST_ENGINES="${TITAN_TRACE_ENGINES// /,}"',
+                'browser-playwright-trace-$engine.log',
+                'browser-playwright-policy-$engine.log',
+                'browser-playwright-degraded-$engine.log',
                 'TITAN_PLAYWRIGHT_VERSION: "1.64.1"',
                 'TITAN_VITE_VERSION: "8.3.6"',
                 "TITAN_VITE_ROOT:",
@@ -6466,6 +6476,7 @@ printf '%s\n' "${schedule[@]}"
                 "Run the persistent bridge and opaque-Promise diagnostics")
             assert.falsy(bridge_gate:find("if:", 1, true), bridge_gate)
             for _, contract in ipairs({
+                "process.env.TITAN_TRACE_ENGINES.split(' ')",
                 "for (const assertions of [2, 0])",
                 "['integration.mjs', 0,",
                 "`assertions-${assertions}/public-states.mjs`",
@@ -6500,14 +6511,14 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(net_python:find("if: matrix.engine == 'chromium'", 1, true))
             assert.truthy(net_python:find("run: python3 --version", 1, true))
             local net_gate = named_step(playwright_job,
-                "Run live HTTP, HTTPS, and WebSocket clients on the managed engine")
+                "Run live HTTP, HTTPS, and WebSocket clients on each managed engine")
             assert.falsy(net_gate:find("if:", 1, true), net_gate)
             for _, contract in ipairs({
                 '"$TITAN_NODE" spec/fixtures/browser_net/run.mjs',
-                '--root "$TITAN_NET_OUTPUT" --engine "$TITAN_TRACE_ENGINE"',
+                '--root "$TITAN_NET_OUTPUT" --engine "$engine"',
                 '--sdk "$PREFIX/lib/titan-browser/0.6"',
                 '--runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" --persistent-webkit',
-                "browser-playwright-net.log",
+                "browser-playwright-net-$engine.log",
             }) do
                 assert.truthy(net_gate:find(contract, 1, true), contract)
             end
@@ -6532,8 +6543,8 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.truthy(docs_gate:find(contract, 1, true), contract)
             end
-            -- The complete application: every cell builds it by its section's
-            -- commands and runs the hosted test; production cells keep records.
+            -- Each job builds the application once per profile and runs it
+            -- on every managed engine; production cells keep records.
             local delivery_build = named_step(playwright_job,
                 "Build the browser chapter's complete application and its server")
             assert.falsy(delivery_build:find("if:", 1, true), delivery_build)
@@ -6542,12 +6553,21 @@ printf '%s\n' "${schedule[@]}"
             local hosted = named_step(playwright_job, "Run the complete application's hosted deployment test")
             assert.falsy(hosted:find("if:", 1, true), hosted)
             for _, contract in ipairs({
-                '"$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE"',
+                '"$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$engine"',
                 '--root "$TITAN_DELIVERY_OUTPUT" "${records[@]}"',
                 'if [ "$TITAN_BUILD_PROFILE" = production ]; then',
-                'records=(--records "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json")',
+                'records=(--records "$PWD/out/browser-records/playwright-$engine.json")',
+                "browser-playwright-delivery-$engine.log",
             }) do
                 assert.truthy(hosted:find(contract, 1, true), contract)
+            end
+            for _, body in ipairs({
+                named_step(playwright_job, "Run full Chromium and Firefox or reduced-fidelity WebKit traces"),
+                named_step(playwright_job, "Require explicit degraded-mode opt-in and preserve original failures"),
+                net_gate, hosted,
+            }) do
+                assert_ordered(body, 'read -ra engines <<< "$TITAN_TRACE_ENGINES"',
+                    'for engine in "${engines[@]}"; do', '--engine "$engine"')
             end
             local delivery_node = named_step(playwright_job, "Run the complete application under Node")
             assert.truthy(delivery_node:find("if: matrix.engine == 'chromium'", 1, true), delivery_node)
@@ -6574,13 +6594,13 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.truthy(engine_records:find(contract, 1, true), contract)
             end
-            -- Every validation cell runs the stdlib aggregate on its engine,
-            -- last, so that failing cases leave the earlier gates' receipts.
+            -- Every validation cell runs the stdlib aggregate on each of its
+            -- engines, last, so failures leave the earlier gates' receipts.
             local playwright_suite = named_step(playwright_job,
-                "Run the complete browser core stdlib suite on the managed engine")
+                "Run the complete browser core stdlib suite on each managed engine")
             for _, contract in ipairs({
                 "if: matrix.profile == 'validation'",
-                'make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE"',
+                'make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINES"',
                 'TITAN_BROWSER_TEST_RUNNER="\\"$TITAN_NODE\\" spec/browser/playwright-run.mjs --image --sdk',
                 'tee "$RUNNER_TEMP/browser-playwright-stdlib.log"',
             }) do
@@ -6779,13 +6799,27 @@ printf '%s\n' "${schedule[@]}"
                     for _, header in ipairs({ "lauxlib.h", "lualib.h" }) do
                         assert.truthy(native_cache:find("/include/" .. header, 1, true), header)
                     end
-                    assert.truthy(suite:find("suite: [native, compiler]", 1, true), suite)
+                    assert_ordered(suite, "matrix:\n        include:",
+                        "suite: native-aggregate", "suite: native-retained\n            group: retained",
+                        "suite: compiler-1\n            group: windows-compiler-shard-1",
+                        "suite: compiler-2\n            group: windows-compiler-shard-2", "defaults:")
+                    assert.equal(4, count_literal(suite, "- suite:"), suite)
+                    for _, step in ipairs({
+                        "Save the Lua SDK and pinned Windows native dependency builds",
+                        "Save standalone-prefix LuaRocks dependencies",
+                        "Save Windows C-probe results",
+                        "Build and run the complete Windows native stdlib aggregate",
+                    }) do
+                        local body = named_step(suite, step)
+                        assert.truthy(body:find("if: matrix.suite == 'native-aggregate'", 1, true), body)
+                    end
                     assert_ordered(suite, "msys2/setup-msys2@v2", "msystem: CLANG64", "cache: true",
                         "mingw32-make -f Makefile.win compiler-deps",
                         "mingw32-make -f Makefile.win compiler",
                         "mingw32-make -f Makefile.win titan-stdlib-test",
+                        "matrix.group != ''",
                         'TITAN_ROCK_TEST_JOBS: "4"',
-                        "matrix.suite == 'native' && 'retained' || 'compiler-uncovered'",
+                        "TITAN_COMPILER_GROUP: ${{ matrix.group }}",
                         "TITAN_ROCK_TEST_SUPERVISOR")
                 end
             end
@@ -7736,6 +7770,43 @@ printf '%s\n' "${schedule[@]}"
                 stdlib_file = "s.txt",
                 stress_file = "st.txt",
             }, "compiler spec appears in both partitions")
+        end)
+
+    it("partitions the hosted Windows Busted files exactly once, with exclusive specs in their own workers",
+        function()
+            local helper = "spec/support/compiler_test_groups.lua"
+            local groups = assert(loadfile(helper))()
+            local inventory = assert(groups.load())
+            local lua = installed_prefix.active() .. "/bin/" .. (platform.windows and "lua.exe" or "lua")
+            local root = make_temp_dir()
+            local tested, failure = xpcall(function()
+                local seen = {}
+                for _, group in ipairs({ "retained", "windows-compiler-shard-1", "windows-compiler-shard-2" }) do
+                    local output_dir = root .. "/" .. group
+                    assert.truthy(lfs.mkdir(output_dir))
+                    local ok, output = run_argv({lua, "-E", helper, "local-plan", "4", output_dir, group})
+                    assert.truthy(ok, output)
+                    local summary = read_file(output_dir .. "/plan.summary")
+                    assert.truthy(summary:find("effective_jobs=4\n", 1, true), summary)
+                    for entry in lfs.dir(output_dir) do
+                        if entry:match("^files%-.+%.txt$") then
+                            local exclusive = entry == "files-exclusive.txt"
+                            for path in read_file(output_dir .. "/" .. entry):gmatch("[^\n]+") do
+                                local item = assert(inventory.by_path[path], path)
+                                assert.falsy(seen[path], path)
+                                assert.equal(exclusive, item.exclusive, path)
+                                assert.equal(group == "retained", item.domain == "retained", path)
+                                seen[path] = true
+                            end
+                        end
+                    end
+                end
+                for _, item in ipairs(inventory.items) do
+                    assert.truthy(seen[item.path], item.path)
+                end
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(failure, 0) end
         end)
 
     it("drains all files and workers after an early spec failure and reports per-file summaries",

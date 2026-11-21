@@ -1077,8 +1077,8 @@ jobs:
           retention-days: 7
 
   # The same native Titan fixture images run in all three managed engines.
-  # Each matrix cell owns its prefix, browser installation and output tree;
-  # assertions 2 and 0 are built by the portable trace and bridge gate builders.
+  # Validation Firefox and WebKit share one prefix and image build; all
+  # runtime gates still run on each engine using those same images.
   browser-playwright:
     name: browser traces and bridge (${{ matrix.profile }}, ${{ matrix.engine }}, Playwright 1.64.1)
     needs: build-compiler
@@ -1092,6 +1092,15 @@ jobs:
       matrix:
         profile: [validation, production]
         engine: [chromium, firefox, webkit]
+        exclude:
+          - profile: validation
+            engine: firefox
+          - profile: validation
+            engine: webkit
+        include:
+          - profile: validation
+            engine: firefox-webkit
+            engines: firefox webkit
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       MAKEFLAGS: "-j4"
@@ -1110,7 +1119,7 @@ jobs:
       TITAN_VITE_VERSION: "8.3.6"
       TITAN_VITE_ROOT: ${{ github.workspace }}/out/vite-tools
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
-      TITAN_TRACE_ENGINE: ${{ matrix.engine }}
+      TITAN_TRACE_ENGINES: ${{ matrix.engines || matrix.engine }}
       TITAN_TRACE_OUTPUT: ${{ github.workspace }}/out/browser/trace-${{ matrix.profile }}-${{ matrix.engine }}
       TITAN_BRIDGE_OUTPUT: ${{ github.workspace }}/out/browser/bridge-${{ matrix.profile }}-${{ matrix.engine }}
       TITAN_NET_OUTPUT: ${{ github.workspace }}/out/browser-net
@@ -1218,19 +1227,20 @@ jobs:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: ubuntu-24.04-${{ runner.arch }}-playwright-${{ env.TITAN_PLAYWRIGHT_VERSION }}-${{ matrix.engine }}-v1
 
-      - name: Install the pinned Playwright engine and runtime dependencies
+      - name: Install the pinned Playwright engines and runtime dependencies
         run: |
           set -euo pipefail
           npm install --prefix "$TITAN_PLAYWRIGHT_ROOT" --no-save \
             --package-lock=false --no-audit --no-fund \
             "playwright@$TITAN_PLAYWRIGHT_VERSION"
+          read -ra engines <<< "$TITAN_TRACE_ENGINES"
           "$TITAN_NODE" "$TITAN_PLAYWRIGHT_ROOT/node_modules/playwright/cli.js" \
-            install --with-deps "$TITAN_TRACE_ENGINE"
+            install --with-deps "${engines[@]}"
 
-      - name: Exercise the Playwright supervisor on this managed engine
+      - name: Exercise the Playwright supervisor on each managed engine
         run: |
           set -euo pipefail
-          TITAN_PLAYWRIGHT_TEST_ENGINES="$TITAN_TRACE_ENGINE" \
+          TITAN_PLAYWRIGHT_TEST_ENGINES="${TITAN_TRACE_ENGINES// /,}" \
             "$TITAN_NODE" --test spec/browser/playwright-runner.test.mjs \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-supervisor.log"
 
@@ -1244,17 +1254,22 @@ jobs:
       - name: Run full Chromium and Firefox or reduced-fidelity WebKit traces
         run: |
           set -euo pipefail
-          "$TITAN_NODE" spec/browser/playwright-run.mjs \
-            --engine "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 \
-            --sdk "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT" \
-            "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
-            2>&1 | tee "$RUNNER_TEMP/browser-playwright-trace.log"
+          read -ra engines <<< "$TITAN_TRACE_ENGINES"
+          for engine in "${engines[@]}"; do
+            "$TITAN_NODE" spec/browser/playwright-run.mjs \
+              --engine "$engine" --timeout 300000 --grace 2000 \
+              --sdk "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT" \
+              "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
+              2>&1 | tee "$RUNNER_TEMP/browser-playwright-trace-$engine.log"
+          done
 
       - name: Require explicit degraded-mode opt-in and preserve original failures
         run: |
           set -euo pipefail
-          "$TITAN_NODE" --input-type=module <<'JS' \
-            2>&1 | tee "$RUNNER_TEMP/browser-playwright-policy.log"
+          read -ra engines <<< "$TITAN_TRACE_ENGINES"
+          for engine in "${engines[@]}"; do
+            TITAN_TRACE_ENGINE="$engine" "$TITAN_NODE" --input-type=module <<'JS' \
+              2>&1 | tee "$RUNNER_TEMP/browser-playwright-policy-$engine.log"
           import {readFileSync} from 'node:fs';
           import {spawnSync} from 'node:child_process';
           import {resolve} from 'node:path';
@@ -1274,12 +1289,13 @@ jobs:
               throw new Error(`${row.name}: degraded trace was not an ordinary initialization failure before Lua/main (${result.status})`);
           }
           JS
-          "$TITAN_NODE" spec/browser/playwright-run.mjs \
-            --engine "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 \
-            --allow-degraded-trace --sdk "$PREFIX/lib/titan-browser/0.6" \
-            --root "$TITAN_TRACE_OUTPUT" \
-            "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
-            2>&1 | tee "$RUNNER_TEMP/browser-playwright-degraded.log"
+            "$TITAN_NODE" spec/browser/playwright-run.mjs \
+              --engine "$engine" --timeout 300000 --grace 2000 \
+              --allow-degraded-trace --sdk "$PREFIX/lib/titan-browser/0.6" \
+              --root "$TITAN_TRACE_OUTPUT" \
+              "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
+              2>&1 | tee "$RUNNER_TEMP/browser-playwright-degraded-$engine.log"
+          done
 
       - name: Build the portable bridge gate for both assertion modes
         run: |
@@ -1299,14 +1315,17 @@ jobs:
         if: matrix.engine == 'chromium'
         run: python3 --version
 
-      - name: Run live HTTP, HTTPS, and WebSocket clients on the managed engine
+      - name: Run live HTTP, HTTPS, and WebSocket clients on each managed engine
         run: |
           set -euo pipefail
-          "$TITAN_NODE" spec/fixtures/browser_net/run.mjs \
-            --root "$TITAN_NET_OUTPUT" --engine "$TITAN_TRACE_ENGINE" \
-            --sdk "$PREFIX/lib/titan-browser/0.6" \
-            --runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" --persistent-webkit \
-            2>&1 | tee "$RUNNER_TEMP/browser-playwright-net.log"
+          read -ra engines <<< "$TITAN_TRACE_ENGINES"
+          for engine in "${engines[@]}"; do
+            "$TITAN_NODE" spec/fixtures/browser_net/run.mjs \
+              --root "$TITAN_NET_OUTPUT" --engine "$engine" \
+              --sdk "$PREFIX/lib/titan-browser/0.6" \
+              --runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" --persistent-webkit \
+              2>&1 | tee "$RUNNER_TEMP/browser-playwright-net-$engine.log"
+          done
 
       - name: Run the persistent bridge and opaque-Promise diagnostics
         run: |
@@ -1317,7 +1336,7 @@ jobs:
           import {resolve} from 'node:path';
           const root = process.env.TITAN_BRIDGE_OUTPUT;
           const sdk = resolve(process.env.PREFIX, 'lib/titan-browser/0.6');
-          const engines = [process.env.TITAN_TRACE_ENGINE];
+          const engines = process.env.TITAN_TRACE_ENGINES.split(' ');
           // Validation Node is covered by browser-stdlib's real-toolchain gate.
           if (process.env.TITAN_BUILD_PROFILE === 'production' && engines[0] === 'chromium')
             engines.push('node');
@@ -1364,7 +1383,7 @@ jobs:
 
       # The browser chapter's complete application, built by the commands its
       # section documents in this cell's profile, then served by the documented
-      # http-dev-server to a page in this engine with nothing else involved.
+      # http-dev-server to a page in each engine with nothing else involved.
       - name: Build the browser chapter's complete application and its server
         run: |
           set -euo pipefail
@@ -1375,13 +1394,16 @@ jobs:
       - name: Run the complete application's hosted deployment test
         run: |
           set -euo pipefail
-          records=()
-          if [ "$TITAN_BUILD_PROFILE" = production ]; then
-            records=(--records "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json")
-          fi
-          "$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE" \
-            --root "$TITAN_DELIVERY_OUTPUT" "${records[@]}" \
-            2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery.log"
+          read -ra engines <<< "$TITAN_TRACE_ENGINES"
+          for engine in "${engines[@]}"; do
+            records=()
+            if [ "$TITAN_BUILD_PROFILE" = production ]; then
+              records=(--records "$PWD/out/browser-records/playwright-$engine.json")
+            fi
+            "$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$engine" \
+              --root "$TITAN_DELIVERY_OUTPUT" "${records[@]}" \
+              2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery-$engine.log"
+          done
 
       - name: Run the complete application under Node
         if: matrix.engine == 'chromium'
@@ -1468,6 +1490,8 @@ jobs:
       # Chromium records of browser-packaging. Never fails on the numbers.
       - name: Record memory, Task scaling and recursion depth on the managed engine
         if: matrix.profile == 'production' && matrix.engine != 'chromium'
+        env:
+          TITAN_TRACE_ENGINE: ${{ matrix.engine }}
         run: |
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
@@ -1478,15 +1502,14 @@ jobs:
             --out "$PWD/out/browser-records/records-$TITAN_TRACE_ENGINE.json" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-records.log"
 
-      # The complete browser core stdlib image on this cell's engine. The step
-      # runs last, so that failing cases leave every earlier gate's receipts;
-      # the image runs every case and the audit reports each failure.
-      - name: Run the complete browser core stdlib suite on the managed engine
+      # The complete browser core stdlib image on each of this cell's engines.
+      # This runs last, so that failing cases leave earlier gates' receipts.
+      - name: Run the complete browser core stdlib suite on each managed engine
         if: matrix.profile == 'validation'
         run: |
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINE" \
+          make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINES" \
             TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs --image --sdk \"$PREFIX/lib/titan-browser/0.6\"" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-stdlib.log"
 

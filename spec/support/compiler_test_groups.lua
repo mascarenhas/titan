@@ -3,6 +3,8 @@
 
 local M = {}
 
+local WINDOWS_COMPILER_WORKERS = 4
+
 M.DEFAULT_PARTITION_FILE = "spec/support/ci_compiler_test_groups.txt"
 M.DEFAULT_STDLIB_FILE = "spec/support/ci_stdlib_compiler_test_files.txt"
 M.DEFAULT_STRESS_FILE = "spec/support/ci_compiler_stress_files.txt"
@@ -173,12 +175,14 @@ function M.load(options)
         local trimmed = line:match("^%s*(.-)%s*$")
         if trimmed ~= "" and trimmed:sub(1, 1) ~= "#" then
             local words = split_words(trimmed)
-            local domain, test_file, local_sec_str, ci_sec_str, extra =
-                words[1], words[2], words[3], words[4], words[5]
+            local domain, test_file, local_sec_str, ci_sec_str, windows_sec_str, extra =
+                words[1], words[2], words[3], words[4], words[5], words[6]
             if (domain ~= "compiler" and domain ~= "stdlib" and domain ~= "retained") or
                not is_valid_spec_path(test_file) or
                not parse_nonnegative_number(local_sec_str) or
                (ci_sec_str ~= nil and ci_sec_str ~= "-" and not parse_nonnegative_number(ci_sec_str)) or
+               (windows_sec_str ~= nil and windows_sec_str ~= "-" and
+                not parse_nonnegative_number(windows_sec_str)) or
                extra ~= nil then
                 return nil, "invalid compiler partition row: " .. trimmed
             end
@@ -192,6 +196,7 @@ function M.load(options)
                 path = test_file,
                 local_validation_seconds = local_sec,
                 ci_covered_seconds = ci_sec,
+                windows_uncovered_seconds = parse_nonnegative_number(windows_sec_str),
                 has_explicit_ci_seconds = (ci_sec_str ~= nil and ci_sec_str ~= "-"),
             }
             partition_rows[#partition_rows + 1] = row
@@ -328,6 +333,7 @@ function M.load(options)
             exclusive = (M.EXCLUSIVE_SPECS[test_file] == true),
             local_validation_seconds = row.local_validation_seconds,
             ci_covered_seconds = row.ci_covered_seconds,
+            windows_uncovered_seconds = row.windows_uncovered_seconds,
             has_explicit_ci_seconds = row.has_explicit_ci_seconds,
         }
         items[#items + 1] = item
@@ -369,6 +375,15 @@ end
 local function cost_for_profile(item, profile)
     if profile == "ci_covered" or profile == "ci" then
         return item.ci_covered_seconds or item.local_validation_seconds or 0
+    end
+    if profile == "windows" or profile == "windows_shard" then
+        local seconds = item.windows_uncovered_seconds or item.local_validation_seconds or 0
+        if profile == "windows_shard" and item.exclusive then
+            -- An exclusive spec occupies its whole Windows runner, while
+            -- ordinary specs occupy one of its four workers.
+            return seconds * WINDOWS_COMPILER_WORKERS
+        end
+        return seconds
     end
     return item.local_validation_seconds or 0
 end
@@ -626,9 +641,11 @@ elseif command == "local-plan" then
         os.exit(2)
     end
     local group = select(4, ...) or "all"
+    local profile = "local_validation"
+    local windows_shard = tonumber(group:match("^windows%-compiler%-shard%-([12])$"))
     if group == "retained" then
         inventory = { items = inventory.retained }
-    elseif group == "compiler-uncovered" then
+    elseif group == "compiler-uncovered" or windows_shard then
         local compiler_items = {}
         for _, item in ipairs(inventory.items) do
             if item.domain ~= "retained" then
@@ -636,11 +653,28 @@ elseif command == "local-plan" then
             end
         end
         inventory = { items = compiler_items }
+        if windows_shard then
+            if n ~= WINDOWS_COMPILER_WORKERS then
+                io.stderr:write("Windows compiler shards require four workers\n")
+                os.exit(2)
+            end
+            local shards, shard_err = M.partition_lpt(compiler_items, 2, "windows_shard")
+            if not shards then
+                io.stderr:write(shard_err .. "\n")
+                os.exit(2)
+            end
+            if not shards[windows_shard] then
+                io.stderr:write("empty Windows compiler shard: " .. windows_shard .. "\n")
+                os.exit(2)
+            end
+            inventory = { items = shards[windows_shard].items }
+            profile = "windows"
+        end
     elseif group ~= "all" then
         io.stderr:write("invalid local test group: " .. group .. "\n")
         os.exit(2)
     end
-    local plan, plan_err = M.plan_local(inventory, n, "local_validation")
+    local plan, plan_err = M.plan_local(inventory, n, profile)
     if not plan then
         io.stderr:write(plan_err .. "\n")
         os.exit(2)

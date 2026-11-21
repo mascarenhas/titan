@@ -20,7 +20,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [native, compiler]
+        include:
+          - suite: native-aggregate
+          - suite: native-retained
+            group: retained
+          - suite: compiler-1
+            group: windows-compiler-shard-1
+          - suite: compiler-2
+            group: windows-compiler-shard-2
     defaults:
       run:
         shell: msys2 {0}
@@ -164,17 +171,17 @@ jobs:
           mingw32-make -f Makefile.win compiler-deps
           "$PREFIX/bin/luarocks.exe" --lua-version=5.5 --tree="$PREFIX" test --prepare titan-0.6.0-1.rockspec
 
-      # Only the native cell publishes shared dependency caches, and never
-      # includes Titan-generated objects or the installed Titan rock.
+      # Only the aggregate cell publishes shared dependency caches; they
+      # never include Titan-generated objects or the installed Titan rock.
       - name: Save the Lua SDK and pinned Windows native dependency builds
-        if: matrix.suite == 'native' && steps.native-cache.outputs.cache-hit != 'true'
+        if: matrix.suite == 'native-aggregate' && steps.native-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: *windows-native-paths
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
 
       - name: Save standalone-prefix LuaRocks dependencies
-        if: matrix.suite == 'native' && steps.rocks-cache.outputs.cache-hit != 'true'
+        if: matrix.suite == 'native-aggregate' && steps.rocks-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: *windows-rocks-paths
@@ -194,14 +201,14 @@ jobs:
           test -f "$PREFIX/lib/titan/0.6/titan.dll"
 
       - name: Save Windows C-probe results
-        if: matrix.suite == 'native'
+        if: matrix.suite == 'native-aggregate'
         uses: actions/cache/save@v4
         with:
           path: C:/titan-ci/.lua/var/cache/titan-probes/2
           key: ${{ steps.probe-cache.outputs.cache-primary-key }}
 
       - name: Build and run the complete Windows native stdlib aggregate
-        if: matrix.suite == 'native'
+        if: matrix.suite == 'native-aggregate'
         run: |
           set -euo pipefail
           unset LD
@@ -209,10 +216,10 @@ jobs:
           mingw32-make -f Makefile.win titan-stdlib-test
 
       - name: Run retained or compiler and language specs without coverage
-        if: ${{ !cancelled() && steps.install-rock.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install-rock.outcome == 'success' && matrix.group != '' }}
         env:
           TITAN_ROCK_TEST_JOBS: "4"
-          TITAN_COMPILER_GROUP: ${{ matrix.suite == 'native' && 'retained' || 'compiler-uncovered' }}
+          TITAN_COMPILER_GROUP: ${{ matrix.group }}
         run: |
           set -euo pipefail
           unset LD
