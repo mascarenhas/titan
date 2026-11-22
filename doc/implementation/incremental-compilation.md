@@ -932,15 +932,17 @@ their ordinary reuse guarantees.
 
 When a source module is prepared for compilation (`prepare_compile` in
 `driver.lua`), `incremental.producer_digests(context, source_entry,
-encoded_layouts, ast._foreign_header_recipe)` (`incremental.lua`)
-computes two self digests from the coder's exact outputs and stores them in
-`certificate.interface`:
+encoded_layouts, ast._foreign_header_recipe, dynamic_providers)`
+(`incremental.lua`) computes two self digests from the coder's exact outputs
+and stores them in `certificate.interface`:
 
 ```text
 public = digest("public-interface", {
     types.serialize_semantic(entry.type),
     encoded_layouts,
     rendered_foreign_helper_or_empty,
+    -- 4th element appended only when dynamic_providers is non-nil:
+    staticmetadata.encode_dynamic_providers(name, dynamic_providers),
 })
 source = digest("source-interface", {
     public,
@@ -975,25 +977,42 @@ importers of that module, and editing a documentation comment in a
 For a binary dependency (`kind == "dynamic"` or `"static"`),
 `incremental.interface_digest(context, entry, "public")`
 (`incremental.lua`) hashes `{ types.serialize_semantic(entry.type),
-entry.layouts, "" }`, memoized per `(provider_path, module_name)`. Each logical
-module inside a combined provider such as `titan.so` or `titan.a` is
-fingerprinted individually from its own `_types` and `_layouts` symbols; whole
-provider file bytes and timestamps never enter consumer module certificates.
+entry.layouts, "" }` (appending
+`staticmetadata.encode_dynamic_providers(name, carriers)` as a fourth element
+only when `dynamic_providers` is present, so modules without carriers keep
+their historical digest bytes), memoized per `(provider_path, module_name)`.
+Each logical module inside a combined provider such as `titan.so` or `titan.a`
+is fingerprinted individually from its own `_types`, `_layouts`, and optional
+`_dynamic_providers` symbols; whole provider file bytes and timestamps never
+enter consumer module certificates.
 
 ### Direct imports, contextual owners, and binding verification
 
-`incremental.make_certificate` records two dependency lists and two binding maps:
+`incremental.make_certificate` records dependency lists, carrier proofs, and
+binding maps:
 
 * `certificate.imports`: every direct import in `native.imports`, with
   `source_required`, `view = source_required and "source" or "public"`, and
   `interface = plan.digest(name, view)`.
 * `certificate.owners`: every logical module in
   `(keys(ast._binary_usage) ∪ keys(native.bindings)) \ ({entry.type.name} ∪ direct_imports)`,
-  sorted bytewise, with `interface = plan.digest(name, "public")`.
-  `ast._binary_usage` (`titan-compiler/checker/binary_usage.lua`) tracks every
-  module whose functions, variables, or nominal types the checked code uses,
-  including nominal owners recovered contextually through another module's
-  return or field types (`recover_contextual_owner` in `driver.lua`).
+  sorted bytewise. When `inputs.owner_carriers`
+  (`context.producer_dynamic_providers`, supplied for both `main` and
+  non-`main` modules) proved a relative carrier for `name`, the entry stores
+  `carrier = relative` and computes `interface = plan.carrier_digest(name,
+  relative)` so certification hashes that exact proved carrier rather than an
+  ordinary lookup that could miss or hit an unrelated provider; otherwise
+  `carrier` is omitted and `interface = plan.digest(name, "public")`.
+  `valid_certificate` permits `item.carrier` only on `owners` entries (never
+  on `imports`). `ast._binary_usage`
+  (`titan-compiler/checker/binary_usage.lua`) tracks every module whose
+  functions, variables, or nominal types the checked code uses, including
+  nominal owners recovered contextually through another module's return or
+  field types (`recover_contextual_owner` in `driver.lua`).
+* `certificate.carriers` (omitted when `native.dynamic_providers` is nil):
+  dense, non-empty, bytewise-sorted `{ name, relative, interface }` entries for
+  every emitted producer carrier proof in `native.dynamic_providers`, each
+  certified via `plan.carrier_digest(name, relative)`.
 * `certificate.bindings` and `certificate.providers`: the coder's native
   binding map (`"direct"`, `"handle"`, or `"global"`) and selected dynamic
   provider map (`provider_file` for direct dynamic imports, or `""` for
@@ -1006,6 +1025,15 @@ provider file bytes and timestamps never enter consumer module certificates.
   owned authored helpers and imported compiled members, stopping at each
   external source.
 
+`plan.carrier_digest(owner, relative)` (`perf.carrier_digest` in `driver.lua`)
+first checks whether this build links `owner` (`plan.linked(owner, true)`,
+passing `known_only = true` to `certificate_dependency` so it never runs an
+ordinary filesystem lookup) or marks it check-only
+(`plan.provider_file(owner) == ""`), returning `nil, "owner-binding"` in either
+case. Otherwise it calls `driver.find_relative_carrier(TITAN_BIN_PATH, owner,
+relative, context)` and returns `incremental.interface_digest(context, carrier,
+"public")` (or `nil, carrier_error or "unavailable"`).
+
 In stage 2, `incremental.verdict(record, plan)` (`incremental.lua`)
 checks the decoded certificate against the final resolution `plan`:
 
@@ -1017,13 +1045,20 @@ checks the decoded certificate against the final resolution `plan`:
    objects as hits across compatible implementation-only edits to an external
    installed source.
 2. For every entry in `cert.imports` (using `item.view`) and `cert.owners`
-   (using `"public"`), it queries `plan.digest(name, view)`. If the dependency
-   is not yet available in the plan (`status == "pending"`), `name` is added to
-   the pending list; if it is unavailable, `verdict` returns
-   `miss("dependency-unavailable", name)`; if the digest differs from
-   `item.interface`, `verdict` returns
-   `miss("import-interface", "<name> (<view>)")` or
-   `miss("owner-interface", name)`.
+   (using `"public"`):
+   * when an `owners` entry records `item.carrier`, `verdict` queries
+     `plan.carrier_digest(name, item.carrier)` first; if it fails with any
+     status other than `"owner-binding"`, `verdict` returns
+     `miss("dependency-unavailable", "<name> (<carrier>)")`; on
+     `"owner-binding"`, it falls back to `plan.digest(name, "public")` so the
+     binding check below explains the relinked or check-only change;
+   * otherwise (and for all `cert.imports`), it queries `plan.digest(name,
+     view)`. If the dependency is not yet available in the plan
+     (`status == "pending"`), `name` is added to the pending list; if it is
+     unavailable, `verdict` returns `miss("dependency-unavailable", name)`;
+   * in either path, if the returned digest differs from `item.interface`,
+     `verdict` returns `miss("import-interface", "<name> (<view>)")` or
+     `miss("owner-interface", name)`.
 3. For every module name in `keys(cert.bindings) ∪ keys(cert.providers)`, sorted
    bytewise, `verdict` computes the expected binding from the plan:
    * `linked = (name == modname) or plan.linked(name)` (true when `name` is an
@@ -1043,7 +1078,16 @@ checks the decoded certificate against the final resolution `plan`:
    `miss("import-binding", "<name>: <before> -> <after>")` for a direct import
    or `miss("owner-binding", "<name>: <before> -> <after>")` for a contextual
    owner.
-4. If any dependency was pending and no earlier check missed, `verdict` returns
+4. For `cert.carriers` (checked after bindings so a relinked owner reports
+   `owner-binding` rather than a lost carrier): `verdict` verifies that the
+   object's emitted `record.object_metadata.dynamic_providers` matches
+   `cert.carriers` exactly (`miss("record-schema", "uncertified dynamic
+   carriers")` or `miss("record-schema", "uncertified dynamic carrier <name>")`)
+   and queries `plan.carrier_digest(item.name, item.relative)` for each entry,
+   returning `miss("carrier-unavailable", "<name> (<relative>)")` when
+   unavailable or `miss("carrier-interface", "<name> (<relative>)")` when the
+   carrier's public digest differs from `item.interface`.
+5. If any dependency was pending and no earlier check missed, `verdict` returns
    `{ status = "pending", names = pending }`; otherwise it returns
    `{ status = "hit" }`.
 
@@ -1108,12 +1152,14 @@ The complete `-v` object-decision vocabulary written to `stderr` is:
 | `Titan object miss <mod>: parts <detail>` | Recorded `.c`/`.priv.h`/`.part<k>.o` companion missing, non-regular, metadata-bearing, or target-mismatched. |
 | `Titan object miss <mod>: coverage-artifacts <path>` | Coverage `.c` or `.gcno` file missing or inventory count mismatched. |
 | `Titan object miss <mod>: c-input <path>: content\|provenance\|missing\|unreadable\|candidate\|changed-during-read` | Recorded C header file, search candidate, or declaring realpath origin changed. |
-| `Titan object miss <mod>: dependency-unavailable <name>` | Recorded import or contextual owner could not be resolved or restored. |
+| `Titan object miss <mod>: dependency-unavailable <name>` (or `<name> (<carrier>)`) | Recorded import, contextual owner, or carrier-certified contextual owner could not be resolved or restored. |
 | `Titan object miss <mod>: dependency-rebuilt <names>` | In-process `defaultloader` checked a dependency from source in the same pass before codegen produced its self digest. |
 | `Titan object miss <mod>: import-interface <name> (public\|source)` | Direct import's public or source-private interface digest changed. |
 | `Titan object miss <mod>: owner-interface <name>` | Contextually exposed nominal owner's public interface or layout digest changed. |
 | `Titan object miss <mod>: import-binding <name>: <before> -> <after>` | Direct import's native binding (`direct`/`handle`/`global`) or dynamic provider path changed. |
 | `Titan object miss <mod>: owner-binding <name>: <before> -> <after>` | Contextual owner's native binding (`direct`/`global`) changed. |
+| `Titan object miss <mod>: carrier-unavailable <name> (<relative>)` | Recorded emitted dynamic carrier could no longer be resolved at `<relative>`. |
+| `Titan object miss <mod>: carrier-interface <name> (<relative>)` | Public interface digest of the recorded emitted dynamic carrier at `<relative>` changed. |
 
 Before publishing a worker's newly compiled object, the coordinator calls
 `incremental.revalidate_record(context, modname, freshly_resolved_source,

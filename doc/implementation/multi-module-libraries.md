@@ -113,9 +113,10 @@ The states are deliberately strict:
   expose layouts;
 * after ABI/type validation (and, in native compilation, after layout
   validation), both native and analysis-only queries probe optional
-  `<mangled>_source_requirements` (clean absence when omitted; open/call/decode
-  failure is terminal; no module initialization runs, and
-  `<mangled>_compatibility` is not queried during compiler DSO lookup);
+  `<mangled>_source_requirements` and `<mangled>_dynamic_providers` (clean
+  `stage == "init"` absence when omitted; open/call/decode failure is terminal;
+  no module initialization runs, and `<mangled>_compatibility` is not queried
+  during compiler DSO lookup);
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
@@ -216,13 +217,19 @@ Both native provider forms contain independent copies of every logical
 protocol:
 
 * `<mangled>_abi`, semantic `<mangled>_types`, physical `<mangled>_layouts`,
-  the separate `<mangled>_compatibility` projection, and (only when the module
-  has non-empty folded external source obligations) `<mangled>_source_requirements`
-  returning the newline-joined canonical list (decoded by
-  `staticmetadata.decode_source_requirements`, probed by
-  `probe_compiled_interface` with clean `stage == "init"` absence when omitted,
-  and matched against the paired archive—including clean absence when empty—by
-  `driver.validate_library_image_fresh`);
+  the separate `<mangled>_compatibility` projection, optional
+  `<mangled>_source_requirements` (only when the module has non-empty folded
+  external source obligations, returning the newline-joined canonical list
+  decoded by `staticmetadata.decode_source_requirements`), and optional
+  `<mangled>_dynamic_providers` (only on non-`main` native modules whose
+  finalized observations prove at least one relocatable dynamic carrier for an
+  external owner, returning newline-joined `owner<TAB>provider` lines in
+  bytewise owner order encoded/decoded by
+  `staticmetadata.encode_dynamic_providers` and
+  `staticmetadata.decode_dynamic_providers`); both optional symbols are probed
+  by `probe_compiled_interface` with clean `stage == "init"` absence when
+  omitted, and matched against the paired archive—including clean absence when
+  empty—by `driver.validate_library_image_fresh`;
 * `<mangled>_init` and `luaopen_<mangled>`;
 * a native export descriptor and per-state binding caches in the module payload;
 * a distinct registry-owned module `Udata`, variables, canonical closures,

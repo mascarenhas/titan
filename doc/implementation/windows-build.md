@@ -387,10 +387,12 @@ PE links disable automatic exports. `driver.windows_provider_exports` writes a
 producer-owned `.def` from every logical module physically carried into the
 DLL: `_abi_value`, `_abi`, `_types`, `_layouts`, `_compatibility`, `_init`, and
 `luaopen_*`, plus public raw foreign entries recovered from module interfaces
-and—only for library modules whose `object_metadata.source_requirements` is
-non-nil (collected by `windows_link_interfaces`)—`<mangled>_source_requirements`.
-The list depends only on logical module names and their interfaces, which only
-part 0 of a split module carries. Part objects and module-private symbols never
+and—only for modules whose `object_metadata.source_requirements` or
+`object_metadata.dynamic_providers` is non-nil (collected by
+`windows_link_interfaces`)—`<mangled>_source_requirements` and
+`<mangled>_dynamic_providers`. The list depends only on logical module names
+and their interfaces, which only part 0 of a split module carries. Part objects
+and module-private symbols never
 enter the `.def`, and `-Wl,--exclude-all-symbols` keeps them unexported.
 Hidden raw-address binding slots are never exported; canonical descriptor
 callbacks resolve later native function and slot addresses, and collision

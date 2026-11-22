@@ -136,7 +136,7 @@ Two invariants shape everything downstream of the checker:
 | [Folder modules](folder-modules.md) | Folder main and contributor discovery, deterministic declaration order, single-AST assembly, canonical output stems, and standard-library ensembles. |
 | [Target source selection](target-source-selection.md) | `source_selection.lua` variant filename classification, `-T`/`TITAN_TARGET` selection rows, folder sweeps, cache admission, logical stems, and Make inventories. |
 | [Multi-module libraries](multi-module-libraries.md) | Common-prefix `.so`/`.a` provider selection, shared candidate search with the package searcher, canonical imports, validated publication, and the stdlib image. |
-| [Static compiled modules](static-compiled-modules.md) | Archive metadata and import inventories, native dependency closure, container readers, target fingerprints, and provider validation. |
+| [Static compiled modules](static-compiled-modules.md) | Archive metadata and import inventories, producer-proved dynamic carriers, native dependency closure, container readers, target fingerprints, and provider validation. |
 | [The linked provider set](codegen-overview.md#the-linked-provider-set) | Private per-state executable catalog (Unix, Windows, and browser Wasm on demand) that supplies reached archive members, app-owned source modules, and selected external required providers without initializing them early or publishing Lua loaders. |
 | [Selective binary dependency verification](binary-compatibility.md) | Consumer-used compatibility projections, construction and closed-union proofs, generated load-time verification exports, and provider-owned ABI slots. |
 
