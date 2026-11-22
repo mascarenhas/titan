@@ -202,4 +202,62 @@ int value;
          assert.equal(expected, util.tostring(yielding({ "type", "id", "op" })))
          assert.equal(expected, util.tostring(yielding({ "op", "id", "type" })))
      end)
+
+     describe("C line-control filenames", function()
+         local ESCAPES = {
+             ["\\\\"] = "\\", ['\\"'] = '"', ["\\?"] = "?", ["\\a"] = "\a",
+             ["\\b"] = "\b", ["\\f"] = "\f", ["\\n"] = "\n", ["\\r"] = "\r",
+             ["\\t"] = "\t", ["\\v"] = "\v",
+         }
+         -- Decodes only the escapes c_line_filename may write, failing on
+         -- any other backslash sequence.
+         local function decode(spelled)
+             assert.equal('"', spelled:sub(1, 1))
+             assert.equal('"', spelled:sub(-1))
+             local body, bytes, offset = spelled:sub(2, -2), {}, 1
+             while offset <= #body do
+                 local byte = body:sub(offset, offset)
+                 if byte == "\\" then
+                     local simple = ESCAPES[body:sub(offset, offset + 1)]
+                     if simple then
+                         bytes[#bytes + 1], offset = simple, offset + 2
+                     else
+                         assert.equal("\\u0024", body:sub(offset, offset + 5))
+                         bytes[#bytes + 1], offset = "$", offset + 6
+                     end
+                 else
+                     assert.not_equal('"', byte)
+                     bytes[#bytes + 1], offset = byte, offset + 1
+                 end
+             end
+             return table.concat(bytes)
+         end
+
+         it("spells raw bytes with simple escapes, a dollar UCN and no numeric escapes", function()
+             assert.equal('"C:\\\\dir\\\\quote\\"\\u0024name \\?\\?/x\\t\1\127 文 😀 Ω.titan"',
+                 util.c_line_filename('C:\\dir\\quote"$name ??/x\t\1\127 文 😀 Ω.titan'))
+         end)
+
+         it("round-trips every non-NUL byte without a dollar or trigraph", function()
+             local all = {}
+             for byte = 1, 255 do all[#all + 1] = string.char(byte) end
+             for _, filename in ipairs({ table.concat(all), "??" .. table.concat(all) .. "??" }) do
+                 local spelled = util.c_line_filename(filename)
+                 assert.is_nil(spelled:find("$", 1, true))
+                 assert.is_nil(spelled:find("??", 1, true))
+                 assert.equal(filename, decode(spelled))
+             end
+             for byte = 1, 255 do
+                 local filename = string.char(byte)
+                 assert.equal(filename, decode(util.c_line_filename(filename)))
+             end
+             assert.has_error(function() util.c_line_filename("a\0b") end,
+                 "C line-control filename contains a NUL byte")
+         end)
+
+         it("stays inert under recursive template rendering", function()
+             local directive = "#line 1 " .. util.c_line_filename("dir/$name ${x}.titan")
+             assert.equal(directive, util.render("$L", { L = directive, name = "BAD", x = "BAD" }))
+         end)
+     end)
 end)

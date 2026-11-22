@@ -79,6 +79,25 @@ function util.normalize_line_directives(source)
     return lpeg.match(generated_line_cleanup, "\n" .. source):sub(2)
 end
 
+-- Spell `filename` as the string literal of a C `#line` directive (or of
+-- TITAN_GENERATED_C_FILE, which is only ever expanded in one). That literal
+-- is unevaluated: Clang 23 rejects numeric (octal/hex) escapes there, so
+-- bytes without a simple escape stay raw. `\?` keeps `--std=c99` trigraphs
+-- from forming, and the UCN keeps a literal dollar out of util.render's
+-- recursive template language.
+-- Implementation notes: doc/implementation/codegen-overview.md#mixed-source-line-attribution
+local LINE_FILENAME_ESCAPES = {
+    ["\\"] = "\\\\", ['"'] = '\\"', ["?"] = "\\?", ["$"] = "\\u0024",
+    ["\a"] = "\\a", ["\b"] = "\\b", ["\f"] = "\\f", ["\n"] = "\\n",
+    ["\r"] = "\\r", ["\t"] = "\\t", ["\v"] = "\\v",
+}
+
+function util.c_line_filename(filename)
+    assert(not filename:find("\0", 1, true),
+        "C line-control filename contains a NUL byte")
+    return '"' .. filename:gsub('[\\"?$\a\b\f\n\r\t\v]', LINE_FILENAME_ESCAPES) .. '"'
+end
+
 -- Barebones string-based template function for generating C/Lua code. Replaces
 -- $VAR and ${VAR} placeholders in the `code` template by the corresponding
 -- strings in the `substs` table.

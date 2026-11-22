@@ -25,6 +25,7 @@ some_c_escape_sequences = {
     ["\v"] = "\\v",
 }
 
+-- For evaluated literals only; line controls use util.c_line_filename.
 function c_string_literal(s)
     local out = { '"' }
     for i = 1, #s do
@@ -106,7 +107,7 @@ function emitline(node)
     local loc = node and node.loc
     if not loc or not loc.line or not loc.filename then return "" end
     return "#line " .. tostring(loc.line) .. " "
-        .. c_string_literal(loc.filename) .. "\n"
+        .. util.c_line_filename(loc.filename) .. "\n"
 end
 
 -- The two flags that decide whether point stamps and scoped coverage markers
@@ -166,7 +167,7 @@ function definitionline(loc)
     if not definition_stamps() then return "" end
     if loc and loc.line and loc.filename then
         return "#line " .. tostring(loc.line) .. " "
-            .. c_string_literal(loc.filename) .. "\n"
+            .. util.c_line_filename(loc.filename) .. "\n"
     end
     return "#line 1 TITAN_GENERATED_C_FILE\n"
 end

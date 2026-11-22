@@ -1042,6 +1042,21 @@ describe("compiler-owned relocation paths", function()
         assert.is_false(relocation.changed(second, second.relocation_roots))
     end)
 
+    it("rebinds non-ASCII roots in generated line controls spelled as raw bytes", function()
+        local util = require "titan-compiler.util"
+        local first, second = owned("/first Ω"), owned("/second Ω")
+        local function generated(root)
+            local part = fixture_path(root .. "/source/out/Part.c")
+            return "#define TITAN_GENERATED_C_FILE " .. util.c_line_filename(part) .. "\n" ..
+                "#line 17 " .. util.c_line_filename(part) .. "\n"
+        end
+        assert.equal(generated("/second Ω"),
+            relocation.generated(second, generated("/first Ω"), first.relocation_roots))
+        local labelled = relocation.generated(first, generated("/first Ω"))
+        assert.matches('#define TITAN_GENERATED_C_FILE "<titan:output>/Part.c"', labelled, 1, true)
+        assert.matches('#line 17 "<titan:output>/Part.c"', labelled, 1, true)
+    end)
+
     it("preserves mixed-case concrete tails while matching Windows roots case-insensitively", function()
         local original = platform.windows
         platform.windows = true

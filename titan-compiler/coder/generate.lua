@@ -1338,7 +1338,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         local filename = stem
             .. (index == 0 and "" or ".part" .. tostring(index)) .. ".c"
         return "#define TITAN_GENERATED_C_FILE "
-            .. c_string_literal(filename) .. "\n"
+            .. util.c_line_filename(filename) .. "\n"
     end
     if part_count == 1 then
         local texts = {}

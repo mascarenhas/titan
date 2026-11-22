@@ -1,6 +1,7 @@
 -- Coverage source ownership is carried through C formatting as reserved line
 -- comments. Only this final pass turns it into preprocessor line controls.
 -- util.render deliberately knows nothing about C locations.
+local util = require "titan-compiler.util"
 local coverage_lines = {}
 
 local PREFIX = "// TITAN_COVERAGE_"
@@ -8,6 +9,8 @@ coverage_lines.comment_pragma = "^ TITAN_COVERAGE_"
 local TRIGRAPHS = { ["="] = "#", ["/"] = "\\", ["'"] = "^",
     ["("] = "[", [")"] = "]", ["!"] = "|", ["<"] = "{",
     [">"] = "}", ["-"] = "~" }
+local SIMPLE_ESCAPES = { a = "\a", b = "\b", f = "\f", n = "\n", r = "\r",
+    t = "\t", v = "\v" }
 
 local function valid_line(line)
     return type(line) == "number" and line % 1 == 0
@@ -32,22 +35,6 @@ end
 local function valid_filename(filename)
     return type(filename) == "string" and filename ~= ""
         and not filename:find("[%z\r\n]")
-end
-
--- Filenames need C preprocessing string escaping, without util.render's
--- special treatment of dollar signs. Fixed-width octal keeps arbitrary bytes
--- independent of the C source encoding.
-local function quoted_filename(filename)
-    return '"' .. filename:gsub(".", function(byte)
-        if byte == "\\" then return "\\\\" end
-        if byte == '"' then return '\\"' end
-        if byte == "?" then return "\\077" end
-        local number = string.byte(byte)
-        if number < 32 or number >= 127 then
-            return string.format("\\%03o", number)
-        end
-        return byte
-    end) .. '"'
 end
 
 function coverage_lines.begin(kind, filename, line)
@@ -153,12 +140,30 @@ local function authored_directive(line, region)
         while offset < #quoted do
             local byte = quoted:sub(offset, offset)
             if byte == "\\" then
-                local octal = quoted:sub(offset + 1):match("^([0-7][0-7]?[0-7]?)")
+                -- Every spelling a conforming compiler accepts, including
+                -- util.c_line_filename's: octal (authored GCC and older
+                -- Clang C), universal character names, simple escapes.
+                local rest = quoted:sub(offset + 1)
+                local octal = rest:match("^([0-7][0-7]?[0-7]?)")
+                local ucn = rest:match("^u(%x%x%x%x)")
+                    or rest:match("^U(%x%x%x%x%x%x%x%x)")
                 if octal then
-                    bytes[#bytes + 1] = string.char(tonumber(octal, 8))
+                    local value = tonumber(octal, 8)
+                    if value > 255 then return end
+                    bytes[#bytes + 1] = string.char(value)
                     offset = offset + 1 + #octal
+                elseif ucn then
+                    local code = tonumber(ucn, 16)
+                    if code > 0x10FFFF or code >= 0xD800 and code <= 0xDFFF then
+                        return
+                    end
+                    bytes[#bytes + 1] = utf8.char(code)
+                    offset = offset + 2 + #ucn
+                elseif SIMPLE_ESCAPES[rest:sub(1, 1)] then
+                    bytes[#bytes + 1] = SIMPLE_ESCAPES[rest:sub(1, 1)]
+                    offset = offset + 2
                 else
-                    bytes[#bytes + 1] = quoted:sub(offset + 1, offset + 1)
+                    bytes[#bytes + 1] = rest:sub(1, 1)
                     offset = offset + 2
                 end
             elseif byte == '"' then
@@ -267,7 +272,7 @@ function coverage_lines.convert(contents, generated_filename)
                 local anchor = region.kind == "generated"
                     and output_lines + 2 or region.line
                 append("#line " .. tostring(anchor) .. " "
-                    .. quoted_filename(filename) .. "\n")
+                    .. util.c_line_filename(filename) .. "\n")
                 append(line:sub(suffix_at) .. (newline and "\n" or ""))
             else
                 if safe and not directive and lexical_line:find("[^ \t]") then
@@ -275,7 +280,7 @@ function coverage_lines.convert(contents, generated_filename)
                     local anchor = region.kind == "generated"
                         and output_lines + 2 or region.line
                     append("#line " .. tostring(anchor) .. " "
-                        .. quoted_filename(filename) .. "\n")
+                        .. util.c_line_filename(filename) .. "\n")
                 end
                 append(line .. (newline and "\n" or ""))
             end
