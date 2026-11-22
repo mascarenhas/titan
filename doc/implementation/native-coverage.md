@@ -41,7 +41,13 @@ clang-format `CommentPragmas: '^ TITAN_COVERAGE_'` so markers survive
 unchanged. Coverage mode also skips the ordinary blank-line normalization after
 `#line`, preserving authored-C line progression. Finally
 `coverage_lines.convert` turns markers into standard `#line` directives; no
-layout pass follows it.
+layout pass follows it. Their filenames use the same
+[`util.c_line_filename`](codegen-overview.md#mixed-source-line-attribution)
+spelling as ordinary generated line controls. Authored line controls are
+decoded from octal, simple and universal-character-name escapes, so the
+converter reads both authored GCC-style C and its own output; an escape that
+names no byte (octal above 255, a surrogate or a code point above U+10FFFF)
+leaves the directive without effect on source ownership.
 
 The converter maintains a stack of owners. Lines in a Titan expansion keep one
 source anchor, while authored-C regions preserve intentional line progression.

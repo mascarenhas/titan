@@ -51,16 +51,36 @@ describe("coverage C source regions", function()
     it("escapes arbitrary filenames independently of C templates", function()
         local result = mapped(source("run();", 'C:\\space dir\\quote"$name.titan', 3))
         assert.truthy(result:find(
-            '#line 3 "C:\\\\space dir\\\\quote\\"$name.titan"', 1, true))
+            '#line 3 "C:\\\\space dir\\\\quote\\"\\u0024name.titan"', 1, true))
         local bytes = mapped(source("run();", "caf\195\169.titan", 2))
-        assert.truthy(bytes:find('"caf\\303\\251.titan"', 1, true))
+        assert.truthy(bytes:find('"caf\195\169.titan"', 1, true))
     end)
 
     it("preserves numeric line controls and decodes octal authored filenames", function()
         local result = mapped(lines.region('# 90 "caf\\303\\251.c"\nrun();\nnext();',
             "authored", "old.c", 1))
-        assert.truthy(result:find('#line 90 "caf\\303\\251.c"\nrun();', 1, true))
-        assert.truthy(result:find('#line 91 "caf\\303\\251.c"\nnext();', 1, true))
+        assert.truthy(result:find('#line 90 "caf\195\169.c"\nrun();', 1, true))
+        assert.truthy(result:find('#line 91 "caf\195\169.c"\nnext();', 1, true))
+    end)
+
+    it("round-trips its own spelling and decodes universal character names", function()
+        local name = 'C:\\dir\\b"c ??/ $line \t 文.c'
+        local spelled = util.c_line_filename(name)
+        local result = mapped(lines.region("#line 90 " .. spelled .. "\nrun();\nnext();",
+            "authored", "old.c", 1))
+        assert.truthy(result:find("#line 91 " .. spelled .. "\nnext();", 1, true))
+        result = mapped(lines.region('#line 90 "a\\u00e9\\U0001F600.c"\nrun();\nnext();',
+            "authored", "old.c", 1))
+        assert.truthy(result:find('#line 91 "a\195\169\240\159\152\128.c"\nnext();', 1, true))
+    end)
+
+    it("keeps unrepresentable authored escapes from changing source ownership", function()
+        for _, control in ipairs({ '#line 90 "a\\uD800.c"', '#line 90 "a\\U00110000.c"',
+                '#line 90 "a\\777.c"' }) do
+            local result = mapped(lines.region(control .. "\nrun();", "authored", "old.c", 1))
+            assert.truthy(result:find(control, 1, true))
+            assert.truthy(result:find('#line 2 "old.c"\nrun();', 1, true))
+        end
     end)
 
     it("keeps invalid authored line controls from changing source ownership", function()
@@ -122,7 +142,7 @@ run();]]))
         local result = mapped(source('// continued ??/\n// TITAN_COVERAGE_END\nrun();',
             "question??/mark.titan"))
         assert.truthy(result:find('// continued ??/\n// TITAN_COVERAGE_END', 1, true))
-        assert.truthy(result:find('#line 7 "question\\077\\077/mark.titan"\nrun();', 1, true))
+        assert.truthy(result:find('#line 7 "question\\?\\?/mark.titan"\nrun();', 1, true))
         result = mapped(lines.region('%:line 71 "hand.c"\nrun();', "authored", "old.c", 1))
         assert.matches('#line 71 "hand.c"\nrun%(%)', result)
     end)

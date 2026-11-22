@@ -196,13 +196,39 @@ semantic effect may still use `pairs`. The pieces appear in this order:
 
 A folder module's generated C contains functions and statements from several
 Titan files. `emitline(node)` (`coder/names.lua`) therefore works per node. It
-C-quotes `node.loc.filename` and emits `#line` at safe physical-line sites
+spells `node.loc.filename` with `util.c_line_filename` (below) and emits
+`#line` at safe physical-line sites
 such as function entries, statements, calls, `raise`, and related throw paths.
 It never installs one directive for the whole translation unit and never
 stamps expression fragments that may be embedded mid-line. The filename
 changes as root nodes and nested bodies from different contributors are
 emitted, so compiler diagnostics, DWARF, and libbacktrace frames identify the
 actual source file and line.
+
+The filename in a `#line` directive is an *unevaluated* string literal: Clang
+23 parses it as one and rejects octal and hex escapes there in every `-std`
+mode, C included. Line controls therefore never use `c_string_literal` (whose
+`\044` and `\077` are numeric escapes for evaluated literals). One function,
+`util.c_line_filename(filename)` (`titan-compiler/util.lua`), spells every
+generated line control — `emitline`, `definitionline`, each part's
+`TITAN_GENERATED_C_FILE` definition, and the coverage converter's directives:
+
+| Input byte | Spelling | Why |
+|---|---|---|
+| `\` | `\\` | simple escape |
+| `"` | `\"` | simple escape |
+| `?` | `\?` | strict `--std=c99` enables trigraphs, so a raw `??/` would become `\` |
+| `$` | `\u0024` | keeps the byte out of `util.render`'s recursive `$NAME` language; C99 permits this UCN |
+| BEL BS FF LF CR HT VT | `\a \b \f \n \r \t \v` | simple escapes that keep the directive on one physical line |
+| NUL | assertion failure | not a filename byte and has no unevaluated spelling |
+| every other byte, including `>= 0x80` | raw | the only byte-exact spelling once numeric escapes are banned |
+
+Both regimes, evaluated (GCC, older Clang) and unevaluated (Clang 23), decode
+this spelling to the original bytes, and `spec/coder/line_directives_spec.lua`
+checks that with the host C compiler. A path that is not valid UTF-8 stays
+raw: GCC accepts it silently, while Clang warns with
+`-Winvalid-source-encoding` and keeps the bytes, so adding `-Werror` with
+Clang turns such a path into an error that no spelling can avoid.
 
 `definitionline(loc)` (`coder/names.lua`, installed in the shared `coder.core`
 environment) additionally stamps a `#line` directive immediately before the
@@ -212,7 +238,8 @@ real declaration or site location; source-less helpers (module protocol,
 metamethod, and init/opener functions, unlocated adapters, and the four inline
 helpers in `cpreamble.definition_prefix`) emit
 `#line 1 TITAN_GENERATED_C_FILE`, where each emitted part defines
-`TITAN_GENERATED_C_FILE` to its actual `<stem>.c` or `<stem>.partN.c` filename
+`TITAN_GENERATED_C_FILE` to its actual `<stem>.c` or `<stem>.partN.c` filename,
+spelled by `util.c_line_filename` because it only ever expands inside `#line`
 (avoiding Clang's `__BASE_FILE__`, which follows prior `#line` changes). This
 prevents a function prologue (such as `luaC_checkGC` or argument/root setup
 before the first statement's `#line`) from inheriting the preceding definition's

@@ -2566,6 +2566,14 @@ describe("Titan code generator", function()
             local generated = assert(util.get_file_contents(stem .. ".c"))
             assert.match('#include "' .. stem .. '.ffi.h"', generated, 1, true)
             assert.match('#include "' .. stem .. '.titan.h"', generated, 1, true)
+            -- Line controls spell the same path as an unevaluated literal.
+            assert.match("#define TITAN_GENERATED_C_FILE " .. util.c_line_filename(stem .. ".c"),
+                generated, 1, true)
+            local source_line
+            for tail in generated:gmatch("#line %d+ ([^\n]*)") do
+                source_line = source_line or tail == util.c_line_filename(source)
+            end
+            assert.is_true(source_line)
             local companion = assert(util.get_file_contents(stem .. ".titan.h"))
             assert.match('#include "' .. stem .. '.ffi.h"', companion, 1, true)
         end)
