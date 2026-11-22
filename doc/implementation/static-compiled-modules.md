@@ -157,10 +157,11 @@ optional `dynamic_providers` table in `.titan.meta` mapping each dotted logical
 owner name to its relative provider filename, sorted bytewise by owner and
 omitted when empty (`staticmetadata.render` and `staticmetadata.validate`
 reject an empty `{}` with `metadata dynamic_providers must be omitted when
-empty`). Each value must pass `staticmetadata.valid_relative_provider`: a
-portable module prefix spelled with `/` (no `.` in the stem, checked via
-`portable_dotted_components`) plus `.so` or `.dll`, rejecting dot segments,
-backslashes, absolute or drive paths, and other suffixes. The matching callable
+empty`). Each value must pass `staticmetadata.valid_relative_provider`: a `.so`
+or `.dll` suffix on a stem with no `.` (`stem:find(".", 1, true)`), whose
+`/`-separated components (mapped `/` → `.`) pass `portable_dotted_components`—
+rejecting dot segments, backslashes, absolute or drive paths, and other
+suffixes. The matching callable
 DSO symbol `<mangled>_dynamic_providers` encodes the same map as
 `owner<TAB>provider` lines in bytewise owner order
 (`staticmetadata.encode_dynamic_providers` / `decode_dynamic_providers`).
@@ -512,10 +513,11 @@ name):
   first probes `driver.find_relative_carrier(TITAN_BIN_PATH, modname, proved,
   context)`, which inspects the first occupied `<root>/<proved>` along the
   Titan binary path (keeping `lstat` and probe errors terminal, and falling
-  back to ordinary `find_dependency_interface` only on a clean nonclaim, i.e.,
-  a stale proof); otherwise it tries `find_dependency_interface` directly in
-  noncommitting type-only mode, recording a `dynamic-global` constraint (with
-  `producer_carrier`, `resolved_provider`, `resolved_relative`, and
+  back to ordinary `find_dependency_interface` when `<proved>` is unoccupied,
+  holds a clean nonclaim, or on the browser target); otherwise it tries
+  `find_dependency_interface` directly in noncommitting type-only mode,
+  recording a `dynamic-global` constraint (with `producer_carrier`,
+  `resolved_provider`, `resolved_relative`, and
   `resolved_kind`) on a hit;
 * in an unplanned open-world semantic check (or planned/worker check) where the
   exposing non-dormant member carries `source_requirements`, a directly
@@ -540,9 +542,11 @@ DSO compiled against an older standalone provider) remain rejected as
 conflicting providers. In `analysis_only` native contexts outside closed
 completion catalogs (`not context.completion_closed_world`), when no carrying
 DSO is present (`carried_provider == nil`), `analysis_same_dynamic` likewise
-allows sharing when every constraint resolves as `"dynamic"` to the same
-physical provider file. Full physical membership is checked for overlapping
-names and native symbol collisions.
+allows sharing when no constraint is `direct-carried`, any ordinary selected
+`driver.imported[owner]` is `kind == "dynamic"` with the same `filename` (an
+ordinary static or source owner disables it), and every constraint resolves as
+`"dynamic"` to that same physical provider file. Full physical membership is
+checked for overlapping names and native symbol collisions.
 
 At the end of `finalize_resolver_context`, non-browser builds inductively
 derive `context.producer_dynamic_providers` strictly from finalized

@@ -1084,9 +1084,11 @@ checks the decoded certificate against the final resolution `plan`:
    `cert.carriers` exactly (`miss("record-schema", "uncertified dynamic
    carriers")` or `miss("record-schema", "uncertified dynamic carrier <name>")`)
    and queries `plan.carrier_digest(item.name, item.relative)` for each entry,
-   returning `miss("carrier-unavailable", "<name> (<relative>)")` when
-   unavailable or `miss("carrier-interface", "<name> (<relative>)")` when the
-   carrier's public digest differs from `item.interface`.
+   returning `miss("carrier-unavailable", "<name> (<relative>)")` on any `nil`
+   result (including `"owner-binding"` if `<name>` is now linked or check-only
+   and was absent from `cert.bindings`) or
+   `miss("carrier-interface", "<name> (<relative>)")` when the carrier's public
+   digest differs from `item.interface`.
 5. If any dependency was pending and no earlier check missed, `verdict` returns
    `{ status = "pending", names = pending }`; otherwise it returns
    `{ status = "hit" }`.
@@ -1158,7 +1160,7 @@ The complete `-v` object-decision vocabulary written to `stderr` is:
 | `Titan object miss <mod>: owner-interface <name>` | Contextually exposed nominal owner's public interface or layout digest changed. |
 | `Titan object miss <mod>: import-binding <name>: <before> -> <after>` | Direct import's native binding (`direct`/`handle`/`global`) or dynamic provider path changed. |
 | `Titan object miss <mod>: owner-binding <name>: <before> -> <after>` | Contextual owner's native binding (`direct`/`global`) changed. |
-| `Titan object miss <mod>: carrier-unavailable <name> (<relative>)` | Recorded emitted dynamic carrier could no longer be resolved at `<relative>`. |
+| `Titan object miss <mod>: carrier-unavailable <name> (<relative>)` | Recorded emitted dynamic carrier could no longer be resolved at `<relative>`, or the owner is now linked or check-only in this build. |
 | `Titan object miss <mod>: carrier-interface <name> (<relative>)` | Public interface digest of the recorded emitted dynamic carrier at `<relative>` changed. |
 
 Before publishing a worker's newly compiled object, the coordinator calls
