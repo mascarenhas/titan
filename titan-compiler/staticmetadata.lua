@@ -214,7 +214,79 @@ function staticmetadata.decode_source_requirements(modname, bytes)
 end
 
 -- Implementation notes: doc/implementation/static-compiled-modules.md#canonical-payload
-function staticmetadata.render(modname, abi, serialized_types, serialized_layouts, imports, requirements)
+-- A producer-proved dynamic carrier is a relative provider name the compiler
+-- emits itself: a portable module prefix spelled with `/` plus `.so` or
+-- `.dll`. Dot segments, backslashes, and absolute or drive paths never reach
+-- a library loader.
+function staticmetadata.valid_relative_provider(value)
+    if type(value) ~= "string" then return false end
+    local stem = value:match("^(.+)%.so$") or value:match("^(.+)%.dll$")
+    if not stem or stem:find(".", 1, true) then return false end
+    return portable_dotted_components((stem:gsub("/", "."))) ~= false
+end
+
+local function validate_dynamic_providers(modname, providers)
+    if type(providers) ~= "table" or getmetatable(providers) ~= nil then
+        return nil, "metadata dynamic_providers must be a plain table"
+    end
+    if next(providers) == nil then
+        return nil, "metadata dynamic_providers must be omitted when empty"
+    end
+    for owner, provider in next, providers do
+        if not valid_module_name(owner) or owner == modname then
+            return nil, "invalid Titan module name in dynamic_providers: " ..
+                diagnostic_value(owner)
+        end
+        if not staticmetadata.valid_relative_provider(provider) then
+            return nil, "invalid relative provider in dynamic_providers for " ..
+                format("%q", owner) .. ": " .. diagnostic_value(provider)
+        end
+    end
+    return true
+end
+
+-- `owner<TAB>provider` lines in bytewise owner order.
+function staticmetadata.encode_dynamic_providers(modname, providers)
+    local valid, err = validate_dynamic_providers(modname, providers)
+    if not valid then return nil, err end
+    local lines = {}
+    for _, owner in ipairs(sorted_keys(providers)) do
+        lines[#lines + 1] = owner .. "\t" .. providers[owner]
+    end
+    return table.concat(lines, "\n")
+end
+
+function staticmetadata.decode_dynamic_providers(modname, bytes)
+    local malformed = "dynamic_providers metadata must be a nonempty canonical owner/provider list"
+    if type(bytes) ~= "string" then return nil, malformed end
+    local providers = {}
+    for line in bytes:gmatch("[^\n]+") do
+        local owner, provider = line:match("^([^\t]+)\t([^\t]+)$")
+        if not owner or providers[owner] ~= nil then return nil, malformed end
+        providers[owner] = provider
+    end
+    if next(providers) == nil then return nil, malformed end
+    local encoded, err = staticmetadata.encode_dynamic_providers(modname, providers)
+    if not encoded then return nil, err end
+    if encoded ~= bytes then return nil, malformed end
+    return providers
+end
+
+local function render_dynamic_providers(modname, providers)
+    local valid, err = validate_dynamic_providers(modname, providers)
+    if not valid then return nil, err end
+    local lines = { "        dynamic_providers = {\n" }
+    for _, owner in ipairs(sorted_keys(providers)) do
+        lines[#lines + 1] = "            [" .. format("%q", owner) .. "] = " ..
+            format("%q", providers[owner]) .. ",\n"
+    end
+    lines[#lines + 1] = "        },\n"
+    return table.concat(lines)
+end
+
+-- Implementation notes: doc/implementation/static-compiled-modules.md#canonical-payload
+function staticmetadata.render(modname, abi, serialized_types, serialized_layouts, imports, requirements,
+                               dynamic_providers)
     if not valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             diagnostic_value(modname)
@@ -240,6 +312,12 @@ function staticmetadata.render(modname, abi, serialized_types, serialized_layout
         serialized_requirements, err = render_module_list(modname, requirements, "source_requirements")
         if not serialized_requirements then return nil, err end
     end
+    local serialized_dynamic_providers = ""
+    if dynamic_providers ~= nil then
+        local err
+        serialized_dynamic_providers, err = render_dynamic_providers(modname, dynamic_providers)
+        if not serialized_dynamic_providers then return nil, err end
+    end
     return staticmetadata.BANNER ..
         "return {\n" ..
         "    [" .. format("%q", modname) .. "] = {\n" ..
@@ -249,6 +327,7 @@ function staticmetadata.render(modname, abi, serialized_types, serialized_layout
             "        layouts = " .. format("%q", serialized_layouts) .. ",\n" or "") ..
         serialized_imports ..
         serialized_requirements ..
+        serialized_dynamic_providers ..
         "    },\n" ..
         "}\n"
 end
@@ -383,7 +462,7 @@ function staticmetadata.validate(payload, origin, options)
 
     for key in next, entry do
         if key ~= "abi" and key ~= "types" and key ~= "layouts" and key ~= "imports"
-           and key ~= "source_requirements" then
+           and key ~= "source_requirements" and key ~= "dynamic_providers" then
             return payload_error(origin, "metadata entry for " ..
                 format("%q", module_name) .. " has unknown field " ..
                 diagnostic_value(key))
@@ -394,6 +473,7 @@ function staticmetadata.validate(payload, origin, options)
     local serialized_layouts = rawget(entry, "layouts")
     local imports = rawget(entry, "imports")
     local requirements = rawget(entry, "source_requirements")
+    local dynamic_providers = rawget(entry, "dynamic_providers")
     if type(abi) ~= "string" or type(serialized_types) ~= "string" or
        (serialized_layouts ~= nil and type(serialized_layouts) ~= "string") then
         return payload_error(origin, "metadata entry for " ..
@@ -411,7 +491,8 @@ function staticmetadata.validate(payload, origin, options)
     end
 
     local canonical, render_error =
-        staticmetadata.render(module_name, abi, serialized_types, serialized_layouts, imports, requirements)
+        staticmetadata.render(module_name, abi, serialized_types, serialized_layouts, imports, requirements,
+            dynamic_providers)
     if not canonical then
         return payload_error(origin, render_error)
     end
@@ -464,6 +545,7 @@ function staticmetadata.validate(payload, origin, options)
         decoded_layouts = decoded_layouts,
         imports = imports,
         source_requirements = requirements,
+        dynamic_providers = dynamic_providers,
         payload = payload,
         origin = origin,
     }

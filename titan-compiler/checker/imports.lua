@@ -754,9 +754,14 @@ end
 function checker.checkimport(modname, loader, request)
     local ok, type_or_error, errors, import_info = loader(modname, request)
     if not ok then return nil, type_or_error, errors end
+    -- Contextual recoveries keep their exposer (`nominal_exposer`, or none);
+    -- an ordinary load (`kind` set) exposes its own interface.
+    local exposer = import_info and
+        (import_info.nominal_exposer or import_info.kind and modname) or
+        request and request.exposer
     local registered, register_error, failure_kind = checker.register_module_interface(
         modname, type_or_error, loader,
-        import_info and import_info.nominal_exposer or request and request.exposer,
+        exposer,
         request and request.interface_seen,
         import_info and import_info.kind == "source"
             and type_or_error._source == true,

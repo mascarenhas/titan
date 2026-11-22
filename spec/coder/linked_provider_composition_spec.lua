@@ -149,6 +149,24 @@ describe("linked provider composition", function()
             "TITAN_PATH_0_6=" .. deploy, program })
     end
 
+    -- The encoded producer-proved carriers of one compiled module, probed in
+    -- a separate process so no fixture DSO stays loaded here.
+    local function recorded_carriers(name, filename)
+        local frontend = fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;"
+        local result = fixture:run({ fixture.prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""),
+            "-e", string.format([[
+package.path = %q .. package.path
+local driver = require "titan-compiler.driver"
+local staticmetadata = require "titan-compiler.staticmetadata"
+local status, value, metadata = driver.probe_compiled_interface(%q, %q)
+assert(status == "valid", tostring(value))
+io.write(metadata.dynamic_providers and
+    assert(staticmetadata.encode_dynamic_providers(%q, metadata.dynamic_providers)) or "")
+]], frontend, name, filename, name) })
+        assert.is_true(result.ok, result.output)
+        return result.output
+    end
+
     it("shares the first compatible DSO owner across both import orders", function()
         local suffix = platform.windows and ".dll" or ".so"
         file("dependency/dep/owner.titan", owner)
@@ -668,9 +686,15 @@ end
             result.output)
         assert(os.rename(fixture.root .. "/package/dep/owner.saved",
             fixture.root .. "/package/dep/owner.so"))
+        -- Built before any shared bundle exists, this facade proves the
+        -- standalone DSO as the carrier of the owner it re-exposes.
+        built("extension", "package", "package", "facade")
+        local function carriers(name)
+            return recorded_carriers(name, fixture.root .. "/package/" .. name .. ".so")
+        end
+        assert.equal("dep.owner\tdep/owner.so", carriers("facade"))
 
-        -- The carried owner can still be imported from that same DSO. A
-        -- second facade with an external edge must not defeat its claim.
+        -- The carried owner can still be imported from that same DSO.
         file("group/dep/owner.titan", owner)
         file("group/dep/carried.titan", facade)
         built("group", "package", nil, "dep.owner", "dep.carried")
@@ -687,21 +711,253 @@ end
         result = run_with_providers("same_handle")
         assert.is_true(result.ok, result.output)
 
+        -- A producer built against the shared bundle proves that bundle as
+        -- the owner's carrier, so its external edge shares the carried owner.
         file("other/external.titan", facade)
         built("other", "package", "package", "external")
+        assert.equal("dep.owner\tdep.so", carriers("external"))
         file("app/competing.titan", [[
 local external = import "external"
 local carried = import "dep.carried"
 local owner = import "dep.owner"
 
 function main(args: {string}): integer
+  if external.make():code() ~= 41 then return 1 end
+  if carried.make().serial ~= 3 or owner.next().serial ~= 4 then return 2 end
   return 0
 end
 ]])
-        result = compile("app", "competing", "package", "competing")
+        built("app", "competing", "package", "competing")
+        result = run_with_providers("competing")
+        assert.is_true(result.ok, result.output)
+
+        -- The same composition inside a no-main library, consumed by Titan
+        -- and by a bare Lua host.
+        file("wrapper/wrapped_ok.titan", [[
+local external = import "external"
+local carried = import "dep.carried"
+
+function n(): integer
+  return external.make():code() + carried.make().serial
+end
+]])
+        built("wrapper", "package", "package", "wrapped_ok")
+        file("app/use_wrapped.titan", [[
+local wrapped_ok = import "wrapped_ok"
+local owner = import "dep.owner"
+
+function main(args: {string}): integer
+  if wrapped_ok.n() == 44 and owner.next().serial == 4 then return 0 end
+  return 1
+end
+]])
+        built("app", "use-wrapped", "package", "use_wrapped")
+        result = run_with_providers("use_wrapped")
+        assert.is_true(result.ok, result.output)
+        result = fixture:run({ fixture.prefix .. "/bin/lua", "-e", [[
+require "titan"
+local wrapped_ok = require "wrapped_ok"
+assert(wrapped_ok.n() == 44)
+assert(require("dep.owner").next().serial == 4)
+]] }, { TITAN_PATH_0_6 = fixture.root .. "/package;" .. stdlib })
+        assert.is_true(result.ok, result.output)
+
+        -- The stale facade's proof names another carrier: it competes with
+        -- the bundle in a program and in a no-main library alike.
+        local conflict = "has producer-dynamic exposures from conflicting providers"
+        file("app/competing_stale.titan", [[
+local facade = import "facade"
+local carried = import "dep.carried"
+
+function main(args: {string}): integer
+  return 0
+end
+]])
+        result = compile("app", "competing-stale", "package", "competing_stale")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find(conflict, 1, true), result.output)
+        file("stale/stale_wrapped.titan", [[
+local facade = import "facade"
+local carried = import "dep.carried"
+
+function n(): integer
+  return facade.make():code() + carried.make().serial
+end
+]])
+        result = compile("stale", "package", "package", "stale_wrapped")
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find(conflict, 1, true), result.output)
+
+        -- Two distinct carrying DSOs never share one owner.
+        file("override_source/dep/owner.titan", owner)
+        file("override_source/dep/owner/wrap.titan", facade)
+        built("override_source", "override", nil, "dep.owner", "dep.owner.wrap")
+        assert.equal("file", lfs.attributes(fixture.root .. "/override/dep/owner.so", "mode"))
+        file("app/multi_carrier.titan", [[
+local wrap = import "dep.owner.wrap"
+local carried = import "dep.carried"
+
+function main(args: {string}): integer
+  return 0
+end
+]])
+        fixture.source = fixture.root .. "/app"
+        fixture.output = fixture.root .. "/multi-carrier"
+        result = fixture:compile({ "multi_carrier" }, { TITAN_PATH_0_6 = fixture.root ..
+            "/override;" .. fixture.root .. "/package;" .. stdlib })
+        assert.is_false(result.ok, result.output)
+        assert.truthy(result.output:find(conflict, 1, true), result.output)
+    end)
+
+    it("shares SDK owners re-exposed by a library with module-level and direct consumers", function()
+        local suffix = platform.windows and ".dll" or ".so"
+        file("author/web.titan", [[
+local json = import "json"
+
+record Context
+  label: string
+  option: json.DecodeOption?
+end
+
+type Handler = function (Context): ()
+
+local handlers: {Handler} = {}
+
+function register(handler: Handler)
+  handlers[#handlers + 1] = handler
+end
+
+function dispatch(label: string): string
+  local ctx = Context(label, nil)
+  for index = 1, #handlers do handlers[index](ctx) end
+  return ctx.label
+end
+]])
+        built("author", "package", nil, "--incremental", "web")
+        local log = built("author", "package", nil, "--incremental", "-v", "web")
+        assert.truthy(log:find("Titan object hit web:", 1, true), log)
+        -- The library proves the SDK image as the carrier of both the owner
+        -- it imports and the owner that owner's interface exposes.
+        local carriers = recorded_carriers("web", fixture.root .. "/package/web" .. suffix)
+        for _, owner_name in ipairs({ "titan.json", "titan.reflect" }) do
+            assert.truthy(carriers:find(owner_name .. "\ttitan" .. suffix, 1, true), carriers)
+        end
+
+        file("app/app_modfn.titan", [[
+local web = import "web"
+
+local function hello(ctx: web.Context)
+  ctx.label = ctx.label .. "!"
+end
+
+function main(args: {string}): integer
+  web.register(hello)
+  if web.dispatch("hi") == "hi!" then return 0 end
+  return 1
+end
+]])
+        file("app/app_json.titan", [[
+local json = import "json"
+local web = import "web"
+
+local function hello(ctx: web.Context)
+  ctx.label = ctx.label .. "!"
+end
+
+function main(args: {string}): integer
+  web.register(hello)
+  local decoded = json.decode("42", nil)
+  if decoded == 42 and web.dispatch(json.encode("x")) == "\"x\"!" then return 0 end
+  return 1
+end
+]])
+        for _, app in ipairs({ "app_modfn", "app_json" }) do
+            built("app", app, "package", "--incremental", app)
+            local result = run_with_providers(app)
+            assert.is_true(result.ok, app .. ": " .. result.output)
+            log = built("app", app, "package", "--incremental", "-v", app)
+            assert.truthy(log:find("Titan object hit " .. app .. ":", 1, true), log)
+        end
+    end)
+
+    it("proves a carried owner across multi-hop facades and certifies that proof", function()
+        local suffix = platform.windows and ".dll" or ".so"
+        local function carriers(name)
+            return recorded_carriers(name, fixture.root .. "/package/" .. name .. suffix)
+        end
+        -- other.api carries its authored dep.owner sibling; no pathname
+        -- names dep.owner on its own.
+        file("other/dep/owner.titan", owner)
+        file("other/other/api.titan", facade)
+        built("other", "package", nil, "other.api")
+        assert.is_nil(lfs.attributes(fixture.root .. "/package/dep/owner" .. suffix, "mode"))
+        assert.is_nil(lfs.attributes(fixture.root .. "/package/dep" .. suffix, "mode"))
+        file("sib/sib_facade.titan", [[
+local api = import "other.api"
+
+type Box = api.Box
+
+function make(): Box
+  return api.make()
+end
+]])
+        built("sib", "package", "package", "--incremental", "sib_facade")
+        file("reexp/reexposer.titan", [[
+local sib_facade = import "sib_facade"
+
+type Box = sib_facade.Box
+
+function make(): Box
+  return sib_facade.make()
+end
+]])
+        built("reexp", "package", "package", "--incremental", "reexposer")
+        local proof = "dep.owner\tother/api" .. suffix
+        assert.equal(proof .. "\nother.api\tother/api" .. suffix, carriers("sib_facade"))
+        assert.equal(proof .. "\nsib_facade\tsib_facade" .. suffix, carriers("reexposer"))
+        file("app/use_reexposer.titan", [[
+local reexposer = import "reexposer"
+
+function main(args: {string}): integer
+  if reexposer.make():code() == 41 then return 0 end
+  return 1
+end
+]])
+        built("app", "use-reexposer", "package", "use_reexposer")
+        local result = run_with_providers("use_reexposer")
+        assert.is_true(result.ok, result.output)
+
+        -- An unrelated bundle claiming the owner appears on the path: the
+        -- recorded proof still names the actual carrier, so a warm rebuild
+        -- hits, and a program mixing both carriers is rejected.
+        file("group/dep/owner.titan", owner)
+        file("group/dep/carried.titan", facade)
+        built("group", "package", nil, "dep.owner", "dep.carried")
+        local log = built("reexp", "package", "package", "--incremental", "-v", "reexposer")
+        assert.truthy(log:find("Titan object hit reexposer:", 1, true), log)
+        file("app/mixed.titan", [[
+local reexposer = import "reexposer"
+local carried = import "dep.carried"
+
+function main(args: {string}): integer
+  return 0
+end
+]])
+        result = compile("app", "mixed", "package", "mixed")
         assert.is_false(result.ok, result.output)
         assert.truthy(result.output:find(
-            "has producer-dynamic exposures from conflicting providers", 1, true),
-            result.output)
+            "has producer-dynamic exposures from conflicting providers", 1, true), result.output)
+
+        -- other.api stops carrying the owner: both recorded proofs miss and
+        -- are rebuilt against the owner's new carrier.
+        assert(os.remove(fixture.root .. "/other/dep/owner.titan"))
+        built("other", "package", "package", "other.api")
+        log = built("sib", "package", "package", "--incremental", "-v", "sib_facade")
+        assert.truthy(log:find("Titan object miss sib_facade:", 1, true), log)
+        log = built("reexp", "package", "package", "--incremental", "-v", "reexposer")
+        assert.truthy(log:find("Titan object miss reexposer:", 1, true), log)
+        local moved = "dep.owner\tdep" .. suffix
+        assert.equal(moved .. "\nother.api\tother/api" .. suffix, carriers("sib_facade"))
+        assert.equal(moved .. "\nsib_facade\tsib_facade" .. suffix, carriers("reexposer"))
     end)
 end)
