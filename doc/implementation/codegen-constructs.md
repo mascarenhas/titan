@@ -505,7 +505,10 @@ interned, so repeated evaluation of a short literal yields the same
 with one, the local's own slot refresh anchors it. `c_string_literal` emits a
 dollar byte as the C octal escape `\044`: generated fragments are recursively
 template-rendered, so this keeps the user's byte without letting a following
-identifier become another `$NAME` substitution.
+identifier become another `$NAME` substitution. Line-control filenames are not
+spelled by `c_string_literal`: a `#line` filename is an unevaluated literal,
+where Clang 23 rejects octal escapes (see
+[Mixed-source `#line` attribution](codegen-overview.md#mixed-source-line-attribution)).
 
 **Concatenation** (`Ast.ExpConcat`) is one n-ary operation: the parser
 flattens `..` chains. The coder never calls `luaV_concat`. It precomputes the

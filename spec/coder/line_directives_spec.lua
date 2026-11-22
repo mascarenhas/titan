@@ -8,6 +8,8 @@ local h = require "spec.support.helpers"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local cdriver = require "c-parser.cdriver"
+local util = require "titan-compiler.util"
 
 local MODULE = "line_directives"
 local FILENAME = MODULE .. ".titan"
@@ -162,5 +164,76 @@ describe("generated C line directives", function()
         if lua_workspace then remove_tree(lua_workspace) end
         clean_cli_artifacts()
         if not tested then error(test_error, 0) end
+    end)
+
+    it("spells line-control filenames that the host C compiler decodes exactly", function()
+        -- Names are virtual, so quotes, question marks and control bytes work
+        -- on every host. Valid UTF-8 keeps Clang free of encoding warnings.
+        local generated = 'C:\\dir\\b"c ??/ ??= $line ${x} 文 😀 Ω.c'
+        local source = 'C:\\dir\\b"c ??/ ??= $line ${x} 文 😀 Ω\t\1\127.titan'
+        local function bytes(text)
+            local values = {}
+            for index = 1, #text do values[index] = tostring(text:byte(index)) end
+            return table.concat(values, ",")
+        end
+        local program = table.concat({
+            "#include <string.h>",
+            "#define TITAN_GENERATED_C_FILE " .. util.c_line_filename(generated),
+            "static const unsigned char generated_expected[] = {" .. bytes(generated) .. "};",
+            "static const unsigned char source_expected[] = {" .. bytes(source) .. "};",
+            "#line 1 TITAN_GENERATED_C_FILE",
+            "static const char *generated_file(void) { return __FILE__; }",
+            "#line 7 " .. util.c_line_filename(source),
+            "static const char *source_file(void) { return __FILE__; }",
+            "typedef char source_length_check[sizeof(__FILE__) == sizeof(source_expected) + 1 ? 1 : -1];",
+            '#line 13 "probe.c"',
+            "static int same(const char *actual, const unsigned char *expected, size_t size) {",
+            "    return strlen(actual) == size && memcmp(actual, expected, size) == 0;",
+            "}",
+            "int main(void) {",
+            "    if (!same(generated_file(), generated_expected, sizeof(generated_expected))) return 1;",
+            "    if (!same(source_file(), source_expected, sizeof(source_expected))) return 2;",
+            "    return 0;",
+            "}",
+            "",
+        }, "\n")
+        local workspace = assert(compiler_io.new_sync():tmpname())
+        if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
+        os.remove(workspace)
+        assert.truthy(lfs.mkdir(workspace))
+        local tested, test_error = xpcall(function()
+            local probe = workspace .. "/probe.c"
+            local executable = workspace .. "/probe" .. (platform.windows and ".exe" or "")
+            assert.truthy(util.set_file_contents(probe, program, "wb"))
+            local argv = assert(cdriver.split_shell_words(driver.CC))
+            for _, word in ipairs({ "--std=c99", "-Wall", "-Werror", "-o", executable, probe }) do
+                argv[#argv + 1] = word
+            end
+            local ok, output, why, status = run(argv)
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " .. tostring(status) .. ")")
+            ok, output, why, status = run({ executable })
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " .. tostring(status) .. ")")
+        end, debug.traceback)
+        remove_tree(workspace)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("spells every generated line control with the shared filename literal", function()
+        -- The same chunk name still reaches evaluated literals as `\044line`
+        -- through c_string_literal; only line controls change spelling.
+        local name = 'weird ??/ $line "q" 文.titan'
+        h.reset()
+        local ast, parse_err = h.parse(SOURCE, name)
+        assert.truthy(ast, parse_err)
+        local _, errors = checker.check(MODULE, ast, SOURCE, name)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local code = coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION).parts[1].code
+        local spelled, named = util.c_line_filename(name), 0
+        for directive in code:gmatch("#line [^\n]*") do
+            local tail = directive:match("^#line %d+ (.*)$")
+            assert.truthy(tail == "TITAN_GENERATED_C_FILE" or tail == spelled, directive)
+            if tail == spelled then named = named + 1 end
+        end
+        assert.is_true(named > 0)
     end)
 end)
