@@ -1493,10 +1493,18 @@ function incremental.make_certificate(context, entry, native, inputs)
     local names = {}
     for name in pairs(owners) do names[#names + 1] = name end
     table.sort(names, util.bytewise_less)
+    -- An owner whose carrier this build proved is certified at that carrier:
+    -- an ordinary lookup of the owner could miss it or hash an unrelated copy.
     for _, name in ipairs(names) do
-        local digest, status = inputs.plan.digest(name, "public")
+        local carrier = inputs.owner_carriers and inputs.owner_carriers[name]
+        local digest, status
+        if carrier then
+            digest, status = inputs.plan.carrier_digest(name, carrier)
+        else
+            digest, status = inputs.plan.digest(name, "public")
+        end
         assert(digest, "cannot certify contextual owner " .. name .. ": " .. tostring(status))
-        result.owners[#result.owners + 1] = { name = name, interface = digest }
+        result.owners[#result.owners + 1] = { name = name, interface = digest, carrier = carrier }
     end
     local parts = {}
     for index, part in ipairs(inputs.generated_parts or {}) do
@@ -1561,6 +1569,9 @@ local function valid_certificate(value, modname)
             or type(item.interface) ~= "string" or (not imported and seen[item.name]) then return false end
         if imported and (type(item.source_required) ~= "boolean"
             or item.view ~= (item.source_required and "source" or "public")) then return false end
+        -- Only a contextual owner may be certified at a proved carrier.
+        if item.carrier ~= nil and (imported or
+            not staticmetadata.valid_relative_provider(item.carrier)) then return false end
         seen[item.name] = true
         return true
     end
@@ -2036,7 +2047,17 @@ function incremental.verdict(record, plan)
         known[name] = true
         if not owner then direct[name] = true end
         local view = owner and "public" or item.view
-        local digest, status = plan.digest(name, view)
+        local digest, status
+        if owner and item.carrier then
+            -- The proved carrier, never an ordinary lookup of the owner. An
+            -- owner this build links instead keeps its ordinary certification
+            -- so the binding checks below explain the change.
+            digest, status = plan.carrier_digest(name, item.carrier)
+            if not digest and status ~= "owner-binding" then
+                return miss("dependency-unavailable", name .. " (" .. item.carrier .. ")")
+            end
+        end
+        if not digest then digest, status = plan.digest(name, view) end
         if not digest then
             if status == "pending" then
                 if not pending_set[name] then pending_set[name] = true; pending[#pending + 1] = name end

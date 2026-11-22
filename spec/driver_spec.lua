@@ -1648,6 +1648,25 @@ describe("Windows provider export inventory", function()
         assert.same(expected, reordered_names)
     end)
 
+    it("exports optional producer metadata only for the modules that record it", function()
+        local definition, names = driver.windows_provider_exports({ "pkg.zeta", "pkg.alpha" }, nil, nil,
+            { ["pkg.zeta"] = { "pkg.source" } },
+            { ["pkg.alpha"] = { ["dep.owner"] = "dep.dll" } })
+        local expected = {
+            "luaopen_pkg_alpha", "luaopen_pkg_zeta",
+            "pkg_alpha_abi", "pkg_alpha_abi_value", "pkg_alpha_compatibility",
+            "pkg_alpha_dynamic_providers", "pkg_alpha_init", "pkg_alpha_layouts", "pkg_alpha_types",
+            "pkg_zeta_abi", "pkg_zeta_abi_value", "pkg_zeta_compatibility",
+            "pkg_zeta_init", "pkg_zeta_layouts", "pkg_zeta_source_requirements", "pkg_zeta_types",
+        }
+        assert.same(expected, names)
+        assert.equal("EXPORTS\n    " .. table.concat(expected, "\n    ") .. "\n", definition)
+        assert.has_error(function()
+            driver.windows_provider_exports({ "pkg.alpha", "pkg.alpha" }, nil, nil, nil,
+                { ["pkg.alpha"] = { ["dep.owner"] = "dep.dll" } })
+        end, "duplicate Windows module export pkg_alpha_abi_value")
+    end)
+
     it("rejects repeated modules and colliding mangled identities", function()
         for _, modules in ipairs({
             { "pkg.alpha", "pkg.alpha" },
@@ -5324,16 +5343,21 @@ describe("compiler module loader", function()
     end
 
     -- Several fake DSOs at once: `files[filename] = { modules = ..., carriers = ... }`.
-    -- A metadata symbol a file does not define is a clean absence.
+    -- A metadata symbol a file does not define is a clean absence; a file
+    -- with `broken = message` fails to open for every module it names.
     local function cache_dynamic_providers(files)
         for filename, file in pairs(files) do
             write_file(filename, "mock dynamic provider\n")
             local abi_values = {}
-            for name in pairs(file.modules) do abi_values[name] = driver.TITAN_ABI_VERSION end
+            for name in pairs(file.modules) do
+                abi_values[name] = file.broken and function() return nil, file.broken, "open" end
+                    or driver.TITAN_ABI_VERSION
+            end
             mock_native_abi(filename, abi_values)
         end
         titan._loadlib = function(found_filename, symbol)
             local file = assert(files[found_filename], "unexpected provider " .. tostring(found_filename))
+            if file.broken then return nil, file.broken, "open" end
             for name, modtype in pairs(file.modules) do
                 local prefix = driver.mangle_module_name(name)
                 if symbol == prefix .. "_abi" then
@@ -10314,6 +10338,68 @@ const broken: integer = "not an integer"
             end
             assert(driver.close_loader(loader))
         end
+    end)
+
+    it("decides carried-owner sharing identically in analysis and keeps stale or broken proofs strict", function()
+        local checker = require "titan-compiler.checker"
+        local nominal = types.Nominal("pkg.owner.Item")
+        local item = types.Record("pkg.owner.Item", {}, {
+            new = types.StaticMethod("pkg.owner.Item", "new", {}, { nominal }, nil, nil, {}),
+        }, {}, 0)
+        local owner = types.Module("pkg.owner", { types.ModuleMember("pkg.owner", "Item", item, nil) })
+        local function exposing(name)
+            return types.Module(name, {
+                types.ModuleMember(name, "make", types.Function({}, { nominal }, false, nil, nil), {}),
+            })
+        end
+        assert(lfs.mkdir(binary .. "/pkg"))
+        local bundle = binary .. provider_path("/pkg.so")
+        local facade_file = binary .. provider_path("/facade.so")
+        local stale = provider_path("pkg/owner.so")
+        local function resolve(app, proof, analysis, extra)
+            driver.imported, types.registry = {}, {}
+            local files = {
+                [bundle] = { modules = { ["pkg.owner"] = owner, ["pkg.carried"] = exposing("pkg.carried") } },
+                [facade_file] = { modules = { facade = exposing("facade") },
+                    carriers = { facade = { ["pkg.owner"] = proof } } },
+            }
+            for filename, file in pairs(extra or {}) do files[filename] = file end
+            cache_dynamic_providers(files)
+            write_file(source .. "/app.titan", app)
+            local context = new_context({ analysis_only = analysis })
+            local loader = driver.defaultloader({}, { context = context })
+            local modtype, errors = checker.checkimport("app", loader)
+            assert.truthy(modtype, errors)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            local finalized, diagnostics = driver.finalize_resolver_context(context)
+            assert(driver.close_loader(loader))
+            return context, finalized, diagnostics
+        end
+        local mixed = 'local facade = import "facade"\nlocal carried = import "pkg.carried"\n'
+        for _, analysis in ipairs({ false, true }) do
+            -- The facade proved the bundle: its external edge shares the
+            -- carried owner in a native build and in analysis alike.
+            local _, finalized, diagnostics = resolve(mixed, provider_path("pkg.so"), analysis)
+            assert.truthy(finalized, diagnostics and table.concat(diagnostics, "\n"))
+            -- The proved DSO is gone and discovery reaches the bundle instead:
+            -- the stale proof still competes with the carrying DSO.
+            _, finalized, diagnostics = resolve(mixed, stale, analysis)
+            assert.is_nil(finalized)
+            assert.matches("has producer-dynamic exposures from conflicting providers",
+                table.concat(diagnostics, "\n"), 1, true)
+        end
+
+        -- An unreadable proved carrier is terminal for that edge: the owner is
+        -- never rediscovered in the unrelated bundle.
+        local context = resolve('local facade = import "facade"\n', stale, false, {
+            [binary .. "/" .. stale] = { modules = { ["pkg.owner"] = owner }, broken = "broken carrier image" },
+        })
+        assert.is_nil(context.native_constraints["pkg.owner"])
+        local reported
+        for _, selection in pairs(context.contextual_types) do
+            reported = reported or (selection.error and selection.error:find("broken carrier image", 1, true))
+        end
+        assert.truthy(reported)
     end)
 
     it("does not alter an analysis-cached DSO selection when native promotion fails", function()

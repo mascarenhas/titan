@@ -220,6 +220,19 @@ describe("browser providers", function()
             assert.is_nil(ok); assert.matches("differs", err, 1, true)
         end
     end)
+    it("rejects native producer carriers and malformed carrier maps", function()
+        local parsed = scan(archive({ wasm("pkg.mod") }))
+        local expected = {}
+        for key, value in pairs(parsed.entries["pkg.mod"]) do expected[key] = value end
+        expected.dynamic_providers = { ["dep.owner"] = "../dep.so" }
+        local ok, err = driver.compare_archive_entries(parsed.entries, { ["pkg.mod"] = expected })
+        assert.is_nil(ok)
+        assert.matches("dynamic providers for module 'pkg.mod' are invalid", err, 1, true)
+        parsed.entries["pkg.mod"].dynamic_providers = { ["dep.owner"] = "dep.so" }
+        ok, err = driver.validate_browser_provider(parsed)
+        assert.is_nil(ok)
+        assert.matches('browser provider module "pkg.mod" records native dynamic providers', err, 1, true)
+    end)
     it("requires every planned split part with its original bytes", function()
         local primary, part = wasm("pkg.mod"), wasm(nil)
         write(root .. "/primary.o", primary); write(root .. "/part.o", part)

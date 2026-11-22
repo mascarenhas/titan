@@ -807,6 +807,25 @@ end
             "/override;" .. fixture.root .. "/package;" .. stdlib })
         assert.is_false(result.ok, result.output)
         assert.truthy(result.output:find(conflict, 1, true), result.output)
+
+        -- The DSO the facade proved disappears and the bundle replaces it: a
+        -- downstream library still builds and certifies, recording no proof
+        -- that this build could not confirm.
+        assert(os.remove(fixture.root .. "/package/dep/owner.so"))
+        file("restale/stale_reexposer.titan", [[
+local facade = import "facade"
+
+type Box = facade.Box
+
+function make(): Box
+  return facade.make()
+end
+]])
+        built("restale", "package", "package", "stale_reexposer")
+        assert.equal("facade\tfacade.so", carriers("stale_reexposer"))
+        built("restale", "package", "package", "--incremental", "stale_reexposer")
+        local log = built("restale", "package", "package", "--incremental", "-v", "stale_reexposer")
+        assert.truthy(log:find("Titan object hit stale_reexposer:", 1, true), log)
     end)
 
     it("shares SDK owners re-exposed by a library with module-level and direct consumers", function()
@@ -892,6 +911,8 @@ end
         built("other", "package", nil, "other.api")
         assert.is_nil(lfs.attributes(fixture.root .. "/package/dep/owner" .. suffix, "mode"))
         assert.is_nil(lfs.attributes(fixture.root .. "/package/dep" .. suffix, "mode"))
+        -- Both facades also use the owner's methods, so each object certifies
+        -- dep.owner as a contextual owner, not only through its interface.
         file("sib/sib_facade.titan", [[
 local api = import "other.api"
 
@@ -899,6 +920,10 @@ type Box = api.Box
 
 function make(): Box
   return api.make()
+end
+
+function code(): integer
+  return api.make():code()
 end
 ]])
         built("sib", "package", "package", "--incremental", "sib_facade")
@@ -909,6 +934,10 @@ type Box = sib_facade.Box
 
 function make(): Box
   return sib_facade.make()
+end
+
+function code(): integer
+  return sib_facade.make():code()
 end
 ]])
         built("reexp", "package", "package", "--incremental", "reexposer")
@@ -923,18 +952,34 @@ function main(args: {string}): integer
   return 1
 end
 ]])
-        built("app", "use-reexposer", "package", "use_reexposer")
+        local function app_build()
+            return built("app", "use-reexposer", "package", "--incremental", "-v", "use_reexposer")
+        end
+        app_build()
         local result = run_with_providers("use_reexposer")
         assert.is_true(result.ok, result.output)
+        -- A main module records no map of its own; it still certifies the
+        -- owner it uses at the proved carrier.
+        local log = app_build()
+        assert.truthy(log:find("Titan object hit use_reexposer:", 1, true), log)
 
         -- An unrelated bundle claiming the owner appears on the path: the
-        -- recorded proof still names the actual carrier, so a warm rebuild
-        -- hits, and a program mixing both carriers is rejected.
+        -- recorded proofs still name the actual carrier, so cold and warm
+        -- rebuilds succeed and hit, and a program mixing both is rejected.
         file("group/dep/owner.titan", owner)
         file("group/dep/carried.titan", facade)
         built("group", "package", nil, "dep.owner", "dep.carried")
-        local log = built("reexp", "package", "package", "--incremental", "-v", "reexposer")
+        for _, name in ipairs({ "sib_facade", "reexposer" }) do
+            local tree = name == "sib_facade" and "sib" or "reexp"
+            log = built(tree, "package", "package", "--incremental", "-v", name)
+            assert.truthy(log:find("Titan object hit " .. name .. ":", 1, true), log)
+        end
+        built("sib", "package", "package", "sib_facade")
+        assert.equal(proof .. "\nother.api\tother/api" .. suffix, carriers("sib_facade"))
+        log = built("reexp", "package", "package", "--incremental", "-v", "reexposer")
         assert.truthy(log:find("Titan object hit reexposer:", 1, true), log)
+        log = app_build()
+        assert.truthy(log:find("Titan object hit use_reexposer:", 1, true), log)
         file("app/mixed.titan", [[
 local reexposer = import "reexposer"
 local carried = import "dep.carried"
@@ -947,6 +992,24 @@ end
         assert.is_false(result.ok, result.output)
         assert.truthy(result.output:find(
             "has producer-dynamic exposures from conflicting providers", 1, true), result.output)
+
+        -- The carried owner changes shape while the unrelated bundle keeps
+        -- the old one: certifying against the bundle would be a false hit.
+        local wide = owner:gsub("record Box\n  serial: integer", "record Box\n  pad: integer\n  serial: integer")
+            :gsub("Box%(count, 39%)", "Box(0, count, 39)")
+        file("other/dep/owner.titan", wide)
+        -- Without the bundle on its path other.api keeps carrying the owner.
+        built("other", "package", nil, "other.api")
+        assert.equal("", recorded_carriers("other.api", fixture.root .. "/package/other/api" .. suffix))
+        for _, name in ipairs({ "sib_facade", "reexposer" }) do
+            local tree = name == "sib_facade" and "sib" or "reexp"
+            log = built(tree, "package", "package", "--incremental", "-v", name)
+            assert.truthy(log:find("Titan object miss " .. name .. ":", 1, true), log)
+        end
+        log = app_build()
+        assert.truthy(log:find("Titan object miss use_reexposer:", 1, true), log)
+        result = run_with_providers("use_reexposer")
+        assert.is_true(result.ok, result.output)
 
         -- other.api stops carrying the owner: both recorded proofs miss and
         -- are rebuilt against the owner's new carrier.

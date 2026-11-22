@@ -4880,24 +4880,38 @@ end
 
 -- The provider a recorded relocatable carrier names now: the first occupied
 -- `<root>/<relative>` along the Titan binary path, as the runtime searcher
--- would load it. Only a valid claim of `owner` there qualifies.
+-- would load it. Only a valid claim of `owner` there qualifies; a clean
+-- nonclaim is a stale proof (nil), while an unreadable or invalid occupied
+-- candidate stays terminal exactly as in ordinary dynamic discovery.
 function driver.find_relative_carrier(paths, owner, relative, context)
+    if context then
+        driver.assert_target_context(context)
+        if context.target == "browser" then return nil end
+    end
     if not staticmetadata.valid_relative_provider(relative) then return nil end
-    local roots = driver.titan_bin_path_entries(paths)
-    if not roots then return nil end
+    local windows_io = platform.windows and not (context and context.io) and
+        compiler_io.new_sync() or nil
+    local roots, roots_error = driver.titan_bin_path_entries(paths)
+    if not roots then return nil, roots_error end
     for _, root in ipairs(roots) do
-        local absolute_root = normalize_root(root, context and context.io or nil)
-        if not absolute_root then return nil end
+        local absolute_root, root_error = normalize_root(root, context and context.io or nil)
+        if not absolute_root then return nil, root_error end
         local filename = join_path(absolute_root, relative)
-        local attributes
+        local attributes, attribute_error
         if context and context.io then
-            attributes = context.io:lstat(filename)
+            attributes, attribute_error = context.io:lstat(filename)
+        elseif windows_io then
+            attributes, attribute_error = windows_io:lstat(filename)
         else
             local mode = lfs.symlinkattributes(filename, "mode")
             attributes = mode and { kind = mode } or nil
         end
-        if attributes then
+        if attribute_error then
+            return nil, "cannot inspect compiled provider candidate '" ..
+                filename .. "': " .. tostring(attribute_error)
+        elseif attributes then
             local status, value, metadata = probe_compiled_interface(owner, filename, context)
+            if status == "error" then return nil, value end
             if status ~= "valid" then return nil end
             value.file = relative
             return perf.attach_provider_metadata({
@@ -5511,7 +5525,8 @@ end
 -- recovered contextual owner, a member carried by a selected static provider,
 -- or (type recovery only, without selecting anything) the provider ordinary
 -- lookup would choose, which an exposer can reach only through globals.
-local function certificate_dependency(context, name, linked_names)
+-- `known_only` stops before that ordinary lookup.
+local function certificate_dependency(context, name, linked_names, known_only)
     driver.assert_target_context(context)
     local mod = driver.imported[name]
     if mod and mod ~= CIRCULAR_MARK then
@@ -5533,6 +5548,7 @@ local function certificate_dependency(context, name, linked_names)
             }, not semantic_only
         end
     end
+    if known_only then return nil end
     if context.planned_requirements then
         local carried = perf.carried_requirement(context, name)
         if carried then return carried, false end
@@ -5544,14 +5560,16 @@ end
 
 -- The public digest of the provider a recorded relative carrier loads now.
 -- An owner this build links, or supplies for checking only, has no carrier.
+-- Neither check runs an ordinary lookup of the owner: the carrier may be an
+-- unrelated DSO no prefix search for the owner would visit.
 function perf.carrier_digest(context, plan, owner, relative)
     driver.assert_target_context(context)
-    if plan.linked(owner) or plan.provider_file(owner) == "" then
-        return nil, "unavailable"
+    if plan.linked(owner, true) or plan.provider_file(owner) == "" then
+        return nil, "owner-binding"
     end
-    local carrier = driver.find_relative_carrier(
+    local carrier, carrier_error = driver.find_relative_carrier(
         driver.TITAN_BIN_PATH, owner, relative, context)
-    if not carrier then return nil, "unavailable" end
+    if not carrier then return nil, carrier_error or "unavailable" end
     return incremental.interface_digest(context, carrier, "public")
 end
 
@@ -5561,8 +5579,8 @@ end
 -- producer-stored self digests or per-module binary provider metadata.
 local function resolver_plan(context, linked_names)
     local plan = {}
-    function plan.linked(name)
-        local mod, linked = certificate_dependency(context, name, linked_names)
+    function plan.linked(name, known_only)
+        local mod, linked = certificate_dependency(context, name, linked_names, known_only)
         if not mod then return nil end
         return linked
     end
@@ -6925,9 +6943,24 @@ function driver.defaultloader(static_deps, options)
             (exposer.name or exposer.type.name) or exposer
         local exposing = type(exposer) == "table" and exposer or
             (exposing_name and driver.imported[exposing_name])
-        if not exposing or exposing == CIRCULAR_MARK or
-           exposing.kind == "source" then
+        if not exposing or exposing == CIRCULAR_MARK then
             return nil
+        end
+        if exposing.kind == "source" then
+            -- A checked or restored source producer reached every owner its
+            -- interface names through its own imports. One it did not import
+            -- ordinarily came from a binary exposer: reuse that recovered
+            -- view rather than discovering an unrelated provider here.
+            if driver.imported[modname] or modname == exposing_name or
+                    (exposing.ast == nil and exposing.object_metadata == nil) then
+                return nil
+            end
+            local recovered = context.native_interface_types[modname]
+            if recovered then
+                return true, recovered, {}, { nominal_exposer = exposing_name }
+            end
+            return false, "module '" .. modname .. "' is not an ordinary import of '" ..
+                tostring(exposing_name) .. "'"
         end
         if exposing.kind == "embedded" then
             local provider = available_embedded_interface_provider(context)
@@ -7095,13 +7128,14 @@ function driver.defaultloader(static_deps, options)
             -- The exposing producer proved which relocatable DSO physically
             -- carries this owner. Prefix discovery may miss that carrier or
             -- find an unrelated copy, so the proof names the demanded owner.
+            -- Only a clean nonclaim there (a stale proof) falls back.
             local proved = exposing.dynamic_providers and exposing.dynamic_providers[modname]
-            if proved and context.target ~= "browser" and not context.strict_static and
-                    not context.prefer_static and not find_embedded_interface(modname, context) then
-                resolved = driver.find_relative_carrier(
+            if proved and not context.strict_static and not context.prefer_static and
+                    not find_embedded_interface(modname, context) then
+                resolved, compiled_err = driver.find_relative_carrier(
                     driver.TITAN_BIN_PATH, modname, proved, context)
             end
-            if not resolved then
+            if not resolved and not compiled_err then
                 resolved, compiled_err = driver.find_dependency_interface(
                     driver.TITAN_BIN_PATH, modname, context)
             end
@@ -7791,12 +7825,12 @@ function driver.resolution_plan(context)
             archives[mod.static_archive] = planned_archive_metadata(context, mod)
         end
     end
-    function plan.linked(name)
+    function plan.linked(name, known_only)
         driver.assert_target_context(context)
         local module = modules[name]
         if module and module.check_only then return false end
         if module and module.kind == "unavailable" then return nil end
-        local mod, is_linked = certificate_dependency(context, name, linked)
+        local mod, is_linked = certificate_dependency(context, name, linked, known_only)
         if not mod then return nil end
         return is_linked
     end
@@ -9053,7 +9087,10 @@ function driver.finalize_resolver_context(context)
         for _, constraint in pairs(keyed) do
             if constraint.binding == "dynamic-carried" then
                 shared_dynamic_owner = false
-                if carried_provider and carried_provider ~= constraint.resolved_provider then
+                if constraint.resolved_provider == nil or constraint.resolved_relative == nil or
+                        (carried_provider ~= nil and
+                         (carried_provider ~= constraint.resolved_provider or
+                          carried_relative ~= constraint.resolved_relative)) then
                     single_carrier = false
                 end
                 carried_provider = carried_provider or constraint.resolved_provider
@@ -9066,10 +9103,13 @@ function driver.finalize_resolver_context(context)
                 constraint.producer_carrier == carried_relative and
                 constraint.resolved_provider == carried_provider
         end
-        -- Semantic clients have no executable to elect an owner for. They may
-        -- share it only when every obligation names the same native DSO.
+        -- Semantic clients have no executable to elect an owner for. Without a
+        -- carrying DSO (which `shares_carried_dynamic` decides exactly as a
+        -- native build would) they may share an owner only when every
+        -- obligation names the same native DSO. Closed catalogs stay strict.
         local analysis_same_dynamic = false
         if context.analysis_only and context.target ~= "browser" and
+                not context.completion_closed_world and carried_provider == nil and
                 not direct_provider and not source_names[owner] then
             local ordinary = driver.imported[owner]
             if ordinary == CIRCULAR_MARK then ordinary = nil end
@@ -9227,7 +9267,12 @@ function driver.finalize_resolver_context(context)
                 elseif constraint.binding == "dynamic-carried" then
                     observe(owner, constraint.resolved_relative)
                 elseif constraint.binding == "dynamic-global" then
-                    observe(owner, constraint.producer_carrier)
+                    -- A proof counts only when this build reached that very
+                    -- carrier; a stale proof must not outlive its DSO.
+                    local confirmed = constraint.resolved_kind == "dynamic" and
+                        constraint.producer_carrier ~= nil and
+                        constraint.resolved_relative == constraint.producer_carrier
+                    observe(owner, confirmed and constraint.producer_carrier or false)
                 end
             end
         end
@@ -10480,6 +10525,7 @@ local function prepare_compile(
                     },
                     plan = resolver_plan(context, static_deps),
                     binary_usage = ast._binary_usage,
+                    owner_carriers = context.producer_dynamic_providers,
                     generated_parts = generated_parts,
                     private_header = generated.private_header,
                 })
@@ -12688,11 +12734,19 @@ function driver.compare_archive_entries(actual, expected, subject)
            table.concat(wanted.source_requirements or {}, "\n") then
             return nil, subject .. " source requirements for module '" .. name .. "' differ"
         end
-        local found_carriers = found.dynamic_providers and
-            staticmetadata.encode_dynamic_providers(name, found.dynamic_providers)
-        local wanted_carriers = wanted.dynamic_providers and
-            staticmetadata.encode_dynamic_providers(name, wanted.dynamic_providers)
-        if found_carriers ~= wanted_carriers then
+        local carriers = {}
+        for index, entry in ipairs({ found, wanted }) do
+            if entry.dynamic_providers ~= nil then
+                local encoded, carrier_error =
+                    staticmetadata.encode_dynamic_providers(name, entry.dynamic_providers)
+                if not encoded then
+                    return nil, subject .. " dynamic providers for module '" .. name ..
+                        "' are invalid: " .. tostring(carrier_error)
+                end
+                carriers[index] = encoded
+            end
+        end
+        if carriers[1] ~= carriers[2] then
             return nil, subject .. " dynamic providers for module '" .. name .. "' differ"
         end
         if found.payload and wanted.payload and
@@ -12765,6 +12819,12 @@ function driver.validate_browser_provider(archive, expected_entries, generated_o
             return nil, string.format(
                 "%s: browser provider module %q requires global non-weak function %q",
                 primary and primary.origin or archive.origin, name, symbol)
+        end
+        -- Browser images load no DSOs, so a producer carrier proof is foreign.
+        if archive.entries[name].dynamic_providers ~= nil then
+            return nil, string.format(
+                "%s: browser provider module %q records native dynamic providers",
+                primary and primary.origin or archive.origin, name)
         end
     end
     for _, generated in ipairs(generated_objects or {}) do
