@@ -120,12 +120,12 @@ ordering remains bytewise deterministic.
 Validation compiles the chunk as text with an empty `_ENV`, protected-calls it
 while counting results, and accepts exactly one plain table containing one
 valid dotted module key. Its value must be a plain table with string
-fields `abi` and `types`, plus optional `layouts` string and optional `imports`
-and `source_requirements` lists. Native compilation
-requires `layouts` and validates its closed module-specific graph separately;
-semantic archive readers may accept absent `layouts` while still retaining
-per-member `source_requirements` when present (narrow metadata-only clients may
-inspect only ABI and types).
+fields `abi` and `types`, plus optional `layouts` string, optional `imports`
+and `source_requirements` lists, and optional `dynamic_providers` map. Native
+compilation requires `layouts` and validates its closed module-specific graph
+separately; semantic archive readers may accept absent `layouts` while still
+retaining per-member `source_requirements` and `dynamic_providers` when present
+(narrow metadata-only clients may inspect only ABI and types).
 Traversal uses `next` and `rawget` only after the
 metatable checks. The validator then re-renders the entry and requires exact
 payload equality.
@@ -150,6 +150,24 @@ source_requirements must be omitted when empty`; callable metadata strings use
 (including in older providers built without it) means no external source
 obligations, and never relaxes strict `--static`'s requirement for `imports`.
 The banner and ABI version do not change.
+
+A non-`main` native module whose finalized build observations prove relocatable
+dynamic carriers for external owners (`owner ~= modname`) also records an
+optional `dynamic_providers` table in `.titan.meta` mapping each dotted logical
+owner name to its relative provider filename, sorted bytewise by owner and
+omitted when empty (`staticmetadata.render` and `staticmetadata.validate`
+reject an empty `{}` with `metadata dynamic_providers must be omitted when
+empty`). Each value must pass `staticmetadata.valid_relative_provider`: a `.so`
+or `.dll` suffix on a stem with no `.` (`stem:find(".", 1, true)`), whose
+`/`-separated components (mapped `/` → `.`) pass `portable_dotted_components`—
+rejecting dot segments, backslashes, absolute or drive paths, and other
+suffixes. The matching callable
+DSO symbol `<mangled>_dynamic_providers` encodes the same map as
+`owner<TAB>provider` lines in bytewise owner order
+(`staticmetadata.encode_dynamic_providers` / `decode_dynamic_providers`).
+Modules with no external dynamic carriers—including `titan.so`/`titan.a`,
+browser archives, `main` modules, and self-contained libraries—omit the field
+and symbol completely.
 
 The driver checks the ABI before evaluating the serialized type expression,
 evaluates that expression with `types` as the constructor environment, and
@@ -471,16 +489,36 @@ library `-c`) are excluded from this direct set and use the ordinary external
 checked ABI (`handle`/`global`).
 
 When the checker walks an exported interface and encounters another module's
-nominal record:
+nominal record (`checker.checkimport` preserves an explicit contextual
+`nominal_exposer` while an ordinary load resets `exposer` to the loaded module
+name):
 
+* if the exposing entry is a checked (`ast`) or restored (`object_metadata`)
+  `source` module and the owner was not imported ordinarily
+  (`not driver.imported[modname]` and `modname ~= exposing_name`),
+  `recover_contextual_owner` never falls through to ordinary filesystem
+  discovery: it reuses `context.native_interface_types[modname]` (retaining
+  `nominal_exposer = exposing_name`) or returns a string error so the checker
+  falls back to `types.registry` without polluting `driver.imported`;
 * if the exposing selected archive carries the owner, it reads that exact
   provider entry contextually and records a direct-carried constraint;
 * if an exposing DSO carries the owner protocol, it reads the same DSO and
-  records a dynamic-carried constraint; otherwise
+  records a dynamic-carried constraint (returning a nested `nominal_exposer`
+  carrying that member's own `source_requirements` and `dynamic_providers`, not
+  the outer exposer's); otherwise
 * when the owner is not already selected and not directly listed in the
-  exposer's `source_requirements`, it tries compiled lookup
-  (`find_dependency_interface`) first in noncommitting type-only mode,
-  recording the dynamic fallback constraint on a hit;
+  exposer's `source_requirements`, if the exposing member records a proved
+  carrier `exposing.dynamic_providers[modname]` (and the build is neither
+  `strict_static` nor `prefer_static` nor served by an embedded interface), it
+  first probes `driver.find_relative_carrier(TITAN_BIN_PATH, modname, proved,
+  context)`, which inspects the first occupied `<root>/<proved>` along the
+  Titan binary path (keeping `lstat` and probe errors terminal, and falling
+  back to ordinary `find_dependency_interface` when `<proved>` is unoccupied,
+  holds a clean nonclaim, or on the browser target); otherwise it tries
+  `find_dependency_interface` directly in noncommitting type-only mode,
+  recording a `dynamic-global` constraint (with `producer_carrier`,
+  `resolved_provider`, `resolved_relative`, and
+  `resolved_kind`) on a hit;
 * in an unplanned open-world semantic check (or planned/worker check) where the
   exposing non-dormant member carries `source_requirements`, a directly
   required owner, an already-selected source owner (in semantic recovery), or a
@@ -492,14 +530,46 @@ Type-only recovery never adds an archive link input. Native executable
 finalization replays reached interfaces, not every stored member. Purely
 external dynamic obligations may share the same canonical, verified
 provider, including library builds and multiple exposing DSOs. A physically
-carried obligation still enforces exact native ownership. Full physical
-membership is checked for overlapping names and native symbol collisions.
+carried obligation still enforces exact native ownership, with one
+producer-backed rule (`shares_carried_dynamic` in `finalize_resolver_context`):
+when every `dynamic-carried` constraint for a native dynamic owner agrees on a
+single physical carrying DSO (`resolved_provider` and `resolved_relative`), an
+external `dynamic-global` constraint from another DSO may share that owner if
+its exposing producer proved that exact relative carrier (`producer_carrier ==
+carried_relative`) and this build reached the same physical file
+(`resolved_provider == carried_provider`). Unproved or stale proofs (such as a
+DSO compiled against an older standalone provider) remain rejected as
+conflicting providers. In `analysis_only` native contexts outside closed
+completion catalogs (`not context.completion_closed_world`), when no carrying
+DSO is present (`carried_provider == nil`), `analysis_same_dynamic` likewise
+allows sharing when no constraint is `direct-carried`, any ordinary selected
+`driver.imported[owner]` is `kind == "dynamic"` with the same `filename` (an
+ordinary static or source owner disables it), and every constraint resolves as
+`"dynamic"` to that same physical provider file. Full physical membership is
+checked for overlapping names and native symbol collisions.
+
+At the end of `finalize_resolver_context`, non-browser builds inductively
+derive `context.producer_dynamic_providers` strictly from finalized
+observations (performing zero post-finalization loader or checker calls): direct
+`dynamic_names` contribute `mod.relative`, restored `source_names` contribute
+their recorded `object_metadata.dynamic_providers`, `dynamic-carried`
+constraints contribute `resolved_relative`, `dynamic-global` constraints
+contribute `producer_carrier` only when confirmed (`resolved_kind == "dynamic"`
+and `resolved_relative == producer_carrier`), and `direct-carried` constraints
+or any disagreement/missing proof drop the owner. Surviving entries exclude
+`native_static_names`, `check_only_sources`, and `check_only_binaries`, and
+must pass `valid_relative_provider`. `prepare_compile` copies entries with
+`owner ~= modname` onto non-`main` native modules (`dynamic_providers`).
+Because this derivation summarizes finalized build observations without
+re-running public-type reachability, it may carry a modest superset that
+includes carriers reached only through private imports; consumers never
+enumerate the map and only consult `exposing.dynamic_providers[modname]` when
+the checker actually demands `modname`.
 
 Public `Type.Module` metadata does not expose private imports. An object's
 producer-chosen lowering remains in place; when it elects a dynamic provider,
 the [linked provider set](codegen-overview.md#the-linked-provider-set) can
 supply an owner from the same executable without changing that lowering.
-
 ## Generated import paths
 
 The `direct`, `handle`, and `global` bindings and their generated sequences are
@@ -582,8 +652,10 @@ Before publication of a native provider pair, the driver:
 
 1. validates every logical protocol in the staged DSO;
 2. scans the staged archive and checks its exact intended key set;
-3. compares embedded ABI/types/layouts and optional `source_requirements`
-   (including clean absence when empty) with the DSO callables;
+3. compares embedded ABI/types/layouts, optional `source_requirements`, and
+   optional `dynamic_providers` (including clean absence when empty) with the
+   DSO callables (`driver.compare_archive_entries` and
+   `driver.validate_library_image_fresh`);
 4. force-loads only the staged archive into a private validation DSO, with the
    same final native policy; and
 5. validates that image's ABI/types/init/Lua-open entries in a fresh process.
@@ -757,8 +829,9 @@ lookup runs it on every browser archive it inspects, without the optional
 arguments; publication supplies both.
 
 1. With `expected_entries`, the archive's key set and each entry's ABI,
-   serialized types, layouts, and optional `source_requirements` must equal the
-   coordinator's entries (`driver.compare_archive_entries`).
+   serialized types, layouts, optional `source_requirements`, and optional
+   `dynamic_providers` must equal the coordinator's entries
+   (`driver.compare_archive_entries`, which also rejects invalid carrier maps).
 2. Every member must be a Wasm object:
    `<member-origin>: browser provider requires Wasm objects`.
 3. No member may import, or leave undefined, `dlopen`, `dlsym`, `dlerror`, or
@@ -779,6 +852,9 @@ arguments; publication supplies both.
    A definition in a sibling or a split part does not count, and a weak,
    local, or data definition fails:
    `<member-origin>: browser provider module "<name>" requires global non-weak function "<symbol>"`.
+   Browser images never load native DSOs, so any entry carrying
+   `dynamic_providers` is rejected:
+   `<member-origin>: browser provider module "<name>" records native dynamic providers`.
 5. With `generated_objects`, every planned object of every module must occur
    in the archive with its original bytes, counting multiplicity:
    `browser provider module "<name>" is missing split part <index>` or

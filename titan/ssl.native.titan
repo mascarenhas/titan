@@ -1809,6 +1809,40 @@ function Connection:shutdown()
   end)
 end
 
+--- Return the local socket address of an open TLS connection.
+-- @return Immutable local TCP endpoint snapshot.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
+function Connection:local_address(): net.Address
+  if self.transport == nil or self.state == STATE_CLOSED or self.state == STATE_FAILED or
+      self.state == STATE_TERMINATING then
+    raise "ssl.local_address: SSL Connection is closed"
+  end
+  return self.transport:local_address()
+end
+
+--- Return the remote peer socket address of an open TLS connection.
+-- @return Immutable remote TCP endpoint snapshot.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
+function Connection:peer_address(): net.Address
+  if self.transport == nil or self.state == STATE_CLOSED or self.state == STATE_FAILED or
+      self.state == STATE_TERMINATING then
+    raise "ssl.peer_address: SSL Connection is closed"
+  end
+  return self.transport:peer_address()
+end
+
+--- Enable or disable TCP_NODELAY on the underlying TCP transport.
+-- @param enabled True to disable Nagle buffering in the local TCP stack; false to enable Nagle coalescing.
+-- @usage standard-library-ssl.md#reading-and-writing
+function Connection:set_no_delay(enabled: boolean)
+  if self.transport == nil or self.transport_closed or
+      self.state == STATE_CLOSED or self.state == STATE_FAILED or
+      self.state == STATE_TERMINATING then
+    raise "ssl.set_no_delay: SSL Connection is closed"
+  end
+  self.transport:set_no_delay(enabled)
+end
+
 --- Abort the transport before draining active operations and retire TLS state.
 -- @usage standard-library-ssl.md#tls-shutdown-and-eof
 function Connection:abort()
@@ -1882,6 +1916,16 @@ function Server:accept(): Connection
     end
     raise failure
   end
+end
+
+--- Return the bound local socket address of an open TLS listener.
+-- @return Immutable local endpoint snapshot.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
+function Server:local_address(): net.Address
+  if self.closed or self.listener_closed then
+    raise "ssl.local_address: Server is closed"
+  end
+  return self.listener:local_address()
 end
 
 --- Close this listener while leaving accepted connections independently owned.

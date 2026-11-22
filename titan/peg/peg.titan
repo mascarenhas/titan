@@ -65,11 +65,15 @@ local _negative: NativeUnary = nil as value
 local _repeat: function (value, integer): (value) = nil as value
 local _capture_replace: NativeBinary = nil as value
 local _match_success_sentinel: {value: value} = {}
+-- Per-state wrapper pieces shared by every Pattern's cached match program.
+local _sentinel_pattern: value = nil
+local _cp_pattern: value = nil
 
 --- Opaque pattern owned by Titan private embedded LPegLabel engine.
 -- @usage standard-library-peg.md
 record Pattern
   local raw: value
+  local match_raw: value
   local tree_size: integer
 end
 
@@ -142,8 +146,13 @@ end
 local function pattern_match_attempt(
     pattern: Pattern, subject: string, start: integer,
     ...: value): PatternMatchAttempt
-  local raw = _sequence(
-    _sequence(_Cc(_match_success_sentinel), pattern.raw), _Cp())
+  -- Build the immutable wrapped program once per Pattern; LPeg then keeps
+  -- its compiled code for every later attempt.
+  local raw = pattern.match_raw
+  if raw == nil then
+    raw = _sequence(_sequence(_sentinel_pattern, pattern.raw), _cp_pattern)
+    pattern.match_raw = raw
+  end
   local results: {value} = {
     _match(raw, subject, start, ...)
   }

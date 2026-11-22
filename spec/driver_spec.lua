@@ -1648,6 +1648,25 @@ describe("Windows provider export inventory", function()
         assert.same(expected, reordered_names)
     end)
 
+    it("exports optional producer metadata only for the modules that record it", function()
+        local definition, names = driver.windows_provider_exports({ "pkg.zeta", "pkg.alpha" }, nil, nil,
+            { ["pkg.zeta"] = { "pkg.source" } },
+            { ["pkg.alpha"] = { ["dep.owner"] = "dep.dll" } })
+        local expected = {
+            "luaopen_pkg_alpha", "luaopen_pkg_zeta",
+            "pkg_alpha_abi", "pkg_alpha_abi_value", "pkg_alpha_compatibility",
+            "pkg_alpha_dynamic_providers", "pkg_alpha_init", "pkg_alpha_layouts", "pkg_alpha_types",
+            "pkg_zeta_abi", "pkg_zeta_abi_value", "pkg_zeta_compatibility",
+            "pkg_zeta_init", "pkg_zeta_layouts", "pkg_zeta_source_requirements", "pkg_zeta_types",
+        }
+        assert.same(expected, names)
+        assert.equal("EXPORTS\n    " .. table.concat(expected, "\n    ") .. "\n", definition)
+        assert.has_error(function()
+            driver.windows_provider_exports({ "pkg.alpha", "pkg.alpha" }, nil, nil, nil,
+                { ["pkg.alpha"] = { ["dep.owner"] = "dep.dll" } })
+        end, "duplicate Windows module export pkg_alpha_abi_value")
+    end)
+
     it("rejects repeated modules and colliding mangled identities", function()
         for _, modules in ipairs({
             { "pkg.alpha", "pkg.alpha" },
@@ -1788,7 +1807,8 @@ describe("Windows native ABI bootstrap", function()
         assert.equal("valid", status)
         assert.equal(serialized, types.serialize(module))
         assert.same({ "native query", "resolve winabi_abi", "resolve winabi_types",
-            "Lua ABI", "Lua types", "resolve winabi_source_requirements" }, events)
+            "Lua ABI", "Lua types", "resolve winabi_source_requirements",
+            "resolve winabi_dynamic_providers" }, events)
     end)
 
     it("rejects a native ABI mismatch without resolving Lua entries", function()
@@ -1843,7 +1863,8 @@ describe("Windows native ABI bootstrap", function()
         titan._abivalue = function() error("Unix must retain the Lua ABI protocol") end
         assert.equal("valid", probe())
         assert.same({ "resolve winabi_abi", "resolve winabi_types",
-            "Lua ABI", "Lua types", "resolve winabi_source_requirements" }, events)
+            "Lua ABI", "Lua types", "resolve winabi_source_requirements",
+            "resolve winabi_dynamic_providers" }, events)
     end)
 end)
 
@@ -1873,13 +1894,14 @@ describe("independent nominal layout metadata", function()
     local previous_loadlib
     local serialized = types.serialize(types.Module("physical", {}, {}))
     local layouts
-    local requested, requirement, requirement_stage
+    local requested, requirement, requirement_stage, carriers, carrier_stage
 
     before_each(function()
         previous_loadlib = titan._loadlib
         layouts = assert(require("titan-compiler.nominallayout").encode("physical", {}))
         requested = {}
         requirement, requirement_stage = nil, "init"
+        carriers, carrier_stage = nil, "init"
         titan._loadlib = function(_, symbol)
             requested[#requested + 1] = symbol
             if symbol == "physical_abi" then
@@ -1891,6 +1913,9 @@ describe("independent nominal layout metadata", function()
             elseif symbol == "physical_source_requirements" then
                 if requirement ~= nil then return function() return requirement end end
                 return nil, "requirements export unavailable", requirement_stage
+            elseif symbol == "physical_dynamic_providers" then
+                if carriers ~= nil then return function() return carriers end end
+                return nil, "carriers export unavailable", carrier_stage
             end
             return nil, "undefined symbol", "init"
         end
@@ -1906,7 +1931,7 @@ describe("independent nominal layout metadata", function()
         assert.same({}, metadata.layout_inventory.layouts)
         assert.is_nil(metadata.source_requirements)
         assert.same({ "physical_abi", "physical_types", "physical_layouts",
-            "physical_source_requirements" }, requested)
+            "physical_source_requirements", "physical_dynamic_providers" }, requested)
         requested = {}
         layouts = nil
         status, modtype, metadata = driver.probe_compiled_interface(
@@ -1916,7 +1941,8 @@ describe("independent nominal layout metadata", function()
         assert.is_nil(metadata.layouts)
         assert.is_nil(metadata.layout_inventory)
         assert.is_nil(metadata.source_requirements)
-        assert.same({ "physical_abi", "physical_types", "physical_source_requirements" }, requested)
+        assert.same({ "physical_abi", "physical_types", "physical_source_requirements",
+            "physical_dynamic_providers" }, requested)
     end)
 
     posix_model_it("validates optional source-requirement exports in analysis", function()
@@ -1944,6 +1970,32 @@ describe("independent nominal layout metadata", function()
         status, err = probe()
         assert.equal("error", status)
         assert.matches("cannot inspect 'physical_source_requirements'", err, 1, true)
+    end)
+
+    posix_model_it("validates optional dynamic-provider exports in analysis", function()
+        local function probe()
+            return driver.probe_compiled_interface("physical", "physical.so", { analysis_only = true })
+        end
+        carriers = "dep.owner\tother/api.so\ntitan.json\ttitan.so"
+        local status, _, metadata = probe()
+        assert.equal("valid", status)
+        assert.same({ ["dep.owner"] = "other/api.so", ["titan.json"] = "titan.so" },
+            metadata.dynamic_providers)
+
+        for _, malformed in ipairs({ "titan.json\ttitan.so\ndep.owner\tother/api.so",
+                "dep.owner\t../api.so", "physical\tphysical.so", "" }) do
+            carriers = malformed
+            local err
+            status, err = probe()
+            assert.equal("error", status)
+            assert.matches("physical.so:physical_dynamic_providers", err, 1, true)
+        end
+
+        carriers, carrier_stage = nil, "open"
+        local err
+        status, err = probe()
+        assert.equal("error", status)
+        assert.matches("cannot inspect 'physical_dynamic_providers'", err, 1, true)
     end)
 
     posix_model_it("rejects absent and invalid physical plans before native access", function()
@@ -5254,7 +5306,8 @@ describe("compiler module loader", function()
         return provider
     end
 
-    local function cache_dynamic_provider(filename, module_types, source_requirements, nonclaims)
+    local function cache_dynamic_provider(filename, module_types, source_requirements, nonclaims,
+                                          dynamic_providers)
         write_file(filename, "mock dynamic provider\n")
         local abi_values = {}
         for name in pairs(module_types) do abi_values[name] = driver.TITAN_ABI_VERSION end
@@ -5274,11 +5327,52 @@ describe("compiler module loader", function()
                     local names = source_requirements and source_requirements[name]
                     if names then return function() return table.concat(names, "\n") end end
                     return nil, "undefined symbol: " .. symbol, "init"
+                elseif symbol == prefix .. "_dynamic_providers" then
+                    local carriers = dynamic_providers and dynamic_providers[name]
+                    if carriers then
+                        local encoded = assert(staticmetadata.encode_dynamic_providers(name, carriers))
+                        return function() return encoded end
+                    end
+                    return nil, "undefined symbol: " .. symbol, "init"
                 end
             end
             local prefix = symbol:match("^(.*)_abi$") or symbol:match("^(.*)_types$")
             if nonclaims and nonclaims[prefix] then return nil, "undefined symbol: " .. symbol, "init" end
             error("unexpected symbol " .. symbol)
+        end
+    end
+
+    -- Several fake DSOs at once: `files[filename] = { modules = ..., carriers = ... }`.
+    -- A metadata symbol a file does not define is a clean absence; a file
+    -- with `broken = message` fails to open for every module it names.
+    local function cache_dynamic_providers(files)
+        for filename, file in pairs(files) do
+            write_file(filename, "mock dynamic provider\n")
+            local abi_values = {}
+            for name in pairs(file.modules) do
+                abi_values[name] = file.broken and function() return nil, file.broken, "open" end
+                    or driver.TITAN_ABI_VERSION
+            end
+            mock_native_abi(filename, abi_values)
+        end
+        titan._loadlib = function(found_filename, symbol)
+            local file = assert(files[found_filename], "unexpected provider " .. tostring(found_filename))
+            if file.broken then return nil, file.broken, "open" end
+            for name, modtype in pairs(file.modules) do
+                local prefix = driver.mangle_module_name(name)
+                if symbol == prefix .. "_abi" then
+                    return function() return driver.TITAN_ABI_VERSION end
+                elseif symbol == prefix .. "_types" then
+                    local serialized = types.serialize(modtype)
+                    return function() return serialized end
+                elseif symbol == prefix .. "_layouts" then
+                    return function() return empty_layouts(name) end
+                elseif symbol == prefix .. "_dynamic_providers" and file.carriers and file.carriers[name] then
+                    local encoded = assert(staticmetadata.encode_dynamic_providers(name, file.carriers[name]))
+                    return function() return encoded end
+                end
+            end
+            return nil, "undefined symbol: " .. symbol, "init"
         end
     end
 
@@ -7041,6 +7135,128 @@ describe("compiler module loader", function()
             assert.equal(object, entry.compiled)
             assert.not_equal(previous_bytes, read_object())
             assert.is_true(lfs.attributes(object, "modification") > timestamp)
+        end)
+
+        it("emits dynamic carriers from frozen finalized state and restores them without lookups", function()
+            local name = "incremental_driver_carriers"
+            local nominal = types.Nominal("inner.Item")
+            local item = types.Record("inner.Item", {}, {
+                new = types.StaticMethod("inner.Item", "new", {}, { nominal }, nil, nil, {}),
+            }, {}, 0)
+            local inner = types.Module("inner", { types.ModuleMember("inner", "Item", item, nil) })
+            local dep = types.Module("dep", {
+                types.ModuleMember("dep", "make", types.Function({}, { nominal }, false, nil, nil), {}),
+            })
+            local relative = provider_path("dep.so")
+            cache_dynamic_providers({
+                [binary .. "/" .. relative] = { modules = { dep = dep, inner = inner } },
+            })
+            write_file(source .. "/" .. name .. ".titan",
+                'local dep = import "dep"\nfunction answer(): integer return 42 end\n')
+            local context = tracked_context()
+            local loader, dependencies = fresh_loader({ context = context, incremental = true })
+            local entry = load_ok(loader, name)
+            assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
+            local finalized, finalize_errors = driver.finalize_resolver_context(context)
+            assert.truthy(finalized, finalize_errors and table.concat(finalize_errors, "\n"))
+            -- The direct handle and the carried owner name the same carrier.
+            local expected = { dep = relative, inner = relative }
+            assert.same(expected, context.producer_dynamic_providers)
+
+            local function snapshot(registry)
+                local result = { imported = {}, registry = {}, constraints = {}, resolutions = {} }
+                for key, value in pairs(driver.imported) do result.imported[key] = value end
+                for key, value in pairs(registry) do result.registry[key] = value end
+                for owner, keyed in pairs(context.native_constraints) do
+                    result.constraints[owner] = {}
+                    for key, constraint in pairs(keyed) do
+                        local copy = {}
+                        for field, value in pairs(constraint) do copy[field] = value end
+                        result.constraints[owner][key] = { identity = constraint, fields = copy }
+                    end
+                end
+                for key, resolution in pairs(context.contextual_resolutions) do
+                    local copy = {}
+                    for field, value in pairs(resolution) do copy[field] = value end
+                    result.resolutions[key] = { identity = resolution, fields = copy }
+                end
+                return result
+            end
+            local function assert_unchanged(expected_state, actual_state, label)
+                for _, field in ipairs({ "imported", "registry" }) do
+                    for key, value in pairs(expected_state[field]) do
+                        assert.is_true(rawequal(value, actual_state[field][key]),
+                            label .. " " .. field .. " " .. tostring(key))
+                    end
+                    for key in pairs(actual_state[field]) do
+                        assert.is_not_nil(expected_state[field][key],
+                            label .. " " .. field .. " gained " .. tostring(key))
+                    end
+                end
+                assert.same(expected_state.constraints, actual_state.constraints)
+                assert.same(expected_state.resolutions, actual_state.resolutions)
+            end
+            -- The checker's registry; code generation later switches to the
+            -- module's own erased registry, which this resolver never reads.
+            local registry = types.registry
+            local before = snapshot(registry)
+            local generate, at_generate, emitted = coder.generate, nil, nil
+            coder.generate = function(modname, ...)
+                if modname == name then
+                    at_generate = snapshot(types.registry)
+                    emitted = select(5, ...).dynamic_providers
+                end
+                return generate(modname, ...)
+            end
+            local compiled, compile_error, object
+            local called, failure = xpcall(function()
+                compiled, compile_error, object = driver.compile_module(
+                    name, entry, dependencies, false, { context = context })
+            end, debug.traceback)
+            coder.generate = generate
+            assert.truthy(called, failure)
+            assert.is_true(compiled, compile_error)
+            -- Deriving the map copies frozen facts: by the time code
+            -- generation starts nothing in the resolver graph or the type
+            -- registry changed, and nothing changes afterwards either.
+            assert.same(expected, emitted)
+            assert_unchanged(before, at_generate, "before codegen")
+            assert_unchanged(before, snapshot(registry), "after codegen")
+
+            local bytes = assert(util.get_file_contents(object, "rb"))
+            local record = assert(objectmetadata.read(bytes, object))
+            assert.same(expected, record.object_metadata.dynamic_providers)
+            local carriers = record.object_metadata.certificate.carriers
+            assert.same({ "dep", "inner" }, { carriers[1].name, carriers[2].name })
+            assert.same({ relative, relative }, { carriers[1].relative, carriers[2].relative })
+
+            -- A restored object contributes its recorded carriers; restoring
+            -- it loads none of their owners into the ordinary graph.
+            local next_context = tracked_context()
+            local restored = load_ok(fresh_loader({ context = next_context, incremental = true }), name)
+            assert.is_string(restored.compiled)
+            assert.is_nil(restored.ast)
+            assert.same(expected, restored.object_metadata.dynamic_providers)
+            assert.is_nil(driver.imported.inner)
+            finalized, finalize_errors = driver.finalize_resolver_context(next_context)
+            assert.truthy(finalized, finalize_errors and table.concat(finalize_errors, "\n"))
+            assert.is_nil(driver.imported.inner)
+            assert.same(expected, next_context.producer_dynamic_providers)
+
+            -- The owner moves to its own DSO with an identical interface:
+            -- only the recorded carrier proof can notice.
+            cache_dynamic_providers({
+                [binary .. "/" .. relative] = { modules = { dep = dep } },
+                [binary .. provider_path("/inner.so")] = { modules = { inner = inner } },
+            })
+            local _, stderr = capture_stderr(function()
+                return load_ok(fresh_loader({
+                    context = tracked_context({ verbose = true }), incremental = true,
+                }), name)
+            end)
+            assert.is_table(driver.imported[name].ast)
+            assert.matches("Titan object miss " .. name .. ": carrier-unavailable inner (" ..
+                relative .. ")", stderr, 1, true)
         end)
 
         it("certifies folder contributor membership and content independently of timestamps", function()
@@ -9701,7 +9917,7 @@ end
         assert.equal("Type.Module", modtype._tag)
         assert.equal(0, #errors)
         assert.same({ "titan_timer_abi", "titan_timer_types", "titan_timer_layouts",
-            "titan_timer_source_requirements" }, symbols)
+            "titan_timer_source_requirements", "titan_timer_dynamic_providers" }, symbols)
         assert.is_nil(driver.imported["titan.timer"].ast)
 
         -- A later explicit build request replaces a cached binary interface
@@ -9742,7 +9958,8 @@ end
         assert.is_nil(cached.layouts)
         assert.is_nil(cached.layout_inventory)
         assert.same({ required }, cached.source_requirements)
-        assert.same({ "provider_layer_abi", "provider_layer_types", "provider_layer_source_requirements" }, queries)
+        assert.same({ "provider_layer_abi", "provider_layer_types", "provider_layer_source_requirements",
+            "provider_layer_dynamic_providers" }, queries)
         assert(require("titan-compiler.checker").checkimport(name, analysis_loader))
         assert.is_nil(driver.imported[required])
         assert(driver.close_loader(analysis_loader))
@@ -9779,8 +9996,8 @@ function main(args: {string}): integer return 0 end
         assert.equal(empty_layouts(name), upgraded.layouts)
         assert.same({}, upgraded.layout_inventory.layouts)
         assert.same({ "provider_layer_abi", "provider_layer_types", "provider_layer_layouts",
-            "provider_layer_source_requirements", "meter_abi", "meter_types",
-            "meter_abi", "meter_types" }, queries)
+            "provider_layer_source_requirements", "provider_layer_dynamic_providers",
+            "meter_abi", "meter_types", "meter_abi", "meter_types" }, queries)
         assert.same({ required }, upgraded.source_requirements)
         assert.same({ required }, library.requirements_by_module.wrap)
         assert.same({ "units", "meter", "wrap" }, library.order)
@@ -10079,6 +10296,112 @@ const broken: integer = "not an integer"
         end)
     end
 
+    it("shares a demonstrated same-DSO owner in analysis but keeps distinct DSOs strict", function()
+        local checker = require "titan-compiler.checker"
+        local nominal = types.Nominal("owner.Item")
+        local item = types.Record("owner.Item", {}, {
+            new = types.StaticMethod("owner.Item", "new", {}, { nominal }, nil, nil, {}),
+        }, {}, 0)
+        local owner = types.Module("owner", { types.ModuleMember("owner", "Item", item, nil) })
+        local web = types.Module("web", {
+            types.ModuleMember("web", "make", types.Function({}, { nominal }, false, nil, nil), {}),
+        })
+        local owner_file = binary .. provider_path("/owner.so")
+        local web_file = binary .. provider_path("/web.so")
+        write_file(source .. "/app.titan", 'local owner = import "owner"\nlocal web = import "web"\n')
+        for _, carried in ipairs({ false, true }) do
+            driver.imported, types.registry = {}, {}
+            local web_modules = { web = web }
+            if carried then web_modules.owner = owner end
+            cache_dynamic_providers({
+                [owner_file] = { modules = { owner = owner } },
+                [web_file] = { modules = web_modules },
+            })
+            local context = new_context({ analysis_only = true })
+            local loader = driver.defaultloader({}, { context = context })
+            local modtype, errors = checker.checkimport("app", loader)
+            assert.truthy(modtype, errors)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            local finalized, diagnostics = driver.finalize_resolver_context(context)
+            if carried then
+                -- A second DSO carrying its own copy is still an identity mixture.
+                assert.is_nil(finalized)
+                assert.matches("logical owner 'owner' resolved independently as dynamic",
+                    table.concat(diagnostics, "\n"), 1, true)
+            else
+                -- Every obligation names the ordinary owner's own DSO.
+                assert.truthy(finalized, diagnostics and table.concat(diagnostics, "\n"))
+                for _, constraint in pairs(context.native_constraints.owner) do
+                    assert.equal("dynamic-global", constraint.binding)
+                    assert.equal(owner_file, paths.to_slash(constraint.resolved_provider))
+                end
+            end
+            assert(driver.close_loader(loader))
+        end
+    end)
+
+    it("decides carried-owner sharing identically in analysis and keeps stale or broken proofs strict", function()
+        local checker = require "titan-compiler.checker"
+        local nominal = types.Nominal("pkg.owner.Item")
+        local item = types.Record("pkg.owner.Item", {}, {
+            new = types.StaticMethod("pkg.owner.Item", "new", {}, { nominal }, nil, nil, {}),
+        }, {}, 0)
+        local owner = types.Module("pkg.owner", { types.ModuleMember("pkg.owner", "Item", item, nil) })
+        local function exposing(name)
+            return types.Module(name, {
+                types.ModuleMember(name, "make", types.Function({}, { nominal }, false, nil, nil), {}),
+            })
+        end
+        assert(lfs.mkdir(binary .. "/pkg"))
+        local bundle = binary .. provider_path("/pkg.so")
+        local facade_file = binary .. provider_path("/facade.so")
+        local stale = provider_path("pkg/owner.so")
+        local function resolve(app, proof, analysis, extra)
+            driver.imported, types.registry = {}, {}
+            local files = {
+                [bundle] = { modules = { ["pkg.owner"] = owner, ["pkg.carried"] = exposing("pkg.carried") } },
+                [facade_file] = { modules = { facade = exposing("facade") },
+                    carriers = { facade = { ["pkg.owner"] = proof } } },
+            }
+            for filename, file in pairs(extra or {}) do files[filename] = file end
+            cache_dynamic_providers(files)
+            write_file(source .. "/app.titan", app)
+            local context = new_context({ analysis_only = analysis })
+            local loader = driver.defaultloader({}, { context = context })
+            local modtype, errors = checker.checkimport("app", loader)
+            assert.truthy(modtype, errors)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            local finalized, diagnostics = driver.finalize_resolver_context(context)
+            assert(driver.close_loader(loader))
+            return context, finalized, diagnostics
+        end
+        local mixed = 'local facade = import "facade"\nlocal carried = import "pkg.carried"\n'
+        for _, analysis in ipairs({ false, true }) do
+            -- The facade proved the bundle: its external edge shares the
+            -- carried owner in a native build and in analysis alike.
+            local _, finalized, diagnostics = resolve(mixed, provider_path("pkg.so"), analysis)
+            assert.truthy(finalized, diagnostics and table.concat(diagnostics, "\n"))
+            -- The proved DSO is gone and discovery reaches the bundle instead:
+            -- the stale proof still competes with the carrying DSO.
+            _, finalized, diagnostics = resolve(mixed, stale, analysis)
+            assert.is_nil(finalized)
+            assert.matches("has producer-dynamic exposures from conflicting providers",
+                table.concat(diagnostics, "\n"), 1, true)
+        end
+
+        -- An unreadable proved carrier is terminal for that edge: the owner is
+        -- never rediscovered in the unrelated bundle.
+        local context = resolve('local facade = import "facade"\n', stale, false, {
+            [binary .. "/" .. stale] = { modules = { ["pkg.owner"] = owner }, broken = "broken carrier image" },
+        })
+        assert.is_nil(context.native_constraints["pkg.owner"])
+        local reported
+        for _, selection in pairs(context.contextual_types) do
+            reported = reported or (selection.error and selection.error:find("broken carrier image", 1, true))
+        end
+        assert.truthy(reported)
+    end)
+
     it("does not alter an analysis-cached DSO selection when native promotion fails", function()
         local name = "provider"
         local filename = binary .. provider_path("/provider.so")
@@ -10329,7 +10652,7 @@ const broken: integer = "not an integer"
                 return function() return serialized end
             elseif symbol == "provider_layouts" then
                 return function() return empty_layouts("provider") end
-            elseif symbol == "provider_source_requirements" then
+            elseif symbol == "provider_source_requirements" or symbol == "provider_dynamic_providers" then
                 return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
@@ -10516,7 +10839,7 @@ const broken: integer = "not an integer"
                 return function() return "Module('fallback',{})" end
             elseif symbol == "fallback_layouts" then
                 return function() return empty_layouts("fallback") end
-            elseif symbol == "fallback_source_requirements" then
+            elseif symbol == "fallback_source_requirements" or symbol == "fallback_dynamic_providers" then
                 return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
@@ -10574,7 +10897,8 @@ const broken: integer = "not an integer"
                 end
             elseif symbol == "fallback_static_layouts" then
                 return function() return empty_layouts("fallback_static") end
-            elseif symbol == "fallback_static_source_requirements" then
+            elseif symbol == "fallback_static_source_requirements" or
+                    symbol == "fallback_static_dynamic_providers" then
                 return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected symbol " .. symbol)
@@ -11742,7 +12066,7 @@ typedef double titan_driver_symlink_value;
                 return function() return "Module('choice',{})" end
             elseif symbol == "choice_layouts" then
                 return function() return empty_layouts("choice") end
-            elseif symbol == "choice_source_requirements" then
+            elseif symbol == "choice_source_requirements" or symbol == "choice_dynamic_providers" then
                 return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected metadata symbol " .. symbol)
@@ -12314,7 +12638,7 @@ typedef double titan_driver_symlink_value;
                 return function() return "Module('dup.item',{})" end
             elseif symbol == "dup_item_layouts" then
                 return function() return empty_layouts("dup.item") end
-            elseif symbol == "dup_item_source_requirements" then
+            elseif symbol == "dup_item_source_requirements" or symbol == "dup_item_dynamic_providers" then
                 return nil, "undefined symbol: " .. symbol, "init"
             end
             error("unexpected metadata symbol " .. symbol)
@@ -12327,7 +12651,7 @@ typedef double titan_driver_symlink_value;
         assert.equal(binary .. provider_path("/dup.so"),
             driver.imported["dup.item"].filename)
         assert.same({ "dup_item_abi", "dup_item_types", "dup_item_layouts",
-            "dup_item_source_requirements" }, symbols)
+            "dup_item_source_requirements", "dup_item_dynamic_providers" }, symbols)
     end)
 
     it("caches two logical interfaces from one physical container separately",
@@ -12340,6 +12664,7 @@ typedef double titan_driver_symlink_value;
             end,
             bundle_left_layouts = function() return empty_layouts("bundle.left") end,
             bundle_left_source_requirements = function() return "shared.meter\nshared.startup" end,
+            bundle_left_dynamic_providers = function() return "dep.owner\tother/api.so" end,
             bundle_right_abi = function() return driver.TITAN_ABI_VERSION end,
             bundle_right_types = function()
                 return "Module('bundle.right',{})"
@@ -12351,7 +12676,7 @@ typedef double titan_driver_symlink_value;
         titan._loadlib = function(filename, symbol)
             assert.equal(binary .. provider_path("/bundle.so"), filename)
             table.insert(symbols, symbol)
-            if symbol == "bundle_right_source_requirements" then
+            if symbol == "bundle_right_source_requirements" or symbol == "bundle_right_dynamic_providers" then
                 return nil, "undefined symbol: " .. symbol, "init"
             end
             return assert(functions[symbol], "unexpected metadata symbol")
@@ -12370,6 +12695,10 @@ typedef double titan_driver_symlink_value;
         assert.same({ "shared.meter", "shared.startup" },
             driver.imported["bundle.left"].source_requirements)
         assert.is_nil(driver.imported["bundle.right"].source_requirements)
+        -- Each logical member keeps its own producer-proved carrier map.
+        assert.same({ ["dep.owner"] = "other/api.so" },
+            driver.imported["bundle.left"].dynamic_providers)
+        assert.is_nil(driver.imported["bundle.right"].dynamic_providers)
         assert.equal(provider_path("bundle.so"), left.file)
         assert.equal(provider_path("bundle.so"), right.file)
         assert.equal(binary .. provider_path("/bundle.so"),
@@ -12378,9 +12707,9 @@ typedef double titan_driver_symlink_value;
             driver.imported["bundle.right"].filename)
         assert.same({
             "bundle_left_abi", "bundle_left_types", "bundle_left_layouts",
-            "bundle_left_source_requirements",
+            "bundle_left_source_requirements", "bundle_left_dynamic_providers",
             "bundle_right_abi", "bundle_right_types", "bundle_right_layouts",
-            "bundle_right_source_requirements",
+            "bundle_right_source_requirements", "bundle_right_dynamic_providers",
         }, symbols)
         local call_count = #symbols
         local cached_ok, cached_left, cached_errors = loader("bundle.left")

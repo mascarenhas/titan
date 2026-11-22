@@ -106,7 +106,10 @@ match locale setmaxstack
 It also obtains the pattern metatable through the private registry key and
 caches `__mul`, `__add`, `__sub`, `__len`, `__unm`, `__pow`, and `__div` as
 the raw operations behind Titan's named combinators. An identity-only Lua
-table is retained as the match-success sentinel.
+table is retained as the match-success sentinel, and `_initialize_native`
+builds the two shared per-state wrapper pieces `_sentinel_pattern`
+(`_Cc(_match_success_sentinel)`) and `_cp_pattern` (`_Cp()`) once per Lua
+state.
 
 These roots belong to the generated module userdata and are therefore
 per-Lua-state. `set_max_stack` changes the value at the private max-stack
@@ -120,6 +123,7 @@ particular, its opaque records are:
 ```titan
 record Pattern
   local raw: value
+  local match_raw: value
   local tree_size: integer
 end
 
@@ -135,12 +139,16 @@ record Definition
 end
 ```
 
-`Pattern.raw` is always a traced `value` owned by the private engine.
-`tree_size` is conservative construction accounting, not a raw native field.
-A pattern `Definition` retains both so the relabel parser can safely rewrap
-the private native pattern without losing the construction bound; a dynamic
-definition records `-1` instead. The contributors `native.titan`,
-`combinators.titan`, `relabel.titan`, and `relabel_parser.titan` declare
+`Pattern.raw` is always a traced `value` owned by the private engine and stays
+untouched for combinator composition and `peg.define`. `Pattern.match_raw` is
+initialized to `nil` by `_pattern(raw, tree_size)` and lazily caches the
+immutable sentinel-and-position-wrapped native pattern on the first match
+attempt. `tree_size` is conservative construction accounting, not a raw native
+field. A pattern `Definition` retains `raw` and `tree_size` so the relabel
+parser can safely rewrap the private native pattern without losing the
+construction bound; a dynamic definition records `-1` instead. The contributors
+`native.titan`, `combinators.titan`, `relabel.titan`, and `relabel_parser.titan`
+declare
 nothing public. Public constructor, combinator, capture, definition, matching,
 and relabel-convenience implementations live directly in the canonical main.
 The contributors retain only module-local native-boundary operations,
@@ -229,12 +237,25 @@ treat it as ordinary failure.
 
 ## Match adapter and failure positions
 
-The shared single-attempt adapter constructs this private pattern around the
-user's pattern:
+The shared single-attempt adapter (`pattern_match_attempt`) runs a private
+wrapped pattern around the user's pattern:
 
 ```text
 constant(success_sentinel) * pattern * position_capture()
 ```
+
+Instead of rebuilding that wrapper on every call, `pattern_match_attempt`
+checks `pattern.match_raw` first and constructs
+`_sequence(_sequence(_sentinel_pattern, pattern.raw), _cp_pattern)` lazily on
+the first match attempt, storing the resulting immutable LPegLabel pattern
+userdata back on `pattern.match_raw`. Because LPegLabel compiles a pattern
+userdata's VM program once and retains it on that userdata, every subsequent
+`Pattern:match` call and every byte step of module-level `peg.match` reuses the
+compiled wrapped program without allocating wrapper userdata or recompiling
+bytecode. Only the immutable native pattern userdata is cached within the
+owning Lua state—never match outputs or mutable match-time state—leaving
+`Pattern.raw`, combinator composition, `MAX_PATTERN_SIZE` accounting, and
+one-shot `peg.gsub` unaffected.
 
 The cached native callable has the precise internal type:
 
@@ -293,10 +314,11 @@ generated generic callable path, which supplies its own roots, result
 adjustment, and error propagation.
 
 The private engine Map, cached native functions, locale patterns, relabel
-parser, weak cache table, and success sentinel are module-state roots. Every
-`Pattern.raw` is traced. LPegLabel's
-pattern userdata uservalue table in turn roots constant captures, grammar
-tables, query tables, and callback functions.
+parser, weak cache table, success sentinel, `_sentinel_pattern`, and
+`_cp_pattern` are module-state roots. Every `Pattern.raw` and cached
+`Pattern.match_raw` is traced. LPegLabel's pattern userdata uservalue table in
+turn roots constant captures, grammar tables, query tables, and callback
+functions.
 
 No raw pointer into a subject string, stack slot, or wrapper lives across an
 allocation or callback. Titan code retains the traced owner and a byte offset,

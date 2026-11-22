@@ -1117,6 +1117,51 @@ describe("static compiled-module metadata", function()
                 (payload:gsub('"z.source"', '"a.source"')), "archive"))
         end)
 
+        it("accepts only compiler-emittable relative dynamic carriers", function()
+            for _, relative in ipairs({ "titan.so", "titan.dll", "dep.so", "other/api.so",
+                    "pkg/titan.so", "a/b/c.dll" }) do
+                assert.is_true(staticmetadata.valid_relative_provider(relative), relative)
+            end
+            for _, relative in ipairs({ "", ".so", "dep", "dep.a", "dep.so.1", "dep.SO",
+                    "../dep.so", "./dep.so", "a/../dep.so", "a/./dep.so", "a.b.so",
+                    "/dep.so", "dep/.so", "a//b.so", "a\\b.so", "C:/dep.so", "C:dep.so",
+                    "//host/share/dep.so", "a b.so", "a\nb.so", false, 1 }) do
+                assert.is_false(staticmetadata.valid_relative_provider(relative), tostring(relative))
+            end
+        end)
+
+        it("keeps producer-proved dynamic carriers canonical and optional", function()
+            local carriers = { ["titan.json"] = "titan.so", ["dep.owner"] = "other/api.so" }
+            local encoded = "dep.owner\tother/api.so\ntitan.json\ttitan.so"
+            assert.equal(encoded, staticmetadata.encode_dynamic_providers("pkg.mod", carriers))
+            assert.same(carriers, staticmetadata.decode_dynamic_providers("pkg.mod", encoded))
+            for _, malformed in ipairs({
+                "", "\n", "titan.json\ttitan.so\ndep.owner\tother/api.so",
+                "dep.owner\tother/api.so\n", "\ndep.owner\tother/api.so",
+                "dep.owner\tother/api.so\ndep.owner\tother/api.so",
+                "dep.owner other/api.so", "dep.owner\tother/api.so\tx",
+                "pkg.mod\tpkg.so", "dep.owner\t../api.so", "bad name\tdep.so",
+            }) do
+                assert.is_nil(staticmetadata.decode_dynamic_providers("pkg.mod", malformed), malformed)
+            end
+            for _, invalid in ipairs({ {}, setmetatable({}, {}), { ["pkg.mod"] = "pkg.so" },
+                    { ["dep.owner"] = "dep" }, "dep.owner\tdep.so" }) do
+                assert.is_nil(staticmetadata.encode_dynamic_providers("pkg.mod", invalid))
+            end
+
+            local payload = assert(staticmetadata.render("pkg.mod", ABI, TYPES, nil,
+                nil, { "a.source" }, carriers))
+            local entry = assert(staticmetadata.validate(payload, "archive"))
+            assert.same(carriers, entry.dynamic_providers)
+            assert.same({ "a.source" }, entry.source_requirements)
+            assert.is_nil(assert(staticmetadata.validate(PAYLOAD, "legacy")).dynamic_providers)
+            assert.is_nil(staticmetadata.render("pkg.mod", ABI, TYPES, nil, nil, nil, {}))
+            local invalid, err = staticmetadata.validate(
+                (payload:gsub('"other/api.so"', '"../api.so"')), "archive")
+            assert.is_nil(invalid)
+            assert.matches("invalid relative provider in dynamic_providers", err, 1, true)
+        end)
+
         it("keeps physical layouts independent from semantic-only readers", function()
             local payload = assert(staticmetadata.render("pkg.mod", ABI, TYPES, "layout-bytes"))
             local semantic = assert(staticmetadata.validate(payload, "analysis", {

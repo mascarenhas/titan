@@ -2053,16 +2053,18 @@ os.exit(result.ok and 0 or result.status or 1)
             })
             certified_exit(72)
             if not platform.windows then
+                -- Linking the owner also withdraws the facade's proved
+                -- dynamic carrier for it, which is part of its interface.
                 saved = remember_objects(stems)
                 decisions(binary_build("--static"), saved, {
                     [facade] = "import-binding " .. owner,
-                    [APP] = "owner-binding " .. owner .. ": global -> direct",
+                    [APP] = "import-interface " .. facade .. " (public)",
                 })
                 certified_exit(72)
                 saved = remember_objects(stems)
                 decisions(binary_build(), saved, {
                     [facade] = "import-binding " .. owner,
-                    [APP] = "owner-binding " .. owner .. ": direct -> global",
+                    [APP] = "import-interface " .. facade .. " (public)",
                 })
                 certified_exit(72)
             end

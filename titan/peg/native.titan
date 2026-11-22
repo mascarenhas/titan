@@ -61,11 +61,14 @@ local function _initialize_native()
   -- capture.  The sentinel makes a native failure triple unambiguous even
   -- when successful user captures begin with nil, "fail", and an integer.
   -- The complete result tuple is captured in a Titan Array so trailing nil
-  -- captures remain measurable through the final non-nil position.
+  -- captures remain measurable through the final non-nil position.  Each
+  -- Pattern builds its wrapped program once, from these shared pieces.
+  _sentinel_pattern = _Cc(_match_success_sentinel)
+  _cp_pattern = _Cp()
 end
 
 local function _pattern(raw: value, tree_size: integer): Pattern
-  return Pattern(raw, tree_size)
+  return Pattern(raw, nil, tree_size)
 end
 
 local function _checked_sum(first: integer, second: integer,

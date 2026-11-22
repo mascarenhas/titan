@@ -37,8 +37,8 @@ function connect(host: string, port: integer,
                  ca_file: string?): Connection
 ```
 
-- **`client(transport, host, ca_file?)`** adopts an already connected `net.Connection` and configures verified TLS without running the handshake yet (call `handshake()` explicitly or let the first read/write run it). `host` sets SNI and certificate identity even if TCP dialed a numeric IP. Empty hosts or invalid text arguments fail before ownership transfers; once accepted, `ssl` owns closing `transport` on any subsequent failure (use `Connection:abort()` afterward).
-- **`connect(host, port, ca_file?)`** loads trust, dials via `net.connect(host, port)` (inheriting DNS, address fallback, and port `1..65535` rules), and completes the verified TLS handshake before returning.
+- **`client(transport, host, ca_file?)`** adopts an already connected `net.Connection` and configures verified TLS without running the handshake yet (call `handshake()` explicitly or let the first read/write run it). `host` sets SNI and certificate identity even if TCP dialed a numeric IP. Empty hosts or invalid text arguments fail before ownership transfers; once accepted, `ssl` owns closing `transport` on any subsequent failure (use `Connection:abort()` afterward). `client` preserves whatever `TCP_NODELAY` setting was already configured on `transport` (including `false`).
+- **`connect(host, port, ca_file?)`** loads trust, dials via `net.connect(host, port)` (inheriting DNS, address fallback, port `1..65535` rules, and default `TCP_NODELAY = true`), and completes the verified TLS handshake before returning.
 - **Identity verification:** DNS names are sent as SNI and matched against the certificate's DNS identity with partial wildcards disabled. IPv4 and IPv6 literals are matched as IP identities without SNI (for scoped IPv6 addresses like `fe80::1%eth0`, the full spelling dials TCP while `%zone` is stripped for X.509 IP matching). Verification failures abort the connection.
 - **Trust roots:**
   - Passing **`ca_file`** reads that PEM bundle asynchronously via `fs` and **replaces** the default trust roots for that connection (empty or invalid PEM raises).
@@ -55,13 +55,17 @@ function listen(host: string, port: integer,
                 backlog: integer?, reuse_port: boolean?): Server
 
 function Connection:handshake()
+function Connection:local_address(): net.Address
+function Connection:peer_address(): net.Address
+function Server:local_address(): net.Address
 function Server:accept(): Connection
 function Server:close()
 ```
 
-- **`listen(host, port, certificate_file, private_key_file?, backlog?, reuse_port?)`** reads the PEM certificate chain (leaf first) and unencrypted PEM private key asynchronously via `fs`, then opens a `net.Server`. Omitting `private_key_file` reads the private key from `certificate_file`. `port` accepts `0..65535` (`0` for ephemeral), `backlog` defaults to `128` (`1..2147483647`), and `reuse_port` forwards to [`net.listen`](standard-library-net.md#connecting-and-listening) (each TLS listener keeps its own certificate context). Listeners require TLS 1.2+ and do not perform mutual TLS client-certificate verification.
-- **`Server:accept()`** accepts TCP immediately without waiting for `ClientHello`; the server TLS handshake runs lazily on `handshake()` or the first `read`, `read_until`, or `write`, preventing slow peers from blocking the accept loop.
+- **`listen(host, port, certificate_file, private_key_file?, backlog?, reuse_port?)`** reads the PEM certificate chain (leaf first) and unencrypted PEM private key asynchronously via `fs`, then opens a `net.Server`. Omitting `private_key_file` reads the private key from `certificate_file`. `port` accepts `0..65535` (`0` for ephemeral; call `Server:local_address()` to discover the assigned endpoint), `backlog` defaults to `128` (`1..2147483647`), and `reuse_port` forwards to [`net.listen`](standard-library-net.md#connecting-and-listening) (each TLS listener keeps its own certificate context). Listeners require TLS 1.2+ and do not perform mutual TLS client-certificate verification.
+- **`Server:accept()`** accepts TCP immediately (inheriting default `TCP_NODELAY = true` from `net`) without waiting for `ClientHello`; the server TLS handshake runs lazily on `handshake()` or the first `read`, `read_until`, or `write`, preventing slow peers from blocking the accept loop.
 - **`Connection:handshake()`** explicitly drives a pending handshake and is a safe no-op on an already negotiated connection.
+- **`Server:local_address()`, `Connection:local_address()`, and `Connection:peer_address()`** delegate to the underlying `net.Server` or `net.Connection` and return immutable [`net.Address`](standard-library-net.md#socket-addresses) snapshots. `Connection` address queries work before and after a lazy `handshake()` and after connection transfer; all three raise when the `Server` or `Connection` is closed, failed, terminating, or detached (or on the wrong `async` Runtime).
 - **`Server:close()`** idempotently stops the listener and releases its certificate context without affecting connections already returned by `accept()`.
 
 ## Reading and writing
@@ -70,6 +74,7 @@ function Server:close()
 function Connection:read(): string?
 function Connection:read_until(delimiter: string, chop: boolean?): string?
 function Connection:write(data: string)
+function Connection:set_no_delay(enabled: boolean)
 function Connection:read_ahead(enabled: boolean?): boolean
 function Connection:has_pending_input(): boolean
 function Connection:add_input_listener(listener: function (): ()): function (): ()
@@ -79,6 +84,7 @@ function Connection:add_input_listener(listener: function (): ()): function (): 
 - **`read_until(delimiter, chop?)`** matches a nonempty literal delimiter across record/chunk boundaries, retains trailing bytes, omits the delimiter when `chop` is `true`, and returns an unterminated final tail before authenticated EOF.
 - **`write(data)`** encrypts and writes all bytes of `data` as one ordered operation (splitting large inputs into TLS records internally).
 - **Concurrency and cancellation:** A `Connection` allows **one concurrent reader (`read`/`read_until`) and one concurrent writer (`write`)**. A second concurrent call in the same direction raises without disturbing the active operation. Explicit `handshake`, `shutdown`, and `close` require an idle connection and exclude I/O until they complete. When first I/O triggers a lazy handshake, one direction drives it while the other waits for the same result. Cancelling an admitted operation closes the transport and terminalizes the TLS connection (unlike `net`, a cancelled TLS read cannot be resumed on the same connection).
+- **`set_no_delay(enabled)`** delegates to [`net.Connection:set_no_delay`](standard-library-net.md#writing-shutdown-and-close) on the underlying TCP transport to disable (`true`) or enable (`false`) Nagle buffering in the local TCP stack. It works before and after a lazy `handshake()` and after connection transfer without driving TLS I/O, and raises when the `Connection` is closed, failed, terminating, or detached. Connections opened by `ssl.connect` and `ssl.Server:accept` default to `TCP_NODELAY = true`; `ssl.client` preserves the option already configured on its supplied `net.Connection`.
 - **`read_ahead(enabled?)`** forwards to the underlying `net.Connection:read_ahead` (configure `false` before the first handshake or I/O for portable connection handoff).
 - **`has_pending_input()`** synchronously checks retained plaintext, OpenSSL buffered/BIO bytes, underlying TCP input, or non-open TLS state without driving handshakes or consuming records (buffered bytes may be partial or control records).
 - **`add_input_listener(listener)`** delegates receive observation to the underlying TCP connection (non-yielding, idempotent remover; events may be partial or control records without application plaintext).
@@ -123,7 +129,7 @@ function Connection.from_transfer_payload(payload: string): Connection
 function Connection.discard_transfer_payload(payload: string): integer
 ```
 
-An idle `ssl.Connection` (including a lazy client or accepted connection before its first handshake) moves between independent Lua states in the same process via `async.TransferValue.from_value(conn)` and `packet:to_value()`, preserving verified peer identity, negotiated engine state, unread plaintext, encrypted BIO buffers, and `read_ahead`.
+An idle `ssl.Connection` (including a lazy client or accepted connection before its first handshake) moves between independent Lua states in the same process via `async.TransferValue.from_value(conn)` and `packet:to_value()`, preserving verified peer identity, negotiated engine state, unread plaintext, encrypted BIO buffers, `read_ahead`, and the underlying socket's `TCP_NODELAY` option. On the destination Runtime, `local_address()`, `peer_address()`, and `set_no_delay(enabled)` operate on the adopted transport.
 
 - Transfer rejects active read, write, handshake, shutdown, retry, or cleanup operations, as well as all [TCP transfer restrictions](standard-library-net.md#transferring-connections) (configure `read_ahead(false)` before first handshake/I/O and call `async.yield()` before encoding on Windows). Rejected transfer leaves the source usable.
 - Encoding detaches the source before delivery; if enclosing serialization fails after detachment, the hook frees the engine and closes the transport. Follow the [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules). `Connection.discard_transfer_payload(payload)` frees the engine and closes the transport without a Runtime, returning the native close status and consuming ownership even on error.

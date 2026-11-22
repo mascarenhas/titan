@@ -895,7 +895,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     local metadata, metadata_err =
         staticmetadata.render(modname, abi, serialized_type, encoded_layouts,
             not tlcontext.browser_trace and coder._sorted_keys(mprefixes) or nil,
-            options.source_requirements)
+            options.source_requirements, options.dynamic_providers)
     assert(metadata, metadata_err)
     local initializer, initializer_err =
         staticmetadata.c_initializer(metadata)
@@ -927,6 +927,14 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             DEFLINE = definitionline(),
             TYPESNAME = tlcontext.prefix .. "source_requirements",
             TYPES = c_string_literal(table.concat(options.source_requirements, "\n")),
+        }))
+    end
+    if options.dynamic_providers then
+        emit_item("pinned", render(modtypes, {
+            DEFLINE = definitionline(),
+            TYPESNAME = tlcontext.prefix .. "dynamic_providers",
+            TYPES = c_string_literal(assert(staticmetadata.encode_dynamic_providers(
+                modname, options.dynamic_providers))),
         }))
     end
 

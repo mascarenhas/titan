@@ -1393,15 +1393,22 @@ function incremental.source_certificate(context, source, contents_by_path)
     return result
 end
 
-function incremental.producer_digests(context, entry, layouts, recipe)
+-- A producer's proved dynamic carriers are part of its public interface:
+-- consumers certified against it miss when they change. Modules without
+-- carriers keep their historical digest bytes.
+function incremental.producer_digests(context, entry, layouts, recipe, dynamic_providers)
     assert(type(layouts) == "string", "producer must supply coder layout bytes")
     local helper = ""
     if recipe then
         helper = require("titan-compiler.ffiheaders").foreign_contents(recipe,
             "module.ffi.h", function(name) return name .. ".titan.h" end)
     end
-    local public = incremental.digest(context, "public-interface", {
-        types.serialize_semantic(entry.type), layouts, helper })
+    local inputs = { types.serialize_semantic(entry.type), layouts, helper }
+    if dynamic_providers then
+        inputs[4] = required(staticmetadata.encode_dynamic_providers(
+            entry.type.name, dynamic_providers))
+    end
+    local public = incremental.digest(context, "public-interface", inputs)
     local private = entry.source_manifest
         or required(require("titan-compiler.sourceinterface").serialize(entry, context))
     return { public = public,
@@ -1426,8 +1433,12 @@ function incremental.interface_digest(context, entry, view)
     if not memo[provider][name] then
         local layouts = entry.layouts or native and native.layouts
         assert(type(layouts) == "string", "binary provider must supply its own layout bytes")
-        memo[provider][name] = incremental.digest(context, "public-interface", {
-            types.serialize_semantic(entry.type), layouts, "" })
+        local inputs = { types.serialize_semantic(entry.type), layouts, "" }
+        local carriers = entry.dynamic_providers or native and native.dynamic_providers
+        if carriers then
+            inputs[4] = required(staticmetadata.encode_dynamic_providers(name, carriers))
+        end
+        memo[provider][name] = incremental.digest(context, "public-interface", inputs)
     end
     return memo[provider][name]
 end
@@ -1448,7 +1459,23 @@ function incremental.make_certificate(context, entry, native, inputs)
         bindings = native.bindings or {}, providers = providers,
         source_requirements = native.source_requirements,
         interface = entry.interface_digests
-            or incremental.producer_digests(context, entry, native.layouts, native.foreign_header) }
+            or incremental.producer_digests(context, entry, native.layouts, native.foreign_header,
+                native.dynamic_providers) }
+    -- Each recorded carrier certifies the provider its relative name loads
+    -- now, not the owner this build happened to select.
+    if native.dynamic_providers then
+        local carriers = {}
+        for name in pairs(native.dynamic_providers) do carriers[#carriers + 1] = name end
+        table.sort(carriers, util.bytewise_less)
+        result.carriers = {}
+        for index, name in ipairs(carriers) do
+            local relative = native.dynamic_providers[name]
+            local digest, status = inputs.plan.carrier_digest(name, relative)
+            assert(digest, "cannot certify dynamic carrier " .. relative .. " for " .. name ..
+                ": " .. tostring(status))
+            result.carriers[index] = { name = name, relative = relative, interface = digest }
+        end
+    end
     local direct = {}
     for _, import in ipairs(native.imports or {}) do
         local name, view = import.name, import.source_required and "source" or "public"
@@ -1466,10 +1493,18 @@ function incremental.make_certificate(context, entry, native, inputs)
     local names = {}
     for name in pairs(owners) do names[#names + 1] = name end
     table.sort(names, util.bytewise_less)
+    -- An owner whose carrier this build proved is certified at that carrier:
+    -- an ordinary lookup of the owner could miss it or hash an unrelated copy.
     for _, name in ipairs(names) do
-        local digest, status = inputs.plan.digest(name, "public")
+        local carrier = inputs.owner_carriers and inputs.owner_carriers[name]
+        local digest, status
+        if carrier then
+            digest, status = inputs.plan.carrier_digest(name, carrier)
+        else
+            digest, status = inputs.plan.digest(name, "public")
+        end
         assert(digest, "cannot certify contextual owner " .. name .. ": " .. tostring(status))
-        result.owners[#result.owners + 1] = { name = name, interface = digest }
+        result.owners[#result.owners + 1] = { name = name, interface = digest, carrier = carrier }
     end
     local parts = {}
     for index, part in ipairs(inputs.generated_parts or {}) do
@@ -1534,6 +1569,9 @@ local function valid_certificate(value, modname)
             or type(item.interface) ~= "string" or (not imported and seen[item.name]) then return false end
         if imported and (type(item.source_required) ~= "boolean"
             or item.view ~= (item.source_required and "source" or "public")) then return false end
+        -- Only a contextual owner may be certified at a proved carrier.
+        if item.carrier ~= nil and (imported or
+            not staticmetadata.valid_relative_provider(item.carrier)) then return false end
         seen[item.name] = true
         return true
     end
@@ -1547,6 +1585,19 @@ local function valid_certificate(value, modname)
     end
     for name, provider in pairs(value.providers) do
         if not seen[name] or type(provider) ~= "string" then return false end
+    end
+    if value.carriers ~= nil then
+        if not dense(value.carriers, function(item)
+            return type(item) == "table" and staticmetadata.valid_module_name(item.name)
+                and item.name ~= modname
+                and staticmetadata.valid_relative_provider(item.relative)
+                and type(item.interface) == "string"
+        end) or #value.carriers == 0 then return false end
+        for index = 2, #value.carriers do
+            if not util.bytewise_less(value.carriers[index - 1].name, value.carriers[index].name) then
+                return false
+            end
+        end
     end
     return true
 end
@@ -1996,7 +2047,17 @@ function incremental.verdict(record, plan)
         known[name] = true
         if not owner then direct[name] = true end
         local view = owner and "public" or item.view
-        local digest, status = plan.digest(name, view)
+        local digest, status
+        if owner and item.carrier then
+            -- The proved carrier, never an ordinary lookup of the owner. An
+            -- owner this build links instead keeps its ordinary certification
+            -- so the binding checks below explain the change.
+            digest, status = plan.carrier_digest(name, item.carrier)
+            if not digest and status ~= "owner-binding" then
+                return miss("dependency-unavailable", name .. " (" .. item.carrier .. ")")
+            end
+        end
+        if not digest then digest, status = plan.digest(name, view) end
         if not digest then
             if status == "pending" then
                 if not pending_set[name] then pending_set[name] = true; pending[#pending + 1] = name end
@@ -2039,6 +2100,25 @@ function incremental.verdict(record, plan)
             local after = expected .. (expected_provider and ("@" .. expected_provider) or "")
             return miss(direct[name] and "import-binding" or "owner-binding",
                 name .. ": " .. before .. " -> " .. after)
+        end
+    end
+    -- The object's emitted carriers must be exactly the certified ones, and
+    -- each relative name must still load an equal owner interface. Binding
+    -- changes above explain a relinked owner better than its lost carrier.
+    local emitted = record.object_metadata.dynamic_providers
+    local carriers = cert.carriers or {}
+    local count = 0
+    for _ in pairs(emitted or {}) do count = count + 1 end
+    if count ~= #carriers then return miss("record-schema", "uncertified dynamic carriers") end
+    for _, item in ipairs(carriers) do
+        if emitted[item.name] ~= item.relative then
+            return miss("record-schema", "uncertified dynamic carrier " .. item.name)
+        end
+        local digest = plan.carrier_digest(item.name, item.relative)
+        if not digest then
+            return miss("carrier-unavailable", item.name .. " (" .. item.relative .. ")")
+        elseif digest ~= item.interface then
+            return miss("carrier-interface", item.name .. " (" .. item.relative .. ")")
         end
     end
     if #pending > 0 then

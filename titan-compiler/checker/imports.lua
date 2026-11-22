@@ -609,7 +609,11 @@ function checker.register_module_interface(
     exposer = exposer or modname
     interface_seen = interface_seen or {}
     local interface_key = recovery_interface_key(modname, exposer)
-    if interface_seen[interface_key] then return true end
+    -- An ordinary load registers under its own name for both views. The
+    -- trusted source view registers declarations a public projection of the
+    -- same module lacks, so an earlier public pass must not suppress it.
+    local seen_key = trusted_source and ("\0source:" .. interface_key) or interface_key
+    if interface_seen[seen_key] then return true end
 
     -- Normalize before publishing either the interface-seen success marker or
     -- the recovered-module memo. A target-profile mismatch is a real load
@@ -624,7 +628,7 @@ function checker.register_module_interface(
         if not normalized then return nil, normalization_error end
     end
 
-    interface_seen[interface_key] = true
+    interface_seen[seen_key] = true
 
     local seen = reference_seen or {}
     local module_key = "\0module-interface:" .. interface_key
@@ -754,9 +758,14 @@ end
 function checker.checkimport(modname, loader, request)
     local ok, type_or_error, errors, import_info = loader(modname, request)
     if not ok then return nil, type_or_error, errors end
+    -- Contextual recoveries keep their exposer (`nominal_exposer`, or none);
+    -- an ordinary load (`kind` set) exposes its own interface.
+    local exposer = import_info and
+        (import_info.nominal_exposer or import_info.kind and modname) or
+        request and request.exposer
     local registered, register_error, failure_kind = checker.register_module_interface(
         modname, type_or_error, loader,
-        import_info and import_info.nominal_exposer or request and request.exposer,
+        exposer,
         request and request.interface_seen,
         import_info and import_info.kind == "source"
             and type_or_error._source == true,
