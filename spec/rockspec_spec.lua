@@ -2704,7 +2704,8 @@ describe("relocatable Lua build configuration", function()
         if not platform.windows and not available then pending("LLVM dlltool is unavailable"); return end
         assert.is_true(available)
         workspace = temporary_directory("windows-openssl")
-        local bin, lib = workspace .. "/private bin", workspace .. "/private lib"
+        local sdk = workspace .. "/private SDK"
+        local bin, lib = sdk .. "/bin", sdk .. "/lib"
         make_directory(bin)
         make_directory(lib)
         local function library(family, basename)
@@ -2726,9 +2727,9 @@ describe("relocatable Lua build configuration", function()
             local crypto, ssl = ("libcrypto-%d-x64.dll"):format(major), ("libssl-%d-x64.dll"):format(major)
             library("libcrypto", crypto)
             library("libssl", ssl)
-            local ok, detail = identify()
-            assert.is_true(ok, detail)
-            assert.equal(crypto .. " " .. ssl .. "\n", detail)
+            -- Exercise the same wrapper as installed SDK tests, including a
+            -- native Windows prefix spelling when run under CLANG64.
+            assert.same({ crypto, ssl }, installed_prefix.windows_openssl_dlls(paths.from_slash(sdk)))
         end
         assert(os.remove(bin .. "/libssl-4-x64.dll"))
         local ok, detail = identify()

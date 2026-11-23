@@ -5,6 +5,7 @@
 -- intentionally unset.
 local M = {}
 local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local driver = require "titan-compiler.driver"
 
 local function normalize_root(root)
@@ -29,7 +30,7 @@ function M.active()
 end
 
 function M.windows_openssl_dlls(prefix)
-    prefix = platform.path.to_slash(prefix)
+    prefix = paths.to_slash(prefix)
     local io = require("titan-compiler.io").new_sync()
     local result = io:run({ "bash", "scripts/windows_openssl.sh", "identify",
         prefix .. "/lib", prefix .. "/bin" })
