@@ -1049,7 +1049,10 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
    When `-MP` was used (POSIX `source` containing `\`), `compile_node`
    rewrites `<stem>.d` via `depfile.render("titan-native", files)` so the
    durable provenance file published on disk records the exact certified
-   `source` and header spellings rather than Clang's slash-folded report.
+   `source` and header spellings for Titan's `depfile.parse` reader rather
+   than Clang's slash-folded report (it escapes `\` as `\\` for Titan
+   consumers, and is not promised to be readable by GNU Make for every
+   literal-backslash spelling).
    Because `<stem>.d` provenance is required by downstream checks, a depfile
    or provenance failure fails that `--c-source` node with a diagnostic rather
    than continuing uncertified. Running `-E` on warm invocations ensures that
