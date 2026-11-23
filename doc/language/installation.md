@@ -110,12 +110,13 @@ layout.
   Titan in the copy or set `TITAN_ROOT` to the new directory.
 - **Versions:** Titan `0.6.1` uses library version `0.6` in paths such as
   `lib/titan/0.6` and `TITAN_PATH_0_6`. Patch releases in the same series share
-  that namespace and keep compiled native providers compatible when the ABI
-  does not change, while release-matched artifacts—browser semantic companions
-  and saved language-server project caches—require the exact Titan release and
-  must be regenerated, and `--incremental` objects compiled from source normally
-  miss and rebuild against the updated compiler and SDK headers. Always install
-  into a fresh prefix when upgrading across breaking prereleases.
+  that namespace and stay compatible when the ABI and artifact format versions
+  do not change: compiled native providers, browser `analysis-target`
+  descriptors and semantic companion packs, and saved language-server project
+  manifests are accepted across patch releases of the same series.
+  `--incremental` objects compiled from source still rebuild after a compiler
+  change because their certificates hash the compiler files and SDK headers.
+  Always install into a fresh prefix when upgrading across breaking prereleases.
 
 ## Other installation types
 

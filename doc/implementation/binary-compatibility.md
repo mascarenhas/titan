@@ -186,19 +186,25 @@ signature would be unsafe even with an ABI bump, because every reader calls
 that entry to discover the ABI.
 
 Native provider probes, runtime ABI checks, and static archive metadata check
-`TITAN_ABI_VERSION`, not the package release `TITAN_VERSION`, so a patch
-release that leaves `TITAN_ABI_VERSION` unchanged continues to accept compatible
-native providers built by an earlier patch release in the same library series
-(subject to normal consumer-compatibility and target/dependency checks). That
-compatibility does not extend to release-coupled artifacts: saved
-language-server manifests and cache identities require an exact `TITAN_VERSION`
-match ([Declared project manifests](driver.md#declared-project-manifests)),
-browser `analysis-target` descriptors and companion packs require an exact
-`TITAN_VERSION` match ([The browser SDK](browser-target.md#the-browser-sdk),
-[Publishing the browser semantic pack](browser-target.md#publishing-the-browser-semantic-pack)),
-and `--incremental` source-backed objects normally miss and rebuild across a
-patch release because compiler files (`version.lua`) and SDK preamble headers
-(`titan.h`) hash into the configuration certificate
+`TITAN_ABI_VERSION`, not the package release `TITAN_VERSION`, so patch releases
+in the same library series (`TITAN_LIBRARY_VERSION`) that leave
+`TITAN_ABI_VERSION` unchanged accept each other's compatible native providers
+(subject to normal consumer-compatibility and target/dependency checks).
+Consumer-side analysis artifacts follow the same series-level rule: saved
+language-server project manifests (`projectcache.decode`), native
+language-server cache identities (`driver.language_server_cache_identity`), and
+browser `analysis-target` descriptors and companion packs
+(`browsertarget.decode_analysis`) compare the library series
+(`TITAN_LIBRARY_VERSION`, derived from the recorded release string via
+`version.library_series`) alongside `TITAN_ABI_VERSION` and the format/schema
+versions, keeping the recorded release as provenance
+([Declared project manifests](driver.md#declared-project-manifests),
+[The browser SDK](browser-target.md#the-browser-sdk)). Producer-side companion
+packaging still requires exact release provenance matching the SDK compiler and
+source rock ([Publishing the browser semantic pack](browser-target.md#publishing-the-browser-semantic-pack)).
+`--incremental` source-backed objects still rebuild after a compiler change
+because compiler files (`version.lua`) and SDK preamble headers (`titan.h`) hash
+into the configuration certificate
 ([Configuration, toolchain, and preamble certificates](incremental-compilation.md#configuration-toolchain-and-preamble-certificates)).
 
 Every generated module userdata has a native payload beginning with

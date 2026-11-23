@@ -1109,10 +1109,15 @@ and store editor facts separately before releasing each checked AST.
   contain only validated include plans, ordered dependency plans and input
   provenance; function bodies and full generated `.titan.h` text are excluded.
 * `driver.decode_project_entry(bytes, options)` returns a private compact entry
-  or `nil, error`. It checks graph, project-cache, release/library and ABI
-  versions, then validates the closed declaration schema, source capability,
-  hybrid member maps, optional `module_name`, and generated C plan identities,
-  digests and dependency order. Old AST payloads and unknown fields are misses.
+  or `nil, error`. It checks `graphcodec.VERSION`, `projectcache.VERSION`,
+  `TITAN_LIBRARY_VERSION` (both the recorded `library_version` field and the
+  series derived from the recorded `titan_version` provenance string via
+  `version.library_series`, rejecting malformed releases and other series), and
+  `TITAN_ABI_VERSION`, then validates the closed declaration schema, source
+  capability, hybrid member maps, optional `module_name`, and generated C plan
+  identities, digests and dependency order. Patch releases in the same library
+  series therefore accept each other's saved manifests when those format and
+  ABI versions match; old AST payloads and unknown fields are misses.
   Optional `header_inputs` overlays matching current host-validated observation
   records without changing semantic identity; unmatched records remain.
   Decode never executes Lua, registers types, changes `driver.imported`, or
@@ -1128,16 +1133,18 @@ and store editor facts separately before releasing each checked AST.
   registry assembly cooperate through `options.yield` and propagate
   cancellation objects unchanged.
 * `driver.language_server_cache_identity({context = context})` returns an
-  opaque digest or `nil, error`. It includes API, graph, release/library/ABI,
-  conversion and target identities, working directory, compiler command, and
-  the actual preprocessor argv/include-root/predefined-macro/forced-header
-  world for native analysis. Call it once per saved analysis before reading
-  project payloads. Browser analysis uses the separate tool-free and lazy
-  identities [above](#browser-analysis-target). A verified embedded profile
-  allows a distinct native-unavailable identity
-  when no SDK is installed. Hosts additionally fingerprint the loaded compiler
-  and native-module files, embedded provider, configuration, source roots and
-  semantic schema. The generated-code ABI alone is not a cache namespace.
+  opaque digest or `nil, error`. It includes API, library-series
+  (`TITAN_LIBRARY_VERSION`, not exact `TITAN_VERSION`), ABI, graph,
+  project/foreign/header-cache, and target identities, working directory,
+  compiler command, and the actual preprocessor
+  argv/include-root/predefined-macro/forced-header world for native analysis.
+  Call it once per saved analysis before reading project payloads. Browser
+  analysis uses the separate tool-free and lazy identities
+  [above](#browser-analysis-target). A verified embedded profile allows a
+  distinct native-unavailable identity when no SDK is installed. Hosts
+  additionally fingerprint the loaded compiler and native-module files,
+  embedded provider, configuration, source roots and semantic schema. The
+  generated-code ABI alone is not a cache namespace.
 
 ### Cache adapter and persistent payloads
 
