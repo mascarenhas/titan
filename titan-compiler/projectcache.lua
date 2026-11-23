@@ -332,7 +332,8 @@ function projectcache.decode(payload, options)
     if not envelope then return nil, err end
     if type(envelope) ~= "table" or envelope.kind ~= "titan-project-manifest"
         or envelope.version ~= projectcache.VERSION or envelope.graph_version ~= graphcodec.VERSION
-        or envelope.titan_version ~= version.TITAN_VERSION or envelope.library_version ~= version.TITAN_LIBRARY_VERSION
+        or version.library_series(envelope.titan_version) ~= version.TITAN_LIBRARY_VERSION
+        or envelope.library_version ~= version.TITAN_LIBRARY_VERSION
         or envelope.abi ~= version.TITAN_ABI_VERSION then return nil, "incompatible project manifest" end
     return attempt(project, envelope.entry, options, true)
 end

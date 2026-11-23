@@ -24,6 +24,7 @@ local context = { io = strategy, cache_adapter = {
 local layout = assert(driver.installed_paths(prefix, "browser"))
 local bytes = incremental.file_contents(context, paths.join(layout.titan_bin, "analysis-target"), 64 * 1024)
 local semantic = assert(target.decode_analysis(context, bytes))
+assert(semantic.release == driver.TITAN_VERSION, "analysis-target: release does not match the SDK compiler")
 assert(semantic.build_profile == profile, "analysis-target: build profile does not match TITAN_BUILD_PROFILE")
 assert(strategy:read_file(paths.join(layout.titan_bin, "build-profile"), 64) == profile .. "\n",
     "build-profile: missing or disagrees with analysis-target")

@@ -300,11 +300,15 @@ require:
   `browsertarget.encode_analysis` projects the validated live descriptor.
   `browsertarget.decode_analysis` accepts only that closed data shape, with a
   64 KiB payload bound, at most 128 graph nodes and at most 1,024 entries.
-  It requires exact matches on `TITAN_VERSION` (`release`), `TITAN_ABI_VERSION`,
-  and the pinned Emscripten version alongside the Wasm/C ABI traits and the Lua
-  record's numeric types and canonical browser defines before returning the
-  semantic facts; an `analysis-target` or companion pack from an earlier patch
-  release is rejected even when `TITAN_ABI_VERSION` is unchanged.
+  It checks that `version.library_series(data.release)` matches
+  `TITAN_LIBRARY_VERSION` (rejecting malformed or non-canonical release strings
+  and other library series, while retaining `release` as provenance) alongside
+  exact matches on `TITAN_ABI_VERSION` and the pinned Emscripten version, the
+  Wasm/C ABI traits, and the Lua record's numeric types and canonical browser
+  defines before returning the semantic facts; patch releases of the same
+  library series therefore accept each other's `analysis-target` descriptors
+  and companion packs when `TITAN_ABI_VERSION` and the other checked traits
+  match.
   The encoder visits string keys in bytewise order before assigning graph
   reference IDs, so identical semantic inputs give identical bytes in
   separate Lua processes. Companion pack tooling re-encodes decoded data
@@ -341,7 +345,13 @@ that has the named commit and its gitlinks. `PACK_PYTHON` selects the Python
 executable. The producer compares the rock and live source files with the
 commit and recursive gitlinks, and checks the deployed compiler sources,
 notices, full browser provider inventory and semantic bytes in the selected
-SDK. It checks the semantic-file digests against the final `sdk-digests`
+SDK. Unlike consumer-side `browsertarget.decode_analysis`, producer-side
+packaging keeps exact release provenance checks: `scripts/browser_semantic_pack.lua`
+requires `analysis-target`'s recorded `release` to equal the SDK compiler's
+`TITAN_VERSION`, and `scripts/browser_semantic_pack.py` requires matching
+`titan-<release>-1.src.rock` and `titan-<release>-1-browser-semantics.tar.gz`
+basenames and records exact `release` and `tag` provenance in `manifest.json`.
+It checks the semantic-file digests against the final `sdk-digests`
 record. The SDK's recorded build profile must match `TITAN_BUILD_PROFILE`;
 the public release uses `production`, and `validation` is for local
 candidates. The producer changes neither input and does not run Emscripten,
