@@ -1015,14 +1015,21 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
    and, after a successful compile, its `<stem>.d`; `<stem>.i` and any staged
    object are invocation scratch.
 2. **Unconditional preprocessing (`native-preprocess`).** On every invocation,
-   `compile_node` runs:
+   `compile_node` builds the depfile options with the shared helper
+   `depfile.append_compiler_options(argv, source, dependencies, "titan-native")`
+   (`titan-compiler/depfile.lua`), running:
 
    ```sh
-   <compile_argv...> -E -P -MD -MF <stem>.d -MT titan-native <source> -o <stem>.i
+   <compile_argv...> -E -P -MD [-MP] -MF <stem>.d -MT titan-native <source> -o <stem>.i
    ```
 
-   It invalidates any prior memo for `<stem>.i` and `<stem>.d`, parses
-   `<stem>.d` with `depfile.parse`, and computes:
+   `-MP` is added only on non-Windows when `source` contains a literal `\`,
+   leaving ordinary paths' flags and cache keys unchanged. `compile_node`
+   invalidates any prior memo for `<stem>.i` and `<stem>.d`, reads `<stem>.d`
+   directly via `context.io:read_file`, parses it with
+   `depfile.compiler_inputs` (retaining exact `source` and rejecting
+   incomplete/malformed or ambiguous phony inventories under `-MP`), and
+   computes:
 
    ```text
    input = incremental.digest(context, "native-c-input", {
@@ -1039,10 +1046,16 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
    `dependencies` (paths and realpaths root-relative under compiler-owned roots,
    exact elsewhere) and through any expanded path macro such as `__FILE__`.
 
-   Running `-E` on warm invocations ensures that conditional compilation,
-   command-line macro changes, newly shadowing headers, and negative
-   `__has_include` branches change `preprocessed` or `dependencies` without
-   requiring a directory walk of every `-I` root.
+   When `-MP` was used (POSIX `source` containing `\`), `compile_node`
+   rewrites `<stem>.d` via `depfile.render("titan-native", files)` so the
+   durable provenance file published on disk records the exact certified
+   `source` and header spellings rather than Clang's slash-folded report.
+   Because `<stem>.d` provenance is required by downstream checks, a depfile
+   or provenance failure fails that `--c-source` node with a diagnostic rather
+   than continuing uncertified. Running `-E` on warm invocations ensures that
+   conditional compilation, command-line macro changes, newly shadowing
+   headers, and negative `__has_include` branches change `preprocessed` or
+   `dependencies` without requiring a directory walk of every `-I` root.
 3. **Cacheability and hit check.** If `compile_argv` contains `@file`,
    `-fplugin*`, `-specs*`/`--specs*`, `-Xclang`, or `-wrapper`,
    `cacheable_policy` marks the node `cacheable = false`. Otherwise, when
@@ -1226,10 +1239,22 @@ are never part of `spec.outputs`. Each target owns
     identities, so warm invocations skip the probe. When supported, appends
     `ticket.dependency_argv = { "-Wl,--dependency-file=" ..
     dependency_file }` to the final executable or public DSO link (never to
-    archive-validation probe links). On commit, LLD's Make-escaped report is
-    parsed with `depfile.parse`, while GNU ld's literal report is decoded from
-    its trailing one-input-per-line phony-target stanza, preserving spaces,
-    `#`, `$`, colons, and backslashes in paths.
+    archive-validation probe links). On non-Windows with `backend == "lld"`
+    (ELF LLD), LLD's `--dependency-file` printer uses the same POSIX `\`-to-`/`
+    rewrite as Clang: before cache lookup, `certificate.prepare` checks all
+    known link paths (`dependency_file`, outputs, input `FILE_FIELDS`, `argv`,
+    `compiler_argv`, and `dependency_excludes`) for any literal `\` and marks
+    `native_request.uncacheable = "ELF LLD cannot report literal backslashes in
+    link paths"` if found (declining reuse even when a slash-spelled twin
+    exists). On commit, ELF LLD reports are parsed with `depfile.lld_inputs`
+    (reconciling LLD's phony rules against the primary rule and rejecting
+    incomplete/malformed inventories or duplicate spellings); if reading,
+    parsing, or resolving ELF LLD's reported inputs fails with a string error
+    after a successful link, `certificate.commit` leaves the link uncertified
+    (writes no link record and returns `true`) rather than discarding the
+    linked image, while non-string cancellations still propagate. GNU ld's
+    literal report is decoded from its trailing one-input-per-line phony-target
+    stanza, preserving spaces, `#`, `$`, colons, and backslashes in paths.
   * **`compiler` fallback (`backend == "none"`, including Windows).** Parses
     `argv` with a finite grammar (expanding `-Wl,` comma tokens): ordered and
     repeated `-L`, `-l<name>`/`-l:<file>` with `-static` and forwarded

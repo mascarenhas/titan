@@ -114,13 +114,22 @@ loading a just-published worker result (`published = true`), it writes
 
 Filesystem and decode failures are classified by where they occur:
 
-* **Configuration inventory errors fail the invocation.**
-  `driver.incremental_configuration(context)` and
-  `incremental.configuration(context, options)` fail with
-  `cannot certify compiler configuration: <detail>` when a loaded compiler Lua
-  file, the executing frontend script, the native compiler/stage tools, or the
-  shared preamble probe cannot be read or executed. A toolchain that cannot
-  inventory itself cannot compile fresh modules either.
+* **Configuration inventory errors fail the invocation; preamble-dependency
+  uncertainty degrades to uncertified compilation.**
+  `incremental.configuration(context, options)` returns `nil, detail` (rather
+  than throwing an uncaught Lua error) when a loaded compiler Lua file, the
+  executing frontend script, the native compiler/stage tools, or the shared
+  preamble preprocessor invocation itself cannot be read or executed, and
+  `driver.incremental_configuration(context)` reports
+  `cannot certify compiler configuration: <detail>`. A toolchain that cannot
+  inventory itself cannot compile fresh modules either. By contrast, when the
+  preamble preprocessor succeeds but its Make dependency report cannot
+  establish preamble inputs (for example, a missing or unreadable reported
+  path, an incomplete phony inventory, or an ambiguous phony spelling),
+  `incremental.preamble_identity` returns `nil, "cannot establish preamble
+  dependencies: <detail>", "uncertified"`, which switches the build to raw
+  uncertified compilation so standalone compilation still succeeds without
+  reusing or writing certificates.
 * **Per-object certification errors become reuse misses.** During
   `certify_local`, `verdict`, and the pre-mutation prefix of
   `restore_source_object`, any string error from reading or decoding the
@@ -658,16 +667,40 @@ reports the exact component:
    places the probe translation unit at the stable path
    `<output_root or first source root>/.titan/preamble.c` and rewrites it only
    when its text differs, keeping `__FILE__` and `__BASE_FILE__` expansions in
-   forced headers invariant across runs. `preamble_identity` runs
-   `<compile_prefix> -E -dD -P -MD -MF <tmp> -MT titan-preamble -x c <source>`,
-   parses the depfile with `depfile.parse` (`titan-compiler/depfile.lua`), and
-   hashes `{ expanded = <stdout>, inputs = { { path, realpath, sha256 }, ... } }`
-   over all external depfile prerequisites (excluding the synthetic
-   `preamble.c` path itself). Hashing both the `-E -dD -P` output and the
-   prerequisite file bytes catches system-header edits, SDK header edits
-   (`titan.h`, `transfer.h`, `titan/ffi.h`, Lua internal headers), new
-   shadowing headers in `-I`/`-isystem`, and `__has_include` branches that
-   alter declarations or macros without adding a positive depfile entry.
+   forced headers invariant across runs. `preamble_identity` builds the
+   depfile flags and parses the report through the shared helpers
+   `depfile.append_compiler_options` and `depfile.compiler_inputs`
+   (`titan-compiler/depfile.lua`), also used by `nativeinputs.compile`. For
+   ordinary paths (Windows, or POSIX paths without a literal `\`), the command
+   remains `<compile_prefix> -E -dD -P -MD -MF <tmp> -MT titan-preamble -x c
+   <source>`, keeping ordinary flags and certification keys unchanged. Only on
+   non-Windows when `source` contains a literal `\`, `append_compiler_options`
+   also passes `-MP` so upstream Clang's POSIX Make writer (which rewrites `\`
+   to `/`) emits one phony rule per included header without emitting one for
+   the main TU (`preamble.c`). `depfile.compiler_inputs` reconciles the phony
+   header targets against the primary rule (leaving exactly one unmatched main
+   word), keeps the exact `source` spelling for the main TU, and rejects
+   incomplete/malformed phony inventories or duplicate phony spellings
+   (permitting GCC's legitimately repeated header entries only when the
+   unmatched main word retained a `\`, proving the reporter did not
+   slash-fold). `preamble_identity` excludes `path == source` directly as well
+   as `realpath(path) == realpath(source)`, and hashes `{ expanded = <stdout>,
+   inputs = { { path, realpath, sha256 }, ... } }` over the external header
+   inputs. Hashing both the `-E -dD -P` output and the prerequisite file bytes
+   catches system-header edits, SDK header edits (`titan.h`, `transfer.h`,
+   `titan/ffi.h`, Lua internal headers), new shadowing headers in
+   `-I`/`-isystem`, and `__has_include` branches that alter declarations or
+   macros without adding a positive depfile entry. If reading/parsing the
+   report or resolving/hashing any reported prerequisite raises a string error,
+   `preamble_identity` returns `nil, "cannot establish preamble dependencies:
+   <detail>", "uncertified"` (and checks `lstat` before reporting an unlink
+   failure on a missing report) so the build degrades cleanly to uncertified
+   compilation. External headers whose paths contain literal backslashes on
+   POSIX with Clang/LLD remain unsupported: if an external backslash-named
+   header has an existing slash-spelled twin, Clang's POSIX `-MD`/`-MP` report
+   is byte-identical to opening the twin, so soundness covers only the known
+   TU, observed duplicate phony spellings, missing/unreadable reported inputs,
+   and known ELF LLD inputs.
 4. **`options` (`incremental.lua`).** Hashes `{ compile_prefix,
    build_profile, emit_line_directives, pretty_print, extra_ffi_include_dirs,
    titan_root }` with tag `"compile-options"`. Module-resolution flags

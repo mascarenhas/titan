@@ -198,6 +198,16 @@ search paths. To consume a library built under `out`, add `out` to
 `TITAN_PATH_0_6` (or install it into the SDK with `titan-install`; see
 [Packaging and distributing modules with LuaRocks](modules.md#packaging-and-distributing-modules-with-luarocks)).
 
+On POSIX hosts (Linux and macOS), `\` is an ordinary filename character rather
+than a directory separator, and Titan's path handling never reinterprets it as
+`/`. Output directories (`-o`/`--output`) and `--c-source` paths containing
+literal backslashes work with GCC and Clang, including under `--incremental`.
+However, Clang's POSIX Make dependency writer and ELF LLD's
+`--dependency-file` rewrite `\` to `/`: external C headers whose paths contain
+literal backslashes on POSIX are unsupported with Clang or ELF LLD, and ELF LLD
+final links involving backslash-containing link paths run uncertified (without
+link-cache reuse).
+
 ### Choosing the executable path (`--exe`)
 
 `--exe PATH` sets the exact destination for a standalone or `--test`
@@ -610,6 +620,14 @@ sources), `configuration` (`compiler`, `preamble`, `toolchain`, or `options`),
 changed), `codegen-options` (`--c-parts`, `--test`, or `--coverage`), and
 link misses (`link inputs changed`, `native libraries changed`, or an opaque
 linker flag such as `@file` or `-Xlinker` that prevents caching).
+
+On POSIX hosts with Clang or ELF LLD, `--incremental` preserves exact
+certification for `-o`/`--output` directories and `--c-source` inputs whose
+paths contain literal backslashes, but external headers with literal
+backslashes are unsupported. If preamble dependency reporting becomes
+uncertain, compilation still succeeds uncertified (rebuilding without reuse);
+if ELF LLD link inputs contain literal backslashes or its report cannot be
+trusted, the link succeeds without caching a link record.
 
 ### Single-invocation Make integration
 
