@@ -904,9 +904,12 @@ that may be ReFS. The aggregate cell uses the [complete Windows aggregate
 harness](windows-build.md#test-ownership-and-keep-going), with the same
 platform and capability skip rules as local validation. Busted workers use
 the existing Windows Job Object supervisor and its private checkout and
-TEMP paths. The hosted Windows validation build uses the pinned bundled
-OpenSSL; [system OpenSSL](../language/windows-build.md#install-from-source)
-remains available for local platform validation.
+TEMP paths. The aggregate and compiler cells build with the pinned bundled OpenSSL 3.5.7
+(`OPENSSL_MODE=bundled`), while the `native-retained` cell builds and installs
+with MSYS2's installed [system OpenSSL](../language/windows-build.md#install-from-source)
+(`OPENSSL_MODE=system`) and runs `mingw32-make -f Makefile.win native-check
+stdlib-check` in addition to its retained suite; neither mode runs every suite
+on its own.
 Manual dispatch runs the same four jobs and covers the full Windows suite.
 
 ### Hosted platform caches
@@ -918,11 +921,13 @@ dependency versions and checksums, patches, build recipes, and rockspec
 where applicable. On macOS, libbacktrace also keys on the resolved upstream
 revision and the other native dependencies have separate caches. On Windows,
 the co-built native libraries share a key that includes the pinned source
-manifests and OpenSSL mode.
-The LuaRocks cache stops before installing the Titan rock. Only the native
-cell (the aggregate on Windows) or macOS manual `full` saves dependency
-misses; no persistent cache contains the installed Titan rock or its
-generated provider.
+manifests, `scripts/windows_openssl.sh`, and `OPENSSL_MODE`.
+The LuaRocks cache stops before installing the Titan rock. On Windows,
+`native-aggregate` saves `bundled` native-dependency misses and the
+standalone-prefix LuaRocks cache, while `native-retained` saves `system`
+native-dependency misses (one native-cache writer per OpenSSL mode); on macOS,
+only the native cell or manual `full` saves dependency misses. No persistent
+cache contains the installed Titan rock or its generated provider.
 
 Do not hash the workflow files themselves: changes to scheduling, tests,
 or logging should not invalidate a dependency snapshot. Each cache key
@@ -932,8 +937,9 @@ to build inputs should change the corresponding key inputs instead.
 
 The C-probe cache restores separately before building the rock, using a
 stable platform/toolchain prefix and a fresh key for each run and attempt.
-The same native or full cell saves it after installation, before any
-OpenSSL-mode switch. Build logs show the restore results. Standard GitHub
+The same native or full cell—both `native-aggregate` (`bundled`) and
+`native-retained` (`system`) on Windows—saves it after installation, before
+any OpenSSL-mode switch. Build logs show the restore results. Standard GitHub
 cache visibility applies: feature branches can restore default-branch caches,
 but caches saved on feature branches do not warm the default branch.
 
