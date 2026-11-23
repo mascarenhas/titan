@@ -38,7 +38,7 @@ Make targets pass the SDK's LuaRocks configuration automatically. For direct
 ```sh
 # MSYS2 Bash
 export LUAROCKS_CONFIG="$(cygpath -m /c/Titan/sdk/etc/luarocks/config-5.5.lua)"
-/c/Titan/sdk/bin/luarocks.exe make titan-0.6.0-1.rockspec
+/c/Titan/sdk/bin/luarocks.exe make titan-0.6.1-1.rockspec
 ```
 
 ```powershell

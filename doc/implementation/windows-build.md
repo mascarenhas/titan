@@ -619,7 +619,7 @@ headers.
 mingw32-make -f Makefile.win luarocks PREFIX=/c/Titan/sdk
 export LUAROCKS_CONFIG=C:/Titan/sdk/etc/luarocks/config-5.5.lua
 /c/Titan/sdk/bin/luarocks.exe --lua-version=5.5 \
-  --tree=C:/Titan/sdk make titan-0.6.0-1.rockspec
+  --tree=C:/Titan/sdk make titan-0.6.1-1.rockspec
 ```
 
 Users who already have compatible Lua and LuaRocks installations can run the

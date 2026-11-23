@@ -20,7 +20,7 @@ export PATH="$PREFIX/bin:$PATH"
 export TITAN_BUILD_PROFILE=validation
 make lua
 make luarocks
-luarocks make titan-0.6.0-1.rockspec
+luarocks make titan-0.6.1-1.rockspec
 luarocks test --prepare
 ```
 

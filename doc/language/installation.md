@@ -108,7 +108,7 @@ layout.
   for module lookup, but LuaRocks's Unix `bin/titanc` wrapper embeds the
   original interpreter path. After copying or moving a Unix prefix, reinstall
   Titan in the copy or set `TITAN_ROOT` to the new directory.
-- **Versions:** Titan `0.6.0` uses library version `0.6` in paths such as
+- **Versions:** Titan `0.6.1` uses library version `0.6` in paths such as
   `lib/titan/0.6` and `TITAN_PATH_0_6`. Always install into a fresh prefix
   when upgrading across breaking prereleases.
 
@@ -222,7 +222,7 @@ Windows requires `PREFIX` and `ROCKS_TREE` to be identical.
 After installing Titan into a prefix, pack a binary rock from a checkout with
 `make binary-rock` (do not use `luarocks pack --pack-binary-rock`, and note
 that plain `luarocks pack titan` mislabels native files as `.all.rock`).
-Install the resulting `titan-0.6.0-1.<arch>.rock` with `luarocks install` to
+Install the resulting `titan-0.6.1-1.<arch>.rock` with `luarocks install` to
 deploy without compiling.
 
 ### A debug (validation) installation
