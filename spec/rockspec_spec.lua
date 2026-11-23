@@ -534,7 +534,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         assert.truthy(headers_ok, headers_output)
 
         local manifest_path = PREFIX ..
-            "/lib/luarocks/rocks-5.5/titan/0.6.0-1/rock_manifest"
+            "/lib/luarocks/rocks-5.5/titan/0.6.1-1/rock_manifest"
         local manifest = read_file(manifest_path)
         local manifest_table = load_rock_manifest(manifest_path)
         local retained_native = manifest_table["titan-sdk"].lib.titan["0.6"]
@@ -614,14 +614,14 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
                 end
             end
         end
-        audit_tree(PREFIX .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1", "")
+        audit_tree(PREFIX .. "/lib/luarocks/rocks-5.5/titan/0.6.1-1", "")
 
         -- The installer recorded every approved SDK native link input,
         -- including the selected Lua archive; titanc admits and reuses each
         -- digest without reading the bytes.
         local incremental = require "titan-compiler.incremental"
         local location = assert(loadfile(PREFIX ..
-            "/lib/luarocks/rocks-5.5/titan/0.6.0-1/installer/location.lua", "t", {}))()
+            "/lib/luarocks/rocks-5.5/titan/0.6.1-1/installer/location.lua", "t", {}))()
         assert.equal("lib/titan/0.6/" .. incremental.SDK_DIGESTS, location.digests)
         local support = require "titan"
         local certified = { io = compiler_io.new_sync(),
@@ -699,7 +699,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
                 tostring(code) .. ")")
         end
 
-        local rockspec = read_file("titan-0.6.0-1.rockspec")
+        local rockspec = read_file("titan-0.6.1-1.rockspec")
         local replacement_count
         local rockspec_environment = {}
         assert(load(rockspec, "=packed rockspec", "t", rockspec_environment))()
@@ -714,7 +714,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
                     source_repository:gsub("\\", "/") .. '"'
             end)
         assert.equal(1, replacement_count)
-        local packed_rockspec = workspace .. "/titan-0.6.0-1.rockspec"
+        local packed_rockspec = workspace .. "/titan-0.6.1-1.rockspec"
         write_file(packed_rockspec, rockspec)
 
         ok, output, why, code = run(clean_environment({
@@ -722,7 +722,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         }), workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        local source_rock = workspace .. "/titan-0.6.0-1.src.rock"
+        local source_rock = workspace .. "/titan-0.6.1-1.src.rock"
         assert_file(source_rock)
 
         ok, output, why, code = run(clean_environment({
@@ -1857,7 +1857,7 @@ install:
 	install -m 0755 %s "$(INST_LIBDIR)/%s"
 ]], support_name, support_name))
         local specification = {}
-        assert(load(read_file("titan-0.6.0-1.rockspec"), "=production rockspec", "t", specification))()
+        assert(load(read_file("titan-0.6.1-1.rockspec"), "=production rockspec", "t", specification))()
         local hook = assert(specification.hooks.post_install)
         if platform.windows then hook = assert(specification.hooks.platforms.windows.post_install) end
         local copy_directories = {}
@@ -1866,11 +1866,11 @@ install:
             write_file(source .. "/" .. directory .. "/fixture.txt", directory .. "\n")
             copy_directories[#copy_directories + 1] = string.format("%q", directory)
         end
-        local rockspec = source .. "/titan-0.6.0-1.rockspec"
+        local rockspec = source .. "/titan-0.6.1-1.rockspec"
         write_file(rockspec, string.format([[
 rockspec_format = "3.0"
 package = "titan"
-version = "0.6.0-1"
+version = "0.6.1-1"
 source = { url = %q }
 description = { summary = "Tiny Titan installation fixture", license = "MIT" }
 dependencies = { "lua ~> 5.5" }
@@ -1900,7 +1900,7 @@ build = {
             return output
         end
         local function private(tree)
-            return tree .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1"
+            return tree .. "/lib/luarocks/rocks-5.5/titan/0.6.1-1"
         end
         local function assert_installed(tree)
             local retained = private(tree)
@@ -1929,7 +1929,7 @@ build = {
         assert_installed(trees[1])
         local packed, pack_output = run(environment({ LUAROCKS, "pack", rockspec }), outside)
         assert.truthy(packed, pack_output)
-        local source_rock = outside .. "/titan-0.6.0-1.src.rock"
+        local source_rock = outside .. "/titan-0.6.1-1.src.rock"
         assert_file(source_rock)
         luarocks(trees[2], "install", source_rock, "--deps-mode=none")
         assert_installed(trees[2])
@@ -1939,7 +1939,7 @@ build = {
             "PREFIX=" .. PREFIX, "ROCKS_TREE=" .. trees[1], "TITAN_LUAROCKS=" .. LUAROCKS,
             "binary-rock" }), outside)
         assert.truthy(ok, output)
-        local binary_rock = outside .. "/titan-0.6.0-1." .. arch .. ".rock"
+        local binary_rock = outside .. "/titan-0.6.1-1." .. arch .. ".rock"
         assert_file(binary_rock)
         luarocks(trees[3], "install", binary_rock, "--deps-mode=none",
             "MAKE=" .. workspace .. "/unavailable make")
@@ -1960,7 +1960,7 @@ build = { type = "builtin", modules = { [%q] = %q } }
             luarocks(trees[3], "make", path, "--deps-mode=none")
         end
         install_dependency("titan-install-test-keep", "fixture_dependency", '"lua ~> 5.5"')
-        install_dependency("titan-install-test-dependent", "fixture_dependent", '"titan == 0.6.0-1"')
+        install_dependency("titan-install-test-dependent", "fixture_dependent", '"titan == 0.6.1-1"')
 
         -- Exercise the real deployed wrapper and LuaRocks' own exact-version
         -- removal, including rollback of a refused post_install hook.
@@ -1985,7 +1985,7 @@ build = { type = "builtin", modules = { [%q] = %q } }
         ok, output = module_tool("uninstall", "titan-install-test-keep")
         assert.falsy(ok, output)
         assert.truthy(output:find("no active Titan module publication", 1, true), output)
-        assert.falsy(module_tool("uninstall", "titan", "0.6.0-1"))
+        assert.falsy(module_tool("uninstall", "titan", "0.6.1-1"))
         local function module_rock(name, version, payload, expected_error)
             local base = workspace .. "/" .. name .. "-" .. version
             make_directory(base)
@@ -1996,7 +1996,7 @@ package = %q
 version = %q
 source = { url = "file:///unused" }
 description = { license = "MIT" }
-dependencies = { "titan == 0.6.0-1" }
+dependencies = { "titan == 0.6.1-1" }
 hooks = { post_install = '"$(SCRIPTS_DIR)/titan-install" --path "$(PREFIX)"' }
 build = { type = "builtin", modules = {}, copy_directories = { "dist" } }
 ]], name, version))

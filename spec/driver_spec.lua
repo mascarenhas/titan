@@ -2025,7 +2025,7 @@ describe("compiler installation discovery", function()
     it("exports the language-server compiler API independently of the ABI",
        function()
         assert.equal("2", driver.TITAN_ABI_VERSION)
-        assert.equal("0.6.0", driver.TITAN_VERSION)
+        assert.equal("0.6.1", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
         assert.equal(1, driver.LANGUAGE_SERVER_API_VERSION)

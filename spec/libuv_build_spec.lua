@@ -1195,7 +1195,7 @@ end
                     argv[#argv + 1] = prefix .. "/bin/titanc" .. executable_suffix
                 else
                     argv[#argv + 1] = prefix .. "/bin/lua"
-                    argv[#argv + 1] = prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"
+                    argv[#argv + 1] = prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc"
                 end
                 for _, argument in ipairs({ "--tree", root, "--output", root .. "/out",
                         "--source-first" }) do
@@ -1411,7 +1411,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
                 "titan-compiler/linkcertificate.lua", "titan-compiler/nativeinputs.lua",
                 "titan-compiler/testroots.lua",
                 "titan/math.titan", "prefix/bin/lua", "prefix/bin/titanc",
-                "prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
+                "prefix/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
                 "prefix/include/transfer.h",
@@ -1599,7 +1599,7 @@ done
             -- objects; the compiler, not Make, decides whether bytes changed.
             for _, changed in ipairs({
                 "prefix/bin/titanc",
-                "prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
+                "prefix/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/titan.h", "prefix/include/transfer.h",
                 "prefix/lib/titan/0.6/libtitan.a",
@@ -3682,7 +3682,7 @@ int main(void) {
                 assert.truthy(makefile:find(contract, 1, true), contract)
             end
 
-            file = assert(io.open("titan-0.6.0-1.rockspec", "rb"))
+            file = assert(io.open("titan-0.6.1-1.rockspec", "rb"))
             local rockspec = file:read("*a")
             file:close()
             for _, contract in ipairs({
@@ -6792,7 +6792,7 @@ printf '%s\n' "${schedule[@]}"
                 end
                 assert.equal(platform_id == "macos" and 6 or 2, dependency_key_count, suite)
                 local rocks_cache = named_step(suite, "Restore standalone-prefix LuaRocks dependencies")
-                assert_ordered(rocks_cache, "-rocks-layout-", "hashFiles(", "'titan-0.6.0-1.rockspec'")
+                assert_ordered(rocks_cache, "-rocks-layout-", "hashFiles(", "'titan-0.6.1-1.rockspec'")
                 if platform_id == "macos" then
                     local core_cache = named_step(suite, "Restore the Lua SDK and libbacktrace build")
                     assert_ordered(core_cache, ".lua/bin/lua\n", ".lua/bin/luac\n",

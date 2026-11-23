@@ -613,7 +613,7 @@ async function main() {
     try { options = parse(process.argv.slice(2)); }
     catch (error) { diagnostic(error.message); process.stderr.write(usage); return 2; }
     if (options.help) { process.stderr.write(usage); return 0; }
-    if (options.version) { diagnostic("Titan 0.6.0 browser runner (Node 26+)"); return 0; }
+    if (options.version) { diagnostic("Titan 0.6.1 browser runner (Node 26+)"); return 0; }
     const chrome = options.probe || options.engine === "chromium" ? await chromeInfo(options.chrome) : null;
     const nodeOK = Number(process.versions.node.split(".")[0]) >= 26 &&
         typeof WebAssembly.promising === "function" && typeof WebAssembly.Suspending === "function";

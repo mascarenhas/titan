@@ -141,7 +141,7 @@ jobs:
             C:/titan-ci/.lua/lib/lua/5.5
             C:/titan-ci/.lua/lib/luarocks
             C:/titan-ci/.lua/share/lua/5.5
-          key: ${{ steps.toolchain.outputs.identity }}-rocks-layout-v1-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile.win', 'scripts/install_windows_luarocks.sh', 'titan-0.6.0-1.rockspec') }}
+          key: ${{ steps.toolchain.outputs.identity }}-rocks-layout-v1-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile.win', 'scripts/install_windows_luarocks.sh', 'titan-0.6.1-1.rockspec') }}
 
       # Bump layout-v1 in both keys only when the cache path list changes.
       - name: Restore Windows C-probe results
@@ -176,7 +176,7 @@ jobs:
           done
           export LUAROCKS_CONFIG="$PREFIX/etc/luarocks/config-5.5.lua"
           mingw32-make -f Makefile.win compiler-deps
-          "$PREFIX/bin/luarocks.exe" --lua-version=5.5 --tree="$PREFIX" test --prepare titan-0.6.0-1.rockspec
+          "$PREFIX/bin/luarocks.exe" --lua-version=5.5 --tree="$PREFIX" test --prepare titan-0.6.1-1.rockspec
 
       # Only the aggregate cell publishes shared dependency caches; they
       # never include Titan-generated objects or the installed Titan rock.

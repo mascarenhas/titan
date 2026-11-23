@@ -11489,7 +11489,7 @@ end
 function driver.windows_launcher_manifest()
     return [[<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity name="Titan.Launcher" version="0.6.0.0" processorArchitecture="amd64" type="win32"/>
+  <assemblyIdentity name="Titan.Launcher" version="0.6.1.0" processorArchitecture="amd64" type="win32"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security><requestedPrivileges>
       <requestedExecutionLevel level="asInvoker" uiAccess="false"/>

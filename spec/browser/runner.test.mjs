@@ -1234,7 +1234,10 @@ test("direct invocation through a symlink still runs the runner CLI",
         const link = join(directory, "runner.mjs");
         await symlink(join(root, "titan-runtime/browser/titan-browser-run.mjs"), link);
         const {stderr} = await exec(process.execPath, [link, "--version"]);
-        assert.match(stderr, /Titan 0[.]6[.]0 browser runner/);
+        const header = await readFile(join(root, "titan-runtime/titan.h"), "utf8");
+        const release = header.match(/^#define TITAN_VERSION "(\d+\.\d+\.\d+)"$/m);
+        assert.ok(release, "titan.h must declare the package version");
+        assert.ok(stderr.includes(`Titan ${release[1]} browser runner`), stderr);
     } finally { await rm(directory, {recursive: true, force: true}); }
 });
 

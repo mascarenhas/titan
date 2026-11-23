@@ -50,7 +50,7 @@ class SemanticPackTests(unittest.TestCase):
                     self.assertEqual(archive.extractfile(member).read(), payloads[member.name])
 
     def test_source_rock_rejects_wrong_missing_and_duplicate_entries(self):
-        rockspec = "titan-0.6.0-1.rockspec"
+        rockspec = "titan-0.6.1-1.rockspec"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             contents = {rockspec: b"rock metadata", "dependency/source.c": b"pinned object"}
@@ -127,7 +127,7 @@ assert(incremental.write_sdk_digests(digest, copied .. "/sdk-digests", files))
 """, installed / self.relative, self.assets)
         self.commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository,
                                               env=self.env, text=True).strip()
-        self.rock = self.root / "titan-0.6.0-1.src.rock"
+        self.rock = self.root / "titan-0.6.1-1.src.rock"
         rockspec = self.rock.name.removesuffix(".src.rock") + ".rockspec"
         with zipfile.ZipFile(self.rock, "w", zipfile.ZIP_DEFLATED) as rock:
             rock.write(repository / rockspec, rockspec)
@@ -175,7 +175,7 @@ assert(incremental.write_sdk_digests(digest, copied .. "/sdk-digests", files))
     def output(self, directory):
         destination = self.root / directory
         destination.mkdir(exist_ok=True)
-        return destination / "titan-0.6.0-1-browser-semantics.tar.gz"
+        return destination / "titan-0.6.1-1-browser-semantics.tar.gz"
 
     def test_full_provider_reproducibility_and_relocation(self):
         first, second = self.output("one"), self.output("two")
