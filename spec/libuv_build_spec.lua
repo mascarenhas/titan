@@ -6817,6 +6817,7 @@ printf '%s\n' "${schedule[@]}"
                         "/include/lua*.h", "/include/lauxlib.h", "/include/lualib.h", "/include/lua.hpp",
                         "/lib/liblua55.a", "/share/man", "/src/lua-5.5.1", "-native-layout-",
                         "env.OPENSSL_MODE", "steps.toolchain.outputs.native-flags", "hashFiles('Makefile.win'",
+                        "'scripts/windows_openssl.sh'",
                         "'vendor/windows-native/dependencies.tsv'", "'vendor/libbacktrace/dependencies.tsv'")
                     local lua_build = named_step(suite, "Build Lua, LuaRocks and the pinned native dependencies")
                     assert_ordered(lua_build, "mingw32-make -f Makefile.win lua luarocks libbacktrace native",
@@ -6827,10 +6828,18 @@ printf '%s\n' "${schedule[@]}"
                         "suite: compiler-1\n            group: windows-compiler-shard-1",
                         "suite: compiler-2\n            group: windows-compiler-shard-2", "defaults:")
                     assert.equal(4, count_literal(suite, "- suite:"), suite)
+                    assert.truthy(suite:find(
+                        "OPENSSL_MODE: ${{ matrix.suite == 'native-retained' && 'system' || 'bundled' }}", 1, true), suite)
                     for _, step in ipairs({
                         "Save the Lua SDK and pinned Windows native dependency builds",
-                        "Save standalone-prefix LuaRocks dependencies",
                         "Save Windows C-probe results",
+                    }) do
+                        local body = named_step(suite, step)
+                        assert.truthy(body:find("matrix.suite == 'native-aggregate' || matrix.suite == 'native-retained'",
+                            1, true), body)
+                    end
+                    for _, step in ipairs({
+                        "Save standalone-prefix LuaRocks dependencies",
                         "Build and run the complete Windows native stdlib aggregate",
                     }) do
                         local body = named_step(suite, step)
@@ -6844,6 +6853,9 @@ printf '%s\n' "${schedule[@]}"
                         'TITAN_ROCK_TEST_JOBS: "4"',
                         "TITAN_COMPILER_GROUP: ${{ matrix.group }}",
                         "TITAN_ROCK_TEST_SUPERVISOR")
+                    local system_check = named_step(suite, "Check the system OpenSSL runtime and stdlib provider")
+                    assert_ordered(system_check, "if: matrix.suite == 'native-retained'",
+                        "mingw32-make -f Makefile.win native-check stdlib-check")
                 end
             end
             local sanitizer_cache_index = assert(sanitizer_job:find(

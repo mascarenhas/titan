@@ -37,7 +37,7 @@ jobs:
       TITAN_PREFIX: C:/titan-ci/.lua
       TITAN_TEST_BUILD_DIR: C:/titan-stdlib-tests
       TITAN_JOBS: "4"
-      OPENSSL_MODE: bundled
+      OPENSSL_MODE: ${{ matrix.suite == 'native-retained' && 'system' || 'bundled' }}
       TITAN_NATIVE_CFLAGS: "-O0 -fno-lto"
       LC_ALL: C.UTF-8
       LANG: C.UTF-8
@@ -125,7 +125,7 @@ jobs:
             C:/titan-ci/out/windows-validation/lua-5.5.1
             C:/titan-ci/out/windows-validation/native-src
             C:/titan-ci/out/windows-validation/native
-          key: ${{ steps.toolchain.outputs.identity }}-native-layout-v1-${{ env.OPENSSL_MODE }}-${{ steps.toolchain.outputs.native-flags }}-${{ hashFiles('Makefile.win', 'scripts/prepare_windows_native.pl', 'scripts/build_windows_native.sh', 'scripts/build_windows_libbacktrace.sh', 'scripts/windows_build_profile.sh', 'vendor/windows-native/CMakeLists.txt', 'vendor/windows-native/dependencies.tsv', 'vendor/libbacktrace/dependencies.tsv', 'vendor/libbacktrace/*.patch', 'vendor/libuv/*-windows-*.patch', 'vendor/lua/*.manifest', 'vendor/lua/*.rc') }}
+          key: ${{ steps.toolchain.outputs.identity }}-native-layout-v1-${{ env.OPENSSL_MODE }}-${{ steps.toolchain.outputs.native-flags }}-${{ hashFiles('Makefile.win', 'scripts/prepare_windows_native.pl', 'scripts/build_windows_native.sh', 'scripts/windows_openssl.sh', 'scripts/build_windows_libbacktrace.sh', 'scripts/windows_build_profile.sh', 'vendor/windows-native/CMakeLists.txt', 'vendor/windows-native/dependencies.tsv', 'vendor/libbacktrace/dependencies.tsv', 'vendor/libbacktrace/*.patch', 'vendor/libuv/*-windows-*.patch', 'vendor/lua/*.manifest', 'vendor/lua/*.rc') }}
 
       # Bump layout-v1 only when the cache path list changes.
       - name: Restore standalone-prefix LuaRocks dependencies
@@ -178,10 +178,11 @@ jobs:
           mingw32-make -f Makefile.win compiler-deps
           "$PREFIX/bin/luarocks.exe" --lua-version=5.5 --tree="$PREFIX" test --prepare titan-0.6.1-1.rockspec
 
-      # Only the aggregate cell publishes shared dependency caches; they
-      # never include Titan-generated objects or the installed Titan rock.
+      # The aggregate and retained cells write their separate bundled and
+      # system native caches. Neither includes Titan-generated objects or the
+      # installed Titan rock.
       - name: Save the Lua SDK and pinned Windows native dependency builds
-        if: matrix.suite == 'native-aggregate' && steps.native-cache.outputs.cache-hit != 'true'
+        if: (matrix.suite == 'native-aggregate' || matrix.suite == 'native-retained') && steps.native-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: *windows-native-paths
@@ -207,8 +208,18 @@ jobs:
           test -f "$PREFIX/lib/lua/5.5/titan.dll"
           test -f "$PREFIX/lib/titan/0.6/titan.dll"
 
+      - name: Check the system OpenSSL runtime and stdlib provider
+        if: matrix.suite == 'native-retained'
+        env:
+          NATIVE_CFLAGS: *windows-native-cflags
+        run: |
+          set -euo pipefail
+          unset LD
+          export PATH="/clang64/bin:$PATH"
+          mingw32-make -f Makefile.win native-check stdlib-check
+
       - name: Save Windows C-probe results
-        if: matrix.suite == 'native-aggregate'
+        if: matrix.suite == 'native-aggregate' || matrix.suite == 'native-retained'
         uses: actions/cache/save@v4
         with:
           path: *windows-probe-path

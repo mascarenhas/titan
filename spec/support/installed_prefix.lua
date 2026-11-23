@@ -28,4 +28,15 @@ function M.active()
     return normalize_root(root)
 end
 
+function M.windows_openssl_dlls(prefix)
+    prefix = platform.path.to_slash(prefix)
+    local io = require("titan-compiler.io").new_sync()
+    local result = io:run({ "bash", "scripts/windows_openssl.sh", "identify",
+        prefix .. "/lib", prefix .. "/bin" })
+    assert(result.ok, result.output or result.diagnostic)
+    local crypto, ssl = (result.output or ""):match("^(%S+) (%S+)\r?\n$")
+    assert(crypto and ssl, "missing selected Windows OpenSSL runtime names")
+    return { crypto, ssl }
+end
+
 return M

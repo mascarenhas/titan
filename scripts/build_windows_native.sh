@@ -42,23 +42,31 @@ case "$OPENSSL_MODE" in
     ;;
   system)
     openssl_prefix=$(cd "$(cygpath -u "$OPENSSL_PREFIX")" && pwd)
-    # A prebuilt SDK may already live in the selected Lua prefix.
-    if [[ $openssl_prefix -ef $prefix ]]; then exit 0; fi
     openssl_bin="$openssl_prefix/bin"
     openssl_lib="$openssl_prefix/lib"
     ;;
   *) echo 'OPENSSL_MODE must be system or bundled' >&2; exit 2 ;;
 esac
-mkdir -p "$prefix/bin" "$prefix/lib" "$prefix/include"
-for library in libcrypto libssl; do
-  install -m 0755 "$openssl_bin/$library-3-x64.dll" "$prefix/bin/$library-3-x64.dll"
-  install -m 0644 "$openssl_lib/$library.dll.a" "$prefix/lib/$library.dll.a"
-done
-rm -rf "$prefix/include/openssl"
-if [[ $OPENSSL_MODE == bundled ]]; then
-  mkdir -p "$prefix/include/openssl"
-  cp "$sources/openssl-3.5.7/include/openssl/"*.h \
-    "$work/openssl/include/openssl/"*.h "$prefix/include/openssl/"
-else
-  cp -R "$openssl_prefix/include/openssl" "$prefix/include/"
+selected=$(bash "$(dirname "$0")/windows_openssl.sh" identify "$openssl_lib" "$openssl_bin")
+read -r -a openssl_dlls <<< "$selected"
+# A system SDK may already live in the selected Lua prefix. Identify its
+# runtime even then, but leave its files and configured headers in place.
+if [[ $OPENSSL_MODE == bundled || ! $openssl_prefix -ef $prefix ]]; then
+  mkdir -p "$prefix/bin" "$prefix/lib" "$prefix/include"
+  for dll in "${openssl_dlls[@]}"; do
+    install -m 0755 "$openssl_bin/$dll" "$prefix/bin/$dll"
+  done
+  for library in libcrypto libssl; do
+    install -m 0644 "$openssl_lib/$library.dll.a" "$prefix/lib/$library.dll.a"
+  done
+  rm -rf "$prefix/include/openssl"
+  if [[ $OPENSSL_MODE == bundled ]]; then
+    mkdir -p "$prefix/include/openssl"
+    cp "$sources/openssl-3.5.7/include/openssl/"*.h \
+      "$work/openssl/include/openssl/"*.h "$prefix/include/openssl/"
+  else
+    cp -R "$openssl_prefix/include/openssl" "$prefix/include/"
+  fi
 fi
+printf '%s\n' "$selected" > "$work/openssl-dlls"
+printf 'Selected Windows OpenSSL runtime (%s): %s\n' "$OPENSSL_MODE" "$selected"

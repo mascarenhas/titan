@@ -342,7 +342,10 @@ describe("standalone-prefix source installation", function()
             assert.equal(read_file("titanc"),
                 read_file(LUA_SHAREDIR .. "/titan-compiler/titanc.lua"))
             for _, dll in ipairs({ "lua55.dll", "libuv-1.dll", "libllhttp-9.4.dll",
-                    "libsqlite3-0.dll", "libssl-3-x64.dll", "libcrypto-3-x64.dll" }) do
+                    "libsqlite3-0.dll" }) do
+                assert_file(PREFIX .. "/bin/" .. dll)
+            end
+            for _, dll in ipairs(installed_prefix.windows_openssl_dlls(PREFIX)) do
                 assert_file(PREFIX .. "/bin/" .. dll)
             end
             for _, import_library in ipairs({ "libuv.dll.a", "libllhttp.dll.a",
@@ -2696,6 +2699,68 @@ describe("relocatable Lua build configuration", function()
         assert_absent(workspace .. "/rock")
     end)
 
+    it("identifies Windows OpenSSL runtimes from real COFF import archives", function()
+        local available = run({ "bash", "-c", "command -v llvm-dlltool" })
+        if not platform.windows and not available then pending("LLVM dlltool is unavailable"); return end
+        assert.is_true(available)
+        workspace = temporary_directory("windows-openssl")
+        local bin, lib = workspace .. "/private bin", workspace .. "/private lib"
+        make_directory(bin)
+        make_directory(lib)
+        local function library(family, basename)
+            local definition = lib .. "/" .. family .. ".def"
+            write_file(definition, "LIBRARY " .. basename .. "\nEXPORTS\n    fixture\n")
+            local ok, detail = run({ "llvm-dlltool", "-m", "i386:x86-64", "-d", definition,
+                "-l", lib .. "/" .. family .. ".dll.a" })
+            assert.is_true(ok, detail)
+        end
+        local function identify()
+            return run({ "bash", "scripts/windows_openssl.sh", "identify", lib, bin })
+        end
+        for _, family in ipairs({ "libcrypto", "libssl" }) do
+            for _, major in ipairs({ 3, 4 }) do
+                write_file(("%s/%s-%d-x64.dll"):format(bin, family, major), "fixture runtime\n")
+            end
+        end
+        for _, major in ipairs({ 3, 4 }) do
+            local crypto, ssl = ("libcrypto-%d-x64.dll"):format(major), ("libssl-%d-x64.dll"):format(major)
+            library("libcrypto", crypto)
+            library("libssl", ssl)
+            local ok, detail = identify()
+            assert.is_true(ok, detail)
+            assert.equal(crypto .. " " .. ssl .. "\n", detail)
+        end
+        assert(os.remove(bin .. "/libssl-4-x64.dll"))
+        local ok, detail = identify()
+        assert.is_false(ok)
+        assert.matches("missing selected runtime " .. bin .. "/libssl-4-x64.dll", detail, 1, true)
+
+        library("libssl", "unrelated.dll")
+        write_file(bin .. "/unrelated.dll", "fixture runtime\n")
+        ok, detail = identify()
+        assert.is_false(ok)
+        assert.matches("expected a single libssl DLL basename", detail, 1, true)
+        write_file(lib .. "/libssl.dll.a", "invalid archive\n")
+        ok, detail = identify()
+        assert.is_false(ok)
+        assert.matches("cannot identify the import target", detail, 1, true)
+    end)
+
+    it("admits OpenSSL Windows CNG imports without admitting stale private DLLs", function()
+        workspace = temporary_directory("windows-openssl-imports")
+        local report = workspace .. "/provider.imports"
+        local function audit(name)
+            write_file(report, "Format: COFF-x86-64\nImport {\n  Name: " .. name .. "\n}\n")
+            return run({ "perl", "spec/support/check_windows_native_imports.pl",
+                "libcrypto-4-x64.dll", "libssl-4-x64.dll", report })
+        end
+        assert(audit("BCRYPT.dll"))
+        assert(audit("libcrypto-4-x64.dll"))
+        local ok, detail = audit("libcrypto-3-x64.dll")
+        assert.is_false(ok)
+        assert.matches("Unexpected native dependency: libcrypto-3-x64.dll", detail, 1, true)
+    end)
+
     it("stages the Windows rock SDK without copying Lua or changing the prepared prefix", function()
         if platform.windows then
             pending("POSIX model of Windows Make staging without native compilation")
@@ -2716,7 +2781,7 @@ describe("relocatable Lua build configuration", function()
         end
         for _, path in ipairs({ "Makefile.win", "scripts/install_compiler.mk", "scripts/browser.mk",
                 "scripts/titan_install.lua", "scripts/titan-install", "scripts/titan-uninstall",
-                "spec/support/stdlib_test_modules.mk" }) do
+                "scripts/windows_openssl.sh", "spec/support/stdlib_test_modules.mk" }) do
             fixture(source, path, read_file(path))
         end
         for _, path in ipairs({ "titanc", "titan-compiler/driver.lua", "LICENSE",
@@ -2741,13 +2806,16 @@ describe("relocatable Lua build configuration", function()
         }
         for _, path in ipairs({
             "bin/libuv-1.dll", "bin/libllhttp-9.4.dll", "bin/libsqlite3-0.dll",
-            "bin/libcrypto-3-x64.dll", "bin/libssl-3-x64.dll",
             "lib/libuv.dll.a", "lib/libllhttp.dll.a", "lib/libsqlite3.dll.a",
             "lib/libcrypto.dll.a", "lib/libssl.dll.a", "lib/libbacktrace.a",
             "include/uv.h", "include/llhttp.h", "include/sqlite3.h",
             "include/backtrace.h", "include/backtrace-supported.h",
             "include/uv/version.h", "include/openssl/ssl.h",
         }) do expected[path] = fixture(prefix, path) end
+        for _, major in ipairs({ 3, 4 }) do
+            fixture(prefix, ("bin/libcrypto-%d-x64.dll"):format(major))
+            fixture(prefix, ("bin/libssl-%d-x64.dll"):format(major))
+        end
         for _, path in ipairs({ "bin/lua.exe", "bin/lua55.dll", "lib/liblua55.a",
                 "include/lua.h", "src/lua-5.5.1/lua.h", "bin/unrelated.exe",
                 "lib/unrelated.a", "include/unrelated.h", "share/unrelated.txt",
@@ -2768,27 +2836,41 @@ describe("relocatable Lua build configuration", function()
             return result
         end
         local original = snapshot(prefix)
-        local ok, output = run({
-            "env", "-u", "OS", "-u", "MAKEFLAGS", "-u", "MFLAGS",
-            "-u", "MAKEOVERRIDES", "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
-            "make", "--no-print-directory", "-s", "-f", "Makefile.win", "install",
-            "PREFIX=" .. prefix, "ROCKS_TREE=" .. prefix, "WINDOWS_BUILD_ROOT=" .. build,
-            "INST_PREFIX=" .. private, "INST_LUADIR=" .. private .. "/lua",
-            "INST_BINDIR=" .. private .. "/bin", "INST_CONFDIR=" .. private .. "/conf",
-            "INST_LIBDIR=" .. private .. "/lib",
-            "TITAN_LICENSE_FILES=fixture-license", "STDLIB_MODULES=math",
-            "OPENSSL_MODE=system", "TITAN_BUILD_PROFILE=validation",
-        }, source)
-        assert.truthy(ok, output)
-        assert.same(original, snapshot(prefix))
-        local staged = snapshot(private .. "/titan-sdk")
-        assert.equal("validation\n", assert(staged["etc/titan/build-profile"])[1])
-        staged["etc/titan/build-profile"] = nil
-        for relative, input in pairs(expected) do
-            assert.same({ read_file(input), old }, staged[relative], relative)
-            staged[relative] = nil
+        local function stage(major, destination)
+            local crypto = ("libcrypto-%d-x64.dll"):format(major)
+            local ssl = ("libssl-%d-x64.dll"):format(major)
+            fixture(build, "native/openssl-dlls", crypto .. " " .. ssl .. "\n")
+            local ok, output = run({
+                "env", "-u", "OS", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                "-u", "MAKEOVERRIDES", "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+                "make", "--no-print-directory", "-s", "-f", "Makefile.win", "install",
+                "PREFIX=" .. prefix, "ROCKS_TREE=" .. prefix, "WINDOWS_BUILD_ROOT=" .. build,
+                "INST_PREFIX=" .. destination, "INST_LUADIR=" .. destination .. "/lua",
+                "INST_BINDIR=" .. destination .. "/bin", "INST_CONFDIR=" .. destination .. "/conf",
+                "INST_LIBDIR=" .. destination .. "/lib",
+                "TITAN_LICENSE_FILES=fixture-license", "STDLIB_MODULES=math",
+                "OPENSSL_MODE=system", "TITAN_BUILD_PROFILE=validation",
+            }, source)
+            assert.truthy(ok, output)
+            assert.same(original, snapshot(prefix))
+            local staged = snapshot(destination .. "/titan-sdk")
+            assert.equal("validation\n", assert(staged["etc/titan/build-profile"])[1])
+            staged["etc/titan/build-profile"] = nil
+            for _, dll in ipairs({ crypto, ssl }) do
+                local relative = "bin/" .. dll
+                assert.same(original[relative], staged[relative], relative)
+                staged[relative] = nil
+            end
+            for relative, input in pairs(expected) do
+                assert.same({ read_file(input), old }, staged[relative], relative)
+                staged[relative] = nil
+            end
+            assert.same({}, staged, "unexpected files in the retained native SDK")
         end
-        assert.same({}, staged, "unexpected files in the retained native SDK")
+        -- Both versions are present in the prefix: retain only the selected
+        -- pair, even when the other version's files are still on disk.
+        stage(3, private .. " v3")
+        stage(4, private)
         for _, copy in ipairs({
             { "titanc", "lua/titan-compiler/titanc.lua" },
             { "scripts/titan-install", "bin/titan-install" },

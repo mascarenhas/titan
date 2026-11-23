@@ -17,26 +17,17 @@ mkdir -p "$2/native-check"
 check_root=$(cd "$2/native-check" && pwd)
 run_root=$(mktemp -d "$check_root/runtime.XXXXXX")
 mkdir -p "$run_root/bin" "$run_root/unrelated"
-libraries=(libuv-1.dll libllhttp-9.4.dll libsqlite3-0.dll libcrypto-3-x64.dll libssl-3-x64.dll)
+selected=$(bash scripts/windows_openssl.sh identify "$prefix/lib" "$prefix/bin")
+read -r crypto ssl <<< "$selected"
+libraries=(libuv-1.dll libllhttp-9.4.dll libsqlite3-0.dll "$crypto" "$ssl")
 for library in "${libraries[@]}"; do cp "$prefix/bin/$library" "$run_root/bin/"; done
 # Audit both regular and delayed imports of every packaged private image.
 # The sole non-OS destinations allowed here are the five files copied above.
 inspect_imports() {
   local file=$1
   llvm-readobj --coff-imports "$file" > "$check_root/${file##*/}.imports"
-  perl -0777 -e '
-    my $text=<>;
-    die "Expected x64 COFF image\n" unless $text =~ /^Format: COFF-x86-64\r?$/m;
-    my @names=$text =~ /^  Name: ([^\r\n]+)\r?$/mg;
-    die "Missing native PE import table\n" unless @names;
-    my %private=map { $_=>1 } qw(libuv-1.dll libllhttp-9.4.dll libsqlite3-0.dll libcrypto-3-x64.dll libssl-3-x64.dll);
-    # libuv imports the Windows WaitOnAddress synchronization API contract.
-    my %system=map { $_=>1 } qw(kernel32.dll ucrtbase.dll advapi32.dll user32.dll psapi.dll iphlpapi.dll userenv.dll ws2_32.dll dbghelp.dll ole32.dll shell32.dll gdi32.dll crypt32.dll api-ms-win-core-synch-l1-2-0.dll);
-    for my $name (@names) {
-      $name=lc $name;
-      die "Unexpected native dependency: $name\n" unless $private{$name} || $system{$name} || $name =~ /^api-ms-win-crt-[a-z0-9-]+\.dll$/;
-    }
-  ' "$check_root/${file##*/}.imports"
+  perl spec/support/check_windows_native_imports.pl \
+    "$crypto" "$ssl" "$check_root/${file##*/}.imports"
 }
 for file in "$run_root/bin/"*.dll; do
   inspect_imports "$file"
