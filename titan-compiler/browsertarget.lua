@@ -438,7 +438,8 @@ function M.decode_analysis(context, bytes)
         "emscripten_version", "build_profile", "profile_data", "lua",
         "provider_sha256", "absent_sha256" }) or data.target ~= "browser" or
         data.triple ~= TRIPLE or data.abi ~= version.TITAN_ABI_VERSION or
-        data.release ~= version.TITAN_VERSION or data.emscripten_version ~= M.EMSCRIPTEN_VERSION or
+        version.library_series(data.release) ~= version.TITAN_LIBRARY_VERSION or
+        data.emscripten_version ~= M.EMSCRIPTEN_VERSION or
         not M.valid_profile(data.build_profile) then
         return nil, "incompatible browser semantic target"
     end

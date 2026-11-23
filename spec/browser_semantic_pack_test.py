@@ -278,6 +278,17 @@ assert(io:write_file(manifest, assert(codec.encode(record))))
 local pathname = ...
 local io = require("titan-compiler.io").new_sync()
 local codec = require "titan-compiler.graphcodec"
+local version = require "titan-compiler.version"
+local record = assert(codec.decode(assert(io:read_file(pathname))))
+record.release = version.TITAN_LIBRARY_VERSION .. ".99"
+assert(io:write_file(pathname, assert(codec.encode(record))))
+""", target)
+        reject("analysis-target: release does not match the SDK compiler")
+        target.write_bytes(original_target)
+        self.run_lua("""
+local pathname = ...
+local io = require("titan-compiler.io").new_sync()
+local codec = require "titan-compiler.graphcodec"
 local record = assert(codec.decode(assert(io:read_file(pathname))))
 record.lua.fork_revision = string.rep("a", 40)
 assert(io:write_file(pathname, assert(codec.encode(record))))

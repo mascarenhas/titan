@@ -20,8 +20,14 @@ local version = {
     SOURCE_INTERFACE_FORMAT = "titan-source-interface-v2",
 }
 
-version.TITAN_LIBRARY_VERSION =
-    assert(version.TITAN_VERSION:match("^(%d+%.%d+)%.[0-9]+$"))
+-- Releases use canonical major.minor.patch, without leading zeroes.
+function version.library_series(release)
+    if type(release) ~= "string" then return nil end
+    local series = release:match("^([0-9]+%.[0-9]+)%.[0-9]+$")
+    if series and not release:find("%f[0-9]0[0-9]") then return series end
+end
+
+version.TITAN_LIBRARY_VERSION = assert(version.library_series(version.TITAN_VERSION))
 version.TITAN_LIBRARY_VERSION_SUFFIX =
     "_" .. version.TITAN_LIBRARY_VERSION:gsub("%.", "_")
 

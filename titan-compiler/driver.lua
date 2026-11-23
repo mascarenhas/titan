@@ -2506,8 +2506,7 @@ function driver.language_server_cache_identity(options)
     local pieces = {}
     for _, item in ipairs({
         "titan-language-server-cache-v1", driver.LANGUAGE_SERVER_API_VERSION,
-        driver.TITAN_VERSION, driver.TITAN_LIBRARY_VERSION,
-        driver.TITAN_ABI_VERSION, graphcodec.VERSION, projectcache.VERSION,
+        driver.TITAN_LIBRARY_VERSION, driver.TITAN_ABI_VERSION, graphcodec.VERSION, projectcache.VERSION,
         foreigncache.VERSION, cdriver.HEADER_CACHE_VERSION, identity, cwd,
         driver.CC, driver.CFLAGS, driver._TOOLCHAIN_FLAGS_ERROR or "", native_identity,
     }) do
