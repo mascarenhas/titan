@@ -300,8 +300,11 @@ require:
   `browsertarget.encode_analysis` projects the validated live descriptor.
   `browsertarget.decode_analysis` accepts only that closed data shape, with a
   64 KiB payload bound, at most 128 graph nodes and at most 1,024 entries.
-  It checks the pinned Wasm and C ABI traits and the Lua record's numeric
-  types and canonical browser defines before returning the semantic facts.
+  It requires exact matches on `TITAN_VERSION` (`release`), `TITAN_ABI_VERSION`,
+  and the pinned Emscripten version alongside the Wasm/C ABI traits and the Lua
+  record's numeric types and canonical browser defines before returning the
+  semantic facts; an `analysis-target` or companion pack from an earlier patch
+  release is rejected even when `TITAN_ABI_VERSION` is unchanged.
   The encoder visits string keys in bytewise order before assigning graph
   reference IDs, so identical semantic inputs give identical bytes in
   separate Lua processes. Companion pack tooling re-encodes decoded data
