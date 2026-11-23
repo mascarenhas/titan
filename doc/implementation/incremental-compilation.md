@@ -721,6 +721,33 @@ On Windows the rebound origin's realpath retains native path serialization,
 matching the I/O strategy that records and revalidates it. Concrete path case
 and semantic C strings are not folded or rewritten.
 
+For generated C and foreign header text, `relocation.includes` and
+`relocation.generated` share a logical-line LPegLabel directive scanner
+(`titan-compiler/relocation.lua`) that skips multiline comments, quoted and raw
+string literals, character constants, and phase-2 line splices (including the
+`??/` trigraph), so directive-like text inside those constructs is never
+rewritten. Only actual directives with valid trailing spacing or comments are
+visited:
+
+* `#include "..."` and `#include <...>` are C header-name preprocessing tokens,
+  not string literals; their raw delimiter-bounded paths are mapped directly
+  without escape decoding or re-encoding (in both `relocation.includes` and
+  `relocation.generated`).
+* `#line <digits> "..."` and `#define TITAN_GENERATED_C_FILE "..."` (handled by
+  `relocation.generated` only) decode the quoted operand with
+  [`util.decode_c_line_filename`](codegen-overview.md#mixed-source-line-attribution)
+  into raw filename bytes before matching or rebinding against admitted roots.
+  Decoding first prevents Windows separator folding (`path.to_slash`) from
+  corrupting C escape sequences such as `\u0024` or `\044`, and lets roots or
+  tails containing quotes, backslashes, `?`, `$`, or control bytes match
+  accurately.
+
+Only a token whose decoded path actually changes is rewritten—canonically
+spelled with `util.c_line_filename` for line controls, or written directly for
+header names. Non-owned paths, malformed or non-literal operands (such as
+`#line 1 TITAN_GENERATED_C_FILE`), and all surrounding bytes remain
+byte-identical.
+
 Compilation records each generated part's final C prefix, after formatting and
 any coverage line conversion, before source-record injection. A binary read
 supplies its byte count and digest; appending the primary source record uses

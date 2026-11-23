@@ -587,8 +587,11 @@ A cached module object is reused only when all of the following match:
   Titan sources.
 
 With `-o`, moving a checkout whose source paths remain relative (together with
-its output tree and an identical SDK) preserves reuse; `titanc` verifies the
-preprocessed C once on first use after the move. Source-adjacent builds
+its output tree and an identical SDK) preserves reuse—even when owned directory
+paths contain characters requiring C escapes in `#line` directives (such as
+quotes, backslashes, `?`, or `$`)—by rebinding only owned preprocessor
+directives and verifying the preprocessed C once on first use after the move.
+Unowned paths and ordinary C strings stay untouched. Source-adjacent builds
 without `-o` miss conservatively when moved.
 
 Pass `-v` to inspect why a module or link rebuilt:
