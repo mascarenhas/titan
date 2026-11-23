@@ -127,9 +127,11 @@ Filesystem and decode failures are classified by where they occur:
   establish preamble inputs (for example, a missing or unreadable reported
   path, an incomplete phony inventory, or an ambiguous phony spelling),
   `incremental.preamble_identity` returns `nil, "cannot establish preamble
-  dependencies: <detail>", "uncertified"`, which switches the build to raw
-  uncertified compilation so standalone compilation still succeeds without
-  reusing or writing certificates.
+  dependencies: <detail>", "uncertified"`, which switches Titan source-object
+  compilation and the final link to uncertified mode so standalone compilation
+  still succeeds without reusing or writing those certificates (independently
+  certifiable `--c-source` nodes still certify against their own
+  `toolchain_identity` unless the shared toolchain itself is uncertified).
 * **Per-object certification errors become reuse misses.** During
   `certify_local`, `verdict`, and the pre-mutation prefix of
   `restore_source_object`, any string error from reading or decoding the
@@ -492,17 +494,23 @@ digest, and each worker recomputes that inventory
 mismatch or an unreadable inventory, to verify that the loaded compiler Lua
 files did not change after the coordinator started.
 
-Only the explicit third result `"uncertified"` from the configuration or
-toolchain identity (for example a Windows tool whose launcher policy cannot
-be proven) selects raw compilation. The resolver then keeps
+Only the explicit third result `"uncertified"` from the configuration
+(shared toolchain or preamble identity—for example a Windows tool whose
+launcher policy cannot be proven, or an uncertain preamble dependency report)
+selects raw Titan compilation. The resolver then keeps
 `incremental_configuration` nil and stores the reason separately as
 `incremental_uncertified`, and the worker configuration carries
 `uncertified = reason` instead of `configuration`. In that mode existing
-objects are never reused: planning parses and selects fresh source, and
-generated objects carry their ordinary metadata but no producer interface
-digests and no certificate, so a later unchanged invocation still cannot hit.
-The final link and `--c-source` nodes are likewise marked uncacheable. Any
-other configuration failure is still an invocation error, and non-string
+Titan source objects are never reused: planning parses and selects fresh
+source, and generated objects carry their ordinary metadata but no producer
+interface digests and no certificate, so a later unchanged invocation still
+cannot hit; `titanc` also passes the reason to mark the final link
+uncacheable. Authored `--c-source` nodes compute `incremental.toolchain_identity`
+independently (`nativeinputs.compile`) instead of reading
+`incremental_uncertified`, so an uncertified shared *toolchain* marks
+`--c-source` nodes uncacheable as well, whereas an uncertified *preamble*
+leaves independently certifiable `--c-source` nodes cacheable. Any other
+configuration failure is still an invocation error, and non-string
 cancellations propagate unchanged.
 
 Uncertainty limited to final output (an uncertain linker backend from
@@ -694,13 +702,14 @@ reports the exact component:
    report or resolving/hashing any reported prerequisite raises a string error,
    `preamble_identity` returns `nil, "cannot establish preamble dependencies:
    <detail>", "uncertified"` (and checks `lstat` before reporting an unlink
-   failure on a missing report) so the build degrades cleanly to uncertified
-   compilation. External headers whose paths contain literal backslashes on
-   POSIX with Clang/LLD remain unsupported: if an external backslash-named
-   header has an existing slash-spelled twin, Clang's POSIX `-MD`/`-MP` report
-   is byte-identical to opening the twin, so soundness covers only the known
-   TU, observed duplicate phony spellings, missing/unreadable reported inputs,
-   and known ELF LLD inputs.
+   failure on a missing report) so Titan source-object compilation and final
+   linking degrade cleanly to uncertified mode. External C headers whose paths
+   contain literal backslashes on POSIX with Clang remain unsupported: if an
+   external backslash-named header has an existing slash-spelled twin, Clang's
+   POSIX `-MD`/`-MP` report is byte-identical to opening the twin, so soundness
+   covers only the known TU, observed duplicate phony spellings,
+   missing/unreadable reported inputs, and (separately for linking) known ELF
+   LLD inputs.
 4. **`options` (`incremental.lua`).** Hashes `{ compile_prefix,
    build_profile, emit_line_directives, pretty_print, extra_ffi_include_dirs,
    titan_root }` with tag `"compile-options"`. Module-resolution flags

@@ -598,12 +598,15 @@ libuv through the matching SDK header contract.
 and verifies those imports and producer declarations. `native-check` requires
 Windows: `spec/support/check_windows_native.sh` identifies the installed
 OpenSSL DLL pair via `scripts/windows_openssl.sh identify`, copies only the
-five selected DLLs into a clean runtime directory, and audits regular/delay PE
-imports and export forwarders of every private DLL with
-`spec/support/check_windows_native_imports.pl` against those exact two OpenSSL
-basenames plus the Windows OS allowlist (including `bcrypt.dll`, which MSYS2
-OpenSSL 4 `libcrypto` imports for Windows CNG). It then links a consumer
-against the exact SDK import libraries. With no toolchain PATH entries, the
+five selected DLLs (`libuv-1.dll`, `libllhttp-9.4.dll`, `libsqlite3-0.dll`,
+and the two OpenSSL DLLs) into a clean runtime directory, audits regular/delay
+PE imports of each private DLL with
+`spec/support/check_windows_native_imports.pl` against all five selected
+private DLLs plus the Windows OS allowlist (including `bcrypt.dll`, which MSYS2
+OpenSSL 4 `libcrypto` imports for Windows CNG), and separately checks
+`llvm-readobj --coff-exports` in the shell to reject export forwarders. It then
+links a consumer against the exact SDK import libraries. With no toolchain PATH
+entries, the
 five-DLL runtime subset exercises a libuv asynchronous callback, an llhttp
 request, an in-memory SQLite query and shared data address, and OpenSSL
 SHA-256 and TLS-context creation. `SSL_CTX_new` success does not prove a TLS
