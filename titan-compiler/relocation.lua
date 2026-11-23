@@ -4,6 +4,7 @@ local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local root_fields = require("titan-compiler.declarationschemas").relocation
 local util = require "titan-compiler.util"
+local lpeg = require "lpeglabel"
 local relocation = {}
 
 local function normalized(path)
@@ -133,27 +134,87 @@ function relocation.argv(context, argv)
     return result
 end
 
--- Only the header-name token is rewritten. Never rewrite C literals, macro
--- definitions, #line locations or the preprocessor's expanded semantic bytes.
+local P, R, S = lpeg.P, lpeg.R, lpeg.S
+local newline = P("\r\n") + S("\r\n")
+local backslash = P("\\") + P("??/")
+local splice = backslash * newline
+local horizontal = S(" \t\v\f")
+local spacing = (horizontal + splice)^0
+local gap = splice^0 * horizontal * spacing
+local block_close = P("*") * splice^0 * P("/")
+local block_open = P("/") * splice^0 * P("*")
+local block = block_open * (P(1) - block_close)^0 * block_close
+local line_comment = P("/") * splice^0 * P("/") * (splice + (P(1) - newline))^0
+local directive_end = (spacing * block)^0 * spacing * line_comment^-1 * #(newline + -P(1))
+
+local function quoted(quote)
+    local escaped = splice + backslash * (P(1) - newline)
+    return P(quote) * (escaped + (P(1) - newline - S(quote .. "\\")))^0 * P(quote)^-1
+end
+
+local raw_string = lpeg.Cmt((P("u8") + S("uUL"))^-1 * P('R"') *
+    lpeg.C((P(1) - S(" ()\\\t\r\n\v\f"))^-16) * P("("),
+    function(source, position, delimiter)
+        local _, finish = source:find(")" .. delimiter .. '"', position, true)
+        return finish and finish + 1 or #source + 1
+    end)
+local word = R("az", "AZ", "09", "\128\255") + S("_$")
+local token = raw_string + quoted('"') + quoted("'") + block + line_comment +
+    block_open * P(1)^0 + word * (word + splice)^0 + splice + (P(1) - newline)
+local directive = lpeg.Cmt((spacing * block)^0 * spacing * P("#") * spacing *
+    (P("include") * gap * #S('"<') * lpeg.Cc(true) +
+     (P("line") * gap * R("09")^1 + P("define") * gap * P("TITAN_GENERATED_C_FILE"))
+        * gap * #P('"') * lpeg.Cc(false)) * lpeg.Carg(1),
+    function(_, position, include, visit)
+        return visit(position, include) or position
+    end)
+-- Only try each directive at the beginning of a logical line. The token walk
+-- consumes multiline comments, literals and phase-2 splices without exposing
+-- directive-like text inside those constructs.
+local directives = (directive * token^0 * newline^-1 + token^1 * newline^-1 + newline)^0
+
+local function rewrite(context, contents, previous, includes_only)
+    if not contents:find("#", 1, true) then return contents end
+    local parts, copied = nil, 1
+    lpeg.match(directives, contents, 1, function(opening, include)
+        local path, after, first, finish
+        if include then
+            -- Header names are preprocessing tokens, not string literals.
+            local delimiter = contents:sub(opening, opening) == '"' and '"' or ">"
+            local end_at = contents:find("[" .. delimiter .. "\r\n]", opening + 1)
+            if not end_at or contents:sub(end_at, end_at) ~= delimiter then return nil end
+            first, finish, after = opening + 1, end_at, end_at + 1
+            path = contents:sub(first, finish - 1)
+        elseif not includes_only then
+            path, after = util.decode_c_line_filename(contents, opening)
+            if not path then return nil end
+            first, finish = opening, after
+        else
+            return nil
+        end
+        if lpeg.match(directive_end, contents, after) then
+            local mapped = previous and relocation.rebind(context, path, previous)
+                or relocation.path(context, path)
+            if mapped ~= path then
+                parts = parts or {}
+                parts[#parts + 1] = contents:sub(copied, first - 1)
+                parts[#parts + 1] = include and mapped or util.c_line_filename(mapped)
+                copied = finish
+            end
+        end
+        return after
+    end)
+    if not parts then return contents end
+    parts[#parts + 1] = contents:sub(copied)
+    return table.concat(parts)
+end
+
 function relocation.includes(context, contents, previous)
-    local function mapped(before, path, after)
-        return before .. (previous and relocation.rebind(context, path, previous)
-            or relocation.path(context, path)) .. after
-    end
-    contents = contents:gsub('(#[ \t]*include[ \t]+")([^"\r\n]+)(")', mapped)
-    return (contents:gsub('(#[ \t]*include[ \t]+<)([^>\r\n]+)(>)', mapped))
+    return rewrite(context, contents, previous, true)
 end
 
 function relocation.generated(context, contents, previous)
-    contents = relocation.includes(context, contents, previous)
-    local function mapped(path)
-        return previous and relocation.rebind(context, path, previous)
-            or relocation.path(context, path)
-    end
-    contents = contents:gsub('(#[ \t]*define[ \t]+TITAN_GENERATED_C_FILE[ \t]+")([^"\r\n]+)(")',
-        function(before, path, after) return before .. mapped(path) .. after end)
-    return (contents:gsub('(#[ \t]*line[ \t]+%d+[ \t]+")([^"\r\n]+)(")',
-        function(before, path, after) return before .. mapped(path) .. after end))
+    return rewrite(context, contents, previous, false)
 end
 
 function relocation.files(context, files)

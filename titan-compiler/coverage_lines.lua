@@ -9,8 +9,6 @@ coverage_lines.comment_pragma = "^ TITAN_COVERAGE_"
 local TRIGRAPHS = { ["="] = "#", ["/"] = "\\", ["'"] = "^",
     ["("] = "[", [")"] = "]", ["!"] = "|", ["<"] = "{",
     [">"] = "}", ["-"] = "~" }
-local SIMPLE_ESCAPES = { a = "\a", b = "\b", f = "\f", n = "\n", r = "\r",
-    t = "\t", v = "\v" }
 
 local function valid_line(line)
     return type(line) == "number" and line % 1 == 0
@@ -134,47 +132,12 @@ local function authored_directive(line, region)
         number, tail = line:match("^[ \t]*#[ \t]*(%d+)(.*)$")
     end
     if not number or not valid_line(tonumber(number)) then return end
-    local quoted = tail:match('^[ \t]+(".*")[ \t]*$')
-    if quoted then
-        local bytes, offset = {}, 2
-        while offset < #quoted do
-            local byte = quoted:sub(offset, offset)
-            if byte == "\\" then
-                -- Every spelling a conforming compiler accepts, including
-                -- util.c_line_filename's: octal (authored GCC and older
-                -- Clang C), universal character names, simple escapes.
-                local rest = quoted:sub(offset + 1)
-                local octal = rest:match("^([0-7][0-7]?[0-7]?)")
-                local ucn = rest:match("^u(%x%x%x%x)")
-                    or rest:match("^U(%x%x%x%x%x%x%x%x)")
-                if octal then
-                    local value = tonumber(octal, 8)
-                    if value > 255 then return end
-                    bytes[#bytes + 1] = string.char(value)
-                    offset = offset + 1 + #octal
-                elseif ucn then
-                    local code = tonumber(ucn, 16)
-                    if code > 0x10FFFF or code >= 0xD800 and code <= 0xDFFF then
-                        return
-                    end
-                    bytes[#bytes + 1] = utf8.char(code)
-                    offset = offset + 2 + #ucn
-                elseif SIMPLE_ESCAPES[rest:sub(1, 1)] then
-                    bytes[#bytes + 1] = SIMPLE_ESCAPES[rest:sub(1, 1)]
-                    offset = offset + 2
-                else
-                    bytes[#bytes + 1] = rest:sub(1, 1)
-                    offset = offset + 2
-                end
-            elseif byte == '"' then
-                return
-            else
-                bytes[#bytes + 1] = byte
-                offset = offset + 1
-            end
+    local opening = tail:match('^[ \t]+()"')
+    if opening then
+        local filename, after = util.decode_c_line_filename(tail, opening)
+        if not valid_filename(filename) or not tail:match("^[ \t]*$", after) then
+            return
         end
-        local filename = table.concat(bytes)
-        if not valid_filename(filename) then return end
         region.filename = filename
     elseif not tail:match("^[ \t]*$") then
         return

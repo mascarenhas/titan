@@ -15086,12 +15086,20 @@ function driver.preflight_build_outputs(context, plan, options)
             if not contents then return nil, read_error end
             -- Coverage conversion places its exact first line directive
             -- before the marker; retain its physical generated-line anchors.
-            local marker_start = contents:match('^#line 2 "[^\r\n]*"\r?\n()') or 1
+            local opening = contents:match('^#line 2 ()"')
+            local marker_start
+            if opening then
+                local _, after = util.decode_c_line_filename(contents, opening)
+                if after then marker_start = contents:match("^\r?\n()", after) end
+            end
+            marker_start = marker_start or 1
             local owned = contents:sub(marker_start,
                 marker_start + #driver.GENERATED_C_MARKER - 1) == driver.GENERATED_C_MARKER
             if not owned then
-                local compact = ("\n" .. contents):gsub('\n#line %d+ "[^\r\n]*"', "")
-                    :gsub("%s+", "")
+                local compact = ("\n" .. contents):gsub('\n#line %d+ ("[^\r\n]*)', function(token)
+                    local _, after = util.decode_c_line_filename(token, 1)
+                    if after and token:match("^[ \t]*$", after) then return "" end
+                end):gsub("%s+", "")
                 owned = compact:find(fixed_helper, 1, true) ~= nil
             end
             if not owned then

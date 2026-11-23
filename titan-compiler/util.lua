@@ -98,6 +98,64 @@ function util.c_line_filename(filename)
     return '"' .. filename:gsub('[\\"?$\a\b\f\n\r\t\v]', LINE_FILENAME_ESCAPES) .. '"'
 end
 
+local LINE_FILENAME_SIMPLE = { ["'"] = "'" }
+for byte, spelling in pairs(LINE_FILENAME_ESCAPES) do
+    if #spelling == 2 then LINE_FILENAME_SIMPLE[spelling:sub(2)] = byte end
+end
+
+-- Decode one C line-control filename, leaving the caller to check directive
+-- syntax around it. The returned cursor is just past the closing quote.
+function util.decode_c_line_filename(source, opening)
+    if source:sub(opening, opening) ~= '"' then return nil end
+    local start, parts = opening + 1, nil
+    while true do
+        local stop = source:find('["\\\r\n%z]', start)
+        if not stop then return nil end
+        local byte = source:sub(stop, stop)
+        if byte == '"' then
+            local tail = source:sub(start, stop - 1)
+            if not parts then return tail, stop + 1 end
+            parts[#parts + 1] = tail
+            return table.concat(parts), stop + 1
+        end
+        if byte ~= "\\" then return nil end
+        local escape = source:sub(stop + 1, stop + 1)
+        local decoded, after = LINE_FILENAME_SIMPLE[escape], stop + 2
+        if not decoded then
+            local first, last, code
+            if escape == "u" or escape == "U" then
+                local digits = escape == "u" and "^%x%x%x%x" or "^%x%x%x%x%x%x%x%x"
+                first, last = source:find(digits, after)
+                if not first then return nil end
+                code = tonumber(source:sub(first, last), 16)
+                if code == 0 or code > 0x10FFFF or code >= 0xD800 and code <= 0xDFFF then
+                    return nil
+                end
+                decoded = utf8.char(code)
+            elseif escape == "x" then
+                first, last = source:find("^%x+", after)
+                if not first then return nil end
+                -- Leading zeroes do not count towards the byte range. Do not
+                -- pass a potentially overflowing run to tonumber.
+                first = source:find("[^0]", first)
+                if not first or first > last or last - first > 1 then return nil end
+                decoded = string.char(tonumber(source:sub(first, last), 16))
+            else
+                first, last = source:find("^[0-7][0-7]?[0-7]?", stop + 1)
+                if not first then return nil end
+                code = tonumber(source:sub(first, last), 8)
+                if code == 0 or code > 255 then return nil end
+                decoded = string.char(code)
+            end
+            after = last + 1
+        end
+        parts = parts or {}
+        parts[#parts + 1] = source:sub(start, stop - 1)
+        parts[#parts + 1] = decoded
+        start = after
+    end
+end
+
 -- Barebones string-based template function for generating C/Lua code. Replaces
 -- $VAR and ${VAR} placeholders in the `code` template by the corresponding
 -- strings in the `substs` table.

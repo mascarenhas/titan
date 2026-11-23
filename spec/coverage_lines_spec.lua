@@ -63,6 +63,12 @@ describe("coverage C source regions", function()
         assert.truthy(result:find('#line 91 "caf\195\169.c"\nnext();', 1, true))
     end)
 
+    it("decodes a greedy hexadecimal byte escape in an authored filename", function()
+        local result = mapped(lines.region('#line 90 "cash\\x00000000024-line.c"\nrun();\nnext();',
+            "authored", "old.c", 1))
+        assert.truthy(result:find('#line 91 "cash\\u0024-line.c"\nnext();', 1, true))
+    end)
+
     it("round-trips its own spelling and decodes universal character names", function()
         local name = 'C:\\dir\\b"c ??/ $line \t 文.c'
         local spelled = util.c_line_filename(name)
@@ -76,7 +82,8 @@ describe("coverage C source regions", function()
 
     it("keeps unrepresentable authored escapes from changing source ownership", function()
         for _, control in ipairs({ '#line 90 "a\\uD800.c"', '#line 90 "a\\U00110000.c"',
-                '#line 90 "a\\777.c"' }) do
+                '#line 90 "a\\777.c"', '#line 90 "a\\x24f.c"', '#line 90 "a\\q.c"',
+                '#line 90 "a\\000.c"', '#line 90 "a\\n.c"' }) do
             local result = mapped(lines.region(control .. "\nrun();", "authored", "old.c", 1))
             assert.truthy(result:find(control, 1, true))
             assert.truthy(result:find('#line 2 "old.c"\nrun();', 1, true))

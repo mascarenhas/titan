@@ -5184,8 +5184,16 @@ end
         local stem = root .. "/gen"
         local split_push = "#if defined(__ELF__)\n#pragma GCC visibility push(protected)\n" ..
             "#endif\nint split_unit;\n"
+        local filename = util.c_line_filename('output\\quote"?$.c')
+        local marker = driver.GENERATED_C_MARKER .. "\n"
+        local legacy = cpreamble.fixed_prefix:gsub("\n    if ",
+            "\n#line 3 " .. filename .. "\n    if ", 1)
         local cases = {
             { "/* An older generated unit. */\n" .. cpreamble.fixed_prefix, true },
+            { legacy, true },
+            { "#line 2 " .. filename .. "\r\n" .. marker, true },
+            { "#line 2 " .. filename .. ' "another.c"\n' .. marker, false },
+            { '#line 2 "malformed\\q.c"\n' .. marker, false },
             { "#include \"" .. root .. "/elsewhere/gen.priv.h\"\n" .. split_push, false },
             { "int authored(void) { return 1; }\n", false },
         }

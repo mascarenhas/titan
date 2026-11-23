@@ -9,6 +9,8 @@ local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 local cdriver = require "c-parser.cdriver"
+local paths = require "titan-compiler.path"
+local relocation = require "titan-compiler.relocation"
 local util = require "titan-compiler.util"
 
 local MODULE = "line_directives"
@@ -166,11 +168,14 @@ describe("generated C line directives", function()
         if not tested then error(test_error, 0) end
     end)
 
-    it("spells line-control filenames that the host C compiler decodes exactly", function()
+    it("rebinds line-control filenames that the host C compiler decodes exactly", function()
         -- Names are virtual, so quotes, question marks and control bytes work
         -- on every host. Valid UTF-8 keeps Clang free of encoding warnings.
-        local generated = 'C:\\dir\\b"c ??/ ??= $line ${x} 文 😀 Ω.c'
-        local source = 'C:\\dir\\b"c ??/ ??= $line ${x} 文 😀 Ω\t\1\127.titan'
+        local previous = platform.windows and 'C:/old"?' or '/old\\"?'
+        local current = platform.windows and "D:/new$" or "/new$"
+        local generated_tail = '/b"c ??/ ??= $line ${x} 文 😀 Ω.c'
+        local source_tail = '/b"c ??/ ??= $line ${x} 文 😀 Ω\t\1\127.titan'
+        local generated, source = current .. generated_tail, current .. source_tail
         local function bytes(text)
             local values = {}
             for index = 1, #text do values[index] = tostring(text:byte(index)) end
@@ -178,12 +183,13 @@ describe("generated C line directives", function()
         end
         local program = table.concat({
             "#include <string.h>",
-            "#define TITAN_GENERATED_C_FILE " .. util.c_line_filename(generated),
+            "#define TITAN_GENERATED_C_FILE " ..
+                util.c_line_filename(paths.from_slash(previous .. generated_tail)),
             "static const unsigned char generated_expected[] = {" .. bytes(generated) .. "};",
             "static const unsigned char source_expected[] = {" .. bytes(source) .. "};",
             "#line 1 TITAN_GENERATED_C_FILE",
             "static const char *generated_file(void) { return __FILE__; }",
-            "#line 7 " .. util.c_line_filename(source),
+            "#line 7 " .. util.c_line_filename(paths.from_slash(previous .. source_tail)),
             "static const char *source_file(void) { return __FILE__; }",
             "typedef char source_length_check[sizeof(__FILE__) == sizeof(source_expected) + 1 ? 1 : -1];",
             '#line 13 "probe.c"',
@@ -197,6 +203,8 @@ describe("generated C line directives", function()
             "}",
             "",
         }, "\n")
+        program = relocation.generated({ relocation_roots = { output = current } },
+            program, { output = previous })
         local workspace = assert(compiler_io.new_sync():tmpname())
         if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
         os.remove(workspace)
