@@ -205,7 +205,9 @@ describe("certified app-owned C sources", function()
         end
         local built, err = build(nil, true, { actual }, replace_report)
         assert.is_nil(built)
+        assert.matches("cannot establish native dependencies for '" .. actual .. "':", err, 1, true)
         assert.matches(missing, err, 1, true)
+        assert.is_nil(err:find("stack traceback", 1, true))
         assert.same({ "native-preprocess" }, phases)
         for name in lfs.dir(root .. "/.native") do
             assert.is_true(name == "." or name == "..", name)
