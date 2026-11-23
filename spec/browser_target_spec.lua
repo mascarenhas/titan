@@ -18,6 +18,7 @@ local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local graphcodec = require "titan-compiler.graphcodec"
 local version = require "titan-compiler.version"
+local other_library_series = require "spec.support.other_library_series"
 local FAKE_ROOT = platform.windows and "C:/fake" or "/fake"
 local LUA_REMEDY = platform.windows and "mingw32-make -f Makefile.win lua-browser" or "make install-browser"
 local function tool_suffix()
@@ -241,7 +242,7 @@ describe("browser target descriptor", function()
         assert.has_error(function() browser.encode_analysis(nil, descriptor, "bad", absent) end)
     end)
 
-    it("accepts semantic profiles from other patch releases in the library series", function()
+    it("admits semantic profiles from the library series regardless of patch release", function()
         local descriptor = assert(browser.import(fixtures.descriptor()))
         local bytes = assert(browser.encode_analysis(nil, descriptor, ("a"):rep(64), ("b"):rep(64)))
         local data = assert(browser.decode_analysis(nil, bytes))
@@ -250,6 +251,12 @@ describe("browser target descriptor", function()
             data.release = release
             local decoded = assert(browser.decode_analysis(nil, assert(browser.encode_analysis_data(nil, data))))
             assert.equal(release, decoded.release)
+        end
+        for _, series in ipairs(other_library_series) do
+            data.release = series .. ".0"
+            local decoded, err = browser.decode_analysis(nil, assert(browser.encode_analysis_data(nil, data)))
+            assert.is_nil(decoded)
+            assert.equal("incompatible browser semantic target", err)
         end
     end)
 
@@ -294,8 +301,6 @@ assert(file:close())
             { "incompatible", function(data) data.target = "linux" end },
             { "incompatible", function(data) data.triple = "wasm64" end },
             { "incompatible", function(data) data.abi = "1" end },
-            { "incompatible", function(data) data.release = "0.5.0" end },
-            { "incompatible", function(data) data.release = "0.7.0" end },
             { "incompatible", function(data) data.release = version.TITAN_LIBRARY_VERSION end },
             { "incompatible", function(data) data.release = version.TITAN_LIBRARY_VERSION .. ".01" end },
             { "incompatible", function(data) data.release = {} end },

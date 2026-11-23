@@ -8,6 +8,7 @@ local cpp = require "c-parser.cpp"
 local coder = require "titan-compiler.coder"
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
+local other_library_series = require "spec.support.other_library_series"
 local _, close_contexts, resolver_options =
     require("spec.support.resolver_contexts")(driver)
 after_each(close_contexts)
@@ -365,10 +366,13 @@ describe("declared project manifests", function()
             local restored = assert(driver.decode_project_entry(assert(cpp.encode_graph(envelope))))
             assert.equal(interface, assert(driver.serialize_source_interface(restored)))
         end
+        local incompatible_releases = { driver.TITAN_LIBRARY_VERSION, driver.TITAN_LIBRARY_VERSION .. ".01", {} }
+        for _, series in ipairs(other_library_series) do
+            incompatible_releases[#incompatible_releases + 1] = series .. ".0"
+        end
         for field, values in pairs({
-            titan_version = { "0.5.0", "0.7.0", driver.TITAN_LIBRARY_VERSION,
-                driver.TITAN_LIBRARY_VERSION .. ".01", {} },
-            library_version = { "0.7" },
+            titan_version = incompatible_releases,
+            library_version = other_library_series,
             abi = { "1" },
             version = { 0 },
             graph_version = { 0 },
@@ -1267,7 +1271,7 @@ describe("language-server compiler cache identity", function()
             local identity = assert(driver.language_server_cache_identity(options))
             driver.TITAN_VERSION = series .. ".99"
             assert.equal(identity, assert(driver.language_server_cache_identity(options)))
-            driver.TITAN_LIBRARY_VERSION = "0.7"
+            driver.TITAN_LIBRARY_VERSION = other_library_series[1]
             assert.not_equal(identity, assert(driver.language_server_cache_identity(options)))
             driver.TITAN_LIBRARY_VERSION = series
             driver.TITAN_ABI_VERSION = "1"
