@@ -53,7 +53,7 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.1-1.rockspec') }}
           restore-keys: |
             ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 

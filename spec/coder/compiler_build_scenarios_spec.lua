@@ -667,8 +667,10 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             -- Fresh image validation uses the selected SDK's lua.exe. Keep
             -- its DLLs beside it and on PATH for the generated launchers too.
             for _, name in ipairs({ "lua.exe", "lua55.dll", "libuv-1.dll",
-                    "libllhttp-9.4.dll", "libsqlite3-0.dll", "libssl-3-x64.dll",
-                    "libcrypto-3-x64.dll" }) do
+                    "libllhttp-9.4.dll", "libsqlite3-0.dll" }) do
+                copy("bin/" .. name)
+            end
+            for _, name in ipairs(require("spec.support.installed_prefix").windows_openssl_dlls(prefix)) do
                 copy("bin/" .. name)
             end
             tool_path = sdk .. "/bin;" .. (os.getenv("PATH") or "")

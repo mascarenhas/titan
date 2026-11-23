@@ -163,6 +163,57 @@ describe("certified app-owned C sources", function()
         assert.same({ "native-preprocess" }, phases)
     end)
 
+    it("retains the literal native TU path and an included slash twin in reusable provenance", function()
+        if platform.windows then pending("POSIX literal backslash in a path"); return end
+        assert(lfs.mkdir(root .. "/lit\\eral"))
+        assert(lfs.mkdir(root .. "/lit"))
+        assert(lfs.mkdir(root .. "/lit/eral"))
+        local actual, twin = root .. "/lit\\eral/helper.c", root .. "/lit/eral/helper.c"
+        write(twin, "#define RETAINED 41\n")
+        write(actual, '#include "' .. twin .. '"\nint helper(void) { return RETAINED; }\n')
+        local first = assert(build(nil, true, { actual }))[1]
+        assert.is_false(first.hit)
+        assert.equal(actual, first.dependencies[1])
+        local retained = false
+        for _, path in ipairs(first.dependencies) do retained = retained or path == twin end
+        assert.is_true(retained)
+        assert_provenance(first)
+
+        local warm = assert(build(nil, true, { actual }))[1]
+        assert.is_true(warm.hit)
+        assert_provenance(warm)
+        write(twin, "#define RETAINED 42\n")
+        local edited = assert(build(nil, true, { actual }))[1]
+        assert.is_false(edited.hit)
+        assert.not_equal(first.identity, edited.identity)
+        assert_provenance(edited)
+    end)
+
+    it("does not publish a native object when the exceptional report cannot name a header", function()
+        if platform.windows then pending("POSIX literal backslash in a path"); return end
+        local actual = root .. "/literal\\source.c"
+        write(actual, "int helper(void) { return 1; }\n")
+        local missing = root .. "/missing/header.h"
+        local function replace_report(phase, result, argv)
+            if phase ~= "native-preprocess" or not result.ok then return end
+            for index, word in ipairs(argv) do
+                if word == "-MF" then
+                    write(argv[index + 1], "titan-native: main.c " .. missing .. "\n" .. missing .. ":\n")
+                    return
+                end
+            end
+        end
+        local built, err = build(nil, true, { actual }, replace_report)
+        assert.is_nil(built)
+        assert.matches("cannot establish native dependencies for '" .. actual .. "':", err, 1, true)
+        assert.matches(missing, err, 1, true)
+        assert.is_nil(err:find("stack traceback", 1, true))
+        assert.same({ "native-preprocess" }, phases)
+        for name in lfs.dir(root .. "/.native") do
+            assert.is_true(name == "." or name == "..", name)
+        end
+    end)
+
     it("classifies and fingerprints each preprocessed input with one read and hash", function()
         local ctx = context()
         local request = { sources = { source }, output_root = root,
@@ -638,6 +689,39 @@ describe("native C object path CLI", function()
         if platform.windows then repository = assert(platform.path.normalize(repository)) end
     end)
     after_each(function() remove(root) end)
+
+    it("certifies a POSIX literal-backslash output directory and runs a linked program", function()
+        if platform.windows then pending("POSIX literal backslash in a path"); return end
+        local output = root .. "/lit\\eral"
+        local executable = output .. "/program"
+        write(root .. "/backslash_main.titan", [[
+function main(args: {string}): integer
+    return 0
+end
+]])
+        local compile_only = { "-c", "--incremental", "-v", "--tree", root, "--output", output,
+            "backslash_main" }
+        local cold = invoke(compile_only)
+        assert.is_true(cold.ok, cold.stderr)
+        assert.matches("Titan object miss backslash_main:", cold.stderr, 1, true)
+        local warm = invoke(compile_only)
+        assert.is_true(warm.ok, warm.stderr)
+        assert.matches("Titan object hit backslash_main:", warm.stderr, 1, true)
+
+        local linked = invoke({ "--incremental", "--tree", root, "--output", output,
+            "--exe", executable, "backslash_main" })
+        assert.is_true(linked.ok, linked.stderr)
+        local executed = context().io:run({ executable })
+        assert.is_true(executed.ok, executed.output)
+        assert.equal(0, executed.status)
+
+        local native_source = root .. "/authored\\helper.c"
+        write(native_source, "int helper(void) { return 17; }\n")
+        local native, cold_native = objects(output, { native_source })
+        assert.matches("Titan native miss " .. native_source, cold_native.stderr, 1, true)
+        local report = read((native[1]:gsub("%.o$", ".d")))
+        assert.equal(native_source, assert(depfile.parse(report))[1])
+    end)
 
     it("prints current returned paths in argument order and preserves duplicates across warm builds", function()
         local output = root .. "/build objects Ω"

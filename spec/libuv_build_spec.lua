@@ -1195,7 +1195,7 @@ end
                     argv[#argv + 1] = prefix .. "/bin/titanc" .. executable_suffix
                 else
                     argv[#argv + 1] = prefix .. "/bin/lua"
-                    argv[#argv + 1] = prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"
+                    argv[#argv + 1] = prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc"
                 end
                 for _, argument in ipairs({ "--tree", root, "--output", root .. "/out",
                         "--source-first" }) do
@@ -1411,7 +1411,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
                 "titan-compiler/linkcertificate.lua", "titan-compiler/nativeinputs.lua",
                 "titan-compiler/testroots.lua",
                 "titan/math.titan", "prefix/bin/lua", "prefix/bin/titanc",
-                "prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
+                "prefix/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
                 "prefix/include/transfer.h",
@@ -1599,7 +1599,7 @@ done
             -- objects; the compiler, not Make, decides whether bytes changed.
             for _, changed in ipairs({
                 "prefix/bin/titanc",
-                "prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
+                "prefix/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/titan.h", "prefix/include/transfer.h",
                 "prefix/lib/titan/0.6/libtitan.a",
@@ -3682,7 +3682,7 @@ int main(void) {
                 assert.truthy(makefile:find(contract, 1, true), contract)
             end
 
-            file = assert(io.open("titan-0.6.0-1.rockspec", "rb"))
+            file = assert(io.open("titan-0.6.1-1.rockspec", "rb"))
             local rockspec = file:read("*a")
             file:close()
             for _, contract in ipairs({
@@ -6792,7 +6792,7 @@ printf '%s\n' "${schedule[@]}"
                 end
                 assert.equal(platform_id == "macos" and 6 or 2, dependency_key_count, suite)
                 local rocks_cache = named_step(suite, "Restore standalone-prefix LuaRocks dependencies")
-                assert_ordered(rocks_cache, "-rocks-layout-", "hashFiles(", "'titan-0.6.0-1.rockspec'")
+                assert_ordered(rocks_cache, "-rocks-layout-", "hashFiles(", "'titan-0.6.1-1.rockspec'")
                 if platform_id == "macos" then
                     local core_cache = named_step(suite, "Restore the Lua SDK and libbacktrace build")
                     assert_ordered(core_cache, ".lua/bin/lua\n", ".lua/bin/luac\n",
@@ -6817,6 +6817,7 @@ printf '%s\n' "${schedule[@]}"
                         "/include/lua*.h", "/include/lauxlib.h", "/include/lualib.h", "/include/lua.hpp",
                         "/lib/liblua55.a", "/share/man", "/src/lua-5.5.1", "-native-layout-",
                         "env.OPENSSL_MODE", "steps.toolchain.outputs.native-flags", "hashFiles('Makefile.win'",
+                        "'scripts/windows_openssl.sh'",
                         "'vendor/windows-native/dependencies.tsv'", "'vendor/libbacktrace/dependencies.tsv'")
                     local lua_build = named_step(suite, "Build Lua, LuaRocks and the pinned native dependencies")
                     assert_ordered(lua_build, "mingw32-make -f Makefile.win lua luarocks libbacktrace native",
@@ -6827,10 +6828,18 @@ printf '%s\n' "${schedule[@]}"
                         "suite: compiler-1\n            group: windows-compiler-shard-1",
                         "suite: compiler-2\n            group: windows-compiler-shard-2", "defaults:")
                     assert.equal(4, count_literal(suite, "- suite:"), suite)
+                    assert.truthy(suite:find(
+                        "OPENSSL_MODE: ${{ matrix.suite == 'native-retained' && 'system' || 'bundled' }}", 1, true), suite)
                     for _, step in ipairs({
                         "Save the Lua SDK and pinned Windows native dependency builds",
-                        "Save standalone-prefix LuaRocks dependencies",
                         "Save Windows C-probe results",
+                    }) do
+                        local body = named_step(suite, step)
+                        assert.truthy(body:find("matrix.suite == 'native-aggregate' || matrix.suite == 'native-retained'",
+                            1, true), body)
+                    end
+                    for _, step in ipairs({
+                        "Save standalone-prefix LuaRocks dependencies",
                         "Build and run the complete Windows native stdlib aggregate",
                     }) do
                         local body = named_step(suite, step)
@@ -6844,6 +6853,9 @@ printf '%s\n' "${schedule[@]}"
                         'TITAN_ROCK_TEST_JOBS: "4"',
                         "TITAN_COMPILER_GROUP: ${{ matrix.group }}",
                         "TITAN_ROCK_TEST_SUPERVISOR")
+                    local system_check = named_step(suite, "Check the system OpenSSL runtime and stdlib provider")
+                    assert_ordered(system_check, "if: matrix.suite == 'native-retained'",
+                        "mingw32-make -f Makefile.win native-check stdlib-check")
                 end
             end
             local sanitizer_cache_index = assert(sanitizer_job:find(

@@ -34,6 +34,44 @@ describe("native dependency files", function()
         assert.same({ "a.c" }, assert(depfile.parse("a.o: a.c")))
     end)
 
+    it("uses the exact TU and preserves an included slash-spelled twin", function()
+        local source = "/main\\dir/unit.c"
+        local report = "target: forced\\ \\#$$.h \\\r\n" ..
+            " /main/dir/unit.c /main/dir/unit.c\r\n" ..
+            "forced\\ \\#$$.h:\r\n/main/dir/unit.c:\r\n"
+        local files = assert(depfile.compiler_inputs(report, source))
+        assert.same({ source, "forced #$.h", "/main/dir/unit.c" }, files)
+        assert.same(files, assert(depfile.parse(assert(depfile.render("target", files)))))
+    end)
+
+    it("accepts a primary compiler rule without phony headers", function()
+        assert.same({ "lit\\eral/main.c" },
+            assert(depfile.compiler_inputs("target: lit/eral/main.c\n", "lit\\eral/main.c")))
+    end)
+
+    it("rejects collapsed or incomplete phony inventories", function()
+        local source = "lit\\eral/main.c"
+        local report = "target: lit/eral/main.c twin.h twin.h\n"
+        local files, err = depfile.compiler_inputs(report .. "twin.h:\ntwin.h:\n", source)
+        assert.is_nil(files)
+        assert.equal("ambiguous dependency spelling: twin.h", err)
+        files, err = depfile.compiler_inputs(report .. "twin.h:\n", source)
+        assert.is_nil(files)
+        assert.equal("incomplete phony dependency inventory", err)
+    end)
+
+    it("deduplicates GCC phony headers when the reported main kept a literal backslash", function()
+        local source = "lit\\eral/main.c"
+        local report = "target: " .. source .. " same.h same.h\nsame.h:\nsame.h:\n"
+        assert.same({ source, "same.h" }, assert(depfile.compiler_inputs(report, source)))
+    end)
+
+    it("writes Make escaping for exceptional native source provenance", function()
+        local inputs = { "dir\\name \\ space\ttab#$:main.c", "headers/common.h" }
+        assert.same(inputs, assert(depfile.parse(assert(depfile.render("target", inputs)))))
+        assert.is_nil(depfile.render("target", { "unrepresentable\npath" }))
+    end)
+
     for _, case in ipairs({
         { "missing separator", "a.o a.c" },
         { "missing target", ": a.c" },

@@ -1057,6 +1057,75 @@ describe("compiler-owned relocation paths", function()
         assert.matches('#line 17 "<titan:output>/Part.c"', labelled, 1, true)
     end)
 
+    it("labels and rebinds complete filenames with escaped roots and tails", function()
+        local util = require "titan-compiler.util"
+        local first, second = owned('/old "cash$\tΩ?'), owned('/new "$文?')
+        local tail = '/Mixed"$?\t文.c'
+        if not platform.windows then tail = '/literal\\slash' .. tail end
+        local path = paths.from_slash(first.relocation_roots.output .. tail)
+        local function controls(name)
+            return "\t# define TITAN_GENERATED_C_FILE " .. util.c_line_filename(name)
+                .. " /* filename */\r\n #line 17 " .. util.c_line_filename(name)
+        end
+        assert.equal(controls("<titan:output>" .. tail), relocation.generated(first, controls(path)))
+        assert.equal(controls(second.relocation_roots.output .. tail),
+            relocation.generated(second, controls(path), first.relocation_roots))
+    end)
+
+    it("maps alternate byte and Unicode escape spellings without changing their decoded meaning", function()
+        local util = require "titan-compiler.util"
+        local context = owned("/owned")
+        local prefix = util.c_line_filename(context.relocation_roots.output .. "/"):sub(1, -2)
+        local tail = [[\7-\44-\0447-\x0000000000000ff-z-\u00e9-\U0001f600-\'.c]]
+        local expected = "/\7-$-$7-\255-z-é-😀-'.c"
+        for _, directive in ipairs({ "#line 1 ", "#define TITAN_GENERATED_C_FILE " }) do
+            assert.equal(directive .. util.c_line_filename("<titan:output>" .. expected),
+                relocation.generated(context, directive .. prefix .. tail .. '"'))
+        end
+    end)
+
+    it("leaves malformed and unowned line-control operands byte-identical", function()
+        local util = require "titan-compiler.util"
+        local context = owned("/owned")
+        local prefix = util.c_line_filename(context.relocation_roots.output .. "/"):sub(1, -2)
+        local operands = {
+            prefix .. [[truncated.c]], prefix .. [[\q.c"]], prefix .. [[\x.c"]],
+            prefix .. [[\x10000000000000024.c"]], prefix .. [[\x24f.c"]],
+            prefix .. [[\777.c"]], prefix .. [[\000.c"]], prefix .. [[\u0000.c"]],
+            prefix .. [[\uD800.c"]], prefix .. [[\U00110000.c"]], prefix .. "nul\0.c\"",
+            prefix .. [[file.c" "concatenated"]], '"' .. fixture_path("/other/a") .. [[\044.c"]],
+            [["relative\044.c"]], "TITAN_GENERATED_C_FILE",
+        }
+        for _, operand in ipairs(operands) do
+            local text = "#line 1 " .. operand
+            assert.equal(text, relocation.generated(context, text))
+        end
+    end)
+
+    it("only rewrites real directives outside comments, strings and continued macros", function()
+        local util = require "titan-compiler.util"
+        local context = owned("/owned")
+        local root = context.relocation_roots.output
+        local filename = util.c_line_filename(root .. "/Mixed.c")
+        local quoted_include = '#include "' .. root .. '/header.h"'
+        local controls = "#line 3 " .. filename .. "\n" .. quoted_include .. "\n"
+        local unchanged = "/*\n" .. controls .. "*/\n" ..
+            "/\\\n* continued comment\n" .. controls .. "*\\\n/\n" ..
+            "const char *text = " .. util.c_line_filename(controls) .. ";\n" ..
+            'const char *raw = u8R"TAG(' .. "\n" .. controls .. ')TAG";' .. "\n" ..
+            "#define MACRO \\\r\n" .. "#line 1 " .. filename .. "\r\n" ..
+            "// continued comment ??/\n" .. quoted_include .. "\n" ..
+            "#define LITERAL " .. filename .. "\n"
+        local leaf = platform.windows and "/header.h" or "/header\\t.h"
+        local header = ' # include "' .. root .. leaf .. '"\n'
+        local named_header = ' # include "<titan:output>' .. leaf .. '"\n'
+        local line = "#line 3 " .. filename
+        assert.equal(unchanged .. named_header .. line,
+            relocation.includes(context, unchanged .. header .. line))
+        assert.equal(unchanged .. named_header .. '#line 3 "<titan:output>/Mixed.c"',
+            relocation.generated(context, unchanged .. header .. line))
+    end)
+
     it("preserves mixed-case concrete tails while matching Windows roots case-insensitively", function()
         local original = platform.windows
         platform.windows = true
@@ -1135,6 +1204,65 @@ describe("incremental configuration", function()
         for _, file in pairs(incremental.counters(ctx).files) do assert.equal(1, file.hashes) end
         assert.equal(cpreamble.certification_includes, ctx.io.writes[fixture_path("/out/.titan/preamble.c")] and
             select(2, incremental.file_digest(ctx, fixture_path("/out/.titan/preamble.c"))))
+    end)
+
+    it("certifies the actual preamble TU and a genuinely included slash twin", function()
+        if platform.windows then pending("POSIX literal backslash in a path"); return end
+        local function configure(header)
+            local ctx, files = configured()
+            local twin = "/out/literal/.titan/preamble.c"
+            files[twin] = header
+            ctx.incremental_options.preamble_path = "/out\\literal/.titan/preamble.c"
+            local run = ctx.io.run
+            function ctx.io:run(argv)
+                local result = run(self, argv)
+                files["/temporary.d"] = "titan-preamble: " .. twin .. " " .. twin .. "\n" .. twin .. ":\n"
+                return result
+            end
+            local cert = assert(incremental.configuration(ctx))
+            assert.equal(1, ctx.io.reads[twin])
+            assert.is_nil(files["/temporary.d"])
+            return cert
+        end
+        local first, changed = configure("first"), configure("changed")
+        assert.not_equal(first.preamble, changed.preamble)
+        assert.equal(first.options, changed.options)
+    end)
+
+    it("does not certify an unreadable, missing or ambiguous preamble dependency report", function()
+        if platform.windows then pending("POSIX literal backslash in a path"); return end
+        local main = "/out/literal/.titan/preamble.c"
+        for _, case in ipairs({
+            { false, "missing /temporary.d" },
+            { "", "cannot read /temporary.d" },
+            { "titan-preamble: " .. main .. " twin.h twin.h\ntwin.h:\ntwin.h:\n",
+                "ambiguous dependency spelling: twin.h" },
+            { "titan-preamble: " .. main .. " missing.h\nmissing.h:\n",
+                "missing missing.h" },
+        }) do
+            local ctx, files = configured()
+            ctx.incremental_options.preamble_path = "/out\\literal/.titan/preamble.c"
+            local run, read, unlink = ctx.io.run, ctx.io.read_file, ctx.io.unlink
+            function ctx.io:run(argv)
+                local result = run(self, argv)
+                files["/temporary.d"] = case[1] or nil
+                return result
+            end
+            function ctx.io:read_file(path)
+                if path == "/temporary.d" and case[1] == "" then return nil, case[2] end
+                return read(self, path)
+            end
+            function ctx.io:unlink(path)
+                if path == "/temporary.d" and files[path] == nil then return nil, "not found" end
+                return unlink(self, path)
+            end
+            local cert, reason, status = incremental.configuration(ctx)
+            assert.is_nil(cert)
+            assert.equal("uncertified", status, reason)
+            assert.matches(case[2], reason, 1, true)
+            assert.is_nil(ctx.incremental_configuration)
+            assert.is_nil(files["/temporary.d"])
+        end
     end)
 
     it("verifies the worker compiler component without native probes", function()
@@ -1886,9 +2014,10 @@ describe("incremental configuration", function()
     it("reports inventory errors and preserves cancellation values", function()
         local ctx, files = configured()
         files[fixture_path("/real/titanc")] = nil
-        local ok, err = pcall(incremental.configuration, ctx)
-        assert.is_false(ok)
-        assert.matches("cannot certify compiler configuration:", err, 1, true)
+        local cert, err, status = incremental.configuration(ctx)
+        assert.is_nil(cert)
+        assert.matches(fixture_path("/real/titanc"), err, 1, true)
+        assert.is_nil(status)
         local cancelled = {}
         local other = configured()
         function other.io:list() error(cancelled, 0) end
@@ -1902,9 +2031,10 @@ describe("incremental configuration", function()
             self.commands[#self.commands + 1] = argv
             return { ok = false, diagnostic = "cc: error: unrecognized command-line option" }
         end
-        local ok, err = pcall(incremental.configuration, ctx)
-        assert.is_false(ok)
-        assert.equal("cannot certify compiler configuration: cc: error: unrecognized command-line option", err)
+        local cert, err, status = incremental.configuration(ctx)
+        assert.is_nil(cert)
+        assert.equal("cc: error: unrecognized command-line option", err)
+        assert.is_nil(status)
         assert.equal(1, #ctx.io.commands)
         assert.is_nil(files[fixture_path("/") .. "temporary.d"])
         assert.is_nil(ctx.incremental_configuration)

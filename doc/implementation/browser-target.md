@@ -300,8 +300,11 @@ require:
   `browsertarget.encode_analysis` projects the validated live descriptor.
   `browsertarget.decode_analysis` accepts only that closed data shape, with a
   64 KiB payload bound, at most 128 graph nodes and at most 1,024 entries.
-  It checks the pinned Wasm and C ABI traits and the Lua record's numeric
-  types and canonical browser defines before returning the semantic facts.
+  It requires exact matches on `TITAN_VERSION` (`release`), `TITAN_ABI_VERSION`,
+  and the pinned Emscripten version alongside the Wasm/C ABI traits and the Lua
+  record's numeric types and canonical browser defines before returning the
+  semantic facts; an `analysis-target` or companion pack from an earlier patch
+  release is rejected even when `TITAN_ABI_VERSION` is unchanged.
   The encoder visits string keys in bytewise order before assigning graph
   reference IDs, so identical semantic inputs give identical bytes in
   separate Lua processes. Companion pack tooling re-encodes decoded data
@@ -328,8 +331,8 @@ byte-identical checkout, and the finished `make browser-sdk` installation:
 
 ```sh
 make browser-semantic-pack PREFIX="$P" ROCKS_TREE="$P" \
-    SOURCE_ROCK="$R/titan-0.6.0-1.src.rock" TITAN_COMMIT="$C" \
-    PACK_OUTPUT="$O/titan-0.6.0-1-browser-semantics.tar.gz"
+    SOURCE_ROCK="$R/titan-0.6.1-1.src.rock" TITAN_COMMIT="$C" \
+    PACK_OUTPUT="$O/titan-0.6.1-1-browser-semantics.tar.gz"
 ```
 
 Use the full 40-hex Titan commit and an existing output directory outside
@@ -3731,7 +3734,7 @@ explicit `TITAN_NODE` before resolving their directories.
 CDP pipe, 30000 ms, and 1500 ms; the
 timeout is a positive and the grace a nonnegative safe integer. Misuse prints
 `titan-browser-run: <detail>` and the usage to stderr and exits 2; `--help`
-prints the usage and `--version` prints `titan-browser-run: Titan 0.6.0
+prints the usage and `--version` prints `titan-browser-run: Titan 0.6.1
 browser runner (Node 26+)`, both to stderr with exit 0. `FILE` must be a
 regular `.mjs` file beneath the root, which defaults to its directory. Stdout
 carries only program bytes; every runner diagnostic goes to stderr. The module

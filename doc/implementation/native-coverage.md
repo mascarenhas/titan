@@ -44,10 +44,11 @@ unchanged. Coverage mode also skips the ordinary blank-line normalization after
 layout pass follows it. Their filenames use the same
 [`util.c_line_filename`](codegen-overview.md#mixed-source-line-attribution)
 spelling as ordinary generated line controls. Authored line controls are
-decoded from octal, simple and universal-character-name escapes, so the
-converter reads both authored GCC-style C and its own output; an escape that
-names no byte (octal above 255, a surrogate or a code point above U+10FFFF)
-leaves the directive without effect on source ownership.
+decoded with [`util.decode_c_line_filename`](codegen-overview.md#mixed-source-line-attribution)
+(simple, octal, hexadecimal `\x`, and universal-character-name escapes), so the
+converter reads both authored GCC-style C and its own output; a malformed,
+unknown, or out-of-range escape (NUL, byte values above 255, surrogates, or code
+points above U+10FFFF) leaves the directive without effect on source ownership.
 
 The converter maintains a stack of owners. Lines in a Titan expansion keep one
 source anchor, while authored-C regions preserve intentional line progression.

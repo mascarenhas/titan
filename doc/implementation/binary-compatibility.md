@@ -185,6 +185,22 @@ symbols as `lua_CFunction` and must not be used to call it. Changing the `_abi`
 signature would be unsafe even with an ABI bump, because every reader calls
 that entry to discover the ABI.
 
+Native provider probes, runtime ABI checks, and static archive metadata check
+`TITAN_ABI_VERSION`, not the package release `TITAN_VERSION`, so a patch
+release that leaves `TITAN_ABI_VERSION` unchanged continues to accept compatible
+native providers built by an earlier patch release in the same library series
+(subject to normal consumer-compatibility and target/dependency checks). That
+compatibility does not extend to release-coupled artifacts: saved
+language-server manifests and cache identities require an exact `TITAN_VERSION`
+match ([Declared project manifests](driver.md#declared-project-manifests)),
+browser `analysis-target` descriptors and companion packs require an exact
+`TITAN_VERSION` match ([The browser SDK](browser-target.md#the-browser-sdk),
+[Publishing the browser semantic pack](browser-target.md#publishing-the-browser-semantic-pack)),
+and `--incremental` source-backed objects normally miss and rebuild across a
+patch release because compiler files (`version.lua`) and SDK preamble headers
+(`titan.h`) hash into the configuration certificate
+([Configuration, toolchain, and preamble certificates](incremental-compilation.md#configuration-toolchain-and-preamble-certificates)).
+
 Every generated module userdata has a native payload beginning with
 `TitanModuleData`. Its `symbols` callback resolves the native entries, metadata
 callbacks, and public slot symbols belonging to the image that created that

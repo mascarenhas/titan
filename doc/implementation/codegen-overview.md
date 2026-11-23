@@ -230,6 +230,20 @@ raw: GCC accepts it silently, while Clang warns with
 `-Winvalid-source-encoding` and keeps the bytes, so adding `-Werror` with
 Clang turns such a path into an error that no spelling can avoid.
 
+The companion decoder `util.decode_c_line_filename(source, opening)`
+(`titan-compiler/util.lua`) reads a quoted C line-control filename starting at
+`opening` and returns the decoded raw filename bytes plus the cursor past the
+closing quote (or `nil` on failure). While Titan only *emits* the unevaluated,
+Clang-23-safe spelling above (no octal or hex escapes), the decoder accepts the
+broader C99/authored input grammar—simple escapes (`\' \" \? \\ \a \b \f \n \r
+\t \v`), 1–3 octal digits, maximal nonempty `\x` hex runs with overflow-safe
+leading-zero handling, and `\uXXXX`/`\UXXXXXXXX` universal character names—so
+that `relocation.generated`, `coverage_lines.convert`, and
+`driver.preflight_build_outputs` read both Titan's emitted directives and
+authored or historical C line controls. It rejects NUL, numeric byte escapes
+above `255`, UTF-16 surrogates, scalars above `U+10FFFF`, unknown escapes, and
+unescaped newlines, while leaving raw bytes (including non-UTF-8) untouched.
+
 `definitionline(loc)` (`coder/names.lua`, installed in the shared `coder.core`
 environment) additionally stamps a `#line` directive immediately before the
 signature of every generated C function definition, on **both** targets and in
@@ -986,7 +1000,7 @@ const-qualified descriptors and wrappers. A mismatched provider is rejected
 before interface rehydration or native value exchange.
 
 The compiler and standard-library release version is independently
-`TITAN_VERSION` `0.6.0`. Its derived `0.6` library version selects
+`TITAN_VERSION` `0.6.1`. Its derived `0.6` library version selects
 `TITAN_PATH_0_6` and the `lib/titan/0.6` provider namespace; patch releases
 share that namespace. There is no migration, compatibility alias, or cleanup
 path for earlier Titan installations.

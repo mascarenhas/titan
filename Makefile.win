@@ -76,7 +76,7 @@ LUA_RESOURCE := $(LUA_SOURCE)/lua-windows.res
 LUA_MANIFEST := vendor/lua/lua-$(LUA_VERSION)-windows.manifest
 LUA_RC_SOURCE := vendor/lua/lua-$(LUA_VERSION)-windows.rc
 LUA_BIN := $(PREFIX)/bin/lua.exe
-TITAN_VERSION := 0.6.0
+TITAN_VERSION := 0.6.1
 TITAN_LIBRARY_VERSION := $(word 1,$(subst ., ,$(TITAN_VERSION))).$(word 2,$(subst ., ,$(TITAN_VERSION)))
 TITAN_INSTALL_TREE := $(PREFIX)
 # The runtime build's support-only Lua module and native compiler frontend.
@@ -256,13 +256,13 @@ $(call make_path,$(PREFIX)/bin/luarocks.exe): | lua
 compiler-deps: luarocks
 	LUAROCKS_CONFIG=$(call quote,$(shell cygpath -m "$(LUAROCKS_CONFIG)")) \
 	  $(call quote,$(LUAROCKS)) --lua-version=5.5 \
-	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) make --only-deps titan-0.6.0-1.rockspec \
+	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) make --only-deps titan-0.6.1-1.rockspec \
 	  CC=$(call quote,$(CC)) LD=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB))
 
 compiler: luarocks
 	LUAROCKS_CONFIG=$(call quote,$(shell cygpath -m "$(LUAROCKS_CONFIG)")) \
 	  $(call quote,$(LUAROCKS)) --lua-version=5.5 \
-	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) make titan-0.6.0-1.rockspec \
+	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) make titan-0.6.1-1.rockspec \
 	  CC=$(call quote,$(CC)) LD=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB))
 
 compiler-check: compiler
@@ -448,7 +448,7 @@ rock-test:
 test: compiler
 	LUAROCKS_CONFIG=$(call quote,$(shell cygpath -m "$(LUAROCKS_CONFIG)")) \
 	  $(call quote,$(LUAROCKS)) --lua-version=5.5 \
-	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) test titan-0.6.0-1.rockspec \
+	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) test titan-0.6.1-1.rockspec \
 	  CC=$(call quote,$(CC)) LD=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB))
 
 # The native Windows build prepares DLL SDK dependencies in PREFIX. Build the
@@ -471,8 +471,10 @@ stage-rock-payload:
 	# Retain only this controlled native SDK, never unrelated prefix contents.
 	mkdir -p $(call quote,$(INST_PREFIX)/titan-sdk/bin) \
 	  $(call quote,$(INST_PREFIX)/titan-sdk/lib) $(call quote,$(INST_PREFIX)/titan-sdk/include)
-	for filename in libuv-1.dll libllhttp-9.4.dll libsqlite3-0.dll libcrypto-3-x64.dll libssl-3-x64.dll; do \
+	for filename in libuv-1.dll libllhttp-9.4.dll libsqlite3-0.dll; do \
 	  cp -p "$(PREFIX)/bin/$$filename" $(call quote,$(INST_PREFIX)/titan-sdk/bin/); done
+	bash scripts/windows_openssl.sh stage $(call quote,$(WINDOWS_BUILD_ROOT)/native/openssl-dlls) \
+	  $(call quote,$(PREFIX)/bin) $(call quote,$(INST_PREFIX)/titan-sdk/bin)
 	for filename in libuv.dll.a libllhttp.dll.a libsqlite3.dll.a libcrypto.dll.a libssl.dll.a libbacktrace.a; do \
 	  cp -p "$(PREFIX)/lib/$$filename" $(call quote,$(INST_PREFIX)/titan-sdk/lib/); done
 	for filename in uv.h llhttp.h sqlite3.h backtrace.h backtrace-supported.h; do \

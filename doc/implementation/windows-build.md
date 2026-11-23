@@ -514,18 +514,31 @@ Those pins match the ordinary Makefile. OpenSSL defaults to
 `OPENSSL_MODE=system`, using an already installed binary SDK. Install
 [`mingw-w64-clang-x86_64-openssl`](https://packages.msys2.org/packages/mingw-w64-clang-x86_64-openssl)
 with `pacman -S mingw-w64-clang-x86_64-openssl`, or set `OPENSSL_PREFIX` to a
-compatible x64 UCRT/GNU OpenSSL 3 SDK. The default prefix is CLANG64's
-`MINGW_PREFIX` (normally `/clang64`). The native installer copies its two DLLs,
-matching GNU import libraries, and configured public headers into the Titan
-SDK. It does not download or compile OpenSSL in this mode.
+compatible x64 UCRT/GNU OpenSSL 3+ SDK (such as MSYS2 OpenSSL 4.x or OpenSSL
+3.x). The default prefix is CLANG64's `MINGW_PREFIX` (normally `/clang64`).
+`scripts/windows_openssl.sh identify` inspects `libcrypto.dll.a` and
+`libssl.dll.a` with `llvm-dlltool --identify-strict -I`, validates that each
+names a single safe `libcrypto*.dll` / `libssl*.dll` basename present in
+`bin/`, and returns the selected pair. `scripts/build_windows_native.sh`
+records that pair in `<WINDOWS_BUILD_ROOT>/native/openssl-dlls` and copies
+only those two DLLs, their GNU import libraries (`libcrypto.dll.a` and
+`libssl.dll.a`), and the configured public headers into the Titan SDK (leaving
+files in place when `OPENSSL_MODE=system` and `OPENSSL_PREFIX` already names
+`PREFIX`, while still recording the selected pair). It does not download or
+compile OpenSSL in this mode.
 
 `OPENSSL_MODE=bundled` selects the pinned OpenSSL 3.5.7 source build with its
 upstream `mingw64` configuration, Perl, MSYS GNU Make (`pacman -S make`), and
 `llvm-windres`. This optional upstream build invokes `make` from the CLANG64
-shell; the Titan Makefile and LuaRocks use the selected native GNU Make. Both modes
-deliver the same runtime and import-library names below. Changing OpenSSL mode
-or system prefix does not rebuild the other native dependencies. Clean the
-private OpenSSL build directory before changing its configured flags or prefix.
+shell; the Titan Makefile and LuaRocks use the selected native GNU Make. Both
+modes run the same import-library identification and deliver the same GNU
+import-library names (`libcrypto.dll.a`, `libssl.dll.a`); bundled mode
+produces `libcrypto-3-x64.dll` and `libssl-3-x64.dll`, while system mode
+delivers the two DLL basenames selected by the installed OpenSSL package (for
+example `libcrypto-4-x64.dll` and `libssl-4-x64.dll` under MSYS2 OpenSSL 4).
+Changing OpenSSL mode or system prefix does not rebuild the other native
+dependencies. Clean the private OpenSSL build directory before changing its
+configured flags or prefix.
 Verified acquisition completion remains separate from build configuration: cold
 source preparation (`scripts/prepare_windows_native.pl`) verifies the pinned
 archives, applies the libuv write-reentry patch, and adds the llhttp and SQLite
@@ -545,8 +558,8 @@ mingw32-make -f Makefile.win native OPENSSL_MODE=bundled
 | `libuv-1.dll` | `libuv.dll.a` |
 | `libllhttp-9.4.dll` | `libllhttp.dll.a` |
 | `libsqlite3-0.dll` | `libsqlite3.dll.a` |
-| `libcrypto-3-x64.dll` | `libcrypto.dll.a` |
-| `libssl-3-x64.dll` | `libssl.dll.a` |
+| Selected `libcrypto` DLL (e.g. `libcrypto-3-x64.dll` bundled; `libcrypto-4-x64.dll` MSYS2 4.x) | `libcrypto.dll.a` |
+| Selected `libssl` DLL (e.g. `libssl-3-x64.dll` bundled; `libssl-4-x64.dll` MSYS2 4.x) | `libssl.dll.a` |
 
 The runtime names express the reviewed upstream ABI versions. OpenSSL's system
 release is selected by the caller's installed SDK; the bundled releases and
@@ -583,14 +596,25 @@ libuv through the matching SDK header contract.
 
 `native-source-check` compiles an actual x64 COFF header consumer on the host
 and verifies those imports and producer declarations. `native-check` requires
-Windows: it inspects regular/delay PE imports and export forwarders of every
-private DLL, then links a consumer against the exact SDK import libraries. Its
-runtime subset contains only the five selected DLLs and the test EXE. With no
-toolchain PATH entries it exercises a libuv asynchronous callback, an llhttp
-request, an in-memory SQLite query and shared data address, and OpenSSL SHA-256
-and TLS-context creation. `SSL_CTX_new` success does not prove a TLS handshake
-or that usable certificate trust roots were loaded. These checks do not establish
-Titan stdlib behavior, network interoperability, or a Windows CA-store policy.
+Windows: `spec/support/check_windows_native.sh` identifies the installed
+OpenSSL DLL pair via `scripts/windows_openssl.sh identify`, copies only the
+five selected DLLs (`libuv-1.dll`, `libllhttp-9.4.dll`, `libsqlite3-0.dll`,
+and the two OpenSSL DLLs) into a clean runtime directory, audits regular/delay
+PE imports of each private DLL with
+`spec/support/check_windows_native_imports.pl` against all five selected
+private DLLs plus the Windows OS allowlist (including `bcrypt.dll`, which MSYS2
+OpenSSL 4 `libcrypto` imports for Windows CNG), and separately checks
+`llvm-readobj --coff-exports` in the shell to reject export forwarders. It then
+links a consumer against the exact SDK import libraries. With no toolchain PATH
+entries, the
+five-DLL runtime subset exercises a libuv asynchronous callback, an llhttp
+request, an in-memory SQLite query and shared data address, and OpenSSL
+SHA-256 and TLS-context creation. `SSL_CTX_new` success does not prove a TLS
+handshake or that usable certificate trust roots were loaded. These checks do
+not establish Titan stdlib behavior, network interoperability, or a Windows
+CA-store policy. `stdlib-check` (`spec/support/check_windows_stdlib.sh` and
+`check_windows_stdlib.lua`) likewise audits `titan.dll`'s PE imports against
+the identified OpenSSL DLL pair.
 
 After that gate, run the exact EXE path recorded in
 `out/windows-validation/native-check/native-probe-path.txt` from ordinary PowerShell
@@ -608,18 +632,20 @@ configures the Lua prefix as its rock tree, with CLANG64 tools and the matching
 prepares the native dependencies and runtime SDK, then builds the standard
 library with the in-tree compiler and the support module
 `<WINDOWS_BUILD_ROOT>/runtime/titan.dll` placed first on its `package.cpath`.
-The copy-only install
-pass and `post_install` payload publication are the same as on Unix; see
+The copy-only install pass (`stage-rock-payload` in `Makefile.win`) stages the
+two OpenSSL DLLs via `scripts/windows_openssl.sh stage` using the selection
+recorded in `<WINDOWS_BUILD_ROOT>/native/openssl-dlls`, without invoking LLVM
+tools again; `post_install` payload publication is the same as on Unix (see
 [build and installation
-responsibilities](build-script-audit.md#installation-and-publication). Windows
-binary rocks also carry the native dependency DLLs, import libraries, and
-headers.
+responsibilities](build-script-audit.md#installation-and-publication)). Windows
+binary rocks therefore carry only the selected OpenSSL DLL pair alongside the
+other native dependency DLLs, unchanged import libraries, and headers.
 
 ```sh
 mingw32-make -f Makefile.win luarocks PREFIX=/c/Titan/sdk
 export LUAROCKS_CONFIG=C:/Titan/sdk/etc/luarocks/config-5.5.lua
 /c/Titan/sdk/bin/luarocks.exe --lua-version=5.5 \
-  --tree=C:/Titan/sdk make titan-0.6.0-1.rockspec
+  --tree=C:/Titan/sdk make titan-0.6.1-1.rockspec
 ```
 
 Users who already have compatible Lua and LuaRocks installations can run the

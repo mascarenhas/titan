@@ -1,24 +1,35 @@
 -- Native -MD/-MF output is data, not a Make program. Preserve prerequisite
 -- order while decoding the escaping emitted by GCC and Clang on all hosts.
+local platform = require "titan-compiler.platform"
 local depfile = {}
 
-function depfile.parse(text)
+local function parse(text, phony, main)
     if type(text) ~= "string" or text:find("\0", 1, true) then
         return nil, "depfile must be a NUL-free string"
     end
-    local result, seen, token = {}, {}, {}
+    local result, seen, token = main and { main } or {}, {}, {}
     local prerequisites, targets, rules = false, 0, 0
+    local observed, remaining = phony and {} or nil, 0
+    local target, has_input
+    local duplicate
     local function flush()
         if #token == 0 then return end
         local name = table.concat(token)
         token = {}
         if prerequisites then
-            if not seen[name] then
+            if phony then
+                has_input = true
+                if rules == 0 then
+                    observed[name] = (observed[name] or 0) + 1
+                    remaining = remaining + 1
+                end
+            elseif not seen[name] then
                 seen[name] = true
                 result[#result + 1] = name
             end
         else
             targets = targets + 1
+            target = name
         end
     end
     local function finish()
@@ -26,8 +37,27 @@ function depfile.parse(text)
         if targets ~= 0 and not prerequisites then
             return nil, "depfile rule has no target separator"
         end
-        if prerequisites then rules = rules + 1 end
-        prerequisites, targets = false, 0
+        if prerequisites then
+            if phony and rules > 0 then
+                if targets ~= 1 or has_input then
+                    return nil, "invalid phony dependency rule"
+                end
+                local count = observed[target] or 0
+                if count == 0 then
+                    return nil, "phony dependency is absent from the primary rule: " .. target
+                end
+                observed[target] = count - 1
+                remaining = remaining - 1
+                if seen[target] then
+                    duplicate = duplicate or target
+                else
+                    seen[target] = true
+                    result[#result + 1] = target
+                end
+            end
+            rules = rules + 1
+        end
+        prerequisites, targets, has_input = false, 0, false
         return true
     end
     local index = 1
@@ -84,7 +114,61 @@ function depfile.parse(text)
     local ok, err = finish()
     if not ok then return nil, err end
     if rules == 0 then return nil, "depfile contains no rules" end
+    if phony and remaining ~= (main and 1 or 0) then
+        return nil, "incomplete phony dependency inventory"
+    end
+    if duplicate then
+        -- GCC can list the same header twice. The one word left over after
+        -- matching the phony rules is the reported main, not necessarily the
+        -- first prerequisite. If it retained a backslash, this was not the
+        -- slash-folding reporter, so repeated header words are not collisions.
+        if main then
+            for spelling, count in pairs(observed) do
+                if count == 1 and spelling:find("\\", 1, true) then return result end
+            end
+        end
+        return nil, "ambiguous dependency spelling: " .. duplicate
+    end
     return result
+end
+
+function depfile.parse(text)
+    return parse(text)
+end
+
+-- Clang's POSIX Make writer can turn a literal backslash into a slash. With
+-- -MP the phony targets describe the included files but never the main TU,
+-- even when a distinct header has the same reported spelling as that TU.
+function depfile.append_compiler_options(argv, source, report, target)
+    local exact_main = not platform.windows and source:find("\\", 1, true) and source or nil
+    argv[#argv + 1] = "-MD"
+    if exact_main then argv[#argv + 1] = "-MP" end
+    argv[#argv + 1] = "-MF"
+    argv[#argv + 1] = report
+    argv[#argv + 1] = "-MT"
+    argv[#argv + 1] = target
+    return exact_main
+end
+
+function depfile.compiler_inputs(text, exact_main)
+    return parse(text, exact_main ~= nil, exact_main)
+end
+
+-- ELF LLD reports every input both as a prerequisite and as a phony rule.
+function depfile.lld_inputs(text)
+    return parse(text, true)
+end
+
+-- Publish the same provenance Titan certified, not the lossy compiler report.
+function depfile.render(target, inputs)
+    local words = { target .. ":" }
+    for _, name in ipairs(inputs) do
+        if name:find("[\r\n%z]") then return nil, "dependency path cannot be written to a depfile" end
+        words[#words + 1] = (name:gsub("[\\ \t#:$]", function(byte)
+            return byte == "$" and "$$" or "\\" .. byte
+        end))
+    end
+    return table.concat(words, " ") .. "\n"
 end
 
 return depfile

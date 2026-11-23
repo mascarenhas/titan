@@ -114,13 +114,24 @@ loading a just-published worker result (`published = true`), it writes
 
 Filesystem and decode failures are classified by where they occur:
 
-* **Configuration inventory errors fail the invocation.**
-  `driver.incremental_configuration(context)` and
-  `incremental.configuration(context, options)` fail with
-  `cannot certify compiler configuration: <detail>` when a loaded compiler Lua
-  file, the executing frontend script, the native compiler/stage tools, or the
-  shared preamble probe cannot be read or executed. A toolchain that cannot
-  inventory itself cannot compile fresh modules either.
+* **Configuration inventory errors fail the invocation; preamble-dependency
+  uncertainty degrades to uncertified compilation.**
+  `incremental.configuration(context, options)` returns `nil, detail` (rather
+  than throwing an uncaught Lua error) when a loaded compiler Lua file, the
+  executing frontend script, the native compiler/stage tools, or the shared
+  preamble preprocessor invocation itself cannot be read or executed, and
+  `driver.incremental_configuration(context)` reports
+  `cannot certify compiler configuration: <detail>`. A toolchain that cannot
+  inventory itself cannot compile fresh modules either. By contrast, when the
+  preamble preprocessor succeeds but its Make dependency report cannot
+  establish preamble inputs (for example, a missing or unreadable reported
+  path, an incomplete phony inventory, or an ambiguous phony spelling),
+  `incremental.preamble_identity` returns `nil, "cannot establish preamble
+  dependencies: <detail>", "uncertified"`, which switches Titan source-object
+  compilation and the final link to uncertified mode so standalone compilation
+  still succeeds without reusing or writing those certificates (independently
+  certifiable `--c-source` nodes still certify against their own
+  `toolchain_identity` unless the shared toolchain itself is uncertified).
 * **Per-object certification errors become reuse misses.** During
   `certify_local`, `verdict`, and the pre-mutation prefix of
   `restore_source_object`, any string error from reading or decoding the
@@ -483,17 +494,23 @@ digest, and each worker recomputes that inventory
 mismatch or an unreadable inventory, to verify that the loaded compiler Lua
 files did not change after the coordinator started.
 
-Only the explicit third result `"uncertified"` from the configuration or
-toolchain identity (for example a Windows tool whose launcher policy cannot
-be proven) selects raw compilation. The resolver then keeps
+Only the explicit third result `"uncertified"` from the configuration
+(shared toolchain or preamble identity—for example a Windows tool whose
+launcher policy cannot be proven, or an uncertain preamble dependency report)
+selects raw Titan compilation. The resolver then keeps
 `incremental_configuration` nil and stores the reason separately as
 `incremental_uncertified`, and the worker configuration carries
 `uncertified = reason` instead of `configuration`. In that mode existing
-objects are never reused: planning parses and selects fresh source, and
-generated objects carry their ordinary metadata but no producer interface
-digests and no certificate, so a later unchanged invocation still cannot hit.
-The final link and `--c-source` nodes are likewise marked uncacheable. Any
-other configuration failure is still an invocation error, and non-string
+Titan source objects are never reused: planning parses and selects fresh
+source, and generated objects carry their ordinary metadata but no producer
+interface digests and no certificate, so a later unchanged invocation still
+cannot hit; `titanc` also passes the reason to mark the final link
+uncacheable. Authored `--c-source` nodes compute `incremental.toolchain_identity`
+independently (`nativeinputs.compile`) instead of reading
+`incremental_uncertified`, so an uncertified shared *toolchain* marks
+`--c-source` nodes uncacheable as well, whereas an uncertified *preamble*
+leaves independently certifiable `--c-source` nodes cacheable. Any other
+configuration failure is still an invocation error, and non-string
 cancellations propagate unchanged.
 
 Uncertainty limited to final output (an uncertain linker backend from
@@ -658,16 +675,41 @@ reports the exact component:
    places the probe translation unit at the stable path
    `<output_root or first source root>/.titan/preamble.c` and rewrites it only
    when its text differs, keeping `__FILE__` and `__BASE_FILE__` expansions in
-   forced headers invariant across runs. `preamble_identity` runs
-   `<compile_prefix> -E -dD -P -MD -MF <tmp> -MT titan-preamble -x c <source>`,
-   parses the depfile with `depfile.parse` (`titan-compiler/depfile.lua`), and
-   hashes `{ expanded = <stdout>, inputs = { { path, realpath, sha256 }, ... } }`
-   over all external depfile prerequisites (excluding the synthetic
-   `preamble.c` path itself). Hashing both the `-E -dD -P` output and the
-   prerequisite file bytes catches system-header edits, SDK header edits
-   (`titan.h`, `transfer.h`, `titan/ffi.h`, Lua internal headers), new
-   shadowing headers in `-I`/`-isystem`, and `__has_include` branches that
-   alter declarations or macros without adding a positive depfile entry.
+   forced headers invariant across runs. `preamble_identity` builds the
+   depfile flags and parses the report through the shared helpers
+   `depfile.append_compiler_options` and `depfile.compiler_inputs`
+   (`titan-compiler/depfile.lua`), also used by `nativeinputs.compile`. For
+   ordinary paths (Windows, or POSIX paths without a literal `\`), the command
+   remains `<compile_prefix> -E -dD -P -MD -MF <tmp> -MT titan-preamble -x c
+   <source>`, keeping ordinary flags and certification keys unchanged. Only on
+   non-Windows when `source` contains a literal `\`, `append_compiler_options`
+   also passes `-MP` so upstream Clang's POSIX Make writer (which rewrites `\`
+   to `/`) emits one phony rule per included header without emitting one for
+   the main TU (`preamble.c`). `depfile.compiler_inputs` reconciles the phony
+   header targets against the primary rule (leaving exactly one unmatched main
+   word), keeps the exact `source` spelling for the main TU, and rejects
+   incomplete/malformed phony inventories or duplicate phony spellings
+   (permitting GCC's legitimately repeated header entries only when the
+   unmatched main word retained a `\`, proving the reporter did not
+   slash-fold). `preamble_identity` excludes `path == source` directly as well
+   as `realpath(path) == realpath(source)`, and hashes `{ expanded = <stdout>,
+   inputs = { { path, realpath, sha256 }, ... } }` over the external header
+   inputs. Hashing both the `-E -dD -P` output and the prerequisite file bytes
+   catches system-header edits, SDK header edits (`titan.h`, `transfer.h`,
+   `titan/ffi.h`, Lua internal headers), new shadowing headers in
+   `-I`/`-isystem`, and `__has_include` branches that alter declarations or
+   macros without adding a positive depfile entry. If reading/parsing the
+   report or resolving/hashing any reported prerequisite raises a string error,
+   `preamble_identity` returns `nil, "cannot establish preamble dependencies:
+   <detail>", "uncertified"` (and checks `lstat` before reporting an unlink
+   failure on a missing report) so Titan source-object compilation and final
+   linking degrade cleanly to uncertified mode. External C headers whose paths
+   contain literal backslashes on POSIX with Clang remain unsupported: if an
+   external backslash-named header has an existing slash-spelled twin, Clang's
+   POSIX `-MD`/`-MP` report is byte-identical to opening the twin, so soundness
+   covers only the known TU, observed duplicate phony spellings,
+   missing/unreadable reported inputs, and (separately for linking) known ELF
+   LLD inputs.
 4. **`options` (`incremental.lua`).** Hashes `{ compile_prefix,
    build_profile, emit_line_directives, pretty_print, extra_ffi_include_dirs,
    titan_root }` with tag `"compile-options"`. Module-resolution flags
@@ -720,6 +762,33 @@ content/interface evidence.
 On Windows the rebound origin's realpath retains native path serialization,
 matching the I/O strategy that records and revalidates it. Concrete path case
 and semantic C strings are not folded or rewritten.
+
+For generated C and foreign header text, `relocation.includes` and
+`relocation.generated` share a logical-line LPegLabel directive scanner
+(`titan-compiler/relocation.lua`) that skips multiline comments, quoted and raw
+string literals, character constants, and phase-2 line splices (including the
+`??/` trigraph), so directive-like text inside those constructs is never
+rewritten. Only actual directives with valid trailing spacing or comments are
+visited:
+
+* `#include "..."` and `#include <...>` are C header-name preprocessing tokens,
+  not string literals; their raw delimiter-bounded paths are mapped directly
+  without escape decoding or re-encoding (in both `relocation.includes` and
+  `relocation.generated`).
+* `#line <digits> "..."` and `#define TITAN_GENERATED_C_FILE "..."` (handled by
+  `relocation.generated` only) decode the quoted operand with
+  [`util.decode_c_line_filename`](codegen-overview.md#mixed-source-line-attribution)
+  into raw filename bytes before matching or rebinding against admitted roots.
+  Decoding first prevents Windows separator folding (`path.to_slash`) from
+  corrupting C escape sequences such as `\u0024` or `\044`, and lets roots or
+  tails containing quotes, backslashes, `?`, `$`, or control bytes match
+  accurately.
+
+Only a token whose decoded path actually changes is rewritten—canonically
+spelled with `util.c_line_filename` for line controls, or written directly for
+header names. Non-owned paths, malformed or non-literal operands (such as
+`#line 1 TITAN_GENERATED_C_FILE`), and all surrounding bytes remain
+byte-identical.
 
 Compilation records each generated part's final C prefix, after formatting and
 any coverage line conversion, before source-record injection. A binary read

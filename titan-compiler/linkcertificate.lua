@@ -771,6 +771,32 @@ function certificate.native_library_policy(context, request)
     return { cacheable = false, backend = backend or "none", argv = {}, reason = err }
 end
 
+local function elf_lld(backend)
+    return backend == "lld" and not platform.windows
+end
+
+local function has_backslash(path)
+    return type(path) == "string" and path:find("\\", 1, true) ~= nil
+end
+
+local function lld_has_unreportable_paths(input, request, excludes)
+    if has_backslash(request.dependency_file) then return true end
+    for _, output in ipairs(input.outputs) do
+        if has_backslash(output.path) then return true end
+    end
+    for _, field in ipairs(FILE_FIELDS) do
+        for _, file in ipairs(input[field]) do
+            if has_backslash(file.path) then return true end
+        end
+    end
+    for _, paths in ipairs({ request.argv or {}, request.compiler_argv or {}, excludes or {} }) do
+        for _, path in ipairs(paths) do
+            if has_backslash(path) then return true end
+        end
+    end
+    return false
+end
+
 -- GNU ld's write_dependency_file does not Make-escape filenames. It emits
 -- one literal input per continuation line, then repeats the complete input
 -- list as one literal phony target per line. Decode that second stanza, whose
@@ -860,6 +886,8 @@ local function native_dependencies(context, policy)
             files[#files + 1] = filename
         end
         need(#files > 0, "empty Wasm linker input trace")
+    elseif elf_lld(policy.backend) then
+        files = need(depfile.lld_inputs(bytes))
     else
         files = need(depfile.parse(bytes))
     end
@@ -914,6 +942,12 @@ function certificate.prepare(context, spec)
         if type(file) == "table" and file.cacheable == false then
             native_request.uncacheable = "opaque native C input mechanism"
         end
+    end
+    if elf_lld(native_request.backend) and not native_request.uncacheable and
+       lld_has_unreportable_paths(input, native_request, spec.dependency_excludes) then
+        -- ELF LLD rewrites backslashes in its POSIX Make dependency report.
+        -- Decline reuse before lookup even if the rewritten path also exists.
+        native_request.uncacheable = "ELF LLD cannot report literal backslashes in link paths"
     end
     local policy = certificate.native_library_policy(context, native_request)
     policy.exclude = {}
@@ -1011,8 +1045,18 @@ function certificate.commit(context, ticket)
     if not ticket.cacheable then return true end
     local outputs = {}
     for _, output in ipairs(ticket.outputs) do outputs[#outputs + 1] = output_snapshot(current, output) end
-    local native, err = native_dependencies(current, ticket.native_policy)
-    if not native then return nil, err end
+    local native, err
+    if elf_lld(ticket.native_policy.backend) then
+        local observed
+        observed, native = pcall(native_dependencies, current, ticket.native_policy)
+        if not observed and type(native) ~= "string" then error(native, 0) end
+        -- Link and known-input rechecks succeeded. A bad LLD report cannot
+        -- make the resulting image reusable, but need not discard the image.
+        if not observed or not native then return true end
+    else
+        native, err = native_dependencies(current, ticket.native_policy)
+        if not native then return nil, err end
+    end
     if ticket.native_policy.files then
         need(incremental.digest(context, "native-fallback", native) ==
             incremental.digest(context, "native-fallback", ticket.recipe.native_policy.files),

@@ -421,6 +421,41 @@ describe("final link certificates", function()
         assert.is_false(hit())
     end)
 
+    it("declines an ELF LLD link certificate before lookup for a known backslash input", function()
+        if platform.windows then pending("POSIX ELF dependency reporting"); return end
+        local input = root .. "/literal\\payload.o"
+        write(input, "real input bytes")
+        spec.native_libraries.backend = "lld"
+        write(root .. "/link.d", "program: " .. root .. "/native.a\n" .. root .. "/native.a:\n")
+        local previous = commit()
+        assert.is_true(hit())
+        local ctx, ticket = prepare({ payloads = { input } })
+        assert.equal(previous.record, ticket.record)
+        local reused, reason = certificate.check(ctx, ticket)
+        assert.is_false(reused)
+        assert.matches("ELF LLD cannot report literal backslashes", reason, 1, true)
+        assert(certificate.invalidate(ctx, ticket))
+        assert(certificate.commit(ctx, ticket))
+        assert.is_nil(lfs.symlinkattributes(ticket.record))
+    end)
+
+    it("retains the linked image without a record when the ELF LLD report is untrustworthy", function()
+        if platform.windows then pending("POSIX ELF dependency reporting"); return end
+        spec.native_libraries.backend = "lld"
+        local library, missing = root .. "/native.a", root .. "/missing.a"
+        local contents = assert(context().io:read_file(root .. "/program"))
+        for _, report in ipairs({
+            "program: " .. missing .. "\n" .. missing .. ":\n",
+            "program: " .. library .. " " .. library .. "\n" .. library .. ":\n" .. library .. ":\n",
+        }) do
+            write(root .. "/link.d", report)
+            local ticket = commit()
+            assert.is_nil(lfs.symlinkattributes(ticket.record))
+            assert.is_false(hit())
+            assert.equal(contents, context().io:read_file(root .. "/program"))
+        end
+    end)
+
     it("reads Darwin dependency-info inputs without treating output records as inputs", function()
         spec.native_libraries.backend = "darwin"
         write(root .. "/link.d", "\0ld64\0\16" .. root .. "/native.a\0\17missing-library\0\64stage-image\0")

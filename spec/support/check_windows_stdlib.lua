@@ -1,5 +1,5 @@
 -- Explicit Windows stdlib artifact validation; ordinary installation copies files.
-local stage, prefix, source, bootstrap, generated = ...
+local stage, prefix, source, bootstrap, generated, crypto, ssl = ...
 assert(package.config:sub(1, 1) == "\\", "native Windows Lua is required")
 local modules = { "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "peg", "string", "path", "math", "lua", "iteration", "gc",
@@ -58,7 +58,7 @@ local function valid_imports(path)
     local report, count = read(path), 0
     local allowed = { ["lua55.dll"] = true, ["libuv-1.dll"] = true,
         ["libllhttp-9.4.dll"] = true, ["libsqlite3-0.dll"] = true,
-        ["libssl-3-x64.dll"] = true, ["libcrypto-3-x64.dll"] = true,
+        [crypto:lower()] = true, [ssl:lower()] = true,
         ["kernel32.dll"] = true, ["bcrypt.dll"] = true, ["ws2_32.dll"] = true,
         ["ucrtbase.dll"] = true }
     for name in report:gmatch("\n  Name: ([^\r\n]+)") do

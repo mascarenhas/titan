@@ -198,6 +198,17 @@ search paths. To consume a library built under `out`, add `out` to
 `TITAN_PATH_0_6` (or install it into the SDK with `titan-install`; see
 [Packaging and distributing modules with LuaRocks](modules.md#packaging-and-distributing-modules-with-luarocks)).
 
+On POSIX hosts (Linux and macOS), `\` is an ordinary filename character rather
+than a directory separator, and Titan's path handling never reinterprets it as
+`/`. Output directories (`-o`/`--output`) and `--c-source` paths containing
+literal backslashes work with GCC and Clang, including under `--incremental`.
+However, Clang's POSIX Make dependency writer rewrites `\` to `/` in C
+dependency reports, so external C headers whose paths contain literal
+backslashes on POSIX are unsupported with Clang (GCC does not fold them during
+preprocessing). Separately, ELF LLD's `--dependency-file` rewrites `\` to `/`
+in linker dependency reports, so ELF LLD final links involving
+backslash-containing link paths run uncertified (without link-cache reuse).
+
 ### Choosing the executable path (`--exe`)
 
 `--exe PATH` sets the exact destination for a standalone or `--test`
@@ -587,9 +598,16 @@ A cached module object is reused only when all of the following match:
   Titan sources.
 
 With `-o`, moving a checkout whose source paths remain relative (together with
-its output tree and an identical SDK) preserves reuse; `titanc` verifies the
-preprocessed C once on first use after the move. Source-adjacent builds
-without `-o` miss conservatively when moved.
+its output tree and an identical SDK) preserves reuse when the compiler can
+rebind owned preprocessor directives and verify that the preprocessed C is
+unchanged on first use after the move. Generated line-control operands (`#line`
+and `TITAN_GENERATED_C_FILE`) are decoded and rebound accurately for
+representable owned paths containing characters that require C escapes (such as
+quotes, backslashes, `?`, or `$`), while unowned paths and ordinary C strings
+stay untouched; builds whose generated code observes concrete source locations
+or whose required `#include` header names cannot represent a directory
+character (such as a quote in a header name) still miss or fail as usual.
+Source-adjacent builds without `-o` miss conservatively when moved.
 
 Pass `-v` to inspect why a module or link rebuilt:
 
@@ -607,6 +625,15 @@ sources), `configuration` (`compiler`, `preamble`, `toolchain`, or `options`),
 changed), `codegen-options` (`--c-parts`, `--test`, or `--coverage`), and
 link misses (`link inputs changed`, `native libraries changed`, or an opaque
 linker flag such as `@file` or `-Xlinker` that prevents caching).
+
+On POSIX hosts, `--incremental` preserves exact certification for
+`-o`/`--output` directories and `--c-source` inputs whose paths contain literal
+backslashes with GCC and Clang. With Clang, external C headers whose paths
+contain literal backslashes are unsupported; if preamble dependency reporting
+becomes uncertain, Titan compilation still succeeds uncertified (rebuilding
+Titan source objects and final links without reuse). With ELF LLD, final links
+whose known link paths contain literal backslashes—or whose linker dependency
+report cannot be trusted—succeed without caching a link record.
 
 ### Single-invocation Make integration
 

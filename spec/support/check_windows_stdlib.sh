@@ -9,6 +9,8 @@ prefix=$(cd "$2" && pwd)
 source_root=$(pwd)
 support="$prefix/lib/lua/5.5/titan.dll"
 [[ -f $support ]] || { echo "missing support module: $support" >&2; exit 1; }
+selected=$(bash scripts/windows_openssl.sh identify "$prefix/lib" "$prefix/bin")
+read -r crypto ssl <<< "$selected"
 stage=$(mktemp -d "$build_root/.stdlib-check.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 cp "$build_root/out/titan.dll" "$stage/titan.dll"
@@ -19,4 +21,4 @@ export MSYS2_ARG_CONV_EXCL='*'
 "$prefix/bin/lua.exe" "$(cygpath -m "$source_root/spec/support/check_windows_stdlib.lua")" \
   "$(cygpath -m "$stage")" "$(cygpath -m "$prefix")" \
   "$(cygpath -m "$source_root")" "$(cygpath -m "$support")" \
-  "$(cygpath -m "$build_root/out")"
+  "$(cygpath -m "$build_root/out")" "$crypto" "$ssl"

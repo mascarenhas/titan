@@ -18,10 +18,14 @@ mingw32-make -f Makefile.win luarocks PREFIX=/c/Titan/sdk
 mingw32-make -f Makefile.win compiler PREFIX=/c/Titan/sdk
 ```
 
-- **OpenSSL:** Defaults to an installed binary OpenSSL 3 SDK, normally MSYS2's
-  `pacman -S mingw-w64-clang-x86_64-openssl` under `/clang64` (override with
-  `OPENSSL_PREFIX`). Pass `OPENSSL_MODE=bundled` to build pinned OpenSSL from
-  source (also requires MSYS GNU Make: `pacman -S make`).
+- **OpenSSL:** Defaults to an installed compatible x64 UCRT/GNU OpenSSL 3+
+  binary SDK, normally MSYS2's `pacman -S mingw-w64-clang-x86_64-openssl`
+  under `/clang64` (including OpenSSL 4.x; override with `OPENSSL_PREFIX`).
+  The build discovers and stages the exact `libcrypto` and `libssl` DLL
+  basenames referenced by the SDK's `libcrypto.dll.a` and `libssl.dll.a`
+  import libraries. Pass `OPENSSL_MODE=bundled` to build pinned OpenSSL 3.5.7
+  from source (`libcrypto-3-x64.dll` and `libssl-3-x64.dll`; also requires
+  MSYS GNU Make: `pacman -S make`).
 - **Build profiles:** Default is `production` (`WINDOWS_BUILD_ROOT` defaults
   to `out/windows` for `production` and `out/windows-validation` for
   `validation`). Use separate prefixes and build roots for each profile.
@@ -38,7 +42,7 @@ Make targets pass the SDK's LuaRocks configuration automatically. For direct
 ```sh
 # MSYS2 Bash
 export LUAROCKS_CONFIG="$(cygpath -m /c/Titan/sdk/etc/luarocks/config-5.5.lua)"
-/c/Titan/sdk/bin/luarocks.exe make titan-0.6.0-1.rockspec
+/c/Titan/sdk/bin/luarocks.exe make titan-0.6.1-1.rockspec
 ```
 
 ```powershell
@@ -83,12 +87,16 @@ Windows output layout and limits:
 
 - **Split modules:** `--c-parts` defaults to `1` on Windows; pass `--c-parts N`
   or `TITAN_C_PARTS=N` to opt in.
-- **Deployment:** Ship `lua55.dll` and native dependency DLLs in `bin/` beside
-  executables, and Titan provider DLLs (including `titan.dll`) in
-  `lib/titan/0.6/` next to `bin/` (matched by the default runtime
-  [Titan path](toolchain.md#the-titan-path), `!;!/../lib/titan/0.6`). During
-  development, the SDK fallback runs `titanc.exe` (or `TITANC`) resolved from
-  `PATH` only, never the current directory.
+- **Deployment:** Ship `lua55.dll` and native dependency DLLs—including the
+  two OpenSSL runtime DLLs installed in your SDK's `bin/` directory (for
+  example `libcrypto-4-x64.dll`/`libssl-4-x64.dll` for MSYS2 OpenSSL 4, or
+  `libcrypto-3-x64.dll`/`libssl-3-x64.dll` for OpenSSL 3 and
+  `OPENSSL_MODE=bundled`)—in `bin/` beside executables, and Titan provider
+  DLLs (including `titan.dll`) in `lib/titan/0.6/` next to `bin/` (matched by
+  the default runtime [Titan path](toolchain.md#the-titan-path),
+  `!;!/../lib/titan/0.6`). During development, the SDK fallback runs
+  `titanc.exe` (or `TITANC`) resolved from `PATH` only, never the current
+  directory.
 - **Two test binaries in one `-o`:** A test executable's provider DLL is named
   after its first root, so test binaries sharing a first root need separate
   `-o` directories if both must stay current.

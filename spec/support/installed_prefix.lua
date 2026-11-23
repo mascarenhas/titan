@@ -5,6 +5,7 @@
 -- intentionally unset.
 local M = {}
 local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local driver = require "titan-compiler.driver"
 
 local function normalize_root(root)
@@ -26,6 +27,17 @@ function M.active()
         "native Titan specs require an absolute PREFIX/TITAN_TEST_PREFIX " ..
         "or a Titan compiler root")
     return normalize_root(root)
+end
+
+function M.windows_openssl_dlls(prefix)
+    prefix = paths.to_slash(prefix)
+    local io = require("titan-compiler.io").new_sync()
+    local result = io:run({ "bash", "scripts/windows_openssl.sh", "identify",
+        prefix .. "/lib", prefix .. "/bin" })
+    assert(result.ok, result.output or result.diagnostic)
+    local crypto, ssl = (result.output or ""):match("^(%S+) (%S+)\r?\n$")
+    assert(crypto and ssl, "missing selected Windows OpenSSL runtime names")
+    return { crypto, ssl }
 end
 
 return M

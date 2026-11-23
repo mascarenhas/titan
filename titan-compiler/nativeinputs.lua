@@ -154,6 +154,23 @@ local function cacheable_policy(argv)
     return true
 end
 
+local function read_dependencies(context, source, report, exact_main)
+    local ok, files, inputs = pcall(function()
+        local names = need(depfile.compiler_inputs(need(context.io:read_file(report)), exact_main))
+        local dependencies = certificate.files(context, names)
+        if exact_main then
+            local provenance = need(depfile.render("titan-native", names))
+            need(context.io:write_file(report, provenance))
+        end
+        return names, dependencies
+    end)
+    if not ok then
+        if type(files) ~= "string" then error(files, 0) end
+        error("cannot establish native dependencies for '" .. source .. "': " .. files, 0)
+    end
+    return files, inputs
+end
+
 local function compile_node(context, request, source, stem)
     local preprocessed, dependencies = stem .. ".i", stem .. ".d"
     local object, sidecar = stem .. ".o", stem .. ".record"
@@ -166,13 +183,15 @@ local function compile_node(context, request, source, stem)
         local cacheable = not request.uncacheable and cacheable_policy(request.compile_argv)
         local argv = {}
         append(argv, request.compile_argv)
-        append(argv, { "-E", "-P", "-MD", "-MF", dependencies, "-MT", "titan-native", source, "-o", preprocessed })
+        append(argv, { "-E", "-P" })
+        local exact_main = depfile.append_compiler_options(argv, source, dependencies, "titan-native")
+        append(argv, { source, "-o", preprocessed })
         -- Always execute preprocessing: its output covers negative __has_include
         -- decisions that cannot be represented by a positive dependency list.
         run(context, request, argv, "native-preprocess")
         incremental.invalidate_file(context, preprocessed)
         incremental.invalidate_file(context, dependencies)
-        local files = need(depfile.parse(incremental.file_contents(context, dependencies)))
+        local files, inputs = read_dependencies(context, source, dependencies, exact_main)
         -- Materialize before requesting its digest so classification and the
         -- strict preprocessed hash share one read/hash, not a streamed reread.
         local location_sensitive = cacheable and incremental.has_presumed_location(
@@ -180,7 +199,7 @@ local function compile_node(context, request, source, stem)
         local recipe = { source = source, argv = request.compile_argv, toolchain = request.toolchain,
             authored = incremental.file_digest(context, source),
             preprocessed = incremental.file_digest(context, preprocessed),
-            dependencies = certificate.files(context, files) }
+            dependencies = inputs }
         local semantic = { source = relocation.path(context, source),
             argv = relocation.argv(context, request.compile_argv), toolchain = request.toolchain,
             authored = recipe.authored, preprocessed = recipe.preprocessed,
