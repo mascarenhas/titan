@@ -12,6 +12,7 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local graphcodec = require "titan-compiler.graphcodec"
 local relocation = require "titan-compiler.relocation"
 local ffiheaders = require "titan-compiler.ffiheaders"
+local depfile = require "titan-compiler.depfile"
 local default_io = require("titan-compiler.io").new_sync()
 local incremental = {}
 
@@ -1317,23 +1318,32 @@ function incremental.preamble_identity(context, value)
     if stat then existing = required(context.io:read_file(source)) end
     if existing ~= contents then required(context.io:write_file(source, contents)) end
     local dep = required(context.io:tmpname())
-    local ok, result, inventory = pcall(function()
-        local argv = append({ table.unpack(assert(opts.compile_prefix)) },
-            { "-E", "-dD", "-P", "-MD", "-MF", dep, "-MT", "titan-preamble",
-                "-x", "c", source })
+    local ok, result, inventory, status = pcall(function()
+        local argv = append({ table.unpack(assert(opts.compile_prefix)) }, { "-E", "-dD", "-P" })
+        local exact_main = depfile.append_compiler_options(argv, source, dep, "titan-preamble")
+        append(argv, { "-x", "c", source })
         local expanded = run(context, argv)
-        local dependencies = required(require("titan-compiler.depfile").parse(
-            incremental.file_contents(context, dep)))
-        local inputs = {}
         local synthetic = required(context.io:realpath(source))
-        for _, path in ipairs(dependencies) do
-            local real = required(context.io:realpath(path))
-            -- The TU is generated from the already-certified compiler include
-            -- constants. Its output-tree path is not an external header input.
-            if real ~= synthetic then
-                local digest = incremental.file_digest(context, path)
-                inputs[#inputs + 1] = { path = path, realpath = real, sha256 = digest }
+        local observed, inputs = pcall(function()
+            local report = required(context.io:read_file(dep))
+            local dependencies = required(depfile.compiler_inputs(report, exact_main))
+            local files = {}
+            for _, path in ipairs(dependencies) do
+                if path ~= source then
+                    local real, err = context.io:realpath(path)
+                    real = required(real, err, path)
+                    -- Another spelling of the generated TU is not a header.
+                    if real ~= synthetic then
+                        local digest = incremental.file_digest(context, path)
+                        files[#files + 1] = { path = path, realpath = real, sha256 = digest }
+                    end
+                end
             end
+            return files
+        end)
+        if not observed then
+            if type(inputs) ~= "string" then error(inputs, 0) end
+            return nil, "cannot establish preamble dependencies: " .. inputs, "uncertified"
         end
         return incremental.digest(context, "preamble", {
             expanded = expanded, inputs = relocation.files(context, inputs) }), inputs
@@ -1341,8 +1351,17 @@ function incremental.preamble_identity(context, value)
     local removed, removeerr = context.io:unlink(dep)
     incremental.invalidate_file(context, dep)
     if not ok then error(result, 0) end
-    required(removed, removeerr, dep)
-    return result, inventory
+    if not removed then
+        if not status or removeerr ~= nil and type(removeerr) ~= "string" then
+            required(removed, removeerr, dep)
+        end
+        -- A successful CPP invocation may leave no usable report. A missing
+        -- file is already retired, but other cleanup failures still matter.
+        local stat, staterr = context.io:lstat(dep)
+        if staterr then required(nil, staterr, dep) end
+        if stat then required(nil, removeerr, dep) end
+    end
+    return result, inventory, status
 end
 
 function incremental.configuration(context, value)
@@ -1358,7 +1377,8 @@ function incremental.configuration(context, value)
             end
             required(nil, toolchain_error)
         end
-        local preamble = incremental.preamble_identity(context, opts)
+        local preamble, preamble_error, preamble_status = incremental.preamble_identity(context, opts)
+        if not preamble then return nil, preamble_error, preamble_status end
         local ffi_dirs = {}
         for index, path in ipairs(opts.extra_ffi_include_dirs or {}) do
             ffi_dirs[index] = relocation.path(context, path)
@@ -1374,7 +1394,7 @@ function incremental.configuration(context, value)
     end)
     if not ok then
         if type(result) ~= "string" then error(result, 0) end
-        error("cannot certify compiler configuration: " .. result, 0)
+        return nil, result
     end
     if not result then return nil, reason, status end
     context.incremental_configuration = result

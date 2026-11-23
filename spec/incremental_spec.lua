@@ -1206,6 +1206,65 @@ describe("incremental configuration", function()
             select(2, incremental.file_digest(ctx, fixture_path("/out/.titan/preamble.c"))))
     end)
 
+    it("certifies the actual preamble TU and a genuinely included slash twin", function()
+        if platform.windows then pending("POSIX literal backslash in a path"); return end
+        local function configure(header)
+            local ctx, files = configured()
+            local twin = "/out/literal/.titan/preamble.c"
+            files[twin] = header
+            ctx.incremental_options.preamble_path = "/out\\literal/.titan/preamble.c"
+            local run = ctx.io.run
+            function ctx.io:run(argv)
+                local result = run(self, argv)
+                files["/temporary.d"] = "titan-preamble: " .. twin .. " " .. twin .. "\n" .. twin .. ":\n"
+                return result
+            end
+            local cert = assert(incremental.configuration(ctx))
+            assert.equal(1, ctx.io.reads[twin])
+            assert.is_nil(files["/temporary.d"])
+            return cert
+        end
+        local first, changed = configure("first"), configure("changed")
+        assert.not_equal(first.preamble, changed.preamble)
+        assert.equal(first.options, changed.options)
+    end)
+
+    it("does not certify an unreadable, missing or ambiguous preamble dependency report", function()
+        if platform.windows then pending("POSIX literal backslash in a path"); return end
+        local main = "/out/literal/.titan/preamble.c"
+        for _, case in ipairs({
+            { false, "missing /temporary.d" },
+            { "", "cannot read /temporary.d" },
+            { "titan-preamble: " .. main .. " twin.h twin.h\ntwin.h:\ntwin.h:\n",
+                "ambiguous dependency spelling: twin.h" },
+            { "titan-preamble: " .. main .. " missing.h\nmissing.h:\n",
+                "missing missing.h" },
+        }) do
+            local ctx, files = configured()
+            ctx.incremental_options.preamble_path = "/out\\literal/.titan/preamble.c"
+            local run, read, unlink = ctx.io.run, ctx.io.read_file, ctx.io.unlink
+            function ctx.io:run(argv)
+                local result = run(self, argv)
+                files["/temporary.d"] = case[1] or nil
+                return result
+            end
+            function ctx.io:read_file(path)
+                if path == "/temporary.d" and case[1] == "" then return nil, case[2] end
+                return read(self, path)
+            end
+            function ctx.io:unlink(path)
+                if path == "/temporary.d" and files[path] == nil then return nil, "not found" end
+                return unlink(self, path)
+            end
+            local cert, reason, status = incremental.configuration(ctx)
+            assert.is_nil(cert)
+            assert.equal("uncertified", status, reason)
+            assert.matches(case[2], reason, 1, true)
+            assert.is_nil(ctx.incremental_configuration)
+            assert.is_nil(files["/temporary.d"])
+        end
+    end)
+
     it("verifies the worker compiler component without native probes", function()
         local ctx = configured()
         local compiler = assert(incremental.compiler_component(ctx))
@@ -1955,9 +2014,10 @@ describe("incremental configuration", function()
     it("reports inventory errors and preserves cancellation values", function()
         local ctx, files = configured()
         files[fixture_path("/real/titanc")] = nil
-        local ok, err = pcall(incremental.configuration, ctx)
-        assert.is_false(ok)
-        assert.matches("cannot certify compiler configuration:", err, 1, true)
+        local cert, err, status = incremental.configuration(ctx)
+        assert.is_nil(cert)
+        assert.matches(fixture_path("/real/titanc"), err, 1, true)
+        assert.is_nil(status)
         local cancelled = {}
         local other = configured()
         function other.io:list() error(cancelled, 0) end
@@ -1971,9 +2031,10 @@ describe("incremental configuration", function()
             self.commands[#self.commands + 1] = argv
             return { ok = false, diagnostic = "cc: error: unrecognized command-line option" }
         end
-        local ok, err = pcall(incremental.configuration, ctx)
-        assert.is_false(ok)
-        assert.equal("cannot certify compiler configuration: cc: error: unrecognized command-line option", err)
+        local cert, err, status = incremental.configuration(ctx)
+        assert.is_nil(cert)
+        assert.equal("cc: error: unrecognized command-line option", err)
+        assert.is_nil(status)
         assert.equal(1, #ctx.io.commands)
         assert.is_nil(files[fixture_path("/") .. "temporary.d"])
         assert.is_nil(ctx.incremental_configuration)

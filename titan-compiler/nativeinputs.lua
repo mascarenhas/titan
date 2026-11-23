@@ -166,13 +166,15 @@ local function compile_node(context, request, source, stem)
         local cacheable = not request.uncacheable and cacheable_policy(request.compile_argv)
         local argv = {}
         append(argv, request.compile_argv)
-        append(argv, { "-E", "-P", "-MD", "-MF", dependencies, "-MT", "titan-native", source, "-o", preprocessed })
+        append(argv, { "-E", "-P" })
+        local exact_main = depfile.append_compiler_options(argv, source, dependencies, "titan-native")
+        append(argv, { source, "-o", preprocessed })
         -- Always execute preprocessing: its output covers negative __has_include
         -- decisions that cannot be represented by a positive dependency list.
         run(context, request, argv, "native-preprocess")
         incremental.invalidate_file(context, preprocessed)
         incremental.invalidate_file(context, dependencies)
-        local files = need(depfile.parse(incremental.file_contents(context, dependencies)))
+        local files = need(depfile.compiler_inputs(need(context.io:read_file(dependencies)), exact_main))
         -- Materialize before requesting its digest so classification and the
         -- strict preprocessed hash share one read/hash, not a streamed reread.
         local location_sensitive = cacheable and incremental.has_presumed_location(
@@ -181,6 +183,10 @@ local function compile_node(context, request, source, stem)
             authored = incremental.file_digest(context, source),
             preprocessed = incremental.file_digest(context, preprocessed),
             dependencies = certificate.files(context, files) }
+        if exact_main then
+            local provenance = need(depfile.render("titan-native", files))
+            need(context.io:write_file(dependencies, provenance))
+        end
         local semantic = { source = relocation.path(context, source),
             argv = relocation.argv(context, request.compile_argv), toolchain = request.toolchain,
             authored = recipe.authored, preprocessed = recipe.preprocessed,
