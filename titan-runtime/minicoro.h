@@ -535,7 +535,7 @@ extern "C" {
       _MCO_UNUSED(res);
       MCO_ASSERT(res != 0);
     }
-  #elif defined(MCO_USE_VMEM_ALLOCATOR) /* POSIX virtual memory allocator */
+  #elif defined(MCO_USE_VMEM_ALLOCATOR) && !defined(__wasm__) /* POSIX virtual memory allocator; Wasm uses the C allocator */
     #include <sys/mman.h>
     #if !defined(MAP_ANONYMOUS)
       #if defined(MAP_ANON)
