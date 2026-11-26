@@ -993,8 +993,8 @@ from silently loading stale build artifacts.
   stack parsers, `Error` descriptor preservation, trace-table reading and lookup validation, and
   compiled `lifecycle.c`/`filter.c` C-merge boundaries, and the end-to-end
   browser trace gate (46 native cases in `trace_cases` plus the
-  `trace_uncaught` and `trace_async` programs, staged as 98 positive and 10
-  `degradedCases` manifest rows across `assertions-2` and `assertions-0`:
+  `trace_uncaught` and `trace_async` programs, staged as 49 positive and 5
+  `degradedCases` manifest rows:
   direct and `.browser.titan` contributor locations, mixed Lua/Titan merge
   order, catchable `C stack overflow` past the browser C-call limit,
   pin/rethrow/clear, coroutine append across yield/resume, post-suspension

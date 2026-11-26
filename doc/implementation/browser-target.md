@@ -3073,7 +3073,7 @@ qualifies its declared, unit-aligned ceiling with the same limit-failure
 classifier used for the final result. It then binary-searches to adjacent
 units and attributes the final failing sample. Every probe starts a fresh
 instance. The `lua-limit`, `create-failure`, and `exhaust` modes run once per
-assertion and engine cell, without a search. Two cookie probes follow the seven
+engine, without a search. Two cookie probes follow the seven
 rows: `cookie-boundary` (verifying no cookie at the main stack's zero low bound
 and an intact coroutine cookie across a switch) and `cookie-overwrite`
 (requiring abort status 70 and `Stack overflow! Stack cookie has been
