@@ -117,3 +117,8 @@ local function ordinary_recursion_complete(trace: string): boolean
          count_frames(trace, ": in trace_cases.test_recursion_beyond_ten") == 1 and
          not contains(trace, truncated)
 end
+
+-- The gate reads its trace observations as soon as initialization finishes.
+do
+  ffi.trace_fixture_publish_controls()
+end

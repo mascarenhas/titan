@@ -7,13 +7,6 @@
 #include <string.h>
 #include "../browser_runtime/fixture_controls.h"
 
-/* Publishes the instance's trace metadata to the gate's __traceTest binding
- * (fixture-imports.mjs) once the image initializes. */
-TITAN_WASM_IMPORT("trace_fixture_publish_controls") void trace_fixture_publish_controls(void);
-__attribute__((constructor)) static void trace_fixture_constructor(void) {
-  trace_fixture_publish_controls();
-}
-
 static const char mixed_source[] =
   "local function lua_inner(action, c)\n"
   "  c.bridge(action)\n"

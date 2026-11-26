@@ -18,5 +18,10 @@ void trace_fixture_sleep(void);
 /* Test-owned host bridge, called only after the failed catch has completed
  * (spec/fixtures/browser_runtime/fixture-imports.mjs). */
 TITAN_WASM_IMPORT("trace_fixture_host_recover") void trace_fixture_host_recover(void);
+/* Publishes the instance's trace metadata to the gate's __traceTest binding
+ * (fixture-imports.mjs). Each trace image calls it from its module's
+ * initialization, never from a C constructor: the compiler's protocol probe
+ * links this file and runs its constructors, but no image module. */
+TITAN_WASM_IMPORT("trace_fixture_publish_controls") void trace_fixture_publish_controls(void);
 void trace_fixture_handler(lua_State *L);
 #endif

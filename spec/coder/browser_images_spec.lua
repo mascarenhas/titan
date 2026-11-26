@@ -1000,9 +1000,12 @@ describe("real browser test image", function()
         files.mkdir(workspace .. "/src")
         files.write(workspace .. "/src/checked.titan", "function main(args: {string}): integer\n    return #args\nend\n")
         local helper = workspace .. "/helper.c"
+        -- The constructor keeps the call linked but never makes it, so neither
+        -- initialization nor the compiler's protocol probe calls the host.
         local function link(declaration)
             files.write(helper, declaration .. "int page_value(void);\n" ..
-                "__attribute__((constructor)) static void load(void) { page_value(); }\n")
+                "static volatile int reached;\n" ..
+                "__attribute__((constructor)) static void load(void) { if (reached) page_value(); }\n")
             return cli(info, "--c-source", helper, "checked")
         end
         -- The link allows no undefined symbol: a host function needs an import name.
