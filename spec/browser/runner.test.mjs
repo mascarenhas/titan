@@ -15,6 +15,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runner = resolve(process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run"));
 const fixture = join(root, "spec/browser/runner-fixtures.mjs");
 const importsFixture = join(root, "spec/browser/runner-imports.mjs");
+// The loader fixture images (TITAN_BROWSER_LOADER_IMAGE) import these.
+const fixtureImports = join(root, "spec/fixtures/browser_runtime/fixture-imports.mjs");
 const windows = process.platform === "win32";
 const strict = process.env.TITAN_REQUIRE_BROWSER_TOOLCHAIN === "1";
 const exec = promisify(execFile);
@@ -561,9 +563,10 @@ for (const engine of ["node", "chromium"]) {
                 return;
             }
             if (engine === "chromium" && !await chromium(t)) return;
+            const image = resolve(named);
             for (const mode of ["duplicate", "invalid"]) await t.test(mode, async () => {
                 const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000",
-                    "--grace", "20", resolve(named), "--", mode]);
+                    "--grace", "20", "--root", fixtureRoot(image), "--imports", fixtureImports, image, "--", mode]);
                 assert.equal(result.status, 75, result.stderr.toString());
                 assert.equal(result.signal, null);
                 assert.match(result.stderr.toString(), /titan-browser-run: harness failure: browser entry reported a duplicate or mismatched completion/);
@@ -638,6 +641,7 @@ for (const engine of ["node", "chromium"]) {
                 const directory = fixtureRoot(image);
                 const before = performance.now();
                 const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000", "--grace", "200", "--root", directory,
+                    "--imports", fixtureImports,
                     "--js-test", join(root, `spec/fixtures/browser_loader/${fixtureName}.mjs`), "--",
                     relative(directory, image).split(sep).join("/"), ...args]);
                 assert.equal(result.status, 70, result.stderr.toString());

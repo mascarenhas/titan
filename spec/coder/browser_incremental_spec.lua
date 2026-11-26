@@ -370,7 +370,7 @@ end
             local record = record_path(fixture.output)
             fixtures.write(source, "function main(args: {string}): integer return 7 end\n")
             local hook, log = fixture.root .. "/certificate-case.lua", fixture.root .. "/certificate-observation"
-            fixtures.write(hook, string.format([[
+            fixtures.write(hook, AFTER_OPTIMIZER .. string.format([[
 local certificate = require "titan-compiler.linkcertificate"
 local driver = require "titan-compiler.driver"
 local util = require "titan-compiler.util"

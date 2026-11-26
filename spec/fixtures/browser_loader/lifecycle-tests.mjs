@@ -90,7 +90,8 @@ export async function lifecycle(context, paths) {
     context.assert(keptHandles.length === 50);
 
     let locations = 0;
-    const never = image.create({locateFile(name) { locations++; return image.locateFile(name); }});
+    const never = image.create({locateFile(name) { locations++; return image.locateFile(name); },
+      imports: context.imports});
     await never.dispose();
     await rejection(context, never.initialize(), disposed);
     await rejection(context, never.run(['cycle']), disposed);
@@ -122,7 +123,8 @@ export async function lifecycle(context, paths) {
     await rejection(context, imported.drain(), disposed);
 
     const unusedOutput = [];
-    const notStarted = image.create({locateFile: image.locateFile, stdout: bytes => { unusedOutput.push(bytes); }});
+    const notStarted = image.create({locateFile: image.locateFile, imports: context.imports,
+      stdout: bytes => { unusedOutput.push(bytes); }});
     const runRejected = rejection(context, notStarted.run(['cycle']), {code: disposed.code});
     const notStartedDisposal = notStarted.dispose();
     await runRejected;
