@@ -32,6 +32,7 @@ export async function run(context) {
     }
     const instance = image.create({
       locateFile: image.locateFile,
+      imports: context.imports,
       bindings: {__titanTest(value) { controls = value; }},
       stdout(chunk) { output += decoder.decode(chunk, {stream: true}); context.stdout(chunk); },
       stderr: context.stderr,
@@ -148,7 +149,7 @@ export async function run(context) {
   await execute(gateImage, ["--filter=^entry_gate%.test_negative_coroutine_"], 1);
 
   for (const [args, status] of [[[], 0], [["nonzero"], 7], [["two"], 2]]) {
-    const instance = finalImage.create({locateFile: finalImage.locateFile,
+    const instance = finalImage.create({locateFile: finalImage.locateFile, imports: context.imports,
       stdout: context.stdout, stderr: context.stderr});
     try {
       const result = await instance.run(args);
@@ -157,5 +158,5 @@ export async function run(context) {
       emit({item: 6, finalAction: "coroutine_transfer", completionStatus: result.status, exportResultAsserted: false});
     } finally { await instance.dispose(); }
   }
-  emit({verdict: "PASS", items: provenItems.size, nativeCases, waitForms: ["emscripten_sleep", "EM_ASYNC_JS/setTimeout"]});
+  emit({verdict: "PASS", items: provenItems.size, nativeCases, waitForms: ["Suspending/Promise", "Suspending/async"]});
 }

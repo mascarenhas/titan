@@ -1143,9 +1143,10 @@ function test_r1_close_retains_owner_on_admission_failure(context: test.Context)
   end)
 end
 
--- Synchronous C callbacks. These tests call the public entry an Emscripten
--- trampoline calls, titan_browser_call_sync (browser.call_sync here), from
--- inside this test's entry; the callable runs on a callback thread.
+-- Synchronous C callbacks. A C function the host calls through the function
+-- table enters Titan with titan_browser_call_sync; these tests call it
+-- (browser.call_sync here) from inside this test's entry, and the callable
+-- runs on a callback thread.
 local function set_identity(identity: foreign *titan_browser_identity, pin: browser.BrowserPin)
   local state, slot, generation = pin:identity()
   identity.state = state
@@ -1442,8 +1443,8 @@ function test_synchronous_callback_handle_arguments_are_borrowed(_: test.Context
   defer free_result(result)
   test.assert(browser.call_sync(identity, 0, nil, result) == 0, "a handle result failed")
   test.assert(result.value.kind == ffi.TITAN_BROWSER_HANDLE, "the handle result changed kind")
-  -- C passes its borrowed result back as an argument, as an Emscripten
-  -- trampoline would pass a handle it keeps.
+  -- C passes its borrowed result back as an argument, as a host-called C
+  -- callback would pass a handle it keeps.
   local args: foreign *titan_browser_value = foreign titan_browser_value.new_array(1)
   args[0].kind = result.value.kind
   args[0].state = result.value.state

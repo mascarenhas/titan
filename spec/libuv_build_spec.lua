@@ -1195,7 +1195,7 @@ end
                     argv[#argv + 1] = prefix .. "/bin/titanc" .. executable_suffix
                 else
                     argv[#argv + 1] = prefix .. "/bin/lua"
-                    argv[#argv + 1] = prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc"
+                    argv[#argv + 1] = prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.2-1/bin/titanc"
                 end
                 for _, argument in ipairs({ "--tree", root, "--output", root .. "/out",
                         "--source-first" }) do
@@ -1411,7 +1411,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
                 "titan-compiler/linkcertificate.lua", "titan-compiler/nativeinputs.lua",
                 "titan-compiler/testroots.lua",
                 "titan/math.titan", "prefix/bin/lua", "prefix/bin/titanc",
-                "prefix/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc",
+                "prefix/lib/luarocks/rocks-5.5/titan/0.6.2-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
                 "prefix/include/transfer.h",
@@ -1599,7 +1599,7 @@ done
             -- objects; the compiler, not Make, decides whether bytes changed.
             for _, changed in ipairs({
                 "prefix/bin/titanc",
-                "prefix/lib/luarocks/rocks-5.5/titan/0.6.1-1/bin/titanc",
+                "prefix/lib/luarocks/rocks-5.5/titan/0.6.2-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/titan.h", "prefix/include/transfer.h",
                 "prefix/lib/titan/0.6/libtitan.a",
@@ -3682,7 +3682,7 @@ int main(void) {
                 assert.truthy(makefile:find(contract, 1, true), contract)
             end
 
-            file = assert(io.open("titan-0.6.1-1.rockspec", "rb"))
+            file = assert(io.open("titan-0.6.2-1.rockspec", "rb"))
             local rockspec = file:read("*a")
             file:close()
             for _, contract in ipairs({
@@ -5848,11 +5848,14 @@ printf '%s\n' "${schedule[@]}"
                     "\n  " .. job_name .. ":"), job_name)
             end
             assert.equal(1, count_literal(browser_job,
-                "\n    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
+                "\n    name: browser target real toolchain (ubuntu-24.04, wasi-sdk 34.0, Binaryen 133, Node 26)\n"),
                 browser_job)
             assert.equal(1, count_literal(browser_stdlib_job,
-                "\n    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
+                "\n    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, wasi-sdk 34.0, Binaryen 133, Node 26)\n"),
                 browser_stdlib_job)
+            assert.equal(1, count_literal(packaging_job,
+                "\n    name: browser packaging, clean checkout and records (ubuntu-24.04, wasi-sdk 34.0, " ..
+                "Binaryen 133, Node 26, Playwright 1.64.1 Chromium)\n"), packaging_job)
             for _, removed in ipairs({
                 "\n  test-linux-stdlib:", "\n  compiler-coverage:",
                 "prepare-linux", "test-linux-library", "ubuntu-slim",
@@ -5994,8 +5997,9 @@ printf '%s\n' "${schedule[@]}"
                 "- name: Upload prepared Linux tree", pack_index, true))
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
-            -- browser-packaging restores the emsdk and Playwright caches.
-            assert.equal(14, count_literal(workflow,
+            -- One anchored step restores wasi-sdk and Binaryen for every
+            -- browser job.
+            assert.equal(11, count_literal(workflow,
                 "uses: actions/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: actions/cache/restore@v4"), workflow)
@@ -6157,19 +6161,73 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(read_file(".codecov.yml"):find(
                 '"^titanc[.]lua$::titanc"', 1, true))
 
+            -- One anchored pair of steps restores and verifies the pinned
+            -- wasi-sdk and Binaryen archives for every browser job. Steps
+            -- activate them one at a time, never through job or workflow
+            -- variables, so the native builds never see them.
+            for _, contract in ipairs({
+                'TITAN_WASI_SDK_VERSION: "34.0"',
+                'TITAN_WASI_SDK_SHA256: "b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4"',
+                "TITAN_WASI_SDK_ROOT: ${{ github.workspace }}/.wasi-sdk",
+                'TITAN_BINARYEN_VERSION: "133"',
+                'TITAN_BINARYEN_SHA256: "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489"',
+                "TITAN_BINARYEN_ROOT: ${{ github.workspace }}/.binaryen",
+                "\n      - &restore-browser-toolchain\n",
+                "\n      - &install-browser-toolchain\n",
+            }) do
+                assert.equal(1, count_literal(workflow, contract), contract)
+            end
+            for _, removed in ipairs({ "emsdk", "EMSDK", "emcc", "Emscripten" }) do
+                assert.falsy(workflow:find(removed, 1, true), removed)
+            end
+            for _, variable in ipairs({ "WASI_SDK_PATH", "BINARYEN_ROOT", "WASM_OPT" }) do
+                assert.falsy(workflow:find("\n%s*" .. variable .. ":"), variable)
+                assert.falsy(workflow:find(variable .. "=[^\n]*GITHUB_ENV"), variable)
+            end
+            assert.falsy(workflow:find("TITAN_WASI_SDK_ROOT[^\n]*GITHUB_PATH"), workflow)
+            assert.falsy(workflow:find("TITAN_BINARYEN_ROOT[^\n]*GITHUB_PATH"), workflow)
+            local toolchain_cache = step_containing(browser_job, "&restore-browser-toolchain")
+            for _, contract in ipairs({
+                "uses: actions/cache@v4",
+                "${{ env.TITAN_WASI_SDK_ROOT }}", "${{ env.TITAN_BINARYEN_ROOT }}",
+                "-wasi-sdk-${{ env.TITAN_WASI_SDK_VERSION }}-${{ env.TITAN_WASI_SDK_SHA256 }}" ..
+                    "-binaryen-${{ env.TITAN_BINARYEN_VERSION }}-${{ env.TITAN_BINARYEN_SHA256 }}-v1",
+            }) do
+                assert.truthy(toolchain_cache:find(contract, 1, true), contract)
+            end
+            -- A re-pinned archive digest must never restore the previous tools.
+            assert.falsy(toolchain_cache:find("restore-keys:", 1, true), toolchain_cache)
+            assert_ordered(step_containing(browser_job, "&install-browser-toolchain"),
+                'if [ ! -x "$TITAN_WASI_SDK_ROOT/bin/clang" ]; then',
+                "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${TITAN_WASI_SDK_VERSION%%.*}/" ..
+                    "wasi-sdk-$TITAN_WASI_SDK_VERSION-x86_64-linux.tar.gz",
+                'echo "$TITAN_WASI_SDK_SHA256  $archive" | sha256sum -c --strict -',
+                'tar -xzf "$archive" -C "$TITAN_WASI_SDK_ROOT" --strip-components=1',
+                'if [ ! -x "$TITAN_BINARYEN_ROOT/bin/wasm-opt" ]; then',
+                "https://github.com/WebAssembly/binaryen/releases/download/version_$TITAN_BINARYEN_VERSION/" ..
+                    "binaryen-version_$TITAN_BINARYEN_VERSION-x86_64-linux.tar.gz",
+                'echo "$TITAN_BINARYEN_SHA256  $archive" | sha256sum -c --strict -',
+                'tar -xzf "$archive" -C "$TITAN_BINARYEN_ROOT" --strip-components=1',
+                '"binaryen-version_$TITAN_BINARYEN_VERSION/bin/wasm-opt"',
+                'test "$(head -n 1 "$TITAN_WASI_SDK_ROOT/VERSION")" = "$TITAN_WASI_SDK_VERSION"',
+                '"wasm-opt version $TITAN_BINARYEN_VERSION (version_$TITAN_BINARYEN_VERSION)"')
+            for _, job in ipairs({ browser_stdlib_job, playwright_job, packaging_job }) do
+                assert.equal(1, count_literal(job, "\n      - *restore-browser-toolchain\n"), job)
+                assert.equal(1, count_literal(job, "\n      - *install-browser-toolchain\n"), job)
+                assert_ordered(job, "- *restore-browser-toolchain", "- *install-browser-toolchain")
+            end
+            local activation = 'export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"'
+            local toolchain_guards = {
+                'test -z "${WASI_SDK_PATH:-}"', 'test -z "${BINARYEN_ROOT:-}"', 'test -z "${WASM_OPT:-}"',
+                "if command -v wasm-opt >/dev/null 2>&1; then exit 1; fi",
+            }
             for _, job in ipairs({ browser_job, browser_stdlib_job }) do
                 for _, contract in ipairs({
                     "\n    needs: build-compiler\n",
                     "timeout-minutes: 60",
-                    'TITAN_EMSDK_VERSION: "6.0.13"',
-                    "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
-                    "git clone --depth 1 https://github.com/emscripten-core/emsdk.git",
-                    '"$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"',
-                    '"$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"',
                     'TITAN_CHROME_VERSION: "156.0.8078.80"',
                     "547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4",
                     "chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-${{ env.TITAN_CHROME_SHA256 }}-v1",
-                    "sha256sum -c --strict -",
                     "python3 scripts/browser_extract_zip.py",
                     "browser-chrome-sandbox.log", "df -h /dev/shm",
                     'sudo sysctl -w "$key=0"',
@@ -6181,19 +6239,22 @@ printf '%s\n' "${schedule[@]}"
                     'make lua-browser PREFIX="$PREFIX"',
                     '"$PREFIX/bin/luarocks" make',
                     'make browser-sdk PREFIX="$PREFIX"',
-                    "titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js",
+                    "libtitan.a titan.a titan-browser.mjs titan-wasm-factory.mjs",
                     'TITAN_PROBE_CACHE_DISABLE: "1"', "if: failure()",
                 }) do
                     assert.equal(1, count_literal(job, contract), contract)
                 end
-                local native_install = step_containing(job, '"$PREFIX/bin/luarocks" make')
-                for _, guard in ipairs({ 'test -z "${EMSDK:-}"', "! command -v emcc" }) do
-                    assert.equal(1, count_literal(native_install, guard), guard)
+                for _, needle in ipairs({
+                    'make lua-browser PREFIX="$PREFIX"', 'make browser-sdk PREFIX="$PREFIX"',
+                    '"$PREFIX/bin/busted" -c -o gtest -v',
+                }) do
+                    local step = step_containing(job, needle)
+                    assert.equal(1, count_literal(step, activation), step)
                 end
                 local previous = 0
                 for _, command in ipairs({
                     'tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz"',
-                    '"$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"',
+                    job == browser_job and "- &install-browser-toolchain" or "- *install-browser-toolchain",
                     'node_bin=$(command -v node)',
                     "python3 scripts/browser_extract_zip.py",
                     "grep -q 'id=\"sandbox\"' \"$log\"",
@@ -6214,15 +6275,15 @@ printf '%s\n' "${schedule[@]}"
                     'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"'), gate)
                 assert.truthy(gate:find('[[ ! -f $gate_spec ]]', 1, true), gate)
                 assert.truthy(gate:find('"${gate_specs[@]}"', 1, true), gate)
-                -- All browser runners reinstall the native compiler without Emscripten
-                -- and must retire every unregistered preparation copy.
+                -- All browser runners reinstall the native compiler without the
+                -- browser toolchain and must retire every unregistered
+                -- preparation copy.
                 local rocks = step_containing(job, '"$PREFIX/bin/luarocks" make')
-                for _, contract in ipairs({
-                    'test -z "${EMSDK:-}"', "! command -v emcc",
-                    'rm -rf "$PREFIX/share/lua/5.5/c-parser"',
-                }) do
-                    assert.truthy(rocks:find(contract, 1, true), contract)
+                assert.falsy(rocks:find(activation, 1, true), rocks)
+                for _, contract in ipairs(toolchain_guards) do
+                    assert.equal(1, count_literal(rocks, contract), contract)
                 end
+                assert.truthy(rocks:find('rm -rf "$PREFIX/share/lua/5.5/c-parser"', 1, true), rocks)
                 -- A re-pinned ZIP digest must invalidate either job's cache.
                 local chrome_cache = step_containing(job,
                     "path: ${{ env.TITAN_CHROME_ROOT }}")
@@ -6279,8 +6340,9 @@ printf '%s\n' "${schedule[@]}"
             local pack_gate = named_step(browser_stdlib_job, "Verify the offline browser semantic release pack")
             for _, contract in ipairs({
                 "if: matrix.shard == 'scheduler'",
-                'test -z "${EMSDK:-}"',
-                "! command -v emcc",
+                'test -z "${WASI_SDK_PATH:-}"',
+                'test -z "${BINARYEN_ROOT:-}"',
+                'test -z "${WASM_OPT:-}"',
                 'TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover',
                 "browser_semantic_pack_test.py -v",
             }) do
@@ -6390,6 +6452,10 @@ printf '%s\n' "${schedule[@]}"
                 "Build and run the browser trace gate under Node")
             assert.equal(1, count_literal(node_trace_gate,
                 "TITAN_ROOT: ${{ github.workspace }}/.lua"), node_trace_gate)
+            -- Directly run degraded images get the trace fixture's imports.
+            assert.truthy(node_trace_gate:find(
+                "'--imports', resolve(root, manifest.imports), resolve(root, row.image)", 1, true),
+                node_trace_gate)
             local browser_loader = named_step(browser_job,
                 "Run the portable loader suite under Node and Chromium")
             assert.truthy(browser_loader:find("for engine in node chromium",
@@ -6403,19 +6469,28 @@ printf '%s\n' "${schedule[@]}"
                 "Run the optimized guard suite under Node and Chromium")
             assert.truthy(browser_guard:find("optimized-guard.mjs", 1, true),
                 browser_guard)
-            local browser_guard_build = named_step(browser_job,
-                "Build the portable loader images for both assertion profiles")
-            assert.truthy(browser_guard_build:find("--ldflag=-Os", 1, true),
-                browser_guard_build)
+            local loader_build = named_step(browser_job, "Build the portable loader images")
+            for _, contract in ipairs({
+                'output="$root/program"', 'optimized="$root/optimized"',
+                "browser_link_options={purpose='baseline',optimization='O2'}",
+                '"$optimized/loader_app.wasm" "$optimized/fidelity.wasm"',
+            }) do
+                assert.truthy(loader_build:find(contract, 1, true), contract)
+            end
+            -- The mismatch case pairs the two loader_app links.
+            assert_ordered(browser_loader, "out/browser/loader/program/loader_app.mjs",
+                "out/browser/loader/optimized/loader_app.mjs", "--fidelity", "--names")
 
             local trace_units = named_step(browser_job,
                 "Run the browser trace adapter and supervisor units")
             for _, contract in ipairs({
-                'for assertions in 2 0; do',
+                'export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT"',
+                "--target=wasm32-wasip1 -mexec-model=reactor",
+                "-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false",
                 'spec/fixtures/browser_trace_adapter/lifecycle.c',
                 'spec/fixtures/browser_trace_adapter/filter.c titan-runtime/titan.c',
-                'TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE="$output/lifecycle-$assertions.mjs"',
-                'TITAN_BROWSER_TRACE_FILTER_IMAGE="$output/filter-$assertions.mjs"',
+                'TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE="$output/lifecycle.wasm"',
+                'TITAN_BROWSER_TRACE_FILTER_IMAGE="$output/filter.wasm"',
                 '"$TITAN_NODE" --test spec/browser/trace-adapter.test.mjs',
                 'spec/browser/playwright-runner.test.mjs',
             }) do
@@ -6423,7 +6498,7 @@ printf '%s\n' "${schedule[@]}"
                     "missing compiled trace unit contract " .. contract)
             end
             assert.equal(2, count_literal(trace_units,
-                '-sASSERTIONS="$assertions"'), trace_units)
+                '"$WASI_SDK_PATH/bin/clang" "${compile[@]}"'), trace_units)
 
             for _, contract in ipairs({
                 "needs: build-compiler",
@@ -6444,7 +6519,8 @@ printf '%s\n' "${schedule[@]}"
                 'TITAN_VITE_VERSION: "8.3.6"',
                 "TITAN_VITE_ROOT:",
                 "PLAYWRIGHT_BROWSERS_PATH:",
-                "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
+                "\n      - *install-browser-toolchain\n",
+                "'--imports', resolve(root, manifest.imports),",
                 "playwright-${{ env.TITAN_PLAYWRIGHT_VERSION }}-${{ matrix.engine }}-v1",
                 "spec/browser/build-trace.lua",
                 "spec/browser/build-bridge.lua",
@@ -6467,8 +6543,13 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.truthy(playwright_job:find(contract, 1, true), contract)
             end
+            local playwright_native = named_step(playwright_job,
+                "Install the selected native compiler and SDK profile")
+            for _, contract in ipairs(toolchain_guards) do
+                assert.equal(1, count_literal(playwright_native, contract), contract)
+            end
             local bridge_build = named_step(playwright_job,
-                "Build the portable bridge gate for both assertion modes")
+                "Build the portable bridge gate")
             assert.falsy(bridge_build:find("if:", 1, true), bridge_build)
             assert.truthy(bridge_build:find(
                 'lua -E spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"', 1, true))
@@ -6477,9 +6558,9 @@ printf '%s\n' "${schedule[@]}"
             assert.falsy(bridge_gate:find("if:", 1, true), bridge_gate)
             for _, contract in ipairs({
                 "process.env.TITAN_TRACE_ENGINES.split(' ')",
-                "for (const assertions of [2, 0])",
+                "const images = ['images/bridge.mjs', 'images/initializer-failure.mjs',",
                 "['integration.mjs', 0,",
-                "`assertions-${assertions}/public-states.mjs`",
+                "'images/public-states.mjs'];",
                 "status === 0 ? images : images.slice(0, 1)",
                 "['unhandled.mjs', 74,",
                 "['unhandled-result.mjs', 74,",
@@ -6487,7 +6568,7 @@ printf '%s\n' "${schedule[@]}"
                 "const pages = engine === 'node' ? [] : [",
                 "['counter.mjs', 0, 'COUNTER {\"verdict\":\"PASS\"']",
                 "['responsive.mjs', 0, 'RESPONSIVE {\"verdict\":\"PASS\"']",
-                "pages.some(([page]) => page === script) ? [`assertions-${assertions}/${script}`]",
+                "pages.some(([page]) => page === script) ? [`images/${script}`]",
                 "!receipt.includes(marker)",
                 "process.env.TITAN_BUILD_PROFILE === 'production' && engines[0] === 'chromium'",
                 "engines.push('node')",
@@ -6537,7 +6618,7 @@ printf '%s\n' "${schedule[@]}"
                 'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"',
                 'TITAN_REQUIRE_BROWSER_DEPLOYMENT: "1"',
                 'TITAN_PROBE_CACHE_DISABLE: "1"',
-                'source "$TITAN_EMSDK_ROOT/emsdk_env.sh"',
+                activation,
                 '"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_docs_spec.lua',
                 "browser-playwright-docs.log",
             }) do
@@ -6792,7 +6873,7 @@ printf '%s\n' "${schedule[@]}"
                 end
                 assert.equal(platform_id == "macos" and 6 or 2, dependency_key_count, suite)
                 local rocks_cache = named_step(suite, "Restore standalone-prefix LuaRocks dependencies")
-                assert_ordered(rocks_cache, "-rocks-layout-", "hashFiles(", "'titan-0.6.1-1.rockspec'")
+                assert_ordered(rocks_cache, "-rocks-layout-", "hashFiles(", "'titan-0.6.2-1.rockspec'")
                 if platform_id == "macos" then
                     local core_cache = named_step(suite, "Restore the Lua SDK and libbacktrace build")
                     assert_ordered(core_cache, ".lua/bin/lua\n", ".lua/bin/luac\n",

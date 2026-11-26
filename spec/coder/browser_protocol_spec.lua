@@ -103,15 +103,32 @@ function driver.publish_provider_bundle(dso, archive, destination, options)
 end
 local oversized = os.getenv("TITAN_PROTOCOL_OVERSIZED")
 if oversized and oversized ~= "" then
-    local link = driver.run_link_command
-    function driver.run_link_command(argv, verbose, output, ...)
-        local linked, term, code = link(argv, verbose, output, ...)
-        if linked and output and output:match("[.]mjs$") then
-            local wasm = output:gsub("[.]mjs$", ".wasm")
-            assert(util.set_file_contents(wasm, assert(util.get_file_contents(oversized, "rb")), "wb"))
-            assert(util.set_file_contents(wasm .. ".map", assert(util.get_file_contents(oversized .. ".map", "rb")), "wb"))
+    -- Replace only wasm-opt's staged output: the optimizer reads the clang
+    -- link's `<stem>.wasm.linked` and writes `<stem>.wasm`, through whichever
+    -- process transport the driver selects.
+    local cdriver = require "c-parser.cdriver"
+    local process = require "titan-compiler.process"
+    local function substitute(command)
+        local argv = type(command) == "string" and cdriver.split_shell_words(command) or command
+        if type(argv) == "table" and (argv[1] == "/bin/sh" or argv[1] == "sh") and argv[2] == "-c" then
+            argv = cdriver.split_shell_words(argv[3])
         end
-        return linked, term, code
+        local count = type(argv) == "table" and #argv or 0
+        if count >= 4 and argv[1]:match("wasm%-opt[^/\\]*$") and argv[count - 1] == "-o" and
+                argv[count - 2]:match("[.]wasm[.]linked$") and argv[count]:match("[.]wasm$") then
+            assert(util.set_file_contents(argv[count], assert(util.get_file_contents(oversized, "rb")), "wb"))
+        end
+    end
+    for _, transport in ipairs({ { os, "execute" }, { process, "run" }, { process, "capture" } }) do
+        local owner, field = transport[1], transport[2]
+        local original = owner[field]
+        owner[field] = function(command, ...)
+            local results = table.pack(original(command, ...))
+            local ok = results[1]
+            if type(ok) == "table" then ok = ok.ok end
+            if ok then substitute(command) end
+            return table.unpack(results, 1, results.n)
+        end
     end
     local io_module = require "titan-compiler.io"
     local new_sync = io_module.new_sync
@@ -137,8 +154,8 @@ local function prepare(info)
     toolchain.stage_lua(info, prefix)
     local source = browserlink.sdk_assets(fixtures.paths(info.prefix))
     local destination = browserlink.sdk_assets(fixtures.paths(prefix))
-    for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-            "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
+    for _, key in ipairs({ "runtime", "factory", "loader", "runner", "runner_module", "node_worker",
+            "page", "build_profile" }) do
         files.copy(source[key], destination[key])
     end
     -- The source launcher is executable; binary copying alone does not retain it.
@@ -173,6 +190,7 @@ local function no_staged_images(directory)
             assert.is_nil(lfs.symlinkattributes(filename), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]c$", ".o"))), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm"))), filename)
+            assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm.linked"))), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm.map"))), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm.trace"))), filename)
         end
@@ -183,6 +201,7 @@ local function no_staged_images(directory)
             assert.is_nil(entry:find(".stage.tmp.", 1, true), entry)
             assert.is_nil(entry:match("[.]mjs$"), entry)
             assert.is_nil(entry:match("[.]wasm$"), entry)
+            assert.is_nil(entry:match("[.]wasm[.]linked$"), entry)
             assert.is_nil(entry:match("[.]wasm[.]map$"), entry)
             assert.is_nil(entry:match("[.]wasm[.]trace$"), entry)
             no_staged_images(directory .. "/" .. entry)
@@ -282,9 +301,8 @@ describe("browser executing provider protocol", function()
         local archive = workspace .. "/out/pkg/left.a"
         local predecessor = files.read(archive)
         files.write(workspace .. "/src/pkg/left.titan", "function answer(): integer return 43 end\n")
-        local candidate, map = fixtures.oversized_body("native_guard_case", "native_input.c")
         local filename = workspace .. "/candidate.wasm"
-        files.write(filename, candidate); files.write(filename .. ".map", map)
+        files.write(filename, fixtures.oversized_body("native_guard_case", "native_input.c"))
         local rejected = cli({ prefix = info.prefix, lua = info.lua, node = info.node, oversized = filename },
             nil, "--incremental", "pkg.left")
         assert.is_false(rejected.ok, rejected.output)
@@ -299,15 +317,16 @@ describe("browser executing provider protocol", function()
         no_staged_images(workspace .. "/out")
     end)
 
-    it("executes again before identical-archive reuse when a required JS input changes", function()
+    it("executes again before identical-archive reuse when the required factory changes", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare(info)
         local result = cli(info, nil, "--incremental", "pkg.left")
         assert.is_true(result.ok, result.output)
         local filename = workspace .. "/out/pkg/left.a"
         local predecessor = files.read(filename)
-        local library = browserlink.sdk_assets(fixtures.paths(prefix)).js_library
-        files.write(library, files.read(library) .. "\n// Required-input identity mutation.\n")
+        local factory = browserlink.sdk_assets(fixtures.paths(prefix)).factory
+        -- The factory's default export must stay last, so the mutation leads.
+        files.write(factory, "// Required-input identity mutation.\n" .. files.read(factory))
         result = cli(info, nil, "--incremental", "pkg.left")
         assert.is_true(result.ok, result.output)
         assert.equal(predecessor, files.read(filename))

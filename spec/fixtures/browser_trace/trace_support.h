@@ -2,6 +2,7 @@
 #define TITAN_TRACE_FIXTURE_SUPPORT_H
 #include <lua.h>
 #include <stddef.h>
+#include <titan/browser.h>
 #include "trace_frame_lines.h"
 int trace_fixture_load(lua_State *L, int which);
 int trace_fixture_bridge(lua_State *L);
@@ -14,6 +15,8 @@ void trace_fixture_emit(const char *label, const char *trace);
 int trace_fixture_count(const char *text, const char *needle);
 int trace_fixture_order(const char *text, const char *first, const char *second);
 void trace_fixture_sleep(void);
-void trace_fixture_host_recover(void);
+/* Test-owned host bridge, called only after the failed catch has completed
+ * (spec/fixtures/browser_runtime/fixture-imports.mjs). */
+TITAN_WASM_IMPORT("trace_fixture_host_recover") void trace_fixture_host_recover(void);
 void trace_fixture_handler(lua_State *L);
 #endif

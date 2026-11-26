@@ -24,15 +24,16 @@
 # stdlib rows above, they have no covered timing. Neither is an observation
 # from the timing runs above.
 # Issue 328 browser rows use the same unmeasured 1.000 local weight. Their
-# real-toolchain cases are pending unless the emsdk gate in ci.yml provides the
-# toolchain, so they stay in this partition without a covered duration.
+# real-toolchain cases are pending unless the browser toolchain gate in ci.yml
+# provides the toolchain, so they stay in this partition without a covered
+# duration.
 # Issue 329 browser image/runner rows use the same unmeasured 1.000 weight: their
-# real cases need emsdk plus the browser SDK, Chrome and Node, so they pend in
-# the default lane and stay in the ordinary compiler partitions.
+# real cases need wasi-sdk, Binaryen, the browser SDK, Chrome and Node, so they
+# pend in the default lane and stay in the ordinary compiler partitions.
 # Issue 330 trace map/entry rows use the same unmeasured 1.000 planning weight;
 # no local or CI covered duration is claimed for these inventory additions.
 # Issue 331 browser stdlib rows use the same unmeasured 1.000 planning weight;
-# real-toolchain closure fixtures pend outside the emsdk gate.
+# real-toolchain closure fixtures pend outside the browser toolchain gate.
 # Issue 332 bridge and deployment rows use the same unmeasured 1.000 planning
 # weight; their real-toolchain cases pend outside the browser CI gates.
 # Counted-string conversion rows use an unmeasured 1.000 planning weight.

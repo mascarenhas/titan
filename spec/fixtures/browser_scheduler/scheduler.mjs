@@ -97,7 +97,7 @@ function makeHost(context, image) {
     marked() { return host.marked; },
     queue_owner_notification() { host.instance.notify(host.fn('public_owner_notification')); },
   };
-  host.instance = image.create({locateFile: image.locateFile, bindings: host.bindings,
+  host.instance = image.create({locateFile: image.locateFile, imports: context.imports, bindings: host.bindings,
     stdout(bytes) { host.stdout.push(bytes.slice()); },
     stderr(bytes) { host.stderr.push(bytes.slice()); },
     onNotificationError(event) { host.notificationErrors.push(event); }});

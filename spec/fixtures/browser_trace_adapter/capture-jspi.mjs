@@ -1,11 +1,12 @@
-// Run through titan-browser-run --js-test after spec/browser/build-trace.lua.
+// Run through titan-browser-run --imports fixture-imports.mjs --js-test after
+// spec/browser/build-trace.lua.
 // The one selected native case captures before/after yield and after an outer
 // wait. Preserve the real Error objects/stack strings at construction time;
 // never reconstruct a throw's trace in a later promise-rejection callback.
 export async function run(context) {
   context.assert(context.args.length === 1, 'pass a trace runtime image');
   const image = await context.image(context.args[0]);
-  const instance = image.create({locateFile: image.locateFile});
+  const instance = image.create({locateFile: image.locateFile, imports: context.imports});
   const NativeError = globalThis.Error;
   const captures = [];
   try {

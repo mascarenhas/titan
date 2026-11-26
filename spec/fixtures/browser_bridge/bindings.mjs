@@ -206,6 +206,7 @@ export function makeHost(context) {
   };
   host.options = {
     bindings,
+    imports: context.imports,
     stdout(bytes) { host.stdout.push(bytes.slice()); return host.sinks.stdout?.(bytes); },
     stderr(bytes) { host.stderr.push(bytes.slice()); return host.sinks.stderr?.(bytes); },
     onNotificationError(event) { host.notificationErrors.push(event); host.hooks.notificationError?.(event); },

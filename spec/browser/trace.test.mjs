@@ -32,6 +32,9 @@ export async function run(context) {
   context.assert(Array.isArray(manifest.cases) && Array.isArray(manifest.degradedCases), "invalid trace manifest lists");
   context.assert(manifest.profile === "production" || manifest.profile === "validation",
     "invalid trace manifest profile");
+  context.assert(manifest.imports === "fixture-imports.mjs", "invalid trace manifest imports");
+  context.assert(typeof context.imports === "function",
+    "run the trace gate with --imports " + manifest.imports);
   const names = new Set();
   for (const row of [...manifest.cases, ...manifest.degradedCases]) {
     context.assert(typeof row.name === "string" && !names.has(row.name), "duplicate/invalid manifest name");
@@ -47,9 +50,6 @@ export async function run(context) {
   }
   const selected = degraded ? manifest.degradedCases : manifest.cases;
   context.assert(selected.length > 0, "empty trace gate");
-  for (const mode of ["assertions-2/", "assertions-0/"]) {
-    context.assert(selected.some(row => row.image.startsWith(mode)), "manifest omitted " + mode);
-  }
   const webkit = context.engine === "webkit";
   const firefox = context.engine === "firefox";
   let nativeExecutions = 0;
@@ -359,6 +359,7 @@ async function executeRow(context, row, degraded, recordCost, profile) {
     console.warn = (...values) => { notice(values); originalWarn.apply(console, values); };
     console.error = (...values) => { notice(values); originalError.apply(console, values); };
     const instance = image.create({
+      imports: context.imports,
       bindings: {
         __traceTest(value) { controls = value; },
         traceFixtureRestoreDescriptors() {

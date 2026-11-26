@@ -7,7 +7,7 @@ lua_prefix=${PREFIX:?select a prepared Lua 5.5 SDK}
 mkdir "$workspace"
 sdk=$workspace/sdk
 mkdir "$sdk"
-rockspec=$PWD/titan-0.6.1-1.rockspec
+rockspec=$PWD/titan-0.6.2-1.rockspec
 lr() { "$lua_prefix/bin/luarocks" --lua-version 5.5 --lua-dir "$lua_prefix" --tree "$sdk" "$@"; }
 # The selected tree is empty. This installs the actual Titan rock there;
 # its prepared Lua prefix provides the already installed compiler dependencies.
@@ -40,7 +40,7 @@ package = "titan-cui"
 version = "0.1.0-1"
 source = { url = "file:///unused-by-make" }
 description = { license = "MIT" }
-dependencies = { "titan == 0.6.1-1" }
+dependencies = { "titan == 0.6.2-1" }
 hooks = { post_install = '"$(SCRIPTS_DIR)/titan-install" --path "$(PREFIX)"' }
 build = {
     type = "command",
@@ -81,7 +81,7 @@ package = "titan-source-addon"
 version = "0.1.0-1"
 source = { url = "file://$workspace/archive/source-addon.tar.gz", dir = "source-addon" }
 description = { license = "MIT" }
-dependencies = { "titan == 0.6.1-1" }
+dependencies = { "titan == 0.6.2-1" }
 hooks = { post_install = '"\$(SCRIPTS_DIR)/titan-install" --path "\$(PREFIX)"' }
 build = {
     type = "command",

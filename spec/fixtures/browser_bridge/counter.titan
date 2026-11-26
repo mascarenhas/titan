@@ -1,7 +1,7 @@
--- A click counter: html5.h click callbacks call pinned Titan handlers
+-- A click counter: the page's click callbacks call pinned Titan handlers
 -- synchronously, and each handler shows the count through a binding.
 local browser = import "browser"
-foreign import "emscripten/html5.h"
+foreign import "click_host.h"
 foreign import "stdio.h"
 foreign import "stdlib.h"
 foreign import "titan/browser.h"
@@ -40,10 +40,9 @@ end
 
 local listeners: {Listener} = {}
 
--- The click callback, html5's `em_mouse_callback_func`. The pinned handler
--- returns nil, so only a failure's message and trace need freeing.
-local foreign function counter_click(kind: int, event: const *EmscriptenMouseEvent,
-                                     identity: *void): bool
+-- The click callback, click_host.h's `titan_test_click_callback`. The pinned
+-- handler returns nil, so only a failure's message and trace need freeing.
+local foreign function counter_click(identity: *void): bool
   local result = foreign titan_browser_sync_result.new()
   local status = ffi.titan_browser_call_sync(
     identity as const *titan_browser_identity, 0, nil, result)
@@ -69,10 +68,7 @@ local function listen(selector: string, handler: function (...: Value): Value)
   identity.generation = generation
   local index = #listeners + 1
   listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
-  -- The short click-registration spelling is a function-like macro.
-  if ffi.emscripten_set_click_callback_on_thread(
-      selector, identity, 0, counter_click,
-      ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD) ~= ffi.EMSCRIPTEN_RESULT_SUCCESS then
+  if ffi.titan_test_set_click_callback(selector, identity, counter_click) ~= 0 then
     listeners[index] = nil
     pin:close()
     raise "cannot listen for clicks on " .. selector
@@ -83,8 +79,7 @@ end
 local function stop(...: Value): Value
   for index = #listeners, 1, -1 do
     local listener = listeners[index]
-    ffi.emscripten_set_click_callback_on_thread(
-      listener.selector, nil, 0, nil, ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD)
+    ffi.titan_test_set_click_callback(listener.selector, nil, nil)
     listener.pin:close()
     listeners[index] = nil
   end

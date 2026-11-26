@@ -1,11 +1,12 @@
-// The html5 click counter on a real page: each button's Emscripten click
-// callback calls a pinned Titan handler synchronously, so the label already
-// shows the new count when click() returns. A failed second registration
-// unregisters the first before main fails, so no callback outlives setup.
-function counter(image, label) {
+// The click counter on a real page: each button's click callback, which the
+// page's host API calls through the function table, calls a pinned Titan
+// handler synchronously, so the label already shows the new count when
+// click() returns. A failed second registration unregisters the first before
+// main fails, so no callback outlives setup.
+function counter(context, image, label) {
   const decoder = new TextDecoder();
   const host = {stderr: '', stop: undefined};
-  host.instance = image.create({locateFile: image.locateFile,
+  host.instance = image.create({locateFile: image.locateFile, imports: context.imports,
     stderr: bytes => { host.stderr += decoder.decode(bytes); },
     bindings: {
       show: count => { label.textContent = String(count); },
@@ -27,7 +28,7 @@ export async function run(context) {
   const shown = [];
   const click = button => { button.click(); shown.push(label.textContent); };
   try {
-    const failed = counter(image, label);
+    const failed = counter(context, image, label);
     try {
       const result = await failed.instance.run(['#missing']);
       context.assert(result.kind === 'failed' && result.status === 1 &&
@@ -40,7 +41,7 @@ export async function run(context) {
       await failed.instance.dispose();
     }
 
-    const host = counter(image, label);
+    const host = counter(context, image, label);
     try {
       const result = await host.instance.run([]);
       context.assert(result.kind === 'returned' && result.status === 0, `main returned ${result.kind}/${result.status}`);

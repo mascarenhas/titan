@@ -451,7 +451,7 @@ end
 
 -- Synchronous C callbacks. pin_callbacks pins these targets and publishes
 -- each identity through the pinned binding; the harness fires them with
--- controls.fire, the way an Emscripten API calls a C callback.
+-- controls.fire, the way a host API calls a C callback.
 local pins: {browser.BrowserPin} = {}
 local awaiting: Job?
 -- The reenter target's identity, for a nested callback from the nested target.

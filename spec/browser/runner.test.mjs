@@ -13,6 +13,7 @@ import {create} from "../../titan-runtime/browser/titan-browser.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runner = resolve(process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run"));
 const fixture = join(root, "spec/browser/runner-fixtures.mjs");
+const importsFixture = join(root, "spec/browser/runner-imports.mjs");
 const windows = process.platform === "win32";
 const strict = process.env.TITAN_REQUIRE_BROWSER_TOOLCHAIN === "1";
 const exec = promisify(execFile);
@@ -391,15 +392,11 @@ test("launcher rejects absent and wrong-major Node without stdout", async t => {
     await t.test("wrong-major interpreter", async st => {
         const directory = await mkdtemp(join(tmpdir(), "titan-node-resolver-"));
         st.after(() => rm(directory, { recursive: true, force: true }));
-        let oldNode = process.env.EMSDK_NODE;
-        if (windows && !oldNode) return st.skip("capability: EMSDK_NODE does not name the pinned older Node executable");
-        if (!windows) {
-            oldNode = join(directory, "node");
-            await writeFile(oldNode, "#!/bin/sh\nprintf 'v24.19.0\\n'\n", { mode: 0o755 });
-        }
-        const { stdout } = await exec(oldNode, ["--version"]);
-        const version = stdout.trim();
-        assert.ok(Number(version.match(/^v(\d+)\./)?.[1]) < 26, version);
+        // A stand-in interpreter that reports an older major version. The
+        // launcher runs it through sh, which honours the #! line everywhere.
+        const oldNode = join(directory, "node");
+        const version = "v24.19.0";
+        await writeFile(oldNode, `#!/bin/sh\nprintf '${version}\\n'\n`, { mode: 0o755 });
         const wrong = await run(["--probe"], { TITAN_NODE: oldNode });
         assert.equal(wrong.status, 75);
         assert.equal(wrong.stdout.length, 0);
@@ -500,6 +497,11 @@ for (const engine of ["node", "chromium"]) {
             assert.equal(forwarded.status, 0, forwarded.stderr.toString());
             assert.deepEqual(forwarded.stdout, Buffer.from(JSON.stringify(args)));
             if (engine === "chromium") await cleanChromium(forwarded);
+            const imported = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--root", root,
+                "--imports", importsFixture, "--js-test", fixture, "--", "imports"]);
+            assert.equal(imported.status, 0, imported.stderr.toString());
+            assert.deepEqual(imported.stdout, Buffer.from("imports"));
+            if (engine === "chromium") await cleanChromium(imported);
         });
         test(`real CLI test image preserves bytes and 0/1/2 status (${engine}/${cdp})`, async t => {
             const image = testImage(t);
@@ -1249,18 +1251,20 @@ const LINKED = {identity: IMAGE, wasm: "app.wasm"};
 // Transport-only unit fixture, not linked-image acceptance evidence. Each
 // promised gateway uses the current operation-id/kind completion protocol.
 function entryOutcomeFactory(entry) {
-    return options => {
-        const backend = {safe: () => true, poison() {}};
-        options.titanBrowserAttach(backend);
+    return owner => {
+        owner.backend = {safe: () => true, poison() {}};
         const complete = (id, kind, status = 0, bytes = new Uint8Array()) =>
-            options.titanBrowserComplete({id, kind, failed: false, status, bytes,
+            owner.complete({id, kind, failed: false, status, bytes,
                 trace: new Uint8Array(), values: []});
         return {
             HEAPU8: new TextEncoder().encode(IMAGE),
-            _titan_browser_trace_identity() { return 0; },
-            _titan_browser_initialize(id) { complete(id, 1); return Promise.resolve(0); },
-            _titan_browser_entry(id) { return entry(options, id); },
-            _titan_browser_close(id) { complete(id, 5); return Promise.resolve(0); },
+            exports: {
+                _initialize() {},
+                titan_browser_trace_identity() { return 0; },
+                titan_browser_initialize(id) { complete(id, 1); return Promise.resolve(0); },
+                titan_browser_entry(id) { return entry(owner, id); },
+                titan_browser_close(id) { complete(id, 5); return Promise.resolve(0); },
+            },
         };
     };
 }
@@ -1268,9 +1272,9 @@ function entryOutcomeFactory(entry) {
 test("a Wasm from another link is a protocol failure before Lua", {timeout: 1000}, async () => {
     let entered = false;
     const other = "f".repeat(64);
-    const instance = create(options => {
-        const image = entryOutcomeFactory(() => Promise.resolve(0))(options);
-        image._titan_browser_initialize = () => { entered = true; return Promise.resolve(0); };
+    const instance = create(owner => {
+        const image = entryOutcomeFactory(() => Promise.resolve(0))(owner);
+        image.exports.titan_browser_initialize = () => { entered = true; return Promise.resolve(0); };
         return image;
     }, {}, {identity: other, wasm: "app.wasm"});
     try {
@@ -1289,9 +1293,9 @@ test("the loader refuses a malformed image binding and a Wasm without its identi
         assert.throws(() => create(factory, {}, image), {name: "TypeError",
             message: "browser image binding must name a 64-digit identity and its .wasm"});
     }
-    const instance = create(options => {
-        const image = factory(options);
-        delete image._titan_browser_trace_identity;
+    const instance = create(owner => {
+        const image = factory(owner);
+        delete image.exports.titan_browser_trace_identity;
         return image;
     }, {}, LINKED);
     try {
@@ -1349,8 +1353,8 @@ test("loader refuses missing JSPI and memoizes failure for initialize and run", 
 test("completion waits for promised retirement and ignores numeric fulfillment", {timeout: 1000}, async () => {
     let release;
     const retired = new Promise(resolve => { release = resolve; });
-    const instance = create(entryOutcomeFactory((options, id) => {
-        options.titanBrowserComplete({id, kind: 2, failed: false, status: 17,
+    const instance = create(entryOutcomeFactory((owner, id) => {
+        owner.complete({id, kind: 2, failed: false, status: 17,
             bytes: new Uint8Array([0, 255]), trace: new Uint8Array(), values: []});
         return retired;
     }), {}, LINKED);
@@ -1369,8 +1373,8 @@ test("completion waits for promised retirement and ignores numeric fulfillment",
 test("dispose waits accepted retirement but interrupts the application result", {timeout: 1000}, async () => {
     let release;
     const retired = new Promise(resolve => { release = resolve; });
-    const instance = create(entryOutcomeFactory((options, id) => {
-        options.titanBrowserComplete({id, kind: 2, failed: false, status: 17,
+    const instance = create(entryOutcomeFactory((owner, id) => {
+        owner.complete({id, kind: 2, failed: false, status: 17,
             bytes: new Uint8Array(), trace: new Uint8Array(), values: []});
         return retired;
     }), {}, LINKED);

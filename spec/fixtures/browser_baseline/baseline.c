@@ -5,16 +5,20 @@
  * unlike os.clock's CPU time, so a suspension is counted at its real cost).
  * baseline_sleep suspends the promising entry through a JSPI import.
  */
-#include <emscripten.h>
+#define _POSIX_C_SOURCE 200809L /* clock_gettime under --std=c99 */
+#include <time.h>
 
 #include "baseline.h"
+#include "../browser_runtime/fixture_controls.h"
 
 double baseline_now(void)
 {
-    return emscripten_get_now() / 1000.0;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
 }
 
 void baseline_sleep(int milliseconds)
 {
-    emscripten_sleep(milliseconds);
+    fixture_sleep(milliseconds);
 }

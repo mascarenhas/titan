@@ -22,7 +22,7 @@ local function run(info, code, ...)
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1", info.lua, "-E", "-e",
         string.format("package.path=%q..package.path;", repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. code }
-    if info.emcc_cflags then table.insert(argv, 2, "EMCC_CFLAGS=" .. info.emcc_cflags) end
+    for index, assignment in ipairs(info.ambient or {}) do table.insert(argv, 1 + index, assignment) end
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
     local result = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
     return result.started and result.ok, result.output or result.diagnostic or ""
@@ -82,8 +82,10 @@ driver.apply_native_inputs({ compile_argv = {}, link_argv = {} })
 local context = driver.new_resolver_context({ target = "browser", output_root = %q })
 assert(driver.configure_foreign_c(context))
 local descriptor = assert(driver.context_target_descriptor(context))
-assert(descriptor.tools.version == "6.0.13")
-assert(descriptor.lua.record.target == "wasm32-unknown-emscripten")
+assert(descriptor.tools.version == "34.0")
+assert(descriptor.tools.optimizer.version == "133")
+assert(descriptor.lua.record.target == "wasm32-wasip1")
+assert(descriptor.lua.record.sjlj == "wasm-exnref")
 assert(descriptor.profile_data.integers.long.bits == 32)
 assert(descriptor.include_dirs[1] == descriptor.paths.lua_source)
 local deps = {}
@@ -105,13 +107,18 @@ assert(driver.close_resolver_context(context))
         assert.equal("object_fixture", entry.type.name)
     end)
 
-    it("clears ambient EMCC_CFLAGS across browser compiler routes without changing native identity", function()
+    it("clears ambient clang configuration across browser compiler routes without changing native identity", function()
         local info, why = toolchain.require({ node = true, sdk = true })
         if not info then pending(why) return end
         prepare()
-        files.write(workspace .. "/source/ambient.h", "int ambient_helper(void);\n")
+        -- The foreign header reaches every browser compiler route: the FFI
+        -- probe, the generated module and the authored C helper.
+        files.write(workspace .. "/source/ambient.h", "#ifdef TITAN_AMBIENT_OVERRIDE\n" ..
+            "#error ambient CCC_OVERRIDE_OPTIONS reached the browser compiler\n#endif\n" ..
+            "int ambient_helper(void);\n")
         files.write(workspace .. "/source/ambient.c", [[
 #include <setjmp.h>
+#include "ambient.h"
 int ambient_helper(void) {
     jmp_buf saved;
     if (setjmp(saved) == 0) longjmp(saved, 7);
@@ -128,15 +135,23 @@ catch
     return 0
 end
 ]])
-        for index, ambient in ipairs({ "-sWASM_LEGACY_EXCEPTIONS=0", "-sSUPPORT_LONGJMP=emscripten" }) do
+        -- A header directory that breaks every compile it reaches.
+        local poisoned_include = workspace .. "/poisoned-include"
+        files.write(poisoned_include .. "/setjmp.h", "#error ambient C_INCLUDE_PATH reached the browser compiler\n")
+        local objdump = paths.join(paths.dirname(info.tools.cc[1]),
+            "llvm-objdump" .. (package.config:sub(1, 1) == "\\" and ".exe" or ""))
+        for index, ambient in ipairs({ { "CCC_OVERRIDE_OPTIONS", "# +-DTITAN_AMBIENT_OVERRIDE=1" },
+                { "C_INCLUDE_PATH", poisoned_include } }) do
             local output = workspace .. "/ambient-out-" .. index
             files.mkdir(output)
             local image = output .. "/ambient.mjs"
-            local poisoned = { prefix = info.prefix, lua = info.lua, output = output, emcc_cflags = ambient }
+            local poisoned = { prefix = info.prefix, lua = info.lua, output = output,
+                ambient = { ambient[1] .. "=" .. ambient[2] } }
             local checked = string.format([[
 local driver = require "titan-compiler.driver"
 local incremental = require "titan-compiler.incremental"
-assert(os.getenv("EMCC_CFLAGS") == %q)
+local name, value = %q, %q
+assert(os.getenv(name) == value)
 local native = driver.new_resolver_context()
 local before = assert(driver.toolchain_descriptor(native))
 local native_identity = assert(incremental.toolchain_identity(native, before))
@@ -145,47 +160,67 @@ local browser = driver.new_resolver_context({target="browser", output_root=%q})
 local descriptor = assert(driver.context_target_descriptor(browser))
 local toolchain = assert(driver.toolchain_descriptor(browser))
 assert(#descriptor.tools.cc == 1)
-assert(toolchain.compiler_argv[1] == "env" and toolchain.compiler_argv[2] == "EMCC_CFLAGS=")
+-- The browser compiler runs with every ambient clang input unset.
+local argv, cleared, index = toolchain.compiler_argv, {}, 2
+assert(argv[1] == "env", "the browser compiler has no environment envelope")
+while argv[index] == "-u" and argv[index + 1] do
+    local variable = argv[index + 1]
+    cleared[variable] = true
+    index = index + 2
+end
+for _, variable in ipairs({ "CCC_OVERRIDE_OPTIONS", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH" }) do
+    assert(cleared[variable], variable .. " reaches the browser compiler")
+end
+assert(argv[index] == descriptor.tools.cc[1] and argv[index + 1] == "--target=wasm32-wasip1" and
+    argv[index + 2] == "--sysroot=" .. descriptor.tools.sysroot, table.concat(argv, " "))
 assert(toolchain.stage_tools[1] == descriptor.tools.cc[1])
 local identity, details = incremental.toolchain_identity(browser, toolchain)
 assert(identity, details)
 local compiler = assert(browser.io:realpath(descriptor.tools.cc[1]))
 local found = false
 for _, tool in ipairs(details.tools) do if tool.path == compiler then found = true end end
-assert(found, "emcc physical identity was lost behind env")
+assert(found, "clang physical identity was lost behind env")
 assert(driver.close_resolver_context(browser))
 local restored = driver.new_resolver_context()
 local after = assert(driver.toolchain_descriptor(restored))
 assert(table.concat(before.compiler_argv, "\0") == table.concat(after.compiler_argv, "\0"))
 assert(incremental.toolchain_identity(restored, after) == native_identity)
 assert(after.stage_tools == nil)
-assert(os.getenv("EMCC_CFLAGS") == %q)
-local inherited = restored.io:run({"sh", "-c", 'printf "%%s" "$EMCC_CFLAGS"'})
-assert(inherited.ok and inherited.output == os.getenv("EMCC_CFLAGS"))
+assert(os.getenv(name) == value)
+local inherited = restored.io:run({"sh", "-c", 'printf "%%s" "$' .. name .. '"'})
+assert(inherited.ok and inherited.output == value)
 assert(driver.close_resolver_context(restored))
-]], ambient, output, ambient)
+]], ambient[1], ambient[2], output)
             local ok, log = run(poisoned, checked)
             assert.is_true(ok, log)
             ok, log = cli(poisoned, "--incremental", "--jobs", "2",
                 "--c-source", workspace .. "/source/ambient.c", "--exe", image, "ambient")
             assert.is_true(ok, log)
-            local wat = output .. "/ambient.wat"
-            local disassembled = compiler_io.new_sync():run({
-                paths.join(paths.dirname(info.tools.clang[1]), "wasm-dis" .. (package.config:sub(1, 1) == "\\" and ".exe" or "")),
-                output .. "/ambient.wasm", "-o", wat,
-            }, { stderr_to_stdout = true })
+            -- setjmp/longjmp and `catch` use the standard (exnref) encoding:
+            -- try_table, never the legacy try/delegate/rethrow or JS invoke_ thunks.
+            local disassembled = compiler_io.new_sync():run({ objdump, "-d", output .. "/ambient.wasm" },
+                { stderr_to_stdout = true })
             assert.is_true(disassembled.ok, disassembled.output)
-            local instructions = read(wat)
-            assert.truthy(instructions:match("%(try%s"), "legacy Wasm EH try was not emitted")
-            assert.is_nil(instructions:find("(try_table", 1, true), "ambient flags changed the EH encoding")
-            assert.is_nil(instructions:match('%(import [^\n]-"invoke_'), "ambient flags restored JS SJLJ")
+            local instructions = disassembled.output
+            assert.truthy(instructions:find("try_table", 1, true), "exnref try_table was not emitted")
+            for _, legacy in ipairs({ "try", "delegate", "rethrow" }) do
+                assert.is_nil(instructions:match("%f[%w_]" .. legacy .. "%f[^%w_]"),
+                    "legacy Wasm EH " .. legacy .. " was emitted")
+            end
+            local inventory = assert(require("titan-compiler.browserlink").image_inventory(
+                read(output .. "/ambient.wasm")))
+            for _, import in ipairs(inventory.imports) do
+                assert.is_nil(import.name:match("^invoke_"), "JS SJLJ import " .. import.name)
+            end
+            toolchain.check_imports(image, { "entry" })
             local executed = compiler_io.new_sync():run(toolchain.runner(info,
                 "--engine", "node", "--root", output, image), { stderr_to_stdout = true })
             assert.is_true(executed.ok, executed.output)
         end
     end)
 
-    it("compiles real standard stream macro values through emcc", function()
+    it("compiles real standard stream macro values through clang", function()
         local info, why = toolchain.require(); if not info then pending(why) return end
         prepare()
         files.write(workspace .. "/source/stdio_fixture.titan", [[
@@ -233,9 +268,10 @@ end
         -- Recompile untouched generated C with a dependency report: runtime
         -- headers in PREFIX/include must not quote-capture native Lua headers.
         local dependency = workspace .. "/headers.d"
-        local command = { table.unpack(info.tools.cc) }
+        local command = require("titan-compiler.browsertarget").compiler_argv(info.tools)
         for _, argument in ipairs(toolchain.with_lua_defines(info,
-                { "--std=c99", "-O0", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1" },
+                { "--std=c99", "-O0", "-mexception-handling", "-mllvm", "-wasm-enable-sjlj",
+                  "-mllvm", "-wasm-use-legacy-eh=false" },
                 { "-DTITAN_TARGET_BROWSER=1",
                   "-I", info.prefix .. "/lib/browser/include", "-I", info.prefix .. "/include",
                   "-MD", "-MF", dependency, "-c", workspace .. "/out/object_fixture.c",
@@ -301,10 +337,10 @@ end)
 -- Capability discovery is exercised in fresh processes: the helper caches a
 -- successful compile-only discovery, so one spec process cannot switch the
 -- prefix under it. Each child below owns a fake installed tree whose record,
--- launcher and SDK assets stay entirely inside the temporary directory, and a
--- fake Emscripten install whose `emcc` only reports the pinned version. That
--- keeps these cases runnable in the ordinary SDK-only shards instead of
--- pending on a real cross toolchain.
+-- launcher and SDK assets stay entirely inside the temporary directory, plus a
+-- fake wasi-sdk and Binaryen whose clang and wasm-opt only report the pinned
+-- versions. That keeps these cases runnable in the ordinary SDK-only shards
+-- instead of pending on a real cross toolchain.
 local version = require "titan-compiler.version"
 local installed = require "spec.support.installed_prefix"
 local baseline_json = require "spec.support.browser_baseline_json"
@@ -312,9 +348,8 @@ local baseline_json = require "spec.support.browser_baseline_json"
 local validation_prefix = installed.active()
 local platform = require "titan-compiler.platform"
 
-local SDK_ASSETS = { "libtitan.a", "titan-browser-library.js", "titan-browser-bridge.js", "titan-browser-trace.js",
-    "titan-browser.mjs", "titan-browser-run", "titan-browser-run.mjs",
-    "titan-browser-node-worker.mjs", "titan-browser-page.mjs", "titan-browser-module-check.mjs" }
+local SDK_ASSETS = { "libtitan.a", "titan-wasm-factory.mjs", "titan-browser.mjs", "titan-browser-run",
+    "titan-browser-run.mjs", "titan-browser-node-worker.mjs", "titan-browser-page.mjs" }
 local NODE_OK = { path = "/opt/node26/bin/node", version = "v26.13.0", ok = true }
 local CHROME_OK = { path = "/opt/chrome/chrome-headless-shell",
     version = "Google Chrome for Testing 156.0.8078.80", ok = true }
@@ -354,16 +389,17 @@ describe("browser toolchain capabilities", function()
             files.write(root .. "/" .. relative, "")
         end
         if not platform.windows then
-            local em = root .. "/emsdk/upstream/emscripten"
-            files.write(em .. "/emcc", "#!/bin/sh\n" ..
-                "echo 'emcc (Emscripten gcc/clang-like replacement) 6.0.13'\n")
-            make_executable(em .. "/emcc")
-            for _, name in ipairs({ "emar", "emranlib" }) do
-                files.write(em .. "/" .. name, "#!/bin/sh\nexit 0\n")
-                make_executable(em .. "/" .. name)
+            local sdk = root .. "/wasi-sdk"
+            files.write(sdk .. "/VERSION", "34.0\nwasi-libc: fixture\n")
+            files.mkdir(sdk .. "/share/wasi-sysroot")
+            files.write(sdk .. "/bin/clang", "#!/bin/sh\necho 'clang version 23.1.0-wasi-sdk'\n")
+            make_executable(sdk .. "/bin/clang")
+            for _, name in ipairs({ "llvm-ar", "llvm-ranlib", "wasm-ld" }) do
+                files.write(sdk .. "/bin/" .. name, "#!/bin/sh\nexit 0\n")
+                make_executable(sdk .. "/bin/" .. name)
             end
-            files.write(root .. "/emsdk/upstream/bin/clang", "#!/bin/sh\nexit 0\n")
-            make_executable(root .. "/emsdk/upstream/bin/clang")
+            files.write(root .. "/binaryen/bin/wasm-opt", "#!/bin/sh\necho 'wasm-opt version 133 (version_133)'\n")
+            make_executable(root .. "/binaryen/bin/wasm-opt")
         end
         prefixes = prefixes or {}
         prefixes[#prefixes + 1] = root
@@ -421,7 +457,7 @@ describe("browser toolchain capabilities", function()
     end
 
     -- The child keeps the validation prefix for its Lua interpreter and
-    -- TITAN_ROOT, and points EMSDK/PREFIX at the fixture tree.
+    -- TITAN_ROOT, and points PREFIX and the browser tools at the fixture tree.
     local function helper_child(environment, code)
         local argv = { "env", "TITAN_ROOT=" .. validation_prefix,
             "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
@@ -440,9 +476,14 @@ describe("browser toolchain capabilities", function()
         return result.started and result.ok, result.output or result.diagnostic or ""
     end
 
-    local function fixture_environment(root, strict)
-        return { strict = strict, PREFIX = root, ROCKS_TREE = "",
-            EMSDK = platform.windows and (os.getenv("EMSDK") or "") or root .. "/emsdk" }
+    -- Windows has no fake tools; it keeps the real wasi-sdk and Binaryen.
+    local function fixture_environment(root, strict, extra)
+        local environment = { strict = strict, PREFIX = root, ROCKS_TREE = "",
+            WASI_SDK_PATH = platform.windows and (os.getenv("WASI_SDK_PATH") or "") or root .. "/wasi-sdk",
+            BINARYEN_ROOT = platform.windows and (os.getenv("BINARYEN_ROOT") or "") or root .. "/binaryen",
+            WASM_OPT = platform.windows and (os.getenv("WASM_OPT") or "") or "" }
+        for key, value in pairs(extra or {}) do environment[key] = value end
+        return environment
     end
 
     it("reports Node and Chrome from the installed runner probe without changing the compile-only result", function()
@@ -601,8 +642,7 @@ print("malformed-ok")
             '{"node":' .. cases[#cases].node .. ',"chrome":' ..
             '{"path":null,"version":null,"ok":false,"reason":"chromium missing"}}\n')
         local repaired_ok, repaired_output = helper_child(
-            { strict = false, PREFIX = root, ROCKS_TREE = "", EMSDK = root .. "/emsdk",
-                PROBE_JSON = probe_json(NODE_OK, CHROME_OK) }, [[
+            fixture_environment(root, false, { PROBE_JSON = probe_json(NODE_OK, CHROME_OK) }), [[
 local toolchain = require "spec.support.browser_toolchain"
 local corrupt, _, malformed = toolchain.detect({ node = true })
 assert(corrupt == nil and malformed == true, "the corrupt probe must fail first")
@@ -666,8 +706,7 @@ print("sdk-incomplete-ok")
 
         local directory = install_sdk(root)
         local complete_ok, complete_output = helper_child(
-            { strict = false, PREFIX = root, ROCKS_TREE = "", EMSDK = root .. "/emsdk",
-                SDK_ROOT = directory }, [[
+            fixture_environment(root, false, { SDK_ROOT = directory }), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found = assert(toolchain.detect({ sdk = true }))
 assert(found.sdk_root == os.getenv("SDK_ROOT"), tostring(found.sdk_root))
@@ -687,8 +726,7 @@ print("sdk-complete-ok")
         prefixes[#prefixes + 1] = rocks
         local directory = install_sdk(rocks)
         local ok, output = helper_child(
-            { strict = false, PREFIX = root, ROCKS_TREE = rocks,
-                EMSDK = root .. "/emsdk", SDK_ROOT = directory }, [[
+            fixture_environment(root, false, { ROCKS_TREE = rocks, SDK_ROOT = directory }), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found = assert(toolchain.detect({ sdk = true }))
 assert(found.sdk_root == os.getenv("SDK_ROOT"), tostring(found.sdk_root))
@@ -705,8 +743,7 @@ print("rocks-tree-ok")
         local root = fixture_prefix()
         files.mkdir(root .. "/lib/titan-browser")
         local ok, output = helper_child(
-            { strict = false, PREFIX = root, ROCKS_TREE = "", EMSDK = root .. "/emsdk",
-                SDK_DIRECTORY = sdk_directory(root) }, [[
+            fixture_environment(root, false, { SDK_DIRECTORY = sdk_directory(root) }), [[
 local toolchain = require "spec.support.browser_toolchain"
 local missing, reason = toolchain.detect({ sdk = true })
 assert(missing == nil and reason:find("browser SDK is incomplete", 1, true),
@@ -714,9 +751,8 @@ assert(missing == nil and reason:find("browser SDK is incomplete", 1, true),
 local directory = os.getenv("SDK_DIRECTORY")
 local lfs = require "lfs"
 assert(lfs.mkdir(directory))
-for _, name in ipairs({ "libtitan.a", "titan-browser-library.js", "titan-browser-bridge.js", "titan-browser-trace.js",
-        "titan-browser.mjs", "titan-browser-run", "titan-browser-run.mjs",
-        "titan-browser-node-worker.mjs", "titan-browser-page.mjs", "titan-browser-module-check.mjs" }) do
+for _, name in ipairs({ "libtitan.a", "titan-wasm-factory.mjs", "titan-browser.mjs", "titan-browser-run",
+        "titan-browser-run.mjs", "titan-browser-node-worker.mjs", "titan-browser-page.mjs" }) do
     local file = assert(io.open(directory .. "/" .. name, "wb"))
     assert(file:write("")); assert(file:close())
 end
@@ -737,8 +773,7 @@ print("sdk-retry-ok")
         install_probe(root, NODE_OK,
             { path = nil, version = nil, ok = false, reason = "chromium missing" }, counter)
         local ok, output = helper_child(
-            { strict = false, PREFIX = root, ROCKS_TREE = "", EMSDK = root .. "/emsdk",
-                COUNTER = counter }, [[
+            fixture_environment(root, false, { COUNTER = counter }), [[
 local toolchain = require "spec.support.browser_toolchain"
 local function probes()
     local file = io.open(os.getenv("COUNTER"), "rb")
@@ -838,9 +873,9 @@ print("source-fallback-ok")
             previous = position
         end
         -- Paired CLI arguments keep adjacency and order.
-        local flags = baseline_json.encode({ "-sEXIT_RUNTIME=0", "--js-library", "path" })
-        local first = assert(flags:find('"-sEXIT_RUNTIME=0"', 1, true), flags)
-        local second = assert(flags:find('"--js-library"', 1, true), flags)
+        local flags = baseline_json.encode({ "-mexec-model=reactor", "-o", "path" })
+        local first = assert(flags:find('"-mexec-model=reactor"', 1, true), flags)
+        local second = assert(flags:find('"-o"', 1, true), flags)
         local third = assert(flags:find('"path"', 1, true), flags)
         assert.is_true(first < second and second < third,
             "paired arguments were reordered: " .. flags)

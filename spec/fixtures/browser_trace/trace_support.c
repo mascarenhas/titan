@@ -5,23 +5,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-EM_JS(void, trace_fixture_publish_controls, (void), {
-  const publish = Module['titanBrowserBridge'].options.bindings?.__traceTest;
-  if (!publish) return;
-  publish(Object.freeze({
-    metadata: () => {
-      const value = Module['titanBrowserTrace'];
-      return Object.freeze({state: value.state, reason: value.reason, traceBytes: value.traceBytes,
-        indexBytes: value.indexBytes, loadMilliseconds: value.loadMilliseconds});
-    },
-  }));
-});
+#include "../browser_runtime/fixture_controls.h"
+
+/* Publishes the instance's trace metadata to the gate's __traceTest binding
+ * (fixture-imports.mjs) once the image initializes. */
+TITAN_WASM_IMPORT("trace_fixture_publish_controls") void trace_fixture_publish_controls(void);
 __attribute__((constructor)) static void trace_fixture_constructor(void) {
   trace_fixture_publish_controls();
 }
-#endif
 
 static const char mixed_source[] =
   "local function lua_inner(action, c)\n"
@@ -140,19 +131,8 @@ void trace_fixture_emit(const char *label, const char *trace) {
   fflush(stdout);
 }
 void trace_fixture_sleep(void) {
-#ifdef __EMSCRIPTEN__
-  emscripten_sleep(1);
-#endif
+  fixture_sleep(1);
 }
-
-#ifdef __EMSCRIPTEN__
-/* Test-owned host bridge, called only after the failed catch has completed. */
-EM_JS(void, trace_fixture_host_recover, (void), {
-  Module['titanBrowserBridge'].options.bindings.traceFixtureRestoreDescriptors();
-});
-#else
-void trace_fixture_host_recover(void) {}
-#endif
 
 /* One-result public backtrace access, not a read of the private registry slot.
  * The returned value remains on the caller's Lua stack. */

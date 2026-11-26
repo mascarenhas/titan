@@ -1,18 +1,17 @@
 import {encode, expectedBytes, join, reentry, rejection} from './checks.mjs';
 
-// Exercise an optimized/assertions-off JSPI image. Emscripten 6.0.13 disables
-// Wasm import/export minification for JSPI, even with a shrink-level override;
-// the fixture asserts that pinned behavior rather than claiming minification.
+// Exercise an optimized measurement JSPI image: wasm-opt keeps the entry's
+// export names, and correctness must not depend on the program profile.
 export async function run(context) {
   context.assert(context.args.length > 0, 'pass an optimized fidelity.mjs image');
   for (const path of context.args) {
     const wasm = await WebAssembly.compile(await context.bytes(path.replace(/\.mjs$/, '.wasm')));
     context.assert(WebAssembly.Module.exports(wasm).some(item => item.name === 'titan_browser_entry'),
-      'JSPI export names did not follow the pinned toolchain contract');
+      'JSPI export names did not survive the optimized link');
     const image = await context.image(path);
     const stdout = [], stderr = [];
     let controls, loaderControls;
-    const instance = image.create({locateFile: image.locateFile,
+    const instance = image.create({locateFile: image.locateFile, imports: context.imports,
       bindings: {__titanTest(value) { controls = value; }, __loaderTest(value) { loaderControls = value; }},
       stdout: bytes => { stdout.push(bytes); }, stderr: bytes => { stderr.push(bytes); }});
     try {

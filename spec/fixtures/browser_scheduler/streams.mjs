@@ -4,7 +4,7 @@ import {decode, encode, observe, rejection, settledMarker, thrown, until} from '
 function makeHost(context, image, options = {}) {
   const host = {callables: new Map(), results: [], chunks: [], notifications: [], disposing: false};
   const sink = stream => bytes => { host.chunks.push({stream, bytes: [...bytes]}); };
-  host.instance = image.create({locateFile: image.locateFile,
+  host.instance = image.create({locateFile: image.locateFile, imports: context.imports,
     stdout: sink('stdout'), stderr: sink('stderr'),
     onNotificationError(error) { host.notifications.push(error); },
     ...options,

@@ -18,6 +18,7 @@ export async function run(context) {
     let absentProbe;
     const instance = create({
       locateFile,
+      imports: context.imports,
       bindings: { __absentProbe: probe => { absentProbe = probe; } },
       stdout: bytes => { stdout.push(...bytes); },
       stderr: bytes => { stderr.push(...bytes); },

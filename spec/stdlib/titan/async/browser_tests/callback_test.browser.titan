@@ -1,5 +1,5 @@
 -- No-switch mode: what coroutine and async do inside a synchronous C callback
--- (browser.call_sync, the entry an Emscripten trampoline calls). No stack can
+-- (browser.call_sync, the entry a host-called C callback uses). No stack can
 -- switch there, so explicit switches raise, the current coroutine and Task
 -- are hidden, settlements are queued, and an abandoned coroutine collected
 -- there unwinds at a later collection.

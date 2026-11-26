@@ -326,7 +326,7 @@ async function codes(attempts) {
 }
 
 // The synchronous-callback rows of 4.2 and FD-M1. The harness fires C
-// callbacks through the fixture's Wasm table entry, the way an Emscripten API
+// callbacks through the fixture's Wasm table entry, the way a host API
 // does; the callback's JavaScript is either a binding its Titan code calls
 // (reenter) or JavaScript its C code calls without a binding (poke).
 async function callbacks(context, image) {

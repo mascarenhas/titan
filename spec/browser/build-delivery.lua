@@ -1,9 +1,10 @@
 -- Build the browser chapter's complete application exactly as its section
 -- documents, plus the documented http-dev-server, for the hosted deployment
 -- test (spec/fixtures/browser_delivery/hosted.mjs) and the Node run
--- (dod.test.mjs). Run it with Emscripten active and the installation's
--- PREFIX; the build uses the profile that the installation's browser SDK
--- recorded, whatever TITAN_BUILD_PROFILE the caller's environment holds.
+-- (dod.test.mjs). Run it with wasi-sdk 34.0 and Binaryen 133 active and the
+-- installation's PREFIX; the build uses the profile that the installation's
+-- browser SDK recorded, whatever TITAN_BUILD_PROFILE the caller's environment
+-- holds.
 -- With --built, the clean-checkout job's doc_check run has already run the
 -- whole chapter in OUTPUT, and this only checks and stages what it built.
 local lfs = require "lfs"

@@ -299,16 +299,13 @@ elseif action == "stage-runtime" then
     end
 
     local browser_src = repo_root .. "/titan-runtime/browser"
-    copy_file_atomic(browser_src .. "/titan-browser-library.js", assets.js_library, false)
-    copy_file_atomic(browser_src .. "/titan-browser-bridge.js", assets.bridge_library, false)
-    copy_file_atomic(browser_src .. "/titan-browser-trace.js", assets.trace_library, false)
+    copy_file_atomic(browser_src .. "/titan-wasm-factory.mjs", assets.factory, false)
     copy_file_atomic(browser_src .. "/titan-browser.mjs", assets.loader, false)
     copy_file_atomic(browser_src .. "/titan-protobuf.mjs", paths.join(descriptor.paths.titan_bin, "titan-protobuf.mjs"), false)
     copy_file_atomic(browser_src .. "/titan-browser-run", assets.runner, true)
     copy_file_atomic(browser_src .. "/titan-browser-run.mjs", assets.runner_module, false)
     copy_file_atomic(browser_src .. "/titan-browser-node-worker.mjs", assets.node_worker, false)
     copy_file_atomic(browser_src .. "/titan-browser-page.mjs", assets.page, false)
-    copy_file_atomic(browser_src .. "/titan-browser-module-check.mjs", assets.module_check, false)
     if platform.windows then
         for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
             copy_file_atomic(build_dir .. ".windows-host/" .. relative, install_tree .. "/" .. relative, true)
@@ -409,8 +406,8 @@ elseif action == "finalize" then
         digest_inputs[#digest_inputs + 1] = paths.join(descriptor.paths.include, rel)
     end
     for _, key in ipairs({
-        "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
-        "runner_module", "node_worker", "page", "module_check", "build_profile", "lpeglabel", "provider",
+        "runtime", "factory", "loader", "runner",
+        "runner_module", "node_worker", "page", "build_profile", "lpeglabel", "provider",
     }) do
         local asset_path = assets[key]
         if lfs.attributes(asset_path, "mode") ~= "file" then

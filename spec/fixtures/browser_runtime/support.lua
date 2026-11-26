@@ -33,9 +33,27 @@ function M.cli(info, root, options, arguments)
     return M.run(argv)
 end
 
-function M.image(info, root, engine, name, arguments, timeout)
+-- Copies the fixtures' host imports (fixture-imports.mjs) beneath `root`,
+-- where the runner loads them, and returns the copy's path.
+function M.fixture_imports(root)
+    local copy = root .. "/fixture-imports.mjs"
+    local input = assert(io.open(M.fixture .. "/fixture-imports.mjs", "rb"))
+    local bytes = assert(input:read("a")); assert(input:close())
+    files.write(copy, bytes)
+    return copy
+end
+
+-- Runs an image directly; `imports` names the --imports module of an image
+-- whose C sources import host functions.
+function M.image(info, root, engine, name, arguments, timeout, imports)
     local argv = toolchain.runner(info, "--engine", engine, "--timeout", tostring(timeout or 30000),
-        "--grace", "1500", "--root", root, root .. "/" .. name .. ".mjs", "--")
+        "--grace", "1500", "--root", root)
+    if imports then
+        argv[#argv + 1] = "--imports"
+        argv[#argv + 1] = imports
+    end
+    argv[#argv + 1] = root .. "/" .. name .. ".mjs"
+    argv[#argv + 1] = "--"
     for _, argument in ipairs(arguments or {}) do argv[#argv + 1] = argument end
     local ok, log, status = M.run(argv)
     io.stdout:write("\nRUNTIME engine=" .. engine .. " image=" .. name .. "\n" .. log .. "\n")

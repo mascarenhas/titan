@@ -1,8 +1,8 @@
 -- Shared real-toolchain gate. Pure/synthesized browser specs do not use this.
 --
 -- `detect()`/`require()` keep #328's compile-only contract: a verified
--- Emscripten 6.0.13 and the fork's installed browser Lua. An explicit
--- requirement table adds capabilities on top of it:
+-- wasi-sdk 34.0, Binaryen 133 and the fork's installed browser Lua. An
+-- explicit requirement table adds capabilities on top of it:
 --
 --   { node = true }                                  -- Node 26+ through the runner
 --   { node = true, chrome = true }                   -- plus headless Chromium
@@ -59,10 +59,6 @@ local function discover()
     local tools, reason = browser.discover_tools({ io = strategy })
     if not tools then return nil, reason end
     local suffix = platform.windows and ".exe" or ""
-    tools.clang = { paths.join(paths.dirname(tools.location), "bin/clang" .. suffix) }
-    if not executable(strategy, tools.clang[1]) then
-        return nil, "clang not found at " .. string.format("%q", tools.clang[1])
-    end
     local prefix = installed_prefix.active()
     local base = paths.join(prefix, "lib/browser")
     for _, relative in ipairs({ "liblua.a", "liblua-config.txt", "include/lua.h",

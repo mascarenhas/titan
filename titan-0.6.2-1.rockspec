@@ -1,6 +1,6 @@
 rockspec_format = "3.0"
 package = "titan"
-version = "0.6.1-1"
+version = "0.6.2-1"
 source = {
    url = "git+https://github.com/mascarenhas/titan"
 }

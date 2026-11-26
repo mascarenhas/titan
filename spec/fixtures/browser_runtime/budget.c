@@ -1,12 +1,13 @@
 #include "budget.h"
 #include <lauxlib.h>
-#include <emscripten.h>
-#include <emscripten/heap.h>
-#include <emscripten/stack.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <minicoro.h>
+#include "fixture_controls.h"
+
+/* wasm-ld's main-stack bounds. */
+extern unsigned char __stack_low, __stack_high;
 
 static volatile uint32_t seed = 0x329U, sink;
 static int fail_create, failed_allocator;
@@ -28,13 +29,39 @@ mco_result __wrap_mco_create(mco_coro **out, mco_desc *desc) {
 void budget_fail_next_create(void) { fail_create = 1; }
 void budget_reset_failure(void) { failed_allocator = 0; }
 int budget_failed_allocator(void) { return failed_allocator; }
-unsigned int budget_heap_size(void) { return (unsigned int)emscripten_get_heap_size(); }
-unsigned int budget_heap_max(void) { return (unsigned int)emscripten_get_heap_max(); }
+unsigned int budget_heap_size(void) { return (unsigned int)__builtin_wasm_memory_size(0) * 65536U; }
+/* The image's -Wl,--max-memory. */
+unsigned int budget_heap_max(void) { return 2147483648U; }
 unsigned int budget_last_stack_span(void) { return last_stack_span; }
 unsigned int budget_last_stack_free(void) { return last_stack_free; }
-void budget_wait(void) { emscripten_sleep(1); }
+void budget_wait(void) { fixture_sleep(1); }
 
-/* Fixed live C frames exercise Emscripten's checked function-prologue stack
+/* The bounds of the C stack that `frame` lives on: the running coroutine's,
+ * which the factory installs as the stack limits on each switch, or the main
+ * stack's. */
+static void budget_stack_bounds(uintptr_t *low, uintptr_t *high) {
+  mco_coro *co = mco_running();
+  if (co) {
+    *low = (uintptr_t)co->stack_base;
+    *high = *low + co->stack_size;
+  } else {
+    *low = (uintptr_t)&__stack_low;
+    *high = (uintptr_t)&__stack_high;
+  }
+}
+static unsigned int budget_stack_free(const void *frame) {
+  uintptr_t low, high;
+  budget_stack_bounds(&low, &high);
+  return (unsigned int)((uintptr_t)frame - low);
+}
+static void budget_record_stack(const void *frame) {
+  uintptr_t low, high;
+  budget_stack_bounds(&low, &high);
+  last_stack_span = (unsigned int)(high - low);
+  last_stack_free = (unsigned int)((uintptr_t)frame - low);
+}
+
+/* Fixed live C frames exercise wasm-opt's checked function-prologue stack
  * allocation, not arbitrary unsafe dynamic alloca. The separate-TU canary
  * check preserves the full frame and prevents tail recursion. */
 __attribute__((noinline)) static int budget_shadow_tail(int bytes) {
@@ -44,8 +71,7 @@ __attribute__((noinline)) static int budget_shadow_tail(int bytes) {
   if (bytes > 16) {
     if (budget_shadow_tail(bytes - 16) != 91) abort();
   } else {
-    last_stack_span = (unsigned int)(emscripten_stack_get_base() - emscripten_stack_get_end());
-    last_stack_free = (unsigned int)emscripten_stack_get_free();
+    budget_record_stack(area);
   }
   if (!budget_check_tail(area, (unsigned int)bytes)) abort();
   return 91;
@@ -60,8 +86,7 @@ __attribute__((noinline)) static int budget_shadow_frame256(int bytes) {
   } else if (bytes > 256) {
     if (budget_shadow_tail(bytes - 256) != 91) abort();
   } else {
-    last_stack_span = (unsigned int)(emscripten_stack_get_base() - emscripten_stack_get_end());
-    last_stack_free = (unsigned int)emscripten_stack_get_free();
+    budget_record_stack(area);
   }
   if (!budget_check_pad(area, (unsigned int)bytes)) abort();
   return 91;
@@ -88,7 +113,7 @@ __attribute__((noinline)) static int deep(lua_State *L, int depth) {
     ++seed;
     lua_pushvalue(L, 1);
     printf("BUDGET MIXED c_depth=%d shadow_free=%u wasm_register_canaries=32\n",
-        bridge_depth, (unsigned int)emscripten_stack_get_free());
+        bridge_depth, budget_stack_free(__builtin_frame_address(0)));
     fflush(stdout);
     lua_call(L, 0, 0);
   }

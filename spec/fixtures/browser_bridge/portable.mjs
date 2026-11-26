@@ -84,6 +84,7 @@ async function withInstance(context, image, action) {
   let output = '', textError, textErrors = 0, textSuccesses = 0;
   const instance = image.create({
     locateFile: image.locateFile,
+    imports: context.imports,
     stdout(chunk) { output += new TextDecoder().decode(chunk); context.stdout(chunk); },
     stderr: context.stderr,
     bindings: {

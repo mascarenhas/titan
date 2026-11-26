@@ -1,15 +1,8 @@
 #include <assert.h>
-#include <emscripten.h>
+#include <titan/browser.h>
 
-EM_JS(void, publish_absent_module_probe, (), {
-    const owner = Module['titanBrowserBridge'];
-    const hook = owner?.options?.bindings?.__absentProbe;
-    if (hook) hook({
-        unadmittedInvoke: () => Module['_titan_browser_invoke'](0n, 1, 1, 1, 0, 0),
-        releaseUnknown: () => Module['_titan_browser_release_callable'](1, 1, 1),
-        admittedInvoke: () => owner.operate('invoke', () => owner.entry('invoke', 1, 1, 1, 0, 0)),
-    });
-});
+/* Publishes raw entry probes to the harness (fixture-imports.mjs). */
+TITAN_WASM_IMPORT("publish_absent_module_probe") void publish_absent_module_probe(void);
 
 static int close_tail(lua_State *L) {
     static const unsigned char out[] = {67, 0, 255};

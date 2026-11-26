@@ -10,10 +10,12 @@ import {Monitor, within} from '../../titan-runtime/browser/titan-browser-run.mjs
 const playwrightVersion = '1.64.1';
 const diagnostic = text => process.stderr.write(`titan-playwright-run: ${text}\n`);
 const usage = `usage: node spec/browser/playwright-run.mjs --engine chromium|firefox|webkit
-       [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
+       [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS] [--imports FILE]
        [--persistent-context DIR] [--allow-degraded-trace] [--image] FILE [-- ARG...]
 
 FILE is a portable run(context) test unless --image selects a Titan image.
+--imports names a module beneath --root whose default export is create's
+imports (context.imports for a portable test).
 The caller owns and removes DIR when --persistent-context selects a persistent profile.
 Set TITAN_PLAYWRIGHT_ROOT to an npm prefix containing playwright@${playwrightVersion}.
 Set PLAYWRIGHT_BROWSERS_PATH to a session-owned managed-browser directory.
@@ -22,7 +24,7 @@ Set PLAYWRIGHT_BROWSERS_PATH to a session-owned managed-browser directory.
 export function parseOptions(argv) {
   const options = {engine: undefined, root: undefined, sdk: undefined,
     timeout: 300000, grace: 1500, args: [], jsTest: true, allowDegradedTrace: false};
-  const values = new Set(['engine', 'root', 'sdk', 'timeout', 'grace', 'persistent-context']);
+  const values = new Set(['engine', 'root', 'sdk', 'timeout', 'grace', 'persistent-context', 'imports']);
   for (let index = 0; index < argv.length; ++index) {
     const arg = argv[index];
     if (arg === '--') { options.args = argv.slice(index + 1); break; }
@@ -78,6 +80,14 @@ async function run(options) {
       !within(root, file) || !file.endsWith('.mjs')) {
     throw new Error('FILE must be a regular .mjs file beneath --root');
   }
+  let imports;
+  if (options.imports !== undefined) {
+    const module = await realpath(resolve(options.imports));
+    if (!within(root, module) || !(await stat(module)).isFile() || !module.endsWith('.mjs')) {
+      throw new Error('--imports must name a regular .mjs file beneath --root');
+    }
+    imports = relative(root, module).split(sep).join('/');
+  }
   const requestedProfile = options['persistent-context'] && resolve(options['persistent-context']);
   // The profile may not exist yet; its parent does.
   const profile = requestedProfile &&
@@ -126,7 +136,7 @@ async function run(options) {
     const origin = `http://127.0.0.1:${server.address().port}`;
     const config = {engine: options.engine, root: origin + '/root/',
       file: relative(root, file).split(sep).join('/'),
-      args: options.args, jsTest: options.jsTest, allowDegradedTrace: options.allowDegradedTrace};
+      args: options.args, jsTest: options.jsTest, allowDegradedTrace: options.allowDegradedTrace, imports};
     html = '<!doctype html><meta charset=utf-8><title>Titan Playwright tests</title><script type=module>' +
       `import {startPage} from '/sdk/titan-browser-page.mjs'; startPage(${JSON.stringify(config).replaceAll('<', '\\u003c')});</script>`;
     const launch = {headless: true, timeout: Math.min(options.timeout, 30000),

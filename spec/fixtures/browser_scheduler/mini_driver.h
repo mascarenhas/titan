@@ -4,7 +4,8 @@
 
 /* Test-only controls for the mini-driver fixture (mini_driver.c). */
 void mini_driver_publish_controls(void);
-void mini_driver_poke(void);
+/* JavaScript reached from C without a binding (fixture-imports.mjs). */
+TITAN_WASM_IMPORT("mini_driver_poke") void mini_driver_poke(void);
 int mini_driver_switch(uint32_t state);
 TValue mini_driver_new_child(lua_State *L);
 int mini_driver_overflow(void);

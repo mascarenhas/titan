@@ -17,17 +17,15 @@ local math = import "math"
 local string = import "string"
 local timer = import "timer"
 
-foreign import "emscripten/heap.h"
-foreign import "malloc.h"
+foreign import "records_heap.h"
 
 local type Release = function (boolean): ()
 
 -- One `RECORD` line: the WebAssembly memory size, which never shrinks, the
--- bytes malloc has handed out, and the Lua state's own count.
+-- bytes C has allocated and not freed, and the Lua state's own count.
 local function report(phase: string, extra: string)
-  local allocator = ffi.mallinfo()
-  io.print("RECORD " .. phase .. " heap=" .. (ffi.emscripten_get_heap_size() as integer) ..
-    " used=" .. (allocator.uordblks as integer) .. " lua=" .. gc.count() .. extra)
+  io.print("RECORD " .. phase .. " heap=" .. (ffi.records_heap_size() as integer) ..
+    " used=" .. (ffi.records_heap_used() as integer) .. " lua=" .. gc.count() .. extra)
 end
 
 -- Starts `count` Tasks that each wait on a channel of their own, and returns

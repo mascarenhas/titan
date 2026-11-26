@@ -71,24 +71,22 @@ local profile = os.getenv("TITAN_BUILD_PROFILE") or "production"
 assert(profile == "production" or profile == "validation",
   "TITAN_BUILD_PROFILE must be production or validation")
 
-for _, assertions in ipairs({2, 0}) do
-  local root = path.join(output, "assertions-" .. assertions)
-  mkdir(root)
-  for _, target in ipairs({{name="runtime", owner="trace_cases", testing=true},
-                           {name="uncaught", owner="trace_uncaught"},
-                           -- Without --no-uv-bootstrap: main runs as the async
-                           -- bootstrap Task (titan#334, D14).
-                           {name="async", owner="trace_async", bootstrap=true}}) do
-    -- LUA_INIT runs the *installed* compiler's ordinary CLI. The profile is
-    -- the existing test-profile control; the link purpose distinguishes a
-    -- test image from a program image. Discovery checks checked cases, never
-    -- a source-text approximation.
-    local init = path.join(root, "profile-" .. target.name .. ".lua")
-    local expected = {}; for _, name in ipairs(all) do expected[#expected + 1] = string.format("%q", name) end
-    write(init, string.format([[
+local root = path.join(output, "images")
+mkdir(root)
+for _, target in ipairs({{name="runtime", owner="trace_cases", testing=true},
+                         {name="uncaught", owner="trace_uncaught"},
+                         -- Without --no-uv-bootstrap: main runs as the async
+                         -- bootstrap Task (titan#334, D14).
+                         {name="async", owner="trace_async", bootstrap=true}}) do
+  -- LUA_INIT runs the *installed* compiler's ordinary CLI. The link purpose
+  -- distinguishes a test image from a program image. Discovery checks
+  -- checked cases, never a source-text approximation.
+  local init = path.join(root, "profile-" .. target.name .. ".lua")
+  local expected = {}; for _, name in ipairs(all) do expected[#expected + 1] = string.format("%q", name) end
+  write(init, string.format([[
 package.path = %q .. ";" .. %q .. ";" .. package.path
 local driver = require "titan-compiler.driver"
-driver.browser_link_options = {purpose=%q, assertions=%d}
+driver.browser_link_options = {purpose=%q}
 local runner = require "titan-compiler.test_runner"
 local discover = runner.discover
 runner.discover = function(...)
@@ -102,28 +100,30 @@ runner.discover = function(...)
   return found, modules
 end
 ]], path.join(prefix, "share/lua/5.5/?.lua"), path.join(prefix, "share/lua/5.5/?/init.lua"),
-      target.testing and "test" or "program", assertions, table.concat(expected, ",")))
-    local image = path.join(root, target.name .. ".mjs")
-    local argv = {prefix .. "/bin/titanc", "-q", "--incremental", "--target", "browser",
-      "--tree", fixture, "--output", path.join(root, "objects"),
-      "--exe", image, "--c-source", path.join(fixture, "trace_support.c")}
-    if not target.bootstrap then argv[#argv + 1] = "--no-uv-bootstrap" end
-    if target.testing then argv[#argv + 1] = "--test" end
-    argv[#argv + 1] = target.owner
-    local result = process.capture(argv, {env = {
-      TITAN_ROOT=prefix, TITAN_TARGET="", TITAN_PATH_0_6="",
-      TITAN_EXTRA_CPPFLAGS="", TITAN_EXTRA_CFLAGS="", TITAN_EXTRA_LDFLAGS="",
-      LUA_INIT_5_5="@" .. init, LUA_INIT="", CCACHE_DISABLE="1",
-    }})
-    io.stdout:write(result.output or result.diagnostic or ""); io.stdout:flush()
-    assert(result.ok, "trace fixture build failed: " .. image .. " (" .. tostring(result.status) .. ")")
-    assert(lfs.attributes(image, "mode") == "file", "missing built image " .. image)
-    assert(checks.check_file_imports(strategy, image, {"entry", "fixture:trace"}))
-    io.stdout:write("TRACE-IMAGE " .. image .. " nativeCases=" .. (target.testing and #all or 0) .. "\n")
-  end
+    target.testing and "test" or "program", table.concat(expected, ",")))
+  local image = path.join(root, target.name .. ".mjs")
+  local argv = {prefix .. "/bin/titanc", "-q", "--incremental", "--target", "browser",
+    "--tree", fixture, "--output", path.join(root, "objects"),
+    "--exe", image, "--c-source", path.join(fixture, "trace_support.c")}
+  if not target.bootstrap then argv[#argv + 1] = "--no-uv-bootstrap" end
+  if target.testing then argv[#argv + 1] = "--test" end
+  argv[#argv + 1] = target.owner
+  local result = process.capture(argv, {env = {
+    TITAN_ROOT=prefix, TITAN_TARGET="", TITAN_PATH_0_6="",
+    TITAN_EXTRA_CPPFLAGS="", TITAN_EXTRA_CFLAGS="", TITAN_EXTRA_LDFLAGS="",
+    LUA_INIT_5_5="@" .. init, LUA_INIT="", CCACHE_DISABLE="1",
+  }})
+  io.stdout:write(result.output or result.diagnostic or ""); io.stdout:flush()
+  assert(result.ok, "trace fixture build failed: " .. image .. " (" .. tostring(result.status) .. ")")
+  assert(lfs.attributes(image, "mode") == "file", "missing built image " .. image)
+  assert(checks.check_file_imports(strategy, image, {"entry", "fixture:trace"}))
+  io.stdout:write("TRACE-IMAGE " .. image .. " nativeCases=" .. (target.testing and #all or 0) .. "\n")
 end
 
-local manifest = {profile=profile, cases={}, degradedCases={}}
+-- trace_support.c's host imports, which the runner passes on (--imports).
+local manifest = {profile=profile, imports="fixture-imports.mjs", cases={}, degradedCases={}}
+write(path.join(output, manifest.imports),
+  read(path.join(repository, "spec/fixtures/browser_runtime/fixture-imports.mjs")))
 local function row(list, name, image, test_name, count, kind, status, stderr, program)
   local args = {}
   if type(test_name) == "string" then test_name = {test_name} end
@@ -131,71 +131,66 @@ local function row(list, name, image, test_name, count, kind, status, stderr, pr
   list[#list + 1] = {name=name, image=image, args=args, program=program == true,
     kind=kind or "returned", status=status or 0, testCount=count, stderrContains=stderr or {}}
 end
-for _, assertions in ipairs({2, 0}) do
-  local mode = "assertions-" .. assertions
-  local base = path.join(output, mode)
-  for _, name in ipairs(cases) do
-    row(manifest.cases, mode .. "." .. name, mode .. "/runtime.mjs", name, 1, nil, nil,
-      name == "test_state_close" and {"Lua warning: error in coroutine cleanup (trace-defer)"} or {})
+for _, name in ipairs(cases) do
+  row(manifest.cases, name, "images/runtime.mjs", name, 1, nil, nil,
+    name == "test_state_close" and {"Lua warning: error in coroutine cleanup (trace-defer)"} or {})
+end
+for _, host in ipairs({"limit_small", "limit_absent", "limit_accessor", "prepare_callback", "prepare_accessor"}) do
+  row(manifest.cases, "host_" .. host, "images/runtime.mjs",
+    host == "prepare_accessor" and "test_host_capture_failed" or "test_host_capture_ready", 1)
+end
+row(manifest.cases, "host_lua_fallback_capacity", "images/runtime.mjs", "test_host_lua_fallback_capacity", 1)
+-- A program image reports the original error and its cleanup exactly. Its
+-- Titan frames are the profile's business: production inlining may drop
+-- them, and the JS gate then requires the survivors to be an ordered
+-- subsequence of the exact frames (D28).
+local uncaught = {"trace-uncaught-original", "TRACE uncaught cleanup=1"}
+if profile == "validation" then
+  table.insert(uncaught, 2, "trace_uncaught.uncaught_middle")
+  table.insert(uncaught, 2, "trace_uncaught.uncaught_leaf")
+end
+row(manifest.cases, "uncaught", "images/uncaught.mjs", nil, 0, "failed", 1, uncaught, true)
+-- A main Task that fails after a resume: stderr has only the uncaught-Task
+-- report, whose trace run() also returns (D14).
+local async_report = {"uncaught error in async Task: trace-async-original\nstack traceback:\n"}
+if profile == "validation" then
+  async_report[#async_report + 1] = "trace_async.async_middle"
+  async_report[#async_report + 1] = "trace_async.async_leaf"
+end
+row(manifest.cases, "async_uncaught", "images/async.mjs", nil, 0, "failed", 1, async_report, true)
+row(manifest.cases, "task_entries", "images/runtime.mjs", "test_task_entry_targets", 1)
+local map = read(path.join(root, "runtime.wasm.map"))
+local trace = read(path.join(root, "runtime.wasm.trace"))
+assert(trace:sub(1, 4) == "TTRC", "runtime image lacks its trace table")
+-- Variant directories hold no map: the runtime reads only the table.
+for _, variant in ipairs({"missing", "malformed", "truncated", "wrong_image", "foreign_image",
+    "missing_symbols"}) do
+  local directory = path.join(root, variant)
+  mkdir(directory)
+  for _, ext in ipairs({"mjs", "wasm"}) do write(path.join(directory, "runtime." .. ext), read(path.join(root, "runtime." .. ext))) end
+  local changed
+  if variant == "malformed" then
+    -- The image's own map under the table's name.
+    changed = map
+  elseif variant == "truncated" then changed = trace:sub(1, -2)
+  elseif variant == "wrong_image" then
+    changed = trace:sub(1, 8) .. (trace:sub(9, 9) == "0" and "1" or "0") .. trace:sub(10)
+  elseif variant == "foreign_image" then
+    -- A complete, valid table from another link.
+    changed = read(path.join(root, "async.wasm.trace"))
+  elseif variant == "missing_symbols" then
+    local unnamed = map:gsub('("x_titan_function_names"%s*:%s*%[)(.-)(%])', function(before, names, after)
+      return before .. names:gsub('"[^"]*"', "null") .. after
+    end, 1)
+    changed = assert(require("titan-compiler.browsertrace").trace_table(unnamed))
   end
-  for _, host in ipairs({"limit_small", "limit_absent", "limit_accessor", "prepare_callback", "prepare_accessor"}) do
-    row(manifest.cases, mode .. ".host_" .. host, mode .. "/runtime.mjs",
-      host == "prepare_accessor" and "test_host_capture_failed" or "test_host_capture_ready", 1)
-  end
-  row(manifest.cases, mode .. ".host_lua_fallback_capacity", mode .. "/runtime.mjs", "test_host_lua_fallback_capacity", 1)
-  -- A program image reports the original error and its cleanup exactly. Its
-  -- Titan frames are the profile's business: production inlining may drop
-  -- them, and the JS gate then requires the survivors to be an ordered
-  -- subsequence of the exact frames (D28).
-  local uncaught = {"trace-uncaught-original", "TRACE uncaught cleanup=1"}
-  if profile == "validation" then
-    table.insert(uncaught, 2, "trace_uncaught.uncaught_middle")
-    table.insert(uncaught, 2, "trace_uncaught.uncaught_leaf")
-  end
-  row(manifest.cases, mode .. ".uncaught", mode .. "/uncaught.mjs", nil, 0, "failed", 1, uncaught, true)
-  -- A main Task that fails after a resume: stderr has only the uncaught-Task
-  -- report, whose trace run() also returns (D14).
-  local async_report = {"uncaught error in async Task: trace-async-original\nstack traceback:\n"}
-  if profile == "validation" then
-    async_report[#async_report + 1] = "trace_async.async_middle"
-    async_report[#async_report + 1] = "trace_async.async_leaf"
-  end
-  row(manifest.cases, mode .. ".async_uncaught", mode .. "/async.mjs", nil, 0, "failed", 1, async_report, true)
-  row(manifest.cases, mode .. ".task_entries", mode .. "/runtime.mjs", "test_task_entry_targets", 1)
-  local map = read(path.join(base, "runtime.wasm.map"))
-  local trace = read(path.join(base, "runtime.wasm.trace"))
-  assert(trace:sub(1, 4) == "TTRC", "runtime image lacks its trace table")
-  -- Variant directories hold no map: the runtime reads only the table.
-  for _, variant in ipairs({"missing", "malformed", "truncated", "wrong_image", "foreign_image",
-      "missing_symbols"}) do
-    local directory = path.join(base, variant)
-    mkdir(directory)
-    for _, ext in ipairs({"mjs", "wasm"}) do write(path.join(directory, "runtime." .. ext), read(path.join(base, "runtime." .. ext))) end
-    local changed
-    if variant == "malformed" then
-      -- The image's own map under the table's name.
-      changed = map
-    elseif variant == "truncated" then changed = trace:sub(1, -2)
-    elseif variant == "wrong_image" then
-      changed = trace:sub(1, 8) .. (trace:sub(9, 9) == "0" and "1" or "0") .. trace:sub(10)
-    elseif variant == "foreign_image" then
-      -- A complete, valid table from another link.
-      changed = read(path.join(base, "async.wasm.trace"))
-    elseif variant == "missing_symbols" then
-      local unnamed = map:gsub('("x_titan_function_names"%s*:%s*%[)(.-)(%])', function(before, names, after)
-        return before .. names:gsub('"[^"]*"', "null") .. after
-      end, 1)
-      changed = assert(require("titan-compiler.browsertrace").trace_table(unnamed))
-    end
-    local destination = path.join(directory, "runtime.wasm.trace")
-    if changed then write(destination, changed)
-    elseif lfs.attributes(destination) then assert(os.remove(destination)) end
-    if variant == "missing_symbols" then
-      row(manifest.cases, mode .. ".missing_symbols", mode .. "/" .. variant .. "/runtime.mjs",
-        "test_missing_symbols", 1)
-    else row(manifest.degradedCases, mode .. "." .. variant, mode .. "/" .. variant .. "/runtime.mjs",
-      {"test_degraded_map", "test_degraded_lua_capacity"}, 2) end
-  end
+  local destination = path.join(directory, "runtime.wasm.trace")
+  if changed then write(destination, changed)
+  elseif lfs.attributes(destination) then assert(os.remove(destination)) end
+  if variant == "missing_symbols" then
+    row(manifest.cases, "missing_symbols", "images/" .. variant .. "/runtime.mjs", "test_missing_symbols", 1)
+  else row(manifest.degradedCases, variant, "images/" .. variant .. "/runtime.mjs",
+    {"test_degraded_map", "test_degraded_lua_capacity"}, 2) end
 end
 
 local function rows(values)
@@ -210,6 +205,7 @@ local function rows(values)
   return "[\n" .. table.concat(encoded, ",\n") .. "\n]"
 end
 write(path.join(output, "manifest.json"), '{"profile":' .. json(manifest.profile) ..
+  ',"imports":' .. json(manifest.imports) ..
   ',"cases":' .. rows(manifest.cases) .. ',"degradedCases":' .. rows(manifest.degradedCases) .. '}\n')
 write(path.join(output, "trace.test.mjs"), read(path.join(repository, "spec/browser/trace.test.mjs")))
 io.stdout:write(string.format("TRACE-GATE %s cases=%d degradedCases=%d nativeCases=%d\n",

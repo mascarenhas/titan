@@ -21,6 +21,7 @@ export async function run(context) {
       const stderr = [];
       const instance = create({
         locateFile,
+        imports: context.imports,
         stdout: chunk => { stdout.push(chunk); },
         stderr: chunk => { stderr.push(chunk); },
       });
@@ -57,7 +58,7 @@ export async function run(context) {
     const large = new Uint8Array(20 * 1024 * 1024);
     for (let index = 0; index < large.length; ++index) large[index] = index % 251;
     const stdout = [];
-    const instance = create({locateFile, stdout: chunk => { stdout.push(chunk); }});
+    const instance = create({locateFile, imports: context.imports, stdout: chunk => { stdout.push(chunk); }});
     try {
       const result = await instance.run(['growth', large]);
       context.assert(result.kind === 'returned' && result.status === 23,
@@ -70,12 +71,13 @@ export async function run(context) {
     context.stdout(encode(`loader bytes: ${path}: 5 runs passed\n`));
   }
   // Each module refuses a Wasm from another link before entry. The
-  // assertions-off module (the second loader_app) is paired with the
-  // assertions-on build's Wasm: same imports, more exports, another identity.
+  // optimized module (the second loader_app) is paired with the program
+  // build's Wasm: the same sources and imports, another identity.
   if (images.length > 1) {
     const module = await context.image(images[1]);
     const other = await context.image(images[0]);
-    const instance = module.create({locateFile: (name, prefix) => other.locateFile(name, prefix)});
+    const instance = module.create({locateFile: (name, prefix) => other.locateFile(name, prefix),
+      imports: context.imports});
     try {
       const caught = await rejection(context, instance.initialize(), {code: 'TITAN_BROWSER_PROTOCOL'});
       context.assert(/^browser image mismatch: loader_app\.mjs belongs to image [0-9a-f]{12}, loader_app\.wasm is image [0-9a-f]{12}$/

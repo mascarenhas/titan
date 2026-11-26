@@ -18,7 +18,7 @@ export async function lifecycle(context, paths) {
     let controls, loaderControls, mainRetired = false, deliveries = 0, expectedSinks = 0;
     let handoffs = 0, terminalHandoffs = 0;
     const checks = [], failures = [], completions = [];
-    const internal = image.create({locateFile: image.locateFile,
+    const internal = image.create({locateFile: image.locateFile, imports: context.imports,
       bindings: {
         __titanTest(value) { controls = value; },
         __loaderTest(value) { loaderControls = value; },
@@ -71,7 +71,7 @@ export async function lifecycle(context, paths) {
     const references = [], keptHandles = [];
     async function cycle() {
       let controls;
-      const instance = image.create({locateFile: image.locateFile,
+      const instance = image.create({locateFile: image.locateFile, imports: context.imports,
         bindings: {__titanTest(value) { controls = value; }}});
       try {
         const result = await instance.run(['cycle']);
@@ -97,7 +97,7 @@ export async function lifecycle(context, paths) {
     context.assert(locations === 0, 'disposing an uninitialized instance fetched assets');
 
     let lateControls;
-    const late = image.create({locateFile: image.locateFile,
+    const late = image.create({locateFile: image.locateFile, imports: context.imports,
       bindings: {__titanTest(value) { lateControls = value; }}});
     const initializing = late.initialize();
     context.assert(initializing === late.initialize(), 'initialization race did not share one promise');
@@ -113,7 +113,7 @@ export async function lifecycle(context, paths) {
     await collect(context, references);
 
     let fromImport, importCalls = 0, imported;
-    imported = image.create({locateFile: image.locateFile,
+    imported = image.create({locateFile: image.locateFile, imports: context.imports,
       bindings: {initialize_hook() { importCalls++; fromImport = imported.dispose(); }}});
     await rejection(context, imported.initialize(), {code: disposed.code});
     await fromImport;
@@ -134,6 +134,7 @@ export async function lifecycle(context, paths) {
     const cause = new Error('first independent instance sink');
     let failedCalls = 0;
     const instances = captures.map((capture, index) => image.create({locateFile: image.locateFile,
+      imports: context.imports,
       bindings: {__titanTest(value) { peerControls[index] = value; }},
       stdout(bytes) {
         if (index === 0) { failedCalls++; throw cause; }
