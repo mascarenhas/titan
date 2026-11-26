@@ -14887,8 +14887,8 @@ describe("browser protocol probe host imports", function()
             expected[#expected + 1] = argument
         end
         assert.same(expected, seen.argv)
-        assert.equal('export default {\n  "env": {"host_note": () => undefined, "host_clock": () => 0n},\n' ..
-            '  "other": {"pair": () => [0, 0]}\n};\n', seen.module)
+        assert.equal('export default {\n  ["env"]: {["host_note"]: () => undefined, ["host_clock"]: () => 0n},\n' ..
+            '  ["other"]: {["pair"]: () => [0, 0]}\n};\n', seen.module)
         assert.is_nil(lfs.attributes(seen.stand_ins))
     end)
 
@@ -14899,5 +14899,28 @@ describe("browser protocol probe host imports", function()
         expected[#expected + 1] = seen.argv[#seen.argv]
         assert.same(expected, seen.argv)
         assert.is_nil(seen.module)
+    end)
+
+    it("makes every module and member name, __proto__ included, an own property returning typed zeros", function()
+        local node = os.getenv("TITAN_NODE")
+        if not node or node == "" then pending("TITAN_NODE is not set") return end
+        local module = assert(require("titan-compiler.browserlink").protocol_imports({
+            { module = "__proto__", name = "__proto__", kind = 0, signature = "()->(i64)" },
+            { module = "env", name = "constructor", kind = 0, signature = "(i32)->(i32,f64,externref)" },
+            { module = "env", name = 'quote"\\\n', kind = 0, signature = "()->()" },
+        }))
+        local file = temporary.name(".mjs")
+        local cleanup <close> = setmetatable({}, { __close = function() os.remove(file) end })
+        assert(util.set_file_contents(file, module, "wb"))
+        local result = compiler_io.new_sync():run({ node, "--input-type=module", "-e", [[
+const own = (object, key) => Object.getOwnPropertyDescriptor(object, key)?.value;
+const imports = (await import((await import('node:url')).pathToFileURL(process.argv[1]).href)).default;
+const proto = own(own(imports, '__proto__'), '__proto__');
+const env = own(imports, 'env');
+console.log(JSON.stringify([Object.getPrototypeOf(imports) === Object.prototype, typeof proto, typeof proto?.(),
+    own(env, 'constructor')(), own(env, 'quote"\\\n')()]));
+]], file }, { stderr_to_stdout = true })
+        assert.is_true(result.ok, result.output)
+        assert.equal('[true,"function","bigint",[0,0,null],null]', (result.output:gsub("%s+$", "")))
     end)
 end)

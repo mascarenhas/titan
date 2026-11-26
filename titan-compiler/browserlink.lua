@@ -332,13 +332,14 @@ function M.protocol_imports(imports)
             end
             local result = #values == 0 and "undefined" or #values == 1 and values[1] or
                 "[" .. table.concat(values, ", ") .. "]"
-            table.insert(modules[module], js_string(name) .. ": () => " .. result)
+            -- Computed keys, so that even a `__proto__` name is an own property.
+            table.insert(modules[module], "[" .. js_string(name) .. "]: () => " .. result)
         end
     end
     if #order == 0 then return nil end
     local entries = {}
     for index, module in ipairs(order) do
-        entries[index] = "  " .. js_string(module) .. ": {" .. table.concat(modules[module], ", ") .. "}"
+        entries[index] = "  [" .. js_string(module) .. "]: {" .. table.concat(modules[module], ", ") .. "}"
     end
     return "export default {\n" .. table.concat(entries, ",\n") .. "\n};\n"
 end
