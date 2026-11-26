@@ -365,7 +365,7 @@ test("public image observation forwards aborts and traps but leaves handled prot
     assert.deepEqual(observed, events);
     assert.deepEqual(controls, [
         {type: "abort", reason: "abort"},
-        {type: "failure", category: "trap", reason: "trap", knownTrap: true},
+        {type: "trap", reason: "trap"},
     ]);
 });
 
@@ -1334,6 +1334,34 @@ test("imported runner helpers leave CLI dormant and preserve supervisor behavior
     assert.equal(within(root, join(root, "spec/browser")), true);
     assert.equal(within(root, root + "-sibling"), false);
     assert.equal(within(root, dirname(root)), false);
+});
+
+test("an observed engine trap waits for the harness that caught it, then reports 71", async () => {
+    const settled = monitor => Promise.race([monitor.done.then(() => "done"),
+        new Promise(resolve => setTimeout(() => resolve("pending"), 20))]);
+    const observe = async (messages, expected) => {
+        const monitor = new Monitor({timeout: 2000, grace: 1000});
+        try {
+            for (const message of messages.slice(0, -1)) {
+                monitor.control(message);
+                assert.equal(await settled(monitor), "pending", `${JSON.stringify(message)} ended the run`);
+            }
+            monitor.control(messages.at(-1));
+            await monitor.done;
+            assert.equal(monitor.result(), expected);
+        } finally { monitor.stop(); }
+    };
+    const trap = {type: "trap", reason: "unreachable"};
+    // The harness finishes its own checks after catching the trap.
+    await observe([trap, {type: "complete", kind: "host-test", status: 0}], 71);
+    // Execute's terminal failure ends the wait; a nonterminal one does not.
+    await observe([trap, {type: "failure", category: "trap", reason: "unreachable"},
+        {type: "failure", category: "trap", reason: "unreachable", terminal: true}], 71);
+    // A trap replaces an observed abort, and an abort never replaces a trap.
+    await observe([{type: "abort", reason: "abort"}, trap, {type: "complete", kind: "host-test", status: 0}], 71);
+    await observe([trap, {type: "abort", reason: "abort"}, {type: "complete", kind: "host-test", status: 0}], 71);
+    // Observed after completion, it is a late engine failure.
+    await observe([{type: "complete", kind: "host-test", status: 0}, trap], 73);
 });
 
 test("direct invocation through a symlink still runs the runner CLI",
