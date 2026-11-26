@@ -205,7 +205,7 @@ describe("browser image profile and SDK readiness", function()
             "-Wl,-z,stack-size=" .. (budgets.stack_size or 1048576),
             "-Wl,--initial-heap=" .. (budgets.initial_heap or 15728640),
             "-Wl,--max-memory=" .. (budgets.maximum_memory or 2147483648),
-            "-Wl,--gc-sections", "-Wl,--export-table", "-Wl,--export=malloc", "-Wl,--export=free",
+            "-Wl,--gc-sections", "-Wl,--export-table",
             "-Wl,--export=__stack_pointer", "-Wl,--export=__stack_low", "-Wl,--export=__stack_high" }
         if gate then
             flags[#flags + 1] = "-Wl,--export=titan_browser_gate_guarded"
@@ -368,6 +368,14 @@ describe("browser image profile and SDK readiness", function()
                 "titan_browser_release_callable", "titan_browser_close" }) do
             assert.truthy(source:find('TITAN_WASM_EXPORT("' .. name .. '")\nint ' .. name .. "(", 1, true), name)
         end
+        -- The factory's allocator exports call the program's malloc and free,
+        -- so -Wl,--wrap=malloc,--wrap=free wrappers see the host's blocks too.
+        for _, text in ipairs({
+            'TITAN_WASM_EXPORT("malloc")\nvoid *titan_browser_export_malloc(size_t size) {\n    return malloc(size);\n}',
+            'TITAN_WASM_EXPORT("free")\nvoid titan_browser_export_free(void *block) {\n    free(block);\n}',
+        }) do
+            assert.truthy(source:find(text, 1, true), text)
+        end
         -- Output reaches the host through WASI fd_write, not a launcher shim.
         for _, name in ipairs({ "emscripten", "__wasi_fd_write", "__syscall_", "titan_browser_host_output" }) do
             assert.is_nil(source:find(name, 1, true), name)
@@ -506,7 +514,9 @@ describe("browser image profile and SDK readiness", function()
         end
     end)
 
-    it("exports only the factory's memory, table, allocator and stack bounds, plus the gate entries", function()
+    -- The launcher exports the allocator itself (see the launcher case), so a
+    -- wrapped malloc or free never loses the factory's export name.
+    it("exports only the factory's memory, table and stack bounds by name, plus the gate entries", function()
         for _, purpose in ipairs(PURPOSES) do
             local plan = assert(browserlink.profile(fixtures.descriptor(), { purpose = purpose }))
             local exports = {}
@@ -514,7 +524,7 @@ describe("browser image profile and SDK readiness", function()
                 local name = flag:match("^%-Wl,%-%-export=(.+)$")
                 if name then exports[#exports + 1] = name end
             end
-            local expected = { "malloc", "free", "__stack_pointer", "__stack_low", "__stack_high" }
+            local expected = { "__stack_pointer", "__stack_low", "__stack_high" }
             if purpose == "gate" then
                 expected[#expected + 1] = "titan_browser_gate_guarded"
                 expected[#expected + 1] = "titan_browser_gate_observe"
