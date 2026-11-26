@@ -520,8 +520,8 @@ the module interface rather than raising stubs):
   that instance.
 - **Time zone and locale:** Local calendar conversion uses the JavaScript
   host's time zone; changing `TZ` modifies only the environment variable, while
-  a leading `"!"` in `date` selects UTC. Under Emscripten's musl C library,
-  `setlocale` may accept unknown locale names while formatting with `C.UTF-8`.
+  a leading `"!"` in `date` selects UTC. Under `wasi-libc` (musl), `setlocale`
+  uses the C/UTF-8 locale.
 - **Exit:** Inside an async Task, `exit` triggers graceful Runtime exit without
   terminating the JavaScript host; outside a Task it raises
   `"os.exit is unavailable outside an async Task on the browser target"`.

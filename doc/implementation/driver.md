@@ -228,10 +228,9 @@ remains a private source-build input rather than part of the installed SDK.
 The browser target resolves its separate Lua and SDK paths under the same root
 with `driver.installed_paths(root, "browser")`, while every host label uses the
 native table ([Installed paths](browser-target.md#installed-paths)).
-On Windows the browser link uses emcc with a response file encoded by
-`platform.windows_response_contents` using GNU response-file quoting, for
-both the program and the trace link.
-Static browser provider archives still use emar with bounded argv batches;
+On Windows the browser link uses `wasi-sdk`'s `clang.exe` with a response file
+encoded by `platform.windows_response_contents` using GNU response-file quoting.
+Static browser provider archives still use `llvm-ar` with bounded argv batches;
 neither path goes through the native Windows DLL publication rule.
 Outside a checkout, an unknown root becomes `driver.INSTALLATION_ERROR`,
 `cannot locate the Titan installation root[: <reason>]; set TITAN_ROOT to the
@@ -1000,7 +999,7 @@ used them (including failures), and compare the identity on restoration in a
 fresh resolver. Do not request live validation for a publication with no such
 dependency.
 
-The lazy path locates pinned Emscripten 6.0.13, verifies the selected SDK's Lua
+The lazy path locates pinned `wasi-sdk` 34.0, verifies the selected SDK's Lua
 headers, and compares the live C profile and Wasm object fingerprint to the
 published target before serving a header or an acceptance probe. It can use the
 same SDK's packaged `src/lua-5.5.1` headers when `lib/browser/include` is absent
@@ -1008,8 +1007,8 @@ and the bytes match the browser header digest. Both forms use the browser Lua
 defines and require all five selected SDK Titan headers to be readable,
 nonempty files. Their digests contribute to the lazy foreign identity, not
 the tool-free semantic key. Neither path asks for host CC, Lua or runtime link
-archives, `emar`, a runner, or Node. Missing or mismatched prerequisites fail
-the C-using module, not the browser target.
+archives, `llvm-ar`, `wasm-opt`, a runner, or Node. Missing or mismatched
+prerequisites fail the C-using module, not the browser target.
 
 ### Embedded interface provider and target profile
 
@@ -1802,7 +1801,7 @@ native_references, objects`.
    (the parsed `driver.CC`, `driver.CFLAGS`, normalized compile extras from
    `TITAN_EXTRA_CPPFLAGS`/`TITAN_EXTRA_CFLAGS` and CLI `-I`/`-D`/`--cflag`, and
    trailing SDK `-I` include roots; for a browser context, the descriptor's
-   `emcc`, flags, and include roots), followed by `driver.test_owner_flags` and
+   `clang --target=wasm32-wasip1`, flags, and include roots), followed by `driver.test_owner_flags` and
    per-request `extra_compile_flags`. When the resulting
    command enables LTO and names no seed, the driver appends a stable seed so
    archive bytes stay reproducible: `-frandom-seed=<modname>` for an unsplit
@@ -2211,7 +2210,7 @@ repeatable CLI native switches in a single deterministic order
   definitions ([Windows consumer
   definitions](windows-build.md#one-controlled-lua-dll-and-its-sdk)). Both
   take an optional resolver context; for a browser context they return the
-  descriptor's `emcc` argv, compile flags, and `-I` roots instead of the host
+  descriptor's `clang --target=wasm32-wasip1` argv, compile flags, and `-I` roots instead of the host
   configuration ([Compile prefix and target
   defines](browser-target.md#compile-prefix-and-target-defines)).
 * **Linking (`driver.link_extra_flags()`).** Appends `TITAN_EXTRA_LDFLAGS`
@@ -2240,7 +2239,7 @@ diagnostics and optional typed enum selection at
 `TITAN_PREFIX` when set and otherwise the installation root. Clear that
 directory or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse if
 external changes make results stale. Browser probes use the separate
-directory `<prefix>/var/cache/titan-probes/browser-6.0.13/2/`
+directory `<prefix>/var/cache/titan-probes/browser-34.0/2/`
 ([Probe-cache isolation](browser-target.md#probe-cache-isolation)). Generated C is compiled normally. See
 [compiled probe caching](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results)
 for record and failure handling.
@@ -2538,9 +2537,12 @@ path with `.mjs` appended. The details are in the browser-target chapter:
   `driver.browser_c_image_contents(worker, options)` exposes the same
   protected wrappers for C-only images.
 * **Linking** uses `browserlink.profile`, compiles the entrypoint with the
-  descriptor's prefix, links with `emcc` into a staging directory, checks the
-  final image's imports and byte bounds, rewrites the staged source map and
-  writes its trace table, embeds the loader into the staged `.mjs` with
+  descriptor's prefix, links with `clang --target=wasm32-wasip1 -mexec-model=reactor`
+  into a staging directory, runs Binaryen `wasm-opt` with `--debuginfo --stack-check`
+  (and profile optimization/skip flags), extracts `.debug_line` in pure Lua to
+  write `<stem>.wasm.trace` and `<stem>.wasm.map` while slicing `.debug_*`
+  sections out of `<stem>.wasm`, checks the final image's imports and byte
+  bounds, embeds the Wasm factory and loader into `<stem>.mjs` with
   `browserlink.embed`, and publishes `<stem>.wasm.trace`, `<stem>.wasm.map`,
   `<stem>.wasm`, and then `<stem>.mjs` as one set (running `after_publish`
   inside the rollback window and restoring every predecessor on failure)
@@ -3302,8 +3304,8 @@ of `titanc`, and its preflight ordering is documented in
 
 User-facing environment variables (`TITAN_ROOT`, `TITAN_PATH_0_6`,
 `TITAN_PATH`, `TITANC`, `TITAN_TARGET`, `TITAN_BUILD_PROFILE`, `TITAN_JOBS`,
-`TITAN_C_PARTS`, `TITAN_EXTRA_*`, `TITAN_NO_LINE_DIRECTIVES`, `EMSDK`,
-`TITAN_NODE`, `TITAN_CHROME`, `TITAN_BROWSER_ROOT_NO_SANDBOX`, `CC`, `AR`,
+`TITAN_C_PARTS`, `TITAN_EXTRA_*`, `TITAN_NO_LINE_DIRECTIVES`, `WASI_SDK_PATH`,
+`BINARYEN_ROOT`, `WASM_OPT`, `TITAN_NODE`, `TITAN_CHROME`, `TITAN_BROWSER_ROOT_NO_SANDBOX`, `CC`, `AR`,
 `RANLIB`, `CLANG_FORMAT`, `GCOV`, `GCOVR`, `NO_COLOR`, `TERM`, `COLUMNS`,
 `LC_ALL`/`LC_CTYPE`/`LANG`, `LUA_PATH*`/`LUA_CPATH*`) are documented in
 [Environment variables](../language/toolchain.md#environment-variables). The
@@ -3311,7 +3313,7 @@ table below maps contributor-internal variables and compiler-side readers:
 
 | Variable | Read by | Default | Compiler-internal role |
 | --- | --- | --- | --- |
-| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache (`var/cache/titan-probes/2` and `var/cache/titan-probes/browser-6.0.13/2`). |
+| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache (`var/cache/titan-probes/2` and `var/cache/titan-probes/browser-34.0/2`). |
 | `TITAN_PROBE_CACHE_DISABLE` | `driver.lua` | unset | Exact value `1` disables persistent C-probe reuse. |
 | `TITAN_RUNTIME_PREBUILT` | `driver.lua` `check_runtime` | unset | Exact value `1` skips the checkout `libtitan.a` rebuild. |
 | `MAKE` | `driver.lua` `check_runtime` | `make` | Make command for checkout runtime archive rebuilds. |

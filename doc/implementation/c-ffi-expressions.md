@@ -934,9 +934,9 @@ expression grammar, so `name`, `(name)`, and `((name))` take the same path in
 `cdefines.register_define`, after the cast and dotted-path forms:
 
 * **Self-reference.** When the identifier is the macro's own name, as in
-  Emscripten's `extern FILE *const stdout; #define stdout (stdout)` or glibc's
-  bare `#define stdout stdout`, the existing declaration is kept as it is,
-  with no copy and no second ordered `TypeList` entry.
+  `wasi-libc` / musl's `extern FILE *const stdout; #define stdout (stdout)` or
+  glibc's bare `#define stdout stdout`, the existing declaration is kept as it
+  is, with no copy and no second ordered `TypeList` entry.
 * **Alias.** Otherwise the macro gets a shallow copy of the target
   declaration with only its public name changed, the convention already used
   for ordinary function aliases. Token types, pointer qualifiers, declarator
@@ -1074,4 +1074,4 @@ restores them from a persisted extracted graph; `spec/coder/c_ffi_spec.lua`
 compiles and runs modules that read stream, array, function, and callback
 aliases and calls `fwrite` with the host's `stdout` and `stderr`; and
 `spec/coder/browser_toolchain_spec.lua` compiles `fwrite` to `ffi.stdout` and
-`ffi.stderr` with the real Emscripten headers.
+`ffi.stderr` with the real `wasi-sdk` headers.

@@ -670,8 +670,8 @@ resolver settings (including the source-selection `target`, which the
 coordinator writes as `configuration.resolver.target`), and `codegen_policy`.
 A browser configuration also carries the closed descriptor as
 `configuration.target_descriptor`, which the worker imports and freezes before
-creating its context, without rerunning `emcc --version` or reverifying the
-record ([Worker transport](browser-target.md#worker-transport)). It then calls
+creating its context, without rerunning `clang --version`/`wasm-opt --version`
+or reverifying the record ([Worker transport](browser-target.md#worker-transport)). It then calls
 `incremental.compiler_component(context, options)` to hash the loaded compiler
 Lua files and frontend script. If the resulting digest differs from the
 top-level `configuration.compiler`, the worker fails immediately with
@@ -1211,11 +1211,12 @@ are never part of `spec.outputs`. Each target owns
     mechanism"`).
   * **`archive` backend (browser library).** A [browser](browser-target.md)
     provider archive has no linker. The backend is `archive`, the policy is
-    cacheable with no native files or argv, and `output_tools` records only
-    the descriptor's `emar` and `emranlib`, without linker selection or
-    link-stage discovery. The opaque-mechanism checks above still apply.
-  * **`wasm` backend (browser program or test).** The link kind selects it.
-    `ticket.dependency_argv` is `{ "-Wl,--trace" }` and
+    cacheable with no native files or argv, and `output_tools` records the
+    descriptor's `llvm-ar`, `llvm-ranlib`, `wasm-ld`, and `wasm-opt`, without
+    native link-stage discovery. The opaque-mechanism checks above still apply.
+  * **`wasm` backend (browser program or test).** The link kind selects it,
+    certifying `llvm-ar`, `llvm-ranlib`, `wasm-ld`, and `wasm-opt` in
+    `output_tools`. `ticket.dependency_argv` is `{ "-Wl,--trace" }` and
     `ticket.dependency_output` names the dependency file; the image link
     captures `wasm-ld`'s stdout there. On commit each trace line must be a
     regular file or an `archive(member)` whose archive is resolved across `(`

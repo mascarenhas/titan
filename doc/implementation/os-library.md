@@ -18,7 +18,7 @@ process and stdio policy stays here.
 | `os_platform.h`, `os_environment.h` | Native platform operations, beside the canonical main; imported only by native contributors. |
 | `clock.browser.titan` | Current timestamp through libc `time`; no CPU-clock member. |
 | `environment.browser.titan` | Instance-local libc environment operations and browser `OperationError` construction. |
-| `environment.browser.h` | The two POSIX `setenv`/`unsetenv` declarations hidden by emsdk 6.0.13's `stdlib.h` without feature macros; a feature macro here would arrive too late in the generated translation unit. No function bodies. |
+| `environment.browser.h` | The two POSIX `setenv`/`unsetenv` declarations hidden by `wasi-libc`'s `stdlib.h` without feature macros; a feature macro here would arrive too late in the generated translation unit. No function bodies. |
 | `process.browser.titan` | Task-only graceful exit through `async.request_exit`. |
 | `stdio.browser.titan` | SDK-backed parent streams, declared kinds, read state, and parent-only transfer hooks. |
 

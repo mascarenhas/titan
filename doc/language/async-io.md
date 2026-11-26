@@ -810,7 +810,7 @@ Titan shares the page's single event loop. Each driver turn delivers queued host
 
 If every remaining Task is suspended with no pending host work, open request/listener, or open [`BrowserPin`](standard-library-browser.md#synchronous-c-callbacks), the driver stops with `"async Runtime became idle while Tasks were waiting"` and unwinds the waiting Tasks.
 
-Tasks wait on host operations with `await`, `await_cleanup`, or `suspend` around [browser requests](standard-library-browser.md#requests-and-listeners) (pass `suspend` a cancel action that cancels the request when cancellation should end the wait early). Do not use stack-suspending Emscripten helpers (`emscripten_sleep`, `EM_ASYNC_JS`) inside Tasks, as they stall every other Task.
+Tasks wait on host operations with `await`, `await_cleanup`, or `suspend` around [browser requests](standard-library-browser.md#requests-and-listeners) (pass `suspend` a cancel action that cancels the request when cancellation should end the wait early). Do not call a JSPI-suspending raw host import (`WebAssembly.Suspending`) directly inside a Task, as suspending the whole WebAssembly stack stalls every other Task.
 
 ### Drives and entries
 

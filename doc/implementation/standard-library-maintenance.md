@@ -157,9 +157,9 @@ exclusive independent-state execution used by `titan.lua`.
 ## Keep C and the Lua C API to what Titan cannot do
 
 Standard-library and runtime code that touches C (authored C, a source
-`foreign function` callback, or a `lua_*`/`luaL_*` call) or JavaScript (a
-`--js-library` file, the browser loader, an `EM_JS` or `EM_ASM` block, or
-JavaScript glue that the compiler generates) follows six rules. A review counts
+`foreign function` callback, or a `lua_*`/`luaL_*` call) or JavaScript (the
+browser Wasm factory, the browser loader, user `create({ imports })` host
+imports, or JavaScript glue that the compiler generates) follows six rules. A review counts
 the new Lua C API calls, authored C lines, and authored JavaScript lines in a
 diff and justifies each one against a rule.
 
@@ -187,7 +187,7 @@ host boundary.
      Lua stack): a `local foreign function` called by name, taking formals and
      returning a status (rule 2). Code that only computes, or that a raise on
      entry cannot harm, is an ordinary Titan function.
-   - *Needs an exact unmangled C symbol* (an Emscripten export, a symbol a C
+   - *Needs an exact unmangled C symbol* (a WebAssembly export, a symbol a C
      library looks up): a compiler-generated one-line forward to a public
      `foreign function` (with a weak declaration when the owning module may be
      absent), never a hand-written runtime C wrapper.
@@ -240,10 +240,10 @@ host boundary.
    ```
 
    ```javascript
-   // In titan-runtime/browser/titan-browser-bridge.js: an import is a one-line
+   // In titan-runtime/browser/titan-wasm-factory.mjs: an import is a one-line
    // forward to the loader owner, which holds the JavaScript value in a slot.
    titan_browser_host_adopt: (state, slot, generation) =>
-     TitanBridge.trusted('adoptSlot', state >>> 0, slot >>> 0, generation >>> 0),
+     trusted('adoptSlot', state >>> 0, slot >>> 0, generation >>> 0),
    ```
 
    *Wrong* (`titan-browser.c` at `843b446e`): a 600-line runtime C file
@@ -352,15 +352,12 @@ host boundary.
 ### The same rules for browser JavaScript
 
 Authored JavaScript is the embedded loader
-(`titan-runtime/browser/titan-browser.mjs`), the `--js-library` files beside it
-(`titan-browser-library.js`, `titan-browser-bridge.js`, and
-`titan-browser-trace.js`), an `EM_JS` or `EM_ASM` block in a C helper, and
-JavaScript text that the compiler emits. [Source
+(`titan-runtime/browser/titan-browser.mjs`), the zero-dependency Wasm factory
+(`titan-runtime/browser/titan-wasm-factory.mjs`), user `create({ imports })`
+host imports, and JavaScript text that the compiler emits. [Source
 ownership](browser-bridge.md#javascript-files) records what each shipped file
-owns. The runner (`titan-browser-run.mjs` with its page and worker scripts)
-and the compiler's module check (`titan-browser-module-check.mjs`, which needs
-a JavaScript parser) are host tooling outside the image, reviewed as ordinary
-Node programs.
+owns. The runner (`titan-browser-run.mjs` with its page and worker scripts) is
+host tooling outside the image, reviewed as ordinary Node programs.
 
 A review counts the authored JavaScript lines added by a diff and names, for
 each added function or block, which host capability listed under rule 1
@@ -374,8 +371,8 @@ and `48b26b75`; rules 2 and 5 are specific to C and the Lua stack.
   `wrapCallable` stored them on the wrapper, and `completionTarget` rejected
   a request whose completion had "an incompatible signature" — validating
   Titan functions in JavaScript. *Right*: `registerCallable` creates one
-  wrapper object for a pin identity and nothing else. Every import in
-  `titan-browser-bridge.js` is one line forwarding to the loader owner
+  wrapper object for a pin identity and nothing else. Every bridge import in
+  `titan-wasm-factory.mjs` is one line forwarding to the loader owner
   (`titan_browser_host_adopt` to `adoptSlot`), and its two helpers hold the
   only shared logic: a trusted import that throws poisons the instance
   (`trusted`), and a host import that throws fills the response (`response`).

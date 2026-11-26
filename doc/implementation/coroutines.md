@@ -351,8 +351,8 @@ described above.
   coroutine instead. minicoro's own default
   and minimum stack sizes are not redefined.
 * The native ASM, UCONTEXT and Windows Fiber backends are unchanged. The
-  Emscripten branch uses JSPI engine continuations and disjoint linear C
-  stacks, not an instrumented stack-copying backend. Each context saves SP
+  WebAssembly (`__wasm__`) branch uses JSPI engine continuations and disjoint
+  linear C stacks, not an instrumented stack-copying backend. Each context saves SP
   and stack-limit metadata, one parked gate, one engine-entry lifetime and a
   BACK identity. A dead coroutine's promised engine invocation retires before
   its resumer can free the allocation. Titan's abandoned-coroutine floor and

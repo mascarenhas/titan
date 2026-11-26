@@ -49,8 +49,8 @@ its own Lua DLL. A stock Lua tree that a checkout compiler links through
 `make lua-browser PREFIX=<prefix>` installs the fork's WebAssembly Lua
 (`lib/browser/liblua.a`, its headers, and its build record) through
 `scripts/lua_browser.sh`, which delegates to the fork's `install-browser` with
-the emsdk sibling tools and `LUA_BROWSER_CC`, `LUA_BROWSER_AR`,
-`LUA_BROWSER_RANLIB`, `LUA_BROWSER_MYCFLAGS`, and `LUA_BROWSER_MYLDFLAGS`.
+the `wasi-sdk` sibling tools (`clang`, `llvm-ar`, `llvm-ranlib`) and
+`LUA_BROWSER_CC`, `LUA_BROWSER_AR`,
 Unlike `make lua`, it reuses an installation only when the effective browser
 configuration and the installed archive and header digests match the record,
 and otherwise rebuilds in the fork's separate browser object directory
@@ -245,8 +245,8 @@ the three aggregate `--c-source` helpers, and `-X $(STDLIB_EXTRA_OBJECTS)`
 
 `titan-stdlib-browser-test` is a phony test goal (so it defaults to the
 `validation` profile) needing the installed compiler, native standard provider,
-browser SDK, emsdk, Node 26+ with JSPI and a JSPI-capable headless Chromium.
-Its root check rejects an empty or duplicate `TITAN_STDLIB_BROWSER_TEST_ROOTS`
+browser SDK, `wasi-sdk` 34.0, Binaryen `version_133`, Node 26+ with JSPI, and
+a JSPI-capable headless Chromium.
 inventory before build setup. Under `BROWSER_SDK_ENV`, with `TITAN_PATH_0_6`
 pointing at the installed browser SDK, one installed
 `titanc -q --target browser --test --incremental --no-uv-bootstrap`
@@ -387,8 +387,8 @@ with `+` and `RECURSIVE_WRAPPER_GUARD`, and delegates native parallelism to
 | `install` (no `INST_PREFIX`) | `install-compiler`, `publish-titan-sdk`, `publish-stdlib`. |
 | `install` (LuaRocks pass) | `install-compiler`, `install-rock-tools`, `stage-rock-payload`. |
 | `binary-rock` | `luarocks pack titan`, renaming the `.all.rock` result to the suffix from `luarocks config arch`. |
-| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, record the build profile in `build-profile` (browser links under the other profile are refused), publish the browser standard provider `titan.a` (the [browser stdlib](browser-target.md#the-browser-standard-library) roots in `BROWSER_STDLIB_ROOTS`, with LPegLabel as the only `-X` payload and include path) through ordinary library mode, certify its dependency closure, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; with `make lua-browser` and `make titan-stdlib-browser-test`, one of the three Titan targets that need emsdk. |
-| `browser-semantic-pack` | Read an already-finished browser SDK and its exact source rock to produce the [offline editor release companion](browser-target.md#publishing-the-browser-semantic-pack). No compiler build or emsdk. |
+| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the factory, loader, and runner assets, record the build profile in `build-profile` (browser links under the other profile are refused), publish the browser standard provider `titan.a` (the [browser stdlib](browser-target.md#the-browser-standard-library) roots in `BROWSER_STDLIB_ROOTS`, with LPegLabel as the only `-X` payload and include path) through ordinary library mode, certify its dependency closure, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). With `make lua-browser` and `make titan-stdlib-browser-test`, one of the three Titan targets that need `wasi-sdk` and Binaryen. |
+| `browser-semantic-pack` | Read an already-finished browser SDK and its exact source rock to produce the [offline editor release companion](browser-target.md#publishing-the-browser-semantic-pack). No compiler build, `wasi-sdk`, or Binaryen required. |
 
 Standard-library installation copies the built provider pair, licenses, and
 optional symbols. SDK installation also publishes Titan's own `LICENSE` at

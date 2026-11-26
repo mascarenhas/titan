@@ -119,11 +119,11 @@ Two invariants shape everything downstream of the checker:
 | [C FFI declarations and expressions](c-ffi-expressions.md) | C tag identity, declarators, target arithmetic profile, batched acceptance probes and caching, counted byte copies, FAM allocation, macros, and enums. |
 | [Foreign-function implementation](foreign-functions.md) | Raw-C foreign-body grammar and checking, C99 literal/operator typing, allocation plans, `.titan.h` export planning, sequencing, and stdlib callbacks. |
 | [Trusted Lua C API boundary](ffi-lua-api-followup.md) | Audited stdlib-only discipline for direct Lua C API calls, per-operation stack/root ledgers, and why it stays outside public FFI. |
-| [Browser target](browser-target.md) | `--target browser` architecture: Emscripten pin, browser Lua and SDK, subset parity gate, JSPI runtime, byte channels, trace tables, and validation suites. |
-| [Browser bridge runtime](browser-bridge.md) | Generated browser launcher, `titan.browser` foreign entries and pin table, JS file ownership, `BrowserValue` marshalling, synchronous callbacks, and `fetch`/`websocket` sources. |
-| [Browser analysis and semantic packs](driver.md#browser-analysis-target) | Tool-free type checking against the Wasm archive, library-series `analysis-target` checks, lazy Emscripten probes, cache identities, and [offline semantic-pack publishing](browser-target.md#publishing-the-browser-semantic-pack). |
-| [Windows-host browser builds](browser-target.md#windows-and-other-hosts) | Shared browser SDK recipes and Wasm validation on Windows hosts, Emscripten discovery, and per-engine runner job ownership. |
-| [Browser Wasm-EH longjmp contract](browser-target.md#wasm-eh-longjmp-contract) | `SUPPORT_LONGJMP=wasm` and `WASM_LEGACY_EXCEPTIONS=1`, ambient flag isolation, EH fingerprints, stale-record refusal, and protected JSPI suspension. |
+| [Browser target](browser-target.md) | `--target browser` architecture: `wasi-sdk` 34.0 and Binaryen 133 pins, browser Lua and SDK, subset parity gate, JSPI runtime, byte channels, pure-Lua DWARF trace tables, and validation suites. |
+| [Browser bridge runtime](browser-bridge.md) | Generated browser launcher, `titan.browser` foreign entries and pin table, JS file ownership (`titan-wasm-factory.mjs`, `titan-browser.mjs`), `create({ imports })`, `BrowserValue` marshalling, synchronous callbacks, and `fetch`/`websocket` sources. |
+| [Browser analysis and semantic packs](driver.md#browser-analysis-target) | Tool-free type checking against the Wasm archive, library-series `analysis-target` checks, lazy `wasi-sdk` probes, cache identities, and [offline semantic-pack publishing](browser-target.md#publishing-the-browser-semantic-pack). |
+| [Windows-host browser builds](browser-target.md#windows-and-other-hosts) | Shared browser SDK recipes and Wasm validation on Windows hosts, `wasi-sdk`/Binaryen discovery, and per-engine runner job ownership. |
+| [Browser Wasm-EH longjmp contract](browser-target.md#wasm-eh-longjmp-contract) | `wasm-exnref` (`-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false`), ambient flag isolation, EH fingerprints, stale-record refusal, and protected JSPI suspension. |
 
 ### Build Coordinator, Incremental Cache & Providers
 

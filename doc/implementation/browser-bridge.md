@@ -20,7 +20,7 @@ runner, deployment, and fatal engine classifications.
 | Installed C layout and JS import contract | `titan-runtime/titan/browser.h` |
 | Browser-only Titan API, pin table, foreign trampolines, and protected entries | `titan/browser.browser.titan` |
 | Generated image launcher and weak C export forwards | `titan-compiler/browserentry.lua` and `driver.browser_entrypoint_contents` |
-| JSPI owner, bridge imports, loader, trace adapter, and standalone portable peer | the five [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
+| Wasm factory (JSPI owner, WASI imports, bridge imports, trace adapter), loader, and standalone portable peer | the three [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
 | Browser runtime/provider staging | `Makefile` and `scripts/browser_sdk.lua` |
 
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
@@ -40,10 +40,8 @@ shipped file is justified by the capability in its last column.
 
 | File | Owns | Host capability |
 | --- | --- | --- |
-| `titan-browser-library.js` (`--js-library`) | The execution owner of one Module: the pending entry, the promising wrappers of the state-entering exports, one promise per coroutine context with its saved linear stack, the suspending imports (`titan_mco_transfer`, `titan_mco_destroy`, `titan_browser_relinquish`), the synchronous-callback depth, and poison | JSPI suspension and resumption; engine failure |
-| `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner, including `titan_browser_host_output` for C stdio; the one-line `$getEnvStrings` override supplies the instance's environment snapshot. It keeps no state | Emscripten import glue; the embedder's libc environment input |
+| `titan-wasm-factory.mjs` (embedded in each image) | Zero-dependency WebAssembly instantiation (`instantiate`), JSPI execution owner and coroutine stack switching (`titan_mco_create`, `titan_mco_transfer`, `titan_mco_destroy`, `titan_browser_relinquish`, synchronous-callback depth, poison, checked stack limits via `__set_stack_limits`), the 18 `wasi_snapshot_preview1` imports (`createWasiImports`, including `fd_write` output to `owner.output` and `options.env` for `environ_*`), the `env` imports for `titan/browser.h` and `localtime`/`mktime`, user `create({ imports })` validation/merging, and the eager `.wasm.trace` loader, stack capture, and symbolization (`createTrace`) | `WebAssembly.instantiate`/`instantiateStreaming`, JSPI suspension/resumption, `Error.stack` capture, `Date.now`/`performance.now`/`crypto.getRandomValues`, host timezone conversion, and engine failure handling |
 | `titan-browser.mjs` (embedded in each image) | The loader: `create` and `BrowserOwner`, in the parts listed below | See below |
-| `titan-browser-trace.js` (`--js-library`) | The index read from the fetched `.wasm.trace` table, stack capture into C-owned records, and symbolization ([trace metadata](browser-target.md#eager-trace-loader-and-trace-metadata)) | Engine stack capture; fetching and reading the table outside the Wasm heap |
 | `titan-protobuf.mjs` (standalone SDK module) | The portable protobuf peer: retains no per-call state, shares a class table only when the caller supplies one, and is not part of any image | Building and reading JavaScript values and classes: records, union variants, Arrays, BigInts, byte arrays, and strings |
 
 The loader's parts:
@@ -51,7 +49,7 @@ The loader's parts:
 | Part | Holds | Host capability |
 | --- | --- | --- |
 | Public object, admission, `operate`, `entry`, `initialize`, `run`, `dispose` | One promise per operation, the lifecycle state, the pending completion, which failure an operation reports, and the references that disposal must drop | The embedder-facing promise API; entering Wasm through a promising export |
-| `create` environment snapshot | The embedder's `NAME=value` strings, empty by default, for Emscripten's later libc initialization | Holding and validating the embedder's option data |
+| `create` environment snapshot | The embedder's `NAME=value` strings, empty by default, served to `wasi-libc` via `wasi_snapshot_preview1.environ_sizes_get` / `environ_get` | Holding and validating the embedder's option data |
 | Slot table and `CallableView` wrappers | JavaScript values with their state, generation, and units; one wrapper per pin with its logical-release flag | Holding JavaScript values and host objects |
 | Marshalling (`snapshotArguments`, `writeValue`, `valuesAt`, `completionAt`, `importResponse`) | Nothing between calls | Converting JavaScript values to and from the records of `titan/browser.h` |
 | Queue (`queue`, `batch`) | Notifications, request events, and calls that wait for `drain()` or a drive, with each queued call's promise | JavaScript values that have no slot yet; items that wait for a point where Wasm can be entered |
@@ -64,10 +62,8 @@ The loader's parts:
 | `titan:websocket` SDK source | Per connection, the `WebSocket` object, its three named listeners, and one holder object per received message until Titan takes or closes it | The host `WebSocket` object, its event listeners, and its `readyState` and `bufferedAmount` |
 
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
-`titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner),
-and `titan-browser-module-check.mjs` is the compiler's [module
-check](browser-target.md#the-module-check): host tooling outside the image.
-
+`titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
+host tooling outside the image.
 ## Generated launcher and foreign-function trampolines
 
 `browserentry.lua` and `driver.browser_entrypoint_contents` generate the image
@@ -159,8 +155,9 @@ run out, an operation is refused at the point where it would allocate one.
 Export return values are admission only. Exactly one completion with
 the same id/kind carries application values/status/errors, and the loader
 settles only after both completion and promised-export/context retirement.
-A private engine entry is not an application gateway. The loader uses
-Emscripten's exported `_malloc` and `_free` for temporary argument buffers.
+A private engine entry is not an application gateway. The loader uses the
+exported `malloc` and `free` (through `context.exports`, looked up at call time)
+for temporary argument buffers.
 
 Close is deliberately different. The generated launcher clears its owner-state
 pointer and invokes `lua_close` directly while the JSPI execution owner is
@@ -337,8 +334,9 @@ drives, and `titan.browser` never learns about Tasks.
 
 ## Synchronous C callbacks
 
-An Emscripten API calls C synchronously from JavaScript, so Titan code in such
-a callback runs below a JavaScript frame and cannot suspend ([language
+A host WebAssembly import can invoke C synchronously from JavaScript (through
+`context.table`), so Titan code in such a callback runs below a JavaScript
+frame and cannot suspend ([language
 contract](../language/standard-library-browser.md#synchronous-c-callbacks)).
 `titan.browser` provides the pin, the C entry and its bracket; core modules
 learn about the callback only through `titan_no_switch`.
@@ -450,8 +448,8 @@ learn about the callback only through `titan_no_switch`.
   callback nested in a binding that Task called, or, from a microtask between
   two internal coroutine hops, possibly a coroutine's stack. Titan keeps no
   C-stack counter of its own and Lua's `LUAI_MAXCCALLS` starts afresh on a
-  callback thread, so Emscripten's checked stack is the limit; overflowing it
-  aborts and poisons the instance.
+  callback thread, so Binaryen's `--stack-check` checked stack is the limit;
+  overflowing it aborts and poisons the instance.
 
 ## Synchronous wrapper release
 
@@ -540,10 +538,11 @@ The installed header is the sole C/JavaScript layout contract. C layout
 assertions check sizes and offsets for wasm32. There is no native packet
 serialization, schema codec, attachment index, or per-call JSON/protobuf step.
 
-The header also declares `titan_browser_host_output(stream, bytes, length)`.
-The generated launcher's libc adapter passes descriptor 1 or 2 and one
-nonempty iovec. The import copies the counted bytes into that stream's queue
-before returning, never starts a sink, and retains no borrowed Wasm pointer.
+C stdio output (`stdout` and `stderr`) uses `wasi_snapshot_preview1.fd_write`
+directly rather than a custom `titan_browser_host_output` import. For file
+descriptors 1 and 2, `createWasiImports` copies each nonempty iovec's bytes
+through `owner.output` into that stream's queue before returning, never starts
+a sink, and retains no borrowed Wasm pointer.
 
 Kinds are `NIL = 0`, `BOOLEAN = 1`, `INTEGER = 2`, `FLOAT = 3`, `STRING = 4`,
 `BYTES = 5`, `HANDLE = 6`, `CALLABLE = 7`, and `REQUEST = 8`. `REQUEST` is the
@@ -811,12 +810,12 @@ construction, encode-only views, private variants, and refusal without
 running transfer hooks. It checks shared class tables and recovery after
 both peer and Titan errors. A 33,554,433-byte payload, more than twice
 `browserlink.lua`'s default `initial_heap`, crosses in each direction, the
-inbound one in a fresh instance. A fixture callable reports the public
-Emscripten `emscripten_get_heap_size()` result before and after, so the
-driver asserts that memory grew from below the payload length to at least it,
-without exposing the loader's private Module. Encode/decode timings for
-10,000 integers are informational. All rows
-run under Node and Chromium with both assertion profiles.
+inbound one in a fresh instance. A fixture callable reports the current
+linear-memory byte size (`__builtin_wasm_memory_size(0) * 65536`) before and
+after, so the driver asserts that memory grew from below the payload length to
+at least it, without exposing the loader's private instance context.
+Encode/decode timings for 10,000 integers are informational. All rows run under
+Node and Chromium.
 
 The same gate uses a separate ordinary owner, `browser.public_state_tests`,
 to create children through public `lua.new`. Its image imports Lua and thus
@@ -852,13 +851,12 @@ no sink during the coroutine switches that follow an `IDLE` relinquish),
 disposal with a running, cleanup and shutdown drive, the exit latch, an open
 `BrowserPin` keeping a waiting drive parked until a C callback settles its job,
 and authored C that switches stacks inside a callback (idle, from a parked
-drive, and nested in a binding), under Node and Chromium in both assertion
-builds. The fixture's C helper fires callbacks through its Wasm table entry,
-as an Emscripten API does.
+drive, and nested in a binding), under Node and Chromium. The fixture's C helper
+fires callbacks through its Wasm table entry (`context.table`), as a host import
+callback does.
 `mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
 `admission.mjs` runs the admission matrix of the loader: every application
-method, wrapper release, `_malloc`/`_free` and the trace view, each from a
-parked wait, a macrotask between turns, a microtask between internal coroutine
+method, wrapper release, `malloc`/`free` and the trace view, each from a
 hops, and a binding the drive invoked. Release also runs from a synchronous
 callback's binding, with capture collection checked in each context.
 It also covers owner and other-state request
@@ -987,15 +985,17 @@ disposal, sinks, requests, and WeakRef ownership with real linked images.
 The separate `environment.mjs` driver, run by `browser_bridge_spec.lua`,
 checks empty and supplied libc environments, validation, UTF-8 round trips,
 mutation, and per-instance isolation under Node and Chromium.
-Test-only C instrumentation may hand explicit frozen controls to a supplied
-fixture binding; the generated application API never exposes the raw Emscripten
-Module or factory.
+Test-only `create({ imports })` factories may receive the per-instance `context`
+(including the private `bridge` and mutable `exports` for fault injection); the
+generated application API never exposes the raw WebAssembly instance or factory
+outside `create({ imports })`.
 
-The html5 click counter of the [language
+The click counter of the [language
 chapter](../language/standard-library-browser.md#synchronous-c-callbacks)
 (`counter.titan` and the page test `counter.mjs` in
-`spec/fixtures/browser_bridge/`) imports `emscripten/html5.h` directly in
-Titan and registers real buttons through `emscripten_set_click_callback_on_thread`.
+`spec/fixtures/browser_bridge/`) declares a `TITAN_WASM_IMPORT` click
+registration function (`titan_test_set_click_callback`) and wires real DOM
+buttons through `create({ imports })` and `context.table`.
 Its callback is a `foreign function` of the same module: the
 synchronous-result aggregate is a
 [zeroed automatic local](foreign-functions.md#allocation-and-recovery-storage)

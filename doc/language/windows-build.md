@@ -42,7 +42,7 @@ Make targets pass the SDK's LuaRocks configuration automatically. For direct
 ```sh
 # MSYS2 Bash
 export LUAROCKS_CONFIG="$(cygpath -m /c/Titan/sdk/etc/luarocks/config-5.5.lua)"
-/c/Titan/sdk/bin/luarocks.exe make titan-0.6.1-1.rockspec
+/c/Titan/sdk/bin/luarocks.exe make titan-0.6.2-1.rockspec
 ```
 
 ```powershell
@@ -116,8 +116,9 @@ Windows output layout and limits:
 ## Build for the browser
 
 Run browser builds from the MSYS2 CLANG64 shell (not `cmd` or PowerShell).
-Activate Emscripten 6.0.13, install Node 26+ separately from emsdk's bundled
-Node, and set `TITAN_NODE` (or put Node 26+ first on `PATH`):
+Install `wasi-sdk` 34.0 and Binaryen `version_133` (set `WASI_SDK_PATH` and
+`BINARYEN_ROOT` or `WASM_OPT`), install Node 26+, and set `TITAN_NODE` (or put
+Node 26+ first on `PATH`):
 
 ```sh
 make -f Makefile.win lua-browser PREFIX="$PREFIX"

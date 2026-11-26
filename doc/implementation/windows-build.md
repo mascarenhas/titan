@@ -275,7 +275,7 @@ semicolons. A leading single or double quote protects semicolons up to
 the matched closing quote. Strip a leading and trailing quote from the
 entry before interpreting it; a relative entry is used as given.
 Regular executable lookup skips both empty and quoted-empty entries;
-Emscripten tool discovery treats both as the current directory, as its
+Browser toolchain discovery treats both as the current directory, as its
 POSIX search does for empty entries. This rule is about how `PATH` entries
 are interpreted, not the separate process policy for search outside `PATH`.
 
@@ -645,7 +645,7 @@ other native dependency DLLs, unchanged import libraries, and headers.
 mingw32-make -f Makefile.win luarocks PREFIX=/c/Titan/sdk
 export LUAROCKS_CONFIG=C:/Titan/sdk/etc/luarocks/config-5.5.lua
 /c/Titan/sdk/bin/luarocks.exe --lua-version=5.5 \
-  --tree=C:/Titan/sdk make titan-0.6.1-1.rockspec
+  --tree=C:/Titan/sdk make titan-0.6.2-1.rockspec
 ```
 
 Users who already have compatible Lua and LuaRocks installations can run the
@@ -1142,8 +1142,8 @@ refer to the same location.
 
 The CLI admits `--target browser` on Windows; browser option-policy tests
 assert the same disabled-line-directive diagnostic on all three hosts.
-Browser object compilation uses the fork's browser Lua and Emscripten,
-not the native DLL and compiler. Run `lua-browser` and `browser-sdk` through
+Browser object compilation uses the fork's browser Lua, `wasi-sdk` 34.0, and
+Binaryen `version_133`, not the native DLL and compiler. Run `lua-browser` and `browser-sdk` through
 `Makefile.win` under MSYS2 CLANG64. The SDK's Wasm archives and JavaScript
 are published under `lib/titan-browser/0.6/`; the runner's job supervisor
 uses the ordinary native executable/DLL layout. The runner is part of

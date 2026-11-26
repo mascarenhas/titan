@@ -1000,7 +1000,7 @@ const-qualified descriptors and wrappers. A mismatched provider is rejected
 before interface rehydration or native value exchange.
 
 The compiler and standard-library release version is independently
-`TITAN_VERSION` `0.6.1`. Its derived `0.6` library version selects
+`TITAN_VERSION` `0.6.2`. Its derived `0.6` library version selects
 `TITAN_PATH_0_6` and the `lib/titan/0.6` provider namespace; patch releases
 share that namespace. There is no migration, compatibility alias, or cleanup
 path for earlier Titan installations.

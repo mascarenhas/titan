@@ -196,7 +196,7 @@ language-server project manifests (`projectcache.decode`) and browser
 (`browsertarget.decode_analysis`) compare the library series
 (`TITAN_LIBRARY_VERSION`, derived from the recorded release string via
 `version.library_series`) alongside `TITAN_ABI_VERSION` and the format/schema
-versions (and, for browser descriptors, the pinned Emscripten version), keeping
+versions (and, for browser descriptors, the pinned `wasi-sdk` and Binaryen versions), keeping
 the recorded release as provenance, while native language-server cache
 identities (`driver.language_server_cache_identity`) hash
 `TITAN_LIBRARY_VERSION` instead of `TITAN_VERSION`

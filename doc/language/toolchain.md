@@ -92,7 +92,7 @@ macOS, and Windows hosts also support `browser` (see
 | --- | --- |
 | absent or empty | Select the host OS (`linux`, `darwin`, `windows`, or unlabeled native host). |
 | host OS label | Same as absent. |
-| `browser` | Build WebAssembly output with Emscripten. Requires `--output`. |
+| `browser` | Build WebAssembly output with `wasi-sdk` and Binaryen. Requires `--output`. |
 | another OS label | Error: native cross-compilation is not supported. |
 | `native` | Error: `native` is a source-variant label (see [Modules](modules.md)), not a build target. |
 | any other value | Error: unknown target. |
@@ -131,7 +131,8 @@ configuration.
 | `CC`, `AR`, `RANLIB` | Override the C compiler (`cc` on Unix, `clang.exe` on Windows), archiver, and `ranlib`. |
 | `CLANG_FORMAT` | Override the formatter run by `--pretty-print` (default: `clang-format`). |
 | `GCOV`, `GCOVR` | Default `gcov` and `gcovr` commands for `--coverage`. |
-| `EMSDK` | Active Emscripten SDK root (`$EMSDK/upstream/emscripten/emcc`) for `--target browser`. |
+| `WASI_SDK_PATH` | Active `wasi-sdk` 34.0 root (`$WASI_SDK_PATH/bin/clang`, `llvm-ar`, `llvm-ranlib`) for `--target browser`. |
+| `BINARYEN_ROOT`, `WASM_OPT` | Active Binaryen `version_133` root (`$BINARYEN_ROOT/bin/wasm-opt`) or explicit `wasm-opt` executable for `--target browser`. |
 | `MAKEFLAGS` | Inspected on Linux/macOS to share a GNU Make jobserver and switch terminal progress to plain lines. |
 | `TERM`, `NO_COLOR`, `COLUMNS` | Control terminal progress layout and ANSI color (`NO_COLOR` disables color without disabling live progress). |
 | `LC_ALL`, `LC_CTYPE`, `LANG` | First non-empty UTF-8 locale enables Unicode progress symbols on Linux and macOS. |

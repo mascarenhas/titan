@@ -1,10 +1,10 @@
 # WebAssembly and the Browser Target
 
-`titanc --target browser` compiles Titan programs, tests, and libraries to WebAssembly with Emscripten so they run in web pages, bundled web apps, and Node 26+. A compiled program consists of an ES module (`.mjs`), its WebAssembly binary (`.wasm`), and its trace table (`.wasm.trace`), plus a source map (`.wasm.map`) for browser developer tools. Pages run the program through Titan's embedded JavaScript [loader](#the-loader-api); command-line tests run the same files through [`titan-browser-run`](#testing-from-the-command-line) under Node or headless Chrome.
+`titanc --target browser` compiles Titan programs, tests, and libraries to WebAssembly with `wasi-sdk` and Binaryen so they run in web pages, bundled web apps, and Node 26+. A compiled program consists of an ES module (`.mjs`), its WebAssembly binary (`.wasm`), and its trace table (`.wasm.trace`), plus a source map (`.wasm.map`) for browser developer tools. Pages run the program through Titan's embedded JavaScript [loader](#the-loader-api); command-line tests run the same files through [`titan-browser-run`](#testing-from-the-command-line) under Node or headless Chrome.
 
 ## A first web page
 
-This walk-through builds a small Titan program, embeds it in a web page, and serves it to a browser. It assumes the toolchain from [Prerequisites](#prerequisites) is installed, Emscripten is active in the shell, and Titan's `bin` directory is on `PATH`. `/path/to/titan` denotes the Titan source checkout.
+This walk-through builds a small Titan program, embeds it in a web page, and serves it to a browser. It assumes the toolchain from [Prerequisites](#prerequisites) is installed, `wasi-sdk` and Binaryen are configured in the shell, and Titan's `bin` directory is on `PATH`. `/path/to/titan` denotes the Titan source checkout.
 
 Write `hello.titan`:
 
@@ -242,20 +242,27 @@ app.titan:156: in app.main
 ## Prerequisites
 
 - **Host OS:** Linux, macOS, or Windows (MSYS2 CLANG64 shell; native PowerShell/`cmd` is unsupported).
-- **Emscripten 6.0.13 (exact):** Install and activate via `emsdk`:
+- **`wasi-sdk` 34.0 (exact):** Download and unpack `wasi-sdk-34.0` (LLVM 23.1.0), then set `WASI_SDK_PATH` (or put `<wasi-sdk>/bin` on `PATH`):
 
 ```sh
-./emsdk install 6.0.13 && ./emsdk activate 6.0.13
-source ./emsdk_env.sh
+export WASI_SDK_PATH=/path/to/wasi-sdk-34.0
 ```
 
-  Titan locates `emcc`, `emar`, and `emranlib` via `$EMSDK/upstream/emscripten/` when `EMSDK` is set, or on `PATH`. `CC`, `AR`, and `RANLIB` are ignored for browser builds.
-- **Node 26+ with WebAssembly JSPI:** Used by `titanc` to validate browser archives and by `titan-browser-run`. Set `TITAN_NODE` or put Node 26+ on `PATH` (Emscripten's bundled Node 24 is only for Emscripten's own tools).
+  Titan locates `clang`, `llvm-ar`, and `llvm-ranlib` via `$WASI_SDK_PATH/bin/` when `WASI_SDK_PATH` is set, or via `clang` on `PATH` (resolving its sibling `llvm-ar` and `llvm-ranlib` and `<root>/VERSION`). `CC`, `AR`, and `RANLIB` are ignored for browser builds.
+- **Binaryen `version_133` (exact):** Download and unpack Binaryen `version_133`, then set `BINARYEN_ROOT` (or `WASM_OPT`, or put `wasm-opt` on `PATH`):
+
+```sh
+export BINARYEN_ROOT=/path/to/binaryen-version_133
+```
+
+  Titan checks `WASM_OPT`, then `$BINARYEN_ROOT/bin/wasm-opt`, then `PATH`, and verifies `wasm-opt --version` reports `133`.
+- **Node 26+ with WebAssembly JSPI:** Used by `titanc` to validate browser archives and by `titan-browser-run`. Set `TITAN_NODE` or put Node 26+ on `PATH`.
 - **JSPI-capable browser:** Chrome/Chromium 137+, Firefox 153+, or Safari 27+ (the loader checks `WebAssembly.promising` and `WebAssembly.Suspending`). For `titan-browser-run --engine chromium`, set `TITAN_CHROME` or put Chrome/Chromium on `PATH`.
 - **Browser Lua and Browser SDK:** Installed into your Titan `PREFIX` in order:
 
 ```sh
-source /path/to/emsdk/emsdk_env.sh
+export WASI_SDK_PATH=/path/to/wasi-sdk-34.0
+export BINARYEN_ROOT=/path/to/binaryen-version_133
 make lua-browser PREFIX="$PREFIX"
 make browser-sdk PREFIX="$PREFIX"
 ```
@@ -264,7 +271,7 @@ make browser-sdk PREFIX="$PREFIX"
 
 ### Wasm-EH longjmp contract
 
-Browser Lua, Titan's runtime, generated C, and authored C helpers all compile and link with `-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1`. Protected calls preserve `catch`, `defer`, and coroutine cleanup across JSPI suspensions. Lua's C-call limit is 100; WebAssembly engine traps and engine stack overflow remain fatal rather than catchable Titan errors.
+Browser Lua, Titan's runtime, generated C, and authored C helpers all compile and link with standard WebAssembly `exnref` exceptions (`-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false`) and `-lsetjmp`, and final images run Binaryen `wasm-opt --stack-check`. Protected calls preserve `catch`, `defer`, and coroutine cleanup across JSPI suspensions. Lua's C-call limit is 100; WebAssembly engine traps and engine stack overflow remain fatal rather than catchable Titan errors.
 
 ### Installing the browser SDK
 
@@ -274,16 +281,16 @@ Browser Lua, Titan's runtime, generated C, and authored C helpers all compile an
 | --- | --- |
 | `libtitan.a`, `libtitan-lpeglabel.a` | Browser runtime and LPegLabel archives |
 | `titan.a` | The 21-module [browser standard library](#the-browser-standard-library) archive |
-| `titan-browser.mjs`, `titan-browser-*.js` | Embedded loader and Emscripten JS libraries (not copied separately to pages) |
+| `titan-browser.mjs`, `titan-wasm-factory.mjs` | Embedded loader and zero-dependency WebAssembly factory (inlined into each `<stem>.mjs`, not copied separately to pages) |
 | `titan-protobuf.mjs` | Standalone JavaScript peer for typed `protobuf` record exchange |
-| `titan-browser-run`, `titan-browser-*.mjs` | Command-line runner and self-containment image checker |
+| `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-page.mjs`, `titan-browser-node-worker.mjs` | Command-line runner for Node and Chromium |
 | `build-profile`, `absent-modules`, `analysis-target`, `sdk-digests` | SDK profile (`production`/`validation`), absent-module diagnostics, editor target profile, and digests |
 
-Every browser link verifies that the active `TITAN_BUILD_PROFILE` matches the SDK's `build-profile` and that `liblua-config.txt` matches Emscripten 6.0.13 and the installed headers/archive.
+Every browser link verifies that the active `TITAN_BUILD_PROFILE` matches the SDK's `build-profile` and that `liblua-config.txt` matches `wasi-sdk` 34.0 and the installed headers/archive.
 
 ### Editor type checking
 
-Editors such as `vscode-titan` type-check browser projects (`target = "browser"` in `titan-config.lua`) using `titan.a`, `analysis-target`, and `absent-modules` from `<PREFIX>/lib/titan-browser/0.6/`—no Emscripten installation is needed unless a source module requires real C header probes (`foreign import`).
+Editors such as `vscode-titan` type-check browser projects (`target = "browser"` in `titan-config.lua`) using `titan.a`, `analysis-target`, and `absent-modules` from `<PREFIX>/lib/titan-browser/0.6/`—no `wasi-sdk` or Binaryen installation is needed unless a source module requires real C header probes (`foreign import`).
 
 ## One target per output directory
 
@@ -300,10 +307,10 @@ Browser builds follow `TITAN_BUILD_PROFILE` (`production` by default, or `valida
 
 | Profile | Compile & Link | Stack traces |
 | --- | --- | --- |
-| `production` | `-O3` plus Emscripten's WebAssembly optimizer | Exact `.titan` files/lines for surviving frames; inlined functions merge into their caller |
-| `validation` | `-O1 -fno-inline -fno-optimize-sibling-calls` (no Wasm optimizer) | Every frame preserved |
+| `production` | `-O3` plus Binaryen `wasm-opt -O3 --stack-check` | Exact `.titan` files/lines for surviving frames; inlined functions merge into their caller |
+| `validation` | `-O1 -fno-inline -fno-optimize-sibling-calls` plus `wasm-opt -O1 --stack-check` | Every frame preserved |
 
-Both profiles emit `-gline-tables-only`, source maps (`-gsource-map -g2`), and `.wasm.trace`. Under `production`, `titanc --target browser --test` disables inlining and function merging on discovered test modules so test failure locations remain exact.
+Both profiles emit DWARF line tables (`-gdwarf-4 -gline-tables-only`), which `titanc` extracts into `<stem>.wasm.map` and `<stem>.wasm.trace` after `wasm-opt` before stripping `.debug_*` sections from the published `.wasm`. Under `production`, `titanc --target browser --test` disables inlining and function merging on discovered test modules (and skips Binaryen's `inlining-optimizing` and `duplicate-function-elimination` passes) so test failure locations remain exact.
 
 ## Building programs, tests, libraries, and C helpers
 
@@ -316,14 +323,15 @@ titanc --target browser -o out-obj -c app.widgets                # object-only c
 
 - **Programs:** Explicit `--exe` paths must end in `.mjs`. `main` uses the standard signature `function main(args: {string}): integer`, with `args[1]` as the first user argument. All four output files are published atomically.
 - **Library archives:** Non-`main` builds emit only a static archive `<prefix>.a` (no `.so` or Lua loaders). A browser library archive may import an installed source-only module without compiling or owning it (keeping that dependency external; compiled browser archive dependencies retain browser's preexisting separate archive composition). Before publishing, `titanc` validates the archive structurally and runs a quick export and startup check under Node 26+. When a browser program or `--test` image imports prebuilt browser libraries whose reached members recorded dependencies from installed source, `titanc` satisfies each logical module once through ordinary browser lookup—selecting an eligible WebAssembly `.a` archive (standalone or canonical prefix bundle) or compiling `.browser.titan`/shared `.titan` source once into the image (never native host binaries or dynamic loading)—and binds those libraries through the checked public ABI without rebuilding them; see [Source-only modules](modules.md#source-only-modules).
-- **Browser dependency path:** Imports resolve in order from (1) `<PREFIX>/lib/titan-browser/0.6/`, (2) `TITAN_PATH_0_6` / `TITAN_PATH` (browser archives only; native ELF/Mach-O/COFF archives are rejected), and (3) source from authored `--tree` roots followed by the read-only installed source fallback `<PREFIX>/lib/titan/0.6/` (searched for `.titan` source only, selecting `.browser.titan` and shared `.titan` variants; native compiled providers there are never eligible). Clear native `TITAN_PATH_0_6` and native `TITAN_EXTRA_*` flags (`-fPIC`, `-flto`, `-march=...`, `-O*`, `-g*`, `--pre-js`, `--embed-file`, `--no-line-directives`) when compiling for the browser; browser builds define `TITAN_TARGET_BROWSER=1` and `TITAN_COROUTINE_STACK_SIZE=262144`.
+- **Browser dependency path:** Imports resolve in order from (1) `<PREFIX>/lib/titan-browser/0.6/`, (2) `TITAN_PATH_0_6` / `TITAN_PATH` (browser archives only; native ELF/Mach-O/COFF archives are rejected), and (3) source from authored `--tree` roots followed by the read-only installed source fallback `<PREFIX>/lib/titan/0.6/` (searched for `.titan` source only, selecting `.browser.titan` and shared `.titan` variants; native compiled providers there are never eligible). Clear native `TITAN_PATH_0_6` and native `TITAN_EXTRA_*` flags (`-fPIC`, `-flto`, `-march=...`, `-O*`, `-g*`, `--no-line-directives`) when compiling for the browser; browser builds define `TITAN_TARGET_BROWSER=1` and `TITAN_COROUTINE_STACK_SIZE=262144`.
 
-### C helpers and Emscripten APIs
+### C helpers and host WebAssembly imports
 
-Titan can `foreign import` Emscripten C headers directly (for example `foreign import "emscripten/html5.h"`), calling underlying C functions when a header wraps them in a function-like macro (such as `emscripten_set_click_callback_on_thread`).
+Pass `--c-source helper.c` to compile authored C helpers with Titan's `wasi-sdk` (`wasm32-wasip1`) flags and link them into the browser image. To call host JavaScript directly from C, declare the imported function with `TITAN_WASM_IMPORT("name")` (from `titan/browser.h`, expanding to `__attribute__((import_module("env"), import_name("name")))` on `__wasm__`) or an explicit `__attribute__((import_module(...), import_name(...)))`, and supply the JavaScript implementation through `create({ imports })`.
 
-Pass `--c-source helper.c` to compile C helpers containing `EM_JS` or `EM_ASM` blocks with Titan's Emscripten flags. Generated `.mjs` modules are strictly **self-contained**: `titanc` parses every linked `.mjs` and rejects `import`, `import()`, `require`, or unexpected `process.getBuiltinModule` calls. To share page JavaScript or ES modules with Titan, pass them via `create({ bindings })` and call them through [`import "browser"`](standard-library-browser.md).
+`imports` may be a plain import object or a factory `(context) => importObject` called once before WebAssembly instantiation. `context` exposes `memory`, `table` (the exported `__indirect_function_table` for invoking C function pointers), `exports`, `HEAPU8` / `HEAPU32` getters that survive memory growth, `readCString(ptr)`, `readBytes(ptr, len)`, `writeBytes(ptr, bytes)`, `trace`, and `abort(msg)`. User imports may use `new WebAssembly.Suspending(asyncFn)` for host suspension (outside synchronous C callbacks). Names under `wasi_snapshot_preview1.*`, `env.titan_browser_*`, and `env.titan_mco_*` are reserved for the Titan runtime and rejected with `TypeError`.
 
+Generated `.mjs` modules are strictly **self-contained** and embed zero external `import` statements. For ordinary application JavaScript and ES modules, prefer `create({ bindings })` and [`import "browser"`](standard-library-browser.md) over custom C imports.
 ## The loader API
 
 Every compiled `.mjs` image exports one default `create(options = {})` function that works in browsers, bundlers, and Node 26+:
@@ -369,6 +377,7 @@ All async methods (`initialize`, `run`, `call`, `callTask`, `drain`, `dispose`) 
 | `locateFile(name, directory)` | Custom URL resolver for `<stem>.wasm` and `<stem>.wasm.trace`. |
 | `requireTrace` | If `true` (default `false`), fail initialization if `<stem>.wasm.trace` cannot be loaded or mismatches. |
 | `bindings` | Object of explicit per-instance JS functions/values for `browser.binding(name)` (names starting with `titan:` are reserved). |
+| `imports` | Plain object or `(context) => importObject` supplying user WebAssembly imports declared by `--c-source` or C headers (`wasi_snapshot_preview1.*`, `env.titan_browser_*`, and `env.titan_mco_*` are reserved). |
 | `env` | Initial instance environment map (string keys/values; default empty; isolated from host and peers). |
 | `onNotificationError({ kind, operation, error })` | Observes errors that cannot return to a caller (notification callback failures, secondary cleanup errors); defaults to `console.error`. |
 | `requestDrain()` | Coalesced hook notified whenever work is queued while idle. |
@@ -422,7 +431,7 @@ Calling `dispose()` closes application admission immediately, rejects unsettled 
 
 ### Synchronous C callbacks
 
-Emscripten APIs such as `html5.h` event listeners invoke C callbacks synchronously. A callback that invokes pinned Titan code via `titan_browser_call_sync` runs immediately whenever the instance is open (refused after `dispose()`, exit, or engine failure). Inside any JS binding called from that callback, `call`/`callTask`/`drain`/`run` reject with `TITAN_BROWSER_REENTRY`; outside a binding, they queue until after the callback returns. See [`titan.browser` synchronous C callbacks](standard-library-browser.md#synchronous-c-callbacks).
+Host JavaScript imports can invoke a C function pointer synchronously through `context.table.get(fnPtr)`. A C callback that invokes pinned Titan code via `titan_browser_call_sync` runs immediately whenever the instance is open (refused after `dispose()`, exit, or engine failure). Inside any JS binding called from that callback, `call`/`callTask`/`drain`/`run` reject with `TITAN_BROWSER_REENTRY`; outside a binding, they queue until after the callback returns. See [`titan.browser` synchronous C callbacks](standard-library-browser.md#synchronous-c-callbacks).
 
 ## Testing from the command line
 
@@ -442,6 +451,7 @@ Pass program or test-runner arguments after `--`. Key options:
 | `--timeout MS`, `--grace MS` | Wall-clock run timeout (default 30000 ms) and post-completion watch window (default 1500 ms). |
 | `--chrome PATH`, `--cdp pipe\|port` | Headless Chrome/Chromium binary (overrides `TITAN_CHROME`) and DevTools transport. |
 | `--root DIR` | Served directory containing `.mjs`, `.wasm`, and `.wasm.trace` (default: directory of `.mjs`). |
+| `--imports FILE` | ES module under `--root` whose default export is passed as `create({ imports })` on both Node and Chromium. |
 | `--allow-degraded-trace` | Allow missing/mismatched `.wasm.trace` (`requireTrace: false`). |
 | `--probe` | Print JSON describing the discovered Node and Chrome binaries without running an image. |
 

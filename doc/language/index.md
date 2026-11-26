@@ -12,7 +12,7 @@ functions, and share values and the garbage collector directly.
 
 Titan compiles to native executables, shared `.so`/`.dll` providers, and static
 `.a` archives on Linux, macOS, and Windows, as well as WebAssembly modules for
-the browser through Emscripten.
+the browser through `wasi-sdk` and Binaryen.
 
 ```titan
 -- sum.titan
