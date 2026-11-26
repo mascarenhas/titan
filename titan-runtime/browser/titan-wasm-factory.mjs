@@ -822,16 +822,19 @@ async function compileImage(url, imports) {
   return (await WebAssembly.instantiate(await source.arrayBuffer(), imports)).instance;
 }
 
-async function traceBytes(url) {
-  const source = await resource(url, 'trace table');
+// The trace table is optional: a failure to locate or read it, like a bad
+// table, degrades traces instead of failing the image.
+async function traceBytes(locate) {
+  const source = await resource(locate(), 'trace table');
   return source instanceof Response ? new Uint8Array(await source.arrayBuffer()) : source;
 }
 
 /**
  * Instantiate the image of `bridge` (the loader's owner): its options name
  * `locateFile` and the embedder's `imports`, and its image binding names the
- * `.wasm` and the module directory. Both resources load concurrently; the
- * trace table is indexed before C constructors run. Resolves to the context.
+ * `.wasm` and the module directory. Both resources load concurrently. Resolves
+ * to the context with the trace table indexed and C constructors not yet run:
+ * the loader attaches and verifies the image, then calls exports._initialize.
  */
 async function instantiate(bridge) {
   const {locateFile} = bridge.options, {wasm, directory} = bridge.image;
@@ -839,7 +842,7 @@ async function instantiate(bridge) {
   const backend = bridge.backend = new Continuations(bridge, context);
   const trace = createTrace(context);
   const started = performance.now();
-  const table = traceBytes(locateFile(`${wasm}.trace`, directory));
+  const table = traceBytes(() => locateFile(`${wasm}.trace`, directory));
   table.catch(() => { /* trace.load reports it after instantiation. */ });
   const imports = bridge.userImports(context);
   const output = (stream, pointer, length) => {
@@ -883,7 +886,6 @@ async function instantiate(bridge) {
   backend.wasm = raw;
   backend.bound(raw.__stack_high.value >>> 0, raw.__stack_low.value >>> 0);
   context.trace = await trace.load(table, context.readCString(raw.titan_browser_trace_identity()), started);
-  raw._initialize();
   return context;
 }
 

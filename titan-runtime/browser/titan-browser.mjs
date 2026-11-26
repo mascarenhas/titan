@@ -714,18 +714,21 @@ class BrowserOwner {
       this.module = await Promise.race([this.factory(this), this.active.fatal.promise]);
       this.factory = undefined;
       if (this.terminal) throw this.terminal;
+      const exports = this.module?.exports;
       if (!this.backend || !(this.module?.HEAPU8 instanceof Uint8Array) ||
-          typeof this.module.exports?.titan_browser_trace_identity !== 'function') {
+          typeof exports?.titan_browser_trace_identity !== 'function' || typeof exports._initialize !== 'function') {
         throw failure('PROTOCOL', 'browser image does not provide Titan channels');
       }
       // Only the host sees both the identity this module was generated with
       // and the one its Wasm exports; a pair from two links never runs.
-      const identity = new TextDecoder().decode(this.bytesAt(this.module.exports.titan_browser_trace_identity(), 64));
+      const identity = new TextDecoder().decode(this.bytesAt(exports.titan_browser_trace_identity(), 64));
       if (identity !== this.image.identity) {
         const stem = this.image.wasm.replace(/\.wasm$/, '');
         throw failure('PROTOCOL', `browser image mismatch: ${stem}.mjs belongs to image ` +
           `${this.image.identity.slice(0, 12)}, ${stem}.wasm is image ${identity.slice(0, 12)}`);
       }
+      // C constructors run once, in a verified image whose output this owner reads.
+      exports._initialize();
     } catch (cause) {
       if (cause?.code === 'TITAN_BROWSER_CAPABILITY') throw cause;
       throw this.poison(cause);
@@ -2093,16 +2096,24 @@ async function retireOwner(owner) {
   return disposal;
 }
 
+// A plain object, ordinary or prototype-less: never an array, a Map, a class
+// instance or a promise from an async imports function.
+function isRecord(value) {
+  if (value === null || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 // Raw Wasm imports for C in the image, copied into prototype-less maps. The
 // WASI module and the env.titan_browser_* and env.titan_mco_* names belong
 // to the Titan runtime, including names it does not import today.
 function importTable(imports) {
-  if (imports === null || typeof imports !== 'object') {
-    throw new TypeError('browser imports must be an object or a function returning one');
+  if (!isRecord(imports)) {
+    throw new TypeError('browser imports must be a plain object of modules, or a function returning one synchronously');
   }
   const table = Object.create(null);
   for (const [module, entries] of Object.entries(imports)) {
-    if (entries === null || typeof entries !== 'object') throw new TypeError(`browser imports.${module} must be an object`);
+    if (!isRecord(entries)) throw new TypeError(`browser imports.${module} must be a plain object of imports`);
     const copy = table[module] = Object.create(null);
     for (const [name, value] of Object.entries(entries)) {
       if (module === 'wasi_snapshot_preview1' || module === 'env' && /^titan_(browser|mco)_/.test(name)) {

@@ -38,8 +38,9 @@ myldflags=${LUA_BROWSER_MYLDFLAGS-${MYLDFLAGS-}}
 }
 
 # Select the wasi-sdk's sibling tools: LUA_BROWSER_CC when set, else clang in
-# WASI_SDK_PATH, else clang on PATH. The fork's Make goals check the pinned
-# release named by the sdk's VERSION file.
+# WASI_SDK_PATH, else the first clang on PATH that sits in a wasi-sdk bin
+# directory, as the compiler's discovery selects it. The fork's Make goals
+# check the pinned release named by the sdk's VERSION file.
 browser_cc=${LUA_BROWSER_CC-}
 browser_ar=${LUA_BROWSER_AR-}
 browser_ranlib=${LUA_BROWSER_RANLIB-}
@@ -70,7 +71,18 @@ elif [ -n "$wasi_sdk" ]; then
 		fail "browser target requires wasi-sdk 34.0: clang not found at \"$candidate\" (WASI_SDK_PATH=\"$WASI_SDK_PATH\"); $remedy"
 	fi
 else
-	resolved_cc=$(command -v "$clang" 2>/dev/null || true)
+	# A wasi-sdk clang has a sibling ../VERSION; a host clang earlier on PATH
+	# does not, and is passed over.
+	saved_ifs=$IFS
+	IFS=:
+	for entry in $PATH; do
+		if [ -x "${entry:-.}/$clang" ] && [ -f "${entry:-.}/../VERSION" ]; then
+			resolved_cc=${entry:-.}/$clang
+			break
+		fi
+	done
+	IFS=$saved_ifs
+	[ -n "$resolved_cc" ] || fail "browser target requires wasi-sdk 34.0: no wasi-sdk clang on PATH (WASI_SDK_PATH is unset, and a wasi-sdk clang has a sibling ../VERSION); $remedy"
 fi
 
 if [ -n "$resolved_cc" ]; then
@@ -224,44 +236,46 @@ check_reuse() {
 	esac
 	[ ${#revision} -eq 40 ] || return 1
 
+	# Exactly the target and longjmp spellings the fork's installer and the
+	# compiler accept: --target=TRIPLE, -mexception-handling and the two
+	# '-mllvm OPTION' pairs, with no other backend or exception option.
 	cflags_normalized=
 	defines=
 	flag_target=
 	eh=
-	wasm_sjlj=
-	legacy_eh=
-	js_sjlj=
+	backend=
+	owned=
 	pic_flags=
 	previous=
 	for flag in $cfg_cflags; do
 		cflags_normalized=${cflags_normalized:+$cflags_normalized }$flag
+		if [ "$previous" = -mllvm ]; then
+			backend="$backend$flag
+"
+			previous=
+			continue
+		fi
 		case $flag in
 		-D*) defines=${defines:+$defines }$flag ;;
 		-fPIC | -fpic | -fPIE | -fpie) pic_flags="$pic_flags $flag" ;;
 		--target=*) flag_target=${flag#--target=} ;;
 		-mexception-handling) eh=1 ;;
-		-mno-exception-handling) eh=0 ;;
+		-mllvm=* | -target | -mno-exception-handling | -mlegacy-exception-handling | \
+		-mno-legacy-exception-handling | -fwasm-exceptions | -fno-wasm-exceptions)
+			owned="$owned $flag" ;;
 		esac
-		if [ "$previous" = -target ]; then flag_target=$flag; fi
-		if [ "$previous" = -mllvm ]; then
-			case $flag in
-			-wasm-enable-sjlj | -wasm-enable-sjlj=true | -wasm-enable-sjlj=1) wasm_sjlj=1 ;;
-			-wasm-enable-sjlj=*) wasm_sjlj=0 ;;
-			-wasm-use-legacy-eh=false | -wasm-use-legacy-eh=0) legacy_eh=0 ;;
-			-wasm-use-legacy-eh | -wasm-use-legacy-eh=*) legacy_eh=1 ;;
-			-enable-emscripten-sjlj*) js_sjlj=1 ;;
-			esac
-		fi
 		previous=$flag
 	done
+	[ "$previous" != -mllvm ] || return 1
+	backend=$(printf '%s' "$backend" | LC_ALL=C sort | paste -sd ' ' -)
 	if [ -n "$defines" ]; then
 		lua_defines=$(printf '%s\n' $defines | LC_ALL=C sort -u | paste -sd ' ' -)
 	else
 		lua_defines=
 	fi
-	[ "$flag_target" = "$cfg_target" ] || return 1
-	[ "$cfg_sjlj" = wasm-exnref ] && [ "$eh" = 1 ] && [ "$wasm_sjlj" = 1 ] &&
-		[ "$legacy_eh" = 0 ] && [ -z "$js_sjlj" ] || return 1
+	[ -z "$owned" ] && [ "$flag_target" = "$cfg_target" ] || return 1
+	[ "$cfg_sjlj" = wasm-exnref ] && [ "$eh" = 1 ] &&
+		[ "$backend" = "-wasm-enable-sjlj -wasm-use-legacy-eh=false" ] || return 1
 	[ -z "$pic_flags" ] || return 1
 
 	cat >"$tmp/macros.c" <<'EOF'
