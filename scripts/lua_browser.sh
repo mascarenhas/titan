@@ -238,7 +238,8 @@ check_reuse() {
 
 	# Exactly the target and longjmp spellings the fork's installer and the
 	# compiler accept: --target=TRIPLE, -mexception-handling and the two
-	# '-mllvm OPTION' pairs, with no other backend or exception option.
+	# '-mllvm OPTION' pairs. The refused list is the compiler's
+	# (browsertarget.validate_flags), as in tools/install-browser.sh.
 	cflags_normalized=
 	defines=
 	flag_target=
@@ -261,7 +262,10 @@ check_reuse() {
 		--target=*) flag_target=${flag#--target=} ;;
 		-mexception-handling) eh=1 ;;
 		-mllvm=* | -target | -mno-exception-handling | -mlegacy-exception-handling | \
-		-mno-legacy-exception-handling | -fwasm-exceptions | -fno-wasm-exceptions)
+		-mno-legacy-exception-handling | -fwasm-exceptions | -fno-wasm-exceptions | \
+		-Xclang* | --config* | @* | -pie | -shared | -dynamiclib | -rdynamic | \
+		-pthread | -ffat-lto-objects | -m32 | -m64 | -flto | -flto=* | -march=* | \
+		-mcpu=* | -mtune=* | --sysroot* | -mexec-model*)
 			owned="$owned $flag" ;;
 		esac
 		previous=$flag

@@ -9,6 +9,7 @@ const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const typedArrayTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag).get;
 const typedArrayLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'length').get;
 const typedArraySet = typedArrayPrototype.set;
+const objectToString = Object.prototype.toString;
 // titan/browser.h's asserted wasm32 layout and discriminants.
 const valueSize = 32;
 const kind = Object.freeze({nil: 0, boolean: 1, integer: 2, float: 3,
@@ -2096,12 +2097,14 @@ async function retireOwner(owner) {
   return disposal;
 }
 
-// A plain object, ordinary or prototype-less: never an array, a Map, a class
-// instance or a promise from an async imports function.
+// A plain object from any realm (a same-origin frame's included), ordinary or
+// prototype-less: never an array, a Map, a class instance or a promise from
+// an async imports function.
 function isRecord(value) {
   if (value === null || typeof value !== 'object') return false;
   const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  return prototype === null ||
+    Object.getPrototypeOf(prototype) === null && objectToString.call(value) === '[object Object]';
 }
 
 // Raw Wasm imports for C in the image, copied into prototype-less maps. The
