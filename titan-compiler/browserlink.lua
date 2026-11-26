@@ -279,7 +279,9 @@ end
 -- function the loader receives. The image binding names the `.wasm`, the
 -- identity the linked Wasm exports, so the loader refuses a `.wasm` from
 -- another link before any entry, and the module's own directory. The default
--- `locateFile` keeps both `new URL` literals visible to bundlers.
+-- `locateFile` keeps both `new URL` literals visible to bundlers. A module
+-- evaluated from an opaque URL (`blob:` or `data:`) has no directory: with a
+-- caller `locateFile` the binding names an empty one instead of throwing.
 function M.embed(factory, loader, wasm_name, identity)
     if type(identity) ~= "string" or not identity:match("^" .. string.rep("[0-9a-f]", 64) .. "$") then
         return nil, "browser image identity must be 64 lowercase hexadecimal digits"
@@ -304,8 +306,10 @@ function M.embed(factory, loader, wasm_name, identity)
         "export default function create(options = {}) {\n" ..
         "  const locateFile = options.locateFile ?? (name => name.endsWith('.wasm.trace') ?\n" ..
         "    new URL(" .. trace .. ", import.meta.url).href : new URL(" .. wasm .. ", import.meta.url).href);\n" ..
+        "  const directory = options.locateFile != null && !URL.canParse('.', import.meta.url) ? '' :\n" ..
+        "    new URL('.', import.meta.url).href;\n" ..
         "  return titanCreate(" .. instantiate .. ", {...options, locateFile}, {identity: \"" .. identity ..
-        "\", wasm: " .. wasm .. ", directory: new URL('.', import.meta.url).href});\n}\n"
+        "\", wasm: " .. wasm .. ", directory});\n}\n"
 end
 
 -- The protocol probe image links the program's own C, so it may import host

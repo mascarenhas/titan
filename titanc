@@ -64,6 +64,7 @@ p:flag('--static', 'Require Titan archives for compiled executable dependencies 
 p:flag('--source-first', 'Prefer available source modules to compiled providers.')
 p:flag('--incremental', 'Reuse each source module object, including requested roots, whose certificate still matches: own sources, compiler, native configuration, C headers, dependency interfaces and bindings (-v explains each miss).')
 p:flag('-c --compile-only', 'Generate objects and headers only; without --incremental every module is rebuilt.')
+p:flag('--no-source-records', 'Omit the trusted source record from each module object: the output links and archives normally, but its objects can never be reused or restored by a later build.')
 p:flag('--test', 'Build native Titan tests (objects only with --compile-only).')
 p:flag('--coverage', 'Instrument source modules without test_ functions and report when the test executable runs.')
 p:option('--coverage-backend', 'Coverage backend: gcc-gcov (Unix default) or llvm-gcov (Windows default).')
@@ -238,6 +239,9 @@ end
 
 if args.incremental and args.print_ast then
     exit("--incremental cannot be combined with --print-ast")
+end
+if args.no_source_records and (args.incremental or args.compile_only or args.print_ast) then
+    exit("--no-source-records cannot be combined with --incremental, --compile-only or --print-ast")
 end
 if not args.coverage and (#args.coverage_module > 0 or #args.coverage_format > 0 or
         args.coverage_root or args.coverage_gcov or args.coverage_backend or
@@ -493,6 +497,7 @@ local loader_options = {
     coverage = coverage_build,
     output_root = args.output,
     c_parts = c_parts,
+    source_records = not args.no_source_records,
 }
 
 -- One exclusive lock per output domain, held from certification through

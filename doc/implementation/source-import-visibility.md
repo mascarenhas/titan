@@ -168,6 +168,16 @@ direct explicit source-import capability; a transitive C include does not make
 supply no generated C environment. Each module remains an ordinary separate C
 translation unit.
 
+A closure of pure Titan modules declares no C: its generated headers hold only
+guards and includes of each other. The checker therefore processes a
+consumer's C environment only when it has foreign directives or foreign
+typedefs of its own, or an explicit-source dependency whose closure has a
+foreign-function header, a direct foreign include or a foreign typedef
+(`source_import_declares_c` in `checker/declarations.lua`; a descriptor without
+its declaration plan counts as C). A consumer of pure source imports thus
+needs no C toolchain to check; it still prepares its generated `.ffi.h`, so
+the descriptors keep flowing to later importers and into generated C.
+
 A source dependency defining foreign functions also contributes `.titan.h` for
 its prototypes and local direct-call helpers. Generated C includes its own
 `.ffi.h` before any `.titan.h`. Resolver-owned checking trees contain the actual

@@ -165,6 +165,12 @@ and are located in-process by `staticmetadata.read_object_section` (including
 COFF long section names via the string table, and Wasm DATA segments named in
 the `linking` segment info).
 
+`titanc --no-source-records` builds objects without the second section: the
+coordinator receives each encoded record from its worker in memory, still
+revalidates and restores from it, and hands it to dependent workers, but no
+later invocation can reuse or restore such an object. See [the link-only
+provider](playground-bundle.md#the-link-only-provider).
+
 ### Record envelope and version gates
 
 `objectmetadata.encode(entry, native)` (`titan-compiler/objectmetadata.lua`)

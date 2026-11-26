@@ -1207,11 +1207,77 @@ end
 
 do
     local accepted = setmetatable({}, { __mode = "k" })
+    local CATALOG_FORMAT = "titan-browser-catalog-1"
 
     function perf.browser_semantics(handle)
         return accepted[handle]
     end
 
+    -- Rehydrate the provider a browser catalog captured from this exact
+    -- archive: every member's canonical metadata validated again here, as an
+    -- archive scan validates it, without reading or digesting the archive.
+    local function catalog_provider(bytes, provider_file, data, validate_types)
+        if type(bytes) ~= "string" then error("browser catalog must be a byte string", 0) end
+        local catalog, err = graphcodec.decode(bytes)
+        if not catalog then error("browser catalog: " .. tostring(err), 0) end
+        if type(catalog) ~= "table" or catalog.format ~= CATALOG_FORMAT or
+            type(catalog.modules) ~= "table" then
+            error("browser catalog: unsupported format", 0)
+        end
+        if catalog.abi ~= driver.TITAN_ABI_VERSION or catalog.provider_sha256 ~= data.provider_sha256 then
+            error("browser catalog does not describe the provider analysis-target names", 0)
+        end
+        local origin = string.format("%q", provider_file)
+        local modules = {}
+        for name, member in pairs(catalog.modules) do
+            if type(member) ~= "table" or type(member.member) ~= "string" then
+                error("browser catalog: malformed entry for " .. string.format("%q", tostring(name)), 0)
+            end
+            modules[name] = { payload = member.payload, origin = origin .. member.member }
+        end
+        local provider
+        provider, err = staticmetadata.metadata_view(provider_file, modules, {
+            expected_abi = driver.TITAN_ABI_VERSION, require_layouts = true,
+            validate_types = validate_types,
+        })
+        if not provider then error(err, 0) end
+        return provider
+    end
+
+    -- The detached metadata of a scanned SDK provider, for hosts that have
+    -- the analysis-target and absent-modules assets but must not ship or scan
+    -- the archive itself. Deterministic for the same archive at any path.
+    function driver.browser_analysis_catalog(handle)
+        local semantic = accepted[handle]
+        if not semantic or semantic.from_catalog then
+            return nil, "a browser analysis handle scanned from its archive is required"
+        end
+        local origin = string.format("%q", semantic.provider_file)
+        local modules = {}
+        for name, entry in pairs(semantic.entries) do
+            if entry.origin:sub(1, #origin) ~= origin then
+                return nil, "browser provider entry " .. name .. " has a foreign origin"
+            end
+            modules[name] = { payload = entry.payload, member = entry.origin:sub(#origin + 1) }
+        end
+        return graphcodec.encode({ format = CATALOG_FORMAT, abi = driver.TITAN_ABI_VERSION,
+            provider_sha256 = semantic.target.provider_sha256, modules = modules },
+            { canonical_string_keys = true })
+    end
+
+    -- The logical modules of a handle's provider, bytewise sorted: the
+    -- compiled modules an analysis over that handle can import.
+    function driver.browser_analysis_modules(handle)
+        local semantic = accepted[handle]
+        if not semantic then error("a browser analysis handle is required", 2) end
+        local names = { table.unpack(semantic.key_order) }
+        table.sort(names, util.bytewise_less)
+        return names
+    end
+
+    -- `options.catalog` (bytes from driver.browser_analysis_catalog) stands in
+    -- for the archive of a published semantic pack that ships only
+    -- analysis-target and absent-modules; the archive is then never read.
     function driver.browser_analysis_target(prefix, options)
         options = options or {}
         local strategy = options.io or compiler_io.new_sync()
@@ -1262,28 +1328,38 @@ do
                 error(absent_file .. ": missing final newline", 0)
             end
 
-            local archive, archive_digest, provider_file = read_asset("titan.a", 256 * 1024 * 1024)
-            if archive_digest ~= data.provider_sha256 then
-                error(provider_file .. ": digest disagrees with analysis-target", 0)
+            local function validate_types(name, serialized, origin)
+                local interface, decode_error = driver.decode_module_interface(serialized, name, origin)
+                if not interface then return nil, decode_error end
+                local valid, profile_error = types.normalize_portable_c_numeric_types(interface, profile)
+                if not valid then return nil, profile_error end
+                return interface
             end
-            local provider
-            provider, err = staticmetadata.scan_bytes(archive, provider_file, {
-                target = data.fingerprint,
-                expected_abi = driver.TITAN_ABI_VERSION,
-                validate_types = function(name, serialized, origin)
-                    local interface, decode_error = driver.decode_module_interface(serialized, name, origin)
-                    if not interface then return nil, decode_error end
-                    local valid, profile_error = types.normalize_portable_c_numeric_types(interface, profile)
-                    if not valid then return nil, profile_error end
-                    return interface
-                end,
-            })
-            if not provider then error(err, 0) end
-            if provider.kind ~= "archive" or #provider.key_order == 0 then
+            local provider, provider_file
+            if options.catalog ~= nil then
+                provider_file = path.join(directory, "titan.a")
+                provider = catalog_provider(options.catalog, provider_file, data, validate_types)
+            else
+                local archive, archive_digest
+                archive, archive_digest, provider_file = read_asset("titan.a", 256 * 1024 * 1024)
+                if archive_digest ~= data.provider_sha256 then
+                    error(provider_file .. ": digest disagrees with analysis-target", 0)
+                end
+                provider, err = staticmetadata.scan_bytes(archive, provider_file, {
+                    target = data.fingerprint,
+                    expected_abi = driver.TITAN_ABI_VERSION,
+                    validate_types = validate_types,
+                })
+                if not provider then error(err, 0) end
+                if provider.kind ~= "archive" then
+                    error(provider_file .. ": expected a nonempty Wasm provider archive", 0)
+                end
+                local valid, provider_error = driver.validate_browser_provider(provider)
+                if not valid then error(provider_error, 0) end
+            end
+            if #provider.key_order == 0 then
                 error(provider_file .. ": expected a nonempty Wasm provider archive", 0)
             end
-            local valid, provider_error = driver.validate_browser_provider(provider)
-            if not valid then error(provider_error, 0) end
             for name in pairs(reasons) do
                 if provider.entries[name] then error(absent_file .. ": lists provider module " .. name, 0) end
             end
@@ -1298,6 +1374,7 @@ do
                 identity = identity, provider_file = provider_file, paths = paths, target = data,
                 cache_owner = identity .. ":" .. root .. ":" .. provider_file,
                 entries = provider.entries, key_order = provider.key_order, absent = reasons,
+                from_catalog = options.catalog ~= nil, decoded_layouts = { layouts = {} },
             }
             return handle
         end)
@@ -1319,13 +1396,26 @@ function driver._new_resolver_context(options, target_descriptor)
        not source_labels[options.target] then
         error("invalid source selection target '" .. tostring(options.target) .. "'", 2)
     end
+    -- A browser semantic handle serves analysis-only contexts and emit-only
+    -- contexts: the latter check with the compiled runtime ABI and render C in
+    -- memory, but never resolve a compiler, probe, write output or link.
     local browser_semantics
+    if options.emit_c_only ~= nil and options.emit_c_only ~= true then
+        error("emit_c_only must be true when present", 2)
+    end
     if options.browser_analysis_target ~= nil then
         browser_semantics = perf.browser_semantics(options.browser_analysis_target)
-        if not browser_semantics or options.target ~= "browser" or options.analysis_only ~= true or
+        if not browser_semantics or options.target ~= "browser" or
+            (options.analysis_only == true) == (options.emit_c_only == true) or
             options.output_root ~= nil or target_descriptor ~= nil then
-            error("browser_analysis_target requires a valid browser handle and an analysis-only browser context without output", 2)
+            error("browser_analysis_target requires a valid browser handle and an analysis-only " ..
+                "or emit-only browser context without output", 2)
         end
+        if options.emit_c_only and (options.completion ~= nil or options.completion_closed_world) then
+            error("an emit-only browser context cannot serve completion", 2)
+        end
+    elseif options.emit_c_only then
+        error("emit_c_only requires a browser_analysis_target", 2)
     end
     local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
     if not cache_valid then error(cache_error, 2) end
@@ -1455,6 +1545,7 @@ function driver._new_resolver_context(options, target_descriptor)
         prefer_static = options.prefer_static == true,
         source_first = options.source_first == true,
         analysis_only = options.analysis_only == true,
+        emit_c_only = options.emit_c_only == true,
         completion = options.completion,
         transient_caches = options.transient_caches == true,
         completion_closed_world = options.completion_closed_world == true,
@@ -4934,10 +5025,28 @@ local function inspect_static_provider(context, filename, relative)
             key_order = { table.unpack(semantic.key_order) }, entries = {} }
         local memo = {}
         for name, entry in pairs(semantic.entries) do
-            provider.entries[name] = {
+            local selected = {
                 abi = entry.abi, types = entry.types, origin = entry.origin,
                 type = types.clone_graph(entry.decoded_types, memo),
             }
+            -- Emitted C lowers against the provider's actual dependencies and
+            -- nominal layouts, exactly as a build reading the archive would.
+            if context.emit_c_only then
+                if entry.layouts == nil then
+                    return nil, "static provider '" .. filename .. "' has no nominal layouts for module '" ..
+                        name .. "'"
+                end
+                local inventory, layout_error = perf.decode_provider_layouts(
+                    semantic.decoded_layouts, name, entry.layouts)
+                if not inventory then
+                    return nil, "static provider '" .. filename .. "' has invalid nominal layouts for module '" ..
+                        name .. "': " .. tostring(layout_error)
+                end
+                selected.layouts, selected.layout_inventory = entry.layouts, inventory
+                selected.imports, selected.source_requirements = entry.imports, entry.source_requirements
+                selected.dynamic_providers = entry.dynamic_providers
+            end
+            provider.entries[name] = selected
         end
         context.provider_cache[filename] = provider
         return provider
@@ -5644,6 +5753,9 @@ function driver.defaultloader(static_deps, options)
         split_threshold = options.split_threshold or coder.DEFAULT_SPLIT_THRESHOLD,
         test = options.test == true,
         coverage = options.coverage,
+        -- Objects without source records link and archive normally, but
+        -- only this invocation can restore their modules (from memory).
+        source_records = options.source_records ~= false,
     }
     -- Planning mode (the build coordinator): each source module is certified
     -- and its imports are followed without parsing or checking it, while
@@ -7914,8 +8026,10 @@ function driver.plan_descriptor(plan, modname)
             if name ~= modname then
                 local certified = plan.accepted(name)
                 item.object = certified and certified.object or nil
-                if needed and needed[name] then
-                    item.interface = certified and certified.interface
+                -- A check-only interface, or the record of an object built
+                -- without one: the worker restores the dependency from it.
+                if certified and certified.interface and (not needed or needed[name]) then
+                    item.interface = certified.interface
                 end
             end
         elseif module.kind == "dynamic" then
@@ -8004,6 +8118,7 @@ function driver.worker_configuration(context)
             split_threshold = policy.split_threshold,
             test = policy.test == true,
             coverage = policy.coverage,
+            source_records = policy.source_records ~= false,
         },
         compiler = compiler,
         uncertified = status == "uncertified" and configuration_error or nil,
@@ -8085,6 +8200,7 @@ function driver.new_worker_context(configuration, io_strategy)
         split_threshold = policy.split_threshold,
         test = policy.test == true,
         coverage = policy.coverage,
+        source_records = policy.source_records ~= false,
     }
     local options, options_error = incremental_options(context)
     if not options then return fail(options_error) end
@@ -8300,6 +8416,7 @@ function driver.compile_planned_module(context, modname, options)
             coverage_backend = coverage_build and coverage_build.backend,
             c_parts = c_parts,
             split_threshold = policy.split_threshold,
+            source_records = policy.source_records,
             staged = true,
         },
     }
@@ -8375,6 +8492,9 @@ function driver.compile_planned_module(context, modname, options)
         -- Invocation-only input evidence, never an object certificate.
         source_snapshot = context.incremental_uncertified and
             mod.source_certificate or nil,
+        -- Without a source record in the object, its encoded record travels
+        -- to the coordinator here instead.
+        interface = compilation.record_payload,
         diagnostics = {},
     }
 end
@@ -8415,7 +8535,7 @@ end
 function driver.publish_staged_module(context, result)
     driver.assert_target_context(context)
     if context.browser_semantics then return nil, "browser analysis context cannot compile or link" end
-    if result.interface then
+    if result.interface and not result.staged then
         local modname = result.modname
         local record, err = objectmetadata.decode(result.interface, modname)
         if not record then return nil, err end
@@ -8446,13 +8566,24 @@ function driver.publish_staged_module(context, result)
         return discard("worker result for module '" .. tostring(modname) ..
             "' has no primary object")
     end
-    local bytes, read_error = perf.compiler_file_contents(
-        incremental.fresh_context(context), primary.from)
-    if not bytes then
-        return discard("cannot read staged object for module '" .. modname ..
-            "': " .. tostring(read_error))
+    -- An object built without its source record delivers the encoded record
+    -- beside it; the policy is the coordinator's own, never the worker's.
+    local lean = (context.codegen_policy or {}).source_records == false
+    local record, record_error
+    if lean then
+        if type(result.interface) ~= "string" then
+            return discard("worker result for module '" .. modname .. "' has no source record")
+        end
+        record, record_error = objectmetadata.decode(result.interface, modname)
+    else
+        local bytes, read_error = perf.compiler_file_contents(
+            incremental.fresh_context(context), primary.from)
+        if not bytes then
+            return discard("cannot read staged object for module '" .. modname ..
+                "': " .. tostring(read_error))
+        end
+        record, record_error = objectmetadata.read(bytes, primary.to)
     end
-    local record, record_error = objectmetadata.read(bytes, primary.to)
     if not record or type(record.object_metadata) ~= "table" then
         return discard("cannot decode staged object for module '" .. modname ..
             "': " .. tostring(record_error))
@@ -8517,6 +8648,7 @@ function driver.publish_staged_module(context, result)
         object = primary.to,
         objects = result.objects,
         imports = record.object_metadata.imports,
+        interface = lean and result.interface or nil,
     }
 end
 
@@ -10313,6 +10445,59 @@ end
 
 driver.GENERATED_C_MARKER = "/* Generated by Titan: module C translation unit. */"
 
+-- The generation one checked module's translation units depend on, shared by
+-- object compilation and in-memory emission: the imported nominal layouts,
+-- the finalized source requirements and carried providers, and the coder.
+-- `paths` names the private header and the generated C stem the units cite.
+function perf.generate_module_code(context, modname, ast, static_deps, options, paths)
+    local imported_layouts = options.nominal_layouts
+    if not imported_layouts then
+        imported_layouts = {}
+        for _, imported in pairs(driver.imported) do
+            local inventory = imported ~= CIRCULAR_MARK and imported.layout_inventory
+            if inventory then
+                for name, plan in pairs(inventory.layouts) do
+                    imported_layouts[name] = plan
+                end
+            end
+        end
+    end
+    local requirements = context and context.requirements_by_module and
+        context.requirements_by_module[modname]
+    -- A non-main native module publishes the carriers its build proved for
+    -- the external owners it reaches. This only copies frozen finalized
+    -- facts; it performs no lookup.
+    local dynamic_providers
+    if context and not context.analysis_only and context.target ~= "browser" and
+            not checker.has_main(ast) then
+        for owner, relative in pairs(context.producer_dynamic_providers or {}) do
+            if owner ~= modname then
+                dynamic_providers = dynamic_providers or {}
+                dynamic_providers[owner] = relative
+            end
+        end
+    end
+    local generated = coder.generate(
+        modname, ast, static_deps, driver.TITAN_ABI_VERSION,
+        driver.EMIT_LINE_DIRECTIVES, {
+            target = context and context.target,
+            check_only_sources = context and context.check_only_sources,
+            check_only_binaries = context and context.check_only_binaries,
+            source_requirements = requirements,
+            dynamic_providers = dynamic_providers,
+            nominal_layouts = imported_layouts,
+            application_nominal_layouts = context and context.application_nominal_layouts,
+            coverage = options.coverage == true,
+            coverage_backend = options.coverage_backend,
+            c_parts = options.c_parts,
+            split_threshold = options.split_threshold,
+            private_header_output = paths.private_header,
+            source_output_stem = paths.stem,
+            foreign_header_plan = options.foreign_header_plan,
+        })
+    return generated, requirements, dynamic_providers
+end
+
 local function prepare_compile(
         modname, ast, sourcef, static_deps, verbose, options, source_entry,
         header_plan)
@@ -10374,50 +10559,17 @@ local function prepare_compile(
             if not valid then return nil, err end
         end
     end
-    local imported_layouts = options and options.nominal_layouts
-    if not imported_layouts then
-        imported_layouts = {}
-        for _, imported in pairs(driver.imported) do
-            local inventory = imported ~= CIRCULAR_MARK and imported.layout_inventory
-            if inventory then
-                for name, plan in pairs(inventory.layouts) do
-                    imported_layouts[name] = plan
-                end
-            end
-        end
-    end
-    local requirements = context and context.requirements_by_module and
-        context.requirements_by_module[modname]
-    -- A non-main native module publishes the carriers its build proved for
-    -- the external owners it reaches. This only copies frozen finalized
-    -- facts; it performs no lookup.
-    local dynamic_providers
-    if context and not context.analysis_only and context.target ~= "browser" and
-            not checker.has_main(ast) then
-        for owner, relative in pairs(context.producer_dynamic_providers or {}) do
-            if owner ~= modname then
-                dynamic_providers = dynamic_providers or {}
-                dynamic_providers[owner] = relative
-            end
-        end
-    end
-    local generated = coder.generate(
-        modname, ast, static_deps, driver.TITAN_ABI_VERSION,
-        driver.EMIT_LINE_DIRECTIVES, {
-            target = context and context.target,
-            check_only_sources = context and context.check_only_sources,
-            check_only_binaries = context and context.check_only_binaries,
-            source_requirements = requirements,
-            dynamic_providers = dynamic_providers,
-            nominal_layouts = imported_layouts,
-            application_nominal_layouts = context and context.application_nominal_layouts,
+    local generated, requirements, dynamic_providers = perf.generate_module_code(
+        context, modname, ast, static_deps, {
+            nominal_layouts = options and options.nominal_layouts,
             coverage = options and options.coverage == true,
             coverage_backend = options and options.coverage_backend,
             c_parts = effective_c_parts,
             split_threshold = split_threshold,
-            private_header_output = normalized_absolute_filename(priv_header_path),
-            source_output_stem = normalized_absolute_filename(stem),
             foreign_header_plan = header_plan,
+        }, {
+            private_header = normalized_absolute_filename(priv_header_path),
+            stem = normalized_absolute_filename(stem),
         })
     local generated_parts = assert(generated and generated.parts)
     local native_references = generated.direct_native_modules
@@ -10428,6 +10580,9 @@ local function prepare_compile(
     -- a certificate. Producer self digests come from this coder output, so a
     -- fresh producer and its later restored record cannot disagree; consumers
     -- planned in the same invocation read them when their records render.
+    -- A build without source records still certifies each record, which its
+    -- coordinator revalidates in memory, but never renders it into the object.
+    local records = not (options and options.source_records == false)
     local certify = context ~= nil and source_entry ~= nil and
         source_entry.source_certificate ~= nil
     if certify then
@@ -10510,7 +10665,7 @@ local function prepare_compile(
             backend = options.coverage_backend }
     end
     local certificate_attempted = false
-    local function metadata_code()
+    local function record_payload()
         if certify and not certificate_attempted then
             certificate_attempted = true
             local made, certificate = pcall(incremental.make_certificate,
@@ -10545,11 +10700,7 @@ local function prepare_compile(
                     certificate, "\n")
             end
         end
-        local payload, metadata_error = objectmetadata.encode(entry, native)
-        if not payload then return nil, metadata_error end
-        -- External on Wasm like the archive metadata, hence the private name.
-        return "\n" .. objectmetadata.render(payload, require("titan-compiler.coder.core")
-            .coder._private_symbol(modname, "titan_source"))
+        return objectmetadata.encode(entry, native)
     end
     -- Preflight an existing private header before any invalidation or file
     -- write.
@@ -10764,13 +10915,18 @@ local function prepare_compile(
             if not semantics then return nil, preprocessing_error end
             for index, identity in ipairs(semantics) do native.generated_inputs[index].semantic = identity end
         end
-        local metadata, metadata_error = metadata_code()
-        if not metadata then return nil, metadata_error end
-        local primary = driver.part_c_filename(stem, 0)
-        local contents, read_error = util.get_file_contents(primary, "rb")
-        if not contents then return nil, read_error end
-        local written, write_error = util.set_file_contents(primary, contents .. metadata, "wb")
-        if not written then return nil, write_error end
+        local payload, metadata_error = record_payload()
+        if not payload then return nil, metadata_error end
+        if records then
+            -- External on Wasm like the archive metadata, hence the private name.
+            local primary = driver.part_c_filename(stem, 0)
+            local contents, read_error = util.get_file_contents(primary, "rb")
+            if not contents then return nil, read_error end
+            local written, write_error = util.set_file_contents(primary, contents .. "\n" ..
+                objectmetadata.render(payload, require("titan-compiler.coder.core")
+                    .coder._private_symbol(modname, "titan_source")), "wb")
+            if not written then return nil, write_error end
+        end
         if native.certificate then incremental.record_materialization(context, stem, native.certificate) end
         if source_entry then
             source_entry.coverage = native.coverage
@@ -10786,6 +10942,7 @@ local function prepare_compile(
             jobs = prepared_jobs,
             objects = ordered_objects,
             source_record = native,
+            record_payload = not records and payload or nil,
             prior_inventory = prior_inventory,
             native_references = native_references,
             private_symbols = private_symbols,
@@ -10856,6 +11013,55 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options, so
     else
         return nil, err
     end
+end
+
+-- Implementation notes: doc/implementation/playground-bundle.md#emitting-c-without-a-toolchain
+-- The C of one checked source module in a finalized emit-only browser
+-- context, rendered as an object compilation renders it (one translation
+-- unit and the module's generated headers) but in memory: no object source
+-- record, files, compiler or probe. Files are named after the module's
+-- logical path (`a/b.c`, `a/b.ffi.h`); the unit includes its headers beside
+-- itself and its explicit source dependencies' headers by relative paths, so
+-- the files compile wherever they are placed. Returns
+-- `{ unit = {filename, code}, headers = {{filename, contents}...} }`.
+function driver.emit_module_c(context, modname)
+    driver.assert_target_context(context)
+    if not context.emit_c_only then
+        error("C emission requires an emit-only browser context", 2)
+    elseif not context.finalized_selection then
+        error("C emission requires a finalized resolver context", 2)
+    end
+    local mod = driver.imported[modname]
+    if type(mod) ~= "table" or mod == CIRCULAR_MARK or mod.kind ~= "source" or not mod.ast then
+        return nil, "module '" .. tostring(modname) .. "' has no checked source in this context"
+    end
+    -- Every emitted file is keyed by its module's logical path, so a unit and
+    -- its headers cite each other, and explicit source dependencies, by
+    -- relative names that hold wherever the files are placed.
+    local ast, stem = mod.ast, modname:gsub("[.]", "/")
+    local leaf = stem:match("[^/]*$")
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelImport" and node._source_import then
+            local dependency = node.modname:gsub("[.]", "/")
+            node._ffi_header = ffiheaders.relative(stem .. ".ffi.h", dependency .. ".ffi.h")
+            if node._foreign_header then
+                node._foreign_header = ffiheaders.relative(stem .. ".titan.h", dependency .. ".titan.h")
+            end
+        end
+    end
+    ast._ffi_header_output = leaf .. ".ffi.h"
+    ast._foreign_header_output = driver.ast_has_foreign_functions(ast) and (leaf .. ".titan.h") or nil
+    coder.prepare_coverage(ast, false)
+    local generated = perf.generate_module_code(context, modname, ast, context.native_static_names, {
+        nominal_layouts = context.nominal_layouts, c_parts = 1, split_threshold = coder.DEFAULT_SPLIT_THRESHOLD,
+    }, { private_header = stem .. ".priv.h", stem = stem })
+    local part = assert(#generated.parts == 1 and generated.parts[1])
+    local headers = { { filename = stem .. ".ffi.h", contents = coder.generate_ffi_header(modname, ast) } }
+    if generated.foreign_header then
+        headers[2] = { filename = stem .. ".titan.h", contents = generated.foreign_header }
+    end
+    return { unit = { filename = stem .. ".c", code = driver.GENERATED_C_MARKER .. "\n" .. part.code },
+        headers = headers }
 end
 
 local function create_compile_log()

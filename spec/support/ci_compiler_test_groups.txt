@@ -41,6 +41,9 @@
 # its real-toolchain cases pend outside the browser CI gates.
 # Issue 337's documentation rows use the same unmeasured 1.000 planning weight;
 # the browser chapter page case pends outside the browser CI gates.
+# The playground compiler row uses the same unmeasured 1.000 planning weight;
+# its catalog, emission and linked-image cases pend outside the browser CI
+# gates, which run them in the browser-stdlib scheduler shard.
 compiler spec/abi_spec.lua 0.201 2.926 0.907
 retained spec/asan_generated_c_context_spec.lua 0.587 - 0.250
 compiler spec/binary_compatibility_spec.lua 0.017 0.107 0.047
@@ -237,6 +240,7 @@ compiler spec/native_record_fields_spec.lua 9.584 65.613 16.937
 compiler spec/nominal_layout_spec.lua 0.025 0.317 0.063
 compiler spec/parser_spec.lua 1.096 3.838 4.579
 compiler spec/path_spec.lua 0.051 0.165 0.109
+compiler spec/playground_spec.lua 1.000
 compiler spec/progress_spec.lua 0.016 - 0.187
 compiler spec/projectcache_spec.lua 37.671 473.778 62.828
 retained spec/rockspec_spec.lua 11.706 - 137.281

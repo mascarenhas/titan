@@ -24,6 +24,7 @@ least one module name is required unless you pass `--print-root`,
 | `--source-first` | Prefer available `.titan` source dependencies over compiled providers, with compiled fallback on miss. |
 | `--incremental` | Certify and reuse unchanged module objects, `--c-source` objects, and final links. |
 | `-c`, `--compile-only` | Generate owned objects and headers only without linking. Plain non-`main`, non-`--test`, non-`--static` `-c` compiles as a prospective library (leaving installed fallback sources external). Rebuilds owned sources unless combined with `--incremental`. |
+| `--no-source-records` | Omit the trusted source record each module object normally carries. The build links and archives as usual, but its objects can never be reused or restored by a later build, so the option cannot be combined with `--incremental`, `-c`, or `--print-ast`. Use it for a link-only library whose size matters, such as the [playground's browser provider](../implementation/playground-bundle.md#the-link-only-provider). |
 | `--no-uv-bootstrap` | Call `main(args)` directly in standalone or `--test` executables even if `titan.uv` installs its bootstrap hook. |
 | `--print-root` | Print the active Titan installation root to stdout and exit. Ignores `--target` and `TITAN_TARGET`. |
 | `-u`, `--lua PATH` | Path to a Lua source and build tree (source checkouts only; rejected by an installed compiler). |
