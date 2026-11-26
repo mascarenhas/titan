@@ -947,14 +947,17 @@ checks that output reaches stdout while the drive waits. Plain runs check the
 runner's exit statuses.
 
 The same spec builds `os.browser_tests` as a normal program and runs
-`os-streams.mjs` separately from the async owner's SDK-source `streams.mjs`.
-It supplies held or failing sinks, input chunks, declared stream kinds, TCP
-end hooks, and an environment through public `create` options. Its named
-cases cover print conversion and redirection, exact binary output and FIFO
-completion, cancellation, disposal and graceful exit, C-stdio ordering and
-failure latching, shutdown and kind errors, input buffering and reader
-ownership, line-iterator cleanup, wall time, calendars, and C/Titan environment
-agreement. Both engines run both assertion builds.
+`os-streams.mjs` (78 named cases, under `TZ=Asia/Kolkata` on both engines)
+separately from the async owner's SDK-source `streams.mjs`. It supplies held or
+failing sinks, input chunks, declared stream kinds, TCP end hooks, and an
+environment through public `create` options. Its named cases cover print
+conversion and redirection, exact binary output and FIFO completion,
+cancellation, disposal and graceful exit, C-stdio ordering and failure
+latching, shutdown and kind errors, input buffering and reader ownership,
+line-iterator cleanup, wall time, calendars (including
+`calendar-zone-titan-and-stock`, verifying `%z %Z` from Titan, stock Lua's
+owner state, and an independent `lua.new()` state all equal the host offset
+`+hhmm`), and C/Titan environment agreement.
 
 Stock Lua cases repeat input, environment and output checks in the owner and
 in public `lua.new` states. Configured embedding input is never consumed by

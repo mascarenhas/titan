@@ -1064,14 +1064,17 @@ outside this root inventory ([live harness](#the-live-browser-network-harness)).
 
 The separate embedding-sensitive owner `os.browser_tests` stays outside this
 root inventory, like `async.browser_tests`. `browser_scheduler_spec.lua`
-builds it as a normal program and runs `os-streams.mjs` under Node and
-Chromium in both assertion builds. Public embedding options supply delayed
-and failing streams, input, kinds, end hooks, and environment values. The
-cases check binary printing and writes, C-stdio interleaving and return
+builds it as a normal program and runs `os-streams.mjs` (78 named cases) under
+Node and Chromium with `TZ=Asia/Kolkata`. Public embedding options supply
+delayed and failing streams, input, kinds, end hooks, and environment values.
+The cases check binary printing and writes, C-stdio interleaving and return
 flushing, cancellation and disposal, TCP shutdown, input and `io.lines`
-cleanup, graceful exit, time, and environment agreement with C and stock Lua.
-Stock Lua checks repeat in public child states; owner-Task `os.exit` also
-checks numeric and boolean statuses, while child exit remains unavailable.
+cleanup, graceful exit, time, calendar zones (`calendar-zone-titan-and-stock`,
+verifying `%z %Z` from Titan, stock Lua's owner state, and an independent
+`lua.new()` state all equal the host offset `+hhmm`), and environment agreement
+with C and stock Lua. Stock Lua checks repeat in public child states;
+owner-Task `os.exit` also checks numeric and boolean statuses, while child exit
+remains unavailable.
 Private published callbacks use `test.assert` without `test.Context` runner
 reports, which would pollute the streams under observation; the JavaScript
 driver names, counts, and asserts every case. Its normal `main` covers `run()`
@@ -2601,7 +2604,7 @@ image that does not link that fixture:
 | `fixture:net` | live network harness images (`spec/stdlib/titan/websocket/browser_tests/native.h`) |
 | `fixture:loader` | `spec/fixtures/browser_loader/loader.c` |
 | `fixture:gate` | `spec/fixtures/browser_runtime/gate.c` |
-| `fixture:budget` | `spec/fixtures/browser_runtime/budget.c` |
+| `fixture:budget` | `spec/fixtures/browser_runtime/budget.c` (`env.fixture_sleep` and `env.budget_stack_state`) |
 | `fixture:images` | entry-close C image (`spec/fixtures/browser_images/entry-close.c`) |
 | `fixture:scheduler` | `spec/fixtures/browser_scheduler/mini_driver.c` and `scheduler_child.c` |
 
@@ -3056,19 +3059,25 @@ growth.
 `browser_budgets_spec.lua` measures checked root/coroutine C-stack limits,
 engine-stack limits with live Wasm-register canaries across JSPI waits and
 transfers, the catchable Lua C-call limit, forced native allocation failure,
-and the delivered 2-GiB heap boundary. The parked canary must remain usable
-before exhausted owners are released, and fresh coroutines must work after
-collection. Native allocation failures can be ordinary errors; an engine
-trap or JS allocation failure poisons the instance instead of pretending
-that native cleanup or continuation reuse is safe.
+and the delivered 2-GiB heap boundary. `budget.c` reads the stack bounds the
+factory installed and the live `__stack_pointer` (plus the two words at the low
+bound) through the `fixture:budget` import `env.budget_stack_state`
+(`fixture-imports.mjs`). The parked canary must remain usable before exhausted
+owners are released, and fresh coroutines must work after collection. Native
+allocation failures can be ordinary errors; an engine trap or JS allocation
+failure poisons the instance instead of pretending that native cleanup or
+continuation reuse is safe.
 
 For each boundary row, the harness checks a positive lowest sample and
 qualifies its declared, unit-aligned ceiling with the same limit-failure
 classifier used for the final result. It then binary-searches to adjacent
 units and attributes the final failing sample. Every probe starts a fresh
 instance. The `lua-limit`, `create-failure`, and `exhaust` modes run once per
-assertion and engine cell, without a search.
-
+assertion and engine cell, without a search. Two cookie probes follow the seven
+rows: `cookie-boundary` (verifying no cookie at the main stack's zero low bound
+and an intact coroutine cookie across a switch) and `cookie-overwrite`
+(requiring abort status 70 and `Stack overflow! Stack cookie has been
+overwritten at 0x…`). The verdict line reads `rows=7 cookie_checks=2`.
 
 ## The browser C-call limit
 
@@ -4456,12 +4465,19 @@ same texts.
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines: byte fidelity, statuses, sinks,
   reentry, 50 collectable create, run, and dispose cycles, concurrent instances,
-  lifecycle races, the optimized guard image (`optimized-guard.mjs`), and the
-  refusal of one `loader_app` module paired with another link's `.wasm`.
+  lifecycle races, the optimized guard image (`optimized-guard.mjs`), the
+  refusal of one `loader_app` module paired with another link's `.wasm`, and
+  `import-tests.mjs` on the `--names` images (accepting import maps in object
+  and function form, null-prototype maps, and foreign-realm maps, and refusing
+  arrays, `Map`s, class instances, promises, reserved `wasi_snapshot_preview1.*`
+  and `env.titan_{browser,mco}_*` names, and async functions with the documented
+  messages).
 * `spec/browser/runner.test.mjs` and `spec/browser/runner-fixtures.mjs` — the
   runner's resolver, probe, CLI (including `--imports`),
   `--allow-degraded-trace` and the default required-trace initialization
-  failure for direct and `--js-test` images,
+  failure for direct and `--js-test` images, a real-image case verifying
+  initialization waits for a delayed `.wasm.trace` (one lookup, one fetch) and
+  that a throwing trace locator degrades the trace (or fails `requireTrace`),
   exported `within`/`Monitor` helpers and symlink invocation, status
   categories, grace, abort and cleanup boundaries, process-group retirement,
   path containment, over Node and both Chromium transports, and, with fake

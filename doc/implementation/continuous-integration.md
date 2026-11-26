@@ -336,7 +336,10 @@ disk-space step:
     `TITAN_BROWSER_RUNNER` (the installed launcher), and
     `TITAN_BROWSER_LOADER_IMAGE` (the `fidelity` image), with output copied to
     `$RUNNER_TEMP/browser-runner.log`.
-15. **Trace adapter and supervisor units.** `$WASI_SDK_PATH/bin/clang
+15. **Trace adapter and supervisor units.** After unsetting the seven D11
+    compiler-environment variables (`CCC_OVERRIDE_OPTIONS`, `CPATH`,
+    `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`,
+    `LIBRARY_PATH`, `COMPILER_PATH`), `$WASI_SDK_PATH/bin/clang
     --target=wasm32-wasip1 -mexec-model=reactor` compiles
     `spec/fixtures/browser_trace_adapter/lifecycle.c` and
     `spec/fixtures/browser_trace_adapter/filter.c` (with `titan-runtime/titan.c`
