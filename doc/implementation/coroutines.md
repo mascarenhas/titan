@@ -344,11 +344,13 @@ described above.
   defines it as 262144 (256 KiB) in its compile prefix. Natively, 2 MiB leaves
   room for the error handler, whose libbacktrace scratch state exceeds
   minicoro's default 56 KiB stack, while physical memory stays lazy on
-  platforms with virtual memory. The browser's allocator commits each stack
-  eagerly and reclaims it (`munmap`) for reuse when the coroutine is destroyed,
-  while the grown WebAssembly linear memory never shrinks back to the host, and
-  the browser has no libbacktrace, so the smaller size bounds memory per
-  coroutine instead. minicoro's own default
+  platforms with virtual memory. On WASI/browser, `minicoro.h` guards
+  `MCO_USE_VMEM_ALLOCATOR` with `!defined(__wasi__)` so allocations fall
+  through to `calloc`/`free`, committing each stack eagerly and returning freed
+  blocks for reuse when the coroutine is destroyed, while the grown WebAssembly
+  linear memory never shrinks back to the host, and the browser has no
+  libbacktrace, so the smaller size bounds memory per coroutine instead.
+  minicoro's own default
   and minimum stack sizes are not redefined.
 * The native ASM, UCONTEXT and Windows Fiber backends are unchanged. The
   WebAssembly (`__wasm__`) branch uses JSPI engine continuations and disjoint

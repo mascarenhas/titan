@@ -2188,17 +2188,20 @@ The reactor link command uses `clang --target=wasm32-wasip1 -mexec-model=reactor
 | `-Wl,--initial-heap=15728640 -Wl,--max-memory=2147483648` | reserves 15 MiB initial heap above static data and stack, growing up to 2 GiB (failed `malloc` returns `NULL` and raises Lua OOM) |
 | `-Wl,--gc-sections` | drops unreferenced `.titan.meta`/`.titan.source`/`.titan.cprobe` segments and dead code |
 | `-Wl,--export-table` | exports `__indirect_function_table` so `create({ imports })` hosts can invoke C callbacks via `context.table` |
-| `-Wl,--export=malloc -Wl,--export=free -Wl,--export=__stack_pointer -Wl,--export=__stack_low -Wl,--export=__stack_high` | exports allocator and stack-bound symbols used by `titan-wasm-factory.mjs`; `gate` adds `-Wl,--export=titan_browser_gate_guarded` and `-Wl,--export=titan_browser_gate_observe` |
+| `-Wl,--export=__stack_pointer -Wl,--export=__stack_low -Wl,--export=__stack_high` | exports the stack-bound symbols used by `titan-wasm-factory.mjs`; `gate` adds `-Wl,--export=titan_browser_gate_guarded` and `-Wl,--export=titan_browser_gate_observe` |
 | `-lc-printscan-long-double -lsetjmp -lwasi-emulated-process-clocks` | links IEEE binary128 `long double` printf (`%La`), standard `exnref` `setjmp`/`longjmp`, and WASI monotonic/process clock emulation |
 | `wasm-opt <level> --debuginfo --stack-check` plus `--enable-exception-handling --enable-multivalue --enable-bulk-memory --enable-mutable-globals --enable-sign-ext --enable-nontrapping-float-to-int --enable-reference-types` | optimizes the linked `.wasm`, preserves DWARF debug info for `browsertrace.lua`, and injects `__set_stack_limits` runtime stack checking; production `test` images add `--skip-pass=inlining-optimizing --skip-pass=duplicate-function-elimination` |
 
 The generated launcher (`browserentry.lua`) and `browsertrace.lua` annotate
 `titan_browser_initialize`, `titan_browser_entry`, `titan_browser_invoke`,
-`titan_browser_release_callable`, `titan_browser_close`, and
-`titan_browser_trace_identity` with `TITAN_WASM_EXPORT("...")`, and
-`minicoro.h` exports `titan_mco_entry`. JSPI `WebAssembly.promising` export
-wrapping and `WebAssembly.Suspending` import wrapping happen at instantiation
-time inside `titan-wasm-factory.mjs`, with no link-time JSPI flag list.
+`titan_browser_release_callable`, `titan_browser_close`,
+`titan_browser_trace_identity`, and the allocator forwards `malloc` and `free`
+(calling the program's allocator so `-Wl,--wrap=malloc,free` wrappers also see
+host-allocated blocks and C/JS ownership stays balanced) with
+`TITAN_WASM_EXPORT("...")`, and `minicoro.h` exports `titan_mco_entry`. JSPI
+`WebAssembly.promising` export wrapping and `WebAssembly.Suspending` import
+wrapping happen at instantiation time inside `titan-wasm-factory.mjs`, with no
+link-time JSPI flag list.
 
 `identity_inputs` is the closed table that certifies the link configuration:
 `{target_identity, profile, purpose, optimization, backend, budgets,
@@ -2813,12 +2816,15 @@ After `clang` links and `wasm-opt` optimizes the image (retaining DWARF
 `.debug_*` sections via `--debuginfo`), `browsertrace.dwarf_map(wasm, map_name,
 origin)` parses DWARF `.debug_line` in pure Lua against the final stripped
 `CODE` payload base (handling `.debug_*` sections even when they appear before
-`CODE`, and emitting one-field unmapped segments at every DWARF `end_sequence`
-and `line == 0` row so unmapped instructions inside a body are never attributed
-to a preceding line), strips every `.debug_*` and any existing
-`sourceMappingURL` section, appends the new length-prefixed `sourceMappingURL`
-custom section (`<basename>.wasm.map`) as the image's last section after
-`name`, and produces `stripped_wasm` and `map_json`.
+`CODE`, reading code-section body bounds to resolve overlapping `wasm-ld
+--wrap` line sequences so only a body's sole own sequence ending at the body
+end survives while ambiguous overlaps and backwards sequences stay unmapped,
+and emitting one-field unmapped segments at every DWARF `end_sequence` and
+`line == 0` row so unmapped instructions inside a body are never attributed to
+a preceding line), strips every `.debug_*` and any existing `sourceMappingURL`
+section, appends the new length-prefixed `sourceMappingURL` custom section
+(`<basename>.wasm.map`) as the image's last section after `name`, and produces
+`stripped_wasm` and `map_json`.
 `browsertrace.rewrite(stripped_wasm,
 map_json, identity, origin)` then reads `stripped_wasm` through
 `staticmetadata.browser_trace_image` (which reuses the bounded section and
@@ -3862,13 +3868,18 @@ signed status; only the CLI masks it. Grace starts at the actual completion
 control, which the page sends after the run settled and the instance was
 disposed, never at console output, and a later trap or abort overrides the
 completed result. Classification follows the evidence chain: a tagged original
-trap (`TITAN_BROWSER_TRAP` anywhere in the `cause` chain) is a trap even when
-an abort follows it; an observed abort (reported through `onEngineFailure`)
-otherwise makes the run an abort, including the factory's subsequent
-`RuntimeError`; and a bare `RuntimeError` without abort evidence is a trap.
-Malformed, duplicate, or unknown controls, a premature engine exit, a crashed
-page target, a missing or invalid image, and an interrupted runner (`SIGINT`,
-`SIGTERM`) are harness failures. Timers longer than Node's 32-bit limit are
+trap (`TITAN_BROWSER_TRAP` anywhere in the `cause` chain) or an observed engine
+trap (reported through `onEngineFailure` as `{type: "trap", reason}`) is a trap
+even when an abort
+follows or precedes it; both observed traps and observed aborts are recorded
+while a catching harness finishes (bounded by `--timeout`/`--grace`), reporting
+71 for a trap, 70 for an abort alone, or 73 for a late observation after
+completion. An observed abort without a trap makes the run an abort, including
+the factory's subsequent `RuntimeError`; and a bare `RuntimeError` without
+abort evidence is a trap. Malformed, duplicate, or unknown controls, a
+premature engine exit, a crashed page target, a missing or invalid image, and
+an interrupted runner (`SIGINT`, `SIGTERM`) are harness failures. Timers longer
+than Node's 32-bit limit are
 armed in bounded slices against a monotonic deadline.
 
 **Public image observation, trace readiness, and terminal cleanup.** Each
@@ -3988,12 +3999,17 @@ module, it:
    probe in a temporary path under the output root with the `protocol` profile
    against `libnames` and `static_archives` (`selected static provider failed
    executable-context protocol linking (<reason>[, exit <code>])`);
-4. runs `<runner> --engine node <probe>.mjs` and requires exit 0
-   (`selected static provider failed executable-context protocol validation
-   (browser runner exit <code>)`, with 75 when the runner could not start);
-   and
-5. removes the probe source, object, `.mjs`, `.wasm`, `.wasm.map`, and
-   `.wasm.trace` on every path.
+4. calls `browserlink.protocol_imports` on the linked probe's inventory to
+   synthesize typed zero-valued stand-in functions (`undefined`, `0`, `0n`,
+   `null`, or multi-value array) for any non-runtime function import (outside
+   `wasi_snapshot_preview1.*`, `env.titan_browser_*`, `env.titan_mco_*`),
+   writes them to `<probe>.imports.mjs` when any stand-in is needed, and runs
+   `<runner> --engine node [--root <dir> --imports <probe>.imports.mjs] <probe>.mjs`,
+   requiring exit 0 (`selected static provider failed executable-context
+   protocol validation (browser runner exit <code>)`, with 75 when the runner
+   could not start); and
+5. removes the probe source, object, `.mjs`, `.wasm`, `.wasm.map`,
+   `.wasm.trace`, and any `.imports.mjs` on every path.
 
 `titanc` calls it before a program or test link, with the program's objects
 and the selected archives, exactly where the native probe runs.
