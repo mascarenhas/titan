@@ -207,7 +207,11 @@ assets under the reserved `/titan` prefix, resets `driver.imported` and
 `types.registry`, and closes its context, so no module, edit or removal of an
 earlier snapshot survives. Project paths are relative POSIX names; `titan/`
 and `..` are refused. Sources resolve through the ordinary `.` source path, so
-files are named `./main.titan` in diagnostics, line tables and frames.
+files are named `./main.titan` in diagnostics, line tables and frames. The
+tree's absolute paths begin with `/`, the path model of `titanc.wasm`'s POSIX
+(WASI) host; a Windows host runs this module only under the POSIX lexical
+path rules, as `spec/playground_spec.lua` models with
+`browser_fixtures.with_posix_host`.
 
 The project's modules are those the ordinary tagged resolver selects for the
 browser target. Each `.titan` file proposes its own dotted stem (its target

@@ -10,6 +10,7 @@ local path = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local installed_prefix = require "spec.support.installed_prefix"
 local toolchain = require "spec.support.browser_toolchain"
+local browser_fixtures = require "spec.support.browser_fixtures"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
@@ -636,15 +637,19 @@ describe("playground wire protocol", function()
         assert.equal("error", unframe(handler(string.pack("<I4", 2) .. string.pack("<s4", "check")))[1])
     end)
 
+    -- titanc.wasm is a POSIX (WASI) host whose in-memory tree is rooted at
+    -- `/`; a Windows host models it with the POSIX lexical path rules.
     it("refuses incomplete assets and images that are not optimized Wasm", function()
-        assert.has_error(function() playground.open(nil) end)
-        assert.has_error(function() playground.open({ analysis_target = "", catalog = "" }) end)
-        local service, err = playground.open({ analysis_target = "x", absent_modules = "", catalog = "y" })
-        assert.is_nil(service)
-        assert.matches("target 'browser' needs a matching browser SDK", err)
-        local image, trace_error = playground.build_trace("not wasm", string.rep("0", 64), "", "")
-        assert.is_nil(image)
-        assert.is_string(trace_error)
+        browser_fixtures.with_posix_host(function()
+            assert.has_error(function() playground.open(nil) end)
+            assert.has_error(function() playground.open({ analysis_target = "", catalog = "" }) end)
+            local service, err = playground.open({ analysis_target = "x", absent_modules = "", catalog = "y" })
+            assert.is_nil(service)
+            assert.matches("target 'browser' needs a matching browser SDK", err)
+            local image, trace_error = playground.build_trace("not wasm", string.rep("0", 64), "", "")
+            assert.is_nil(image)
+            assert.is_string(trace_error)
+        end)
     end)
 end)
 
