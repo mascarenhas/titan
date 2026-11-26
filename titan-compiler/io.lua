@@ -1000,4 +1000,234 @@ function compiler_io.new_sync()
     return setmetatable({}, Sync)
 end
 
+-- An owned in-memory strategy: files under absolute POSIX paths, directories
+-- implied by them or created explicitly, writes kept in memory, and no host
+-- file or process. A host without a filesystem (the browser compiler) hands
+-- the compiler exactly the files it owns. `options.files` maps absolute paths
+-- to contents; `options.cwd` (default "/") resolves relative paths.
+local Memory = {}
+Memory.__index = Memory
+
+local function memory_path(self, path)
+    local valid, path_err = checked_path(path)
+    if not valid then return nil, path_err end
+    if path:sub(1, 1) ~= "/" then path = self.directory .. "/" .. path end
+    local components = {}
+    for component in path:gmatch("[^/]+") do
+        if component == ".." then
+            components[#components] = nil
+        elseif component ~= "." then
+            components[#components + 1] = component
+        end
+    end
+    return "/" .. table.concat(components, "/")
+end
+
+local function memory_parent(path)
+    local parent = path:match("^(.*)/[^/]+$")
+    return (parent == nil or parent == "") and "/" or parent, path:match("([^/]+)$")
+end
+
+local function memory_stat(self, path)
+    local normalized, err = memory_path(self, path)
+    if not normalized then return nil, err end
+    local contents = self.files[normalized]
+    local kind = contents and "file" or self.directories[normalized] and "directory"
+    if not kind then return nil, nil end
+    return { size = contents and #contents or 0, kind = kind,
+        mode = kind == "file" and (FILE_TYPE_BITS.file | 0x1a4) or (FILE_TYPE_BITS.directory | 0x1ed),
+        modified_seconds = 0, modified_nanoseconds = 0,
+        time_precision = "coarse", precision = "coarse" }
+end
+
+-- Create `path` and its missing ancestors; a file in the way is an error, so
+-- one name is never both a file and a directory.
+local function memory_directory(self, path)
+    local missing = {}
+    while not self.directories[path] do
+        if self.files[path] then return nil, "not a directory: " .. path end
+        missing[#missing + 1] = path
+        path = memory_parent(path)
+    end
+    for _, directory in ipairs(missing) do self.directories[directory] = true end
+    return true
+end
+
+function Memory:cwd() return self.directory end
+function Memory:stat(path) return memory_stat(self, path) end
+function Memory:lstat(path) return memory_stat(self, path) end
+
+function Memory:realpath(path)
+    local info, err = memory_stat(self, path)
+    if not info then return nil, err or path_missing(path) end
+    return (memory_path(self, path))
+end
+
+function Memory:readable(path)
+    local normalized = memory_path(self, path)
+    return normalized ~= nil and self.files[normalized] ~= nil
+end
+
+function Memory:read_file(path, max_bytes)
+    local normalized, err = memory_path(self, path)
+    if not normalized then return nil, err end
+    if max_bytes ~= nil and
+       (type(max_bytes) ~= "number" or max_bytes < 0 or
+        max_bytes % 1 ~= 0 or max_bytes >= math.maxinteger) then
+        return nil, "read limit must be a nonnegative integer"
+    end
+    local contents = self.files[normalized]
+    if not contents then return nil, path_missing(path) end
+    -- Like the host strategy, return one byte beyond a caller's bound.
+    if max_bytes ~= nil then return contents:sub(1, max_bytes + 1) end
+    return contents
+end
+
+function Memory:write_file(path, contents)
+    local normalized, err = memory_path(self, path)
+    if not normalized then return nil, err end
+    if type(contents) ~= "string" then return nil, "file contents must be a string" end
+    if not self.directories[memory_parent(normalized)] then return nil, path_missing(path) end
+    if self.directories[normalized] then return nil, "cannot write directory '" .. path .. "'" end
+    self.files[normalized] = contents
+    return true
+end
+
+function Memory:list(path)
+    local normalized, err = memory_path(self, path)
+    if not normalized then return nil, err end
+    if not self.directories[normalized] then return nil, path_missing(path) end
+    local entries = {}
+    for _, set in ipairs({ self.files, self.directories }) do
+        for candidate in pairs(set) do
+            local parent, leaf = memory_parent(candidate)
+            if parent == normalized and candidate ~= "/" then entries[#entries + 1] = leaf end
+        end
+    end
+    table.sort(entries)
+    return entries
+end
+
+function Memory:mkdir(path)
+    local normalized, err = memory_path(self, path)
+    if not normalized then return nil, err end
+    if self.files[normalized] or self.directories[normalized] then
+        return nil, "path already exists: " .. path
+    elseif not self.directories[memory_parent(normalized)] then
+        return nil, path_missing(path)
+    end
+    self.directories[normalized] = true
+    return true
+end
+
+function Memory:unlink(path)
+    local normalized, err = memory_path(self, path)
+    if not normalized then return nil, err end
+    if not self.files[normalized] then return nil, path_missing(path) end
+    self.files[normalized] = nil
+    return true
+end
+
+function Memory:rmdir(path)
+    local normalized, err = memory_path(self, path)
+    if not normalized then return nil, err end
+    local entries, list_err = self:list(normalized)
+    if not entries then return nil, list_err end
+    if #entries > 0 or normalized == "/" then return nil, "directory not empty: " .. path end
+    self.directories[normalized] = nil
+    return true
+end
+
+-- POSIX replacement semantics: a file replaces a file, a directory replaces
+-- an empty directory and moves with everything below it.
+function Memory:rename(from, to)
+    local source, source_err = memory_path(self, from)
+    if not source then return nil, source_err end
+    local target, target_err = memory_path(self, to)
+    if not target then return nil, target_err end
+    local is_file = self.files[source] ~= nil
+    if not is_file and not self.directories[source] then return nil, path_missing(from) end
+    if source == target then return true end
+    if not self.directories[memory_parent(target)] then return nil, path_missing(to) end
+    if is_file then
+        if self.directories[target] then return nil, "cannot replace directory '" .. to .. "' with a file" end
+        self.files[target], self.files[source] = self.files[source], nil
+        return true
+    end
+    local prefix = source .. "/"
+    if source == "/" or target:sub(1, #prefix) == prefix then
+        return nil, "cannot move directory '" .. from .. "' into itself"
+    elseif self.directory == source or self.directory:sub(1, #prefix) == prefix then
+        return nil, "cannot move directory '" .. from .. "' holding the working directory"
+    elseif self.files[target] then
+        return nil, "cannot replace file '" .. to .. "' with a directory"
+    elseif self.directories[target] and #self:list(target) > 0 then
+        return nil, "directory not empty: " .. to
+    end
+    local files, directories = {}, {}
+    for name, contents in pairs(self.files) do
+        if name:sub(1, #prefix) == prefix then files[name] = contents end
+    end
+    for name in pairs(self.directories) do
+        if name == source or name:sub(1, #prefix) == prefix then directories[name] = true end
+    end
+    for name in pairs(files) do self.files[name] = nil end
+    for name in pairs(directories) do self.directories[name] = nil end
+    for name, contents in pairs(files) do self.files[target .. name:sub(#source + 1)] = contents end
+    for name in pairs(directories) do self.directories[target .. name:sub(#source + 1)] = true end
+    return true
+end
+
+function Memory:tmpname()
+    local made, err = memory_directory(self, "/.titan-temporary")
+    if not made then return nil, err end
+    local path
+    repeat
+        self.temporaries = self.temporaries + 1
+        path = "/.titan-temporary/" .. self.temporaries
+    until not self.files[path] and not self.directories[path]
+    self.files[path] = ""
+    return path
+end
+
+function Memory:run()
+    return { started = false, ok = false,
+        diagnostic = "this compiler has no host processes" }
+end
+
+function Memory:yield() end
+
+function compiler_io.new_memory(options)
+    options = options or {}
+    local strategy = setmetatable({ files = {}, directories = { ["/"] = true },
+        directory = "/", temporaries = 0 }, Memory)
+    if options.cwd ~= nil then
+        local cwd, err = memory_path(strategy, options.cwd)
+        if not cwd or options.cwd:sub(1, 1) ~= "/" then
+            error("in-memory cwd must be an absolute path: " .. tostring(err or options.cwd), 2)
+        end
+        strategy.directory = cwd
+    end
+    for path, contents in pairs(options.files or {}) do
+        local normalized, err = memory_path(strategy, path)
+        if not normalized or normalized == "/" or type(contents) ~= "string" then
+            error("invalid in-memory file " .. string.format("%q", tostring(path)) .. ": " ..
+                tostring(err or "contents must be a string"), 2)
+        end
+        if strategy.files[normalized] then
+            error("invalid in-memory file " .. string.format("%q", path) .. ": names " .. normalized .. " twice", 2)
+        end
+        strategy.files[normalized] = contents
+    end
+    -- Directories come after every file, so a file named as another's
+    -- ancestor (or as the working directory) is refused in any order.
+    local directories = { strategy.directory }
+    for normalized in pairs(strategy.files) do directories[#directories + 1] = (memory_parent(normalized)) end
+    for _, directory in ipairs(directories) do
+        local made, err = memory_directory(strategy, directory)
+        if not made then error("invalid in-memory tree: " .. err, 2) end
+    end
+    return strategy
+end
+
 return compiler_io

@@ -151,6 +151,8 @@ cp out/hello.wasm out/hello.wasm.trace site-assets/assets/
 </html>
 ```
 
+`directory` is the URL of the folder holding the `.mjs`. A module evaluated from an opaque URL, such as a `blob:` or `data:` URL that a page builds from fetched bytes, has no folder: there `create` requires a `locateFile`, which then receives an empty `directory`.
+
 ### Using a bundler
 
 Generated images reference `hello.wasm` and `hello.wasm.trace` through standard `new URL(..., import.meta.url)` expressions recognized by bundlers such as [Vite](https://vite.dev/):
@@ -375,7 +377,7 @@ All async methods (`initialize`, `run`, `call`, `callTask`, `drain`, `dispose`) 
 | `stdin` | Function called per `os.stdin` read, returning a `Uint8Array`, `null`/`undefined`, or a Promise of one. |
 | `stdinKind`, `stdoutKind`, `stderrKind` | Optional declared stream kind strings reported by `os.InputStream:kind()` / `OutputStream:kind()`. |
 | `stdoutEnd`, `stderrEnd` | Optional hooks called when Titan finishes (`shutdown()`) `os.stdout` or `os.stderr`. |
-| `locateFile(name, directory)` | Custom URL resolver for `<stem>.wasm` and `<stem>.wasm.trace`. |
+| `locateFile(name, directory)` | Custom URL resolver for `<stem>.wasm` and `<stem>.wasm.trace`; `directory` is the module's folder URL, or `""` for a module evaluated from an opaque (`blob:` or `data:`) URL. |
 | `requireTrace` | If `true` (default `false`), fail initialization if `<stem>.wasm.trace` cannot be loaded or mismatches. |
 | `bindings` | Object of explicit per-instance JS functions/values for `browser.binding(name)` (names starting with `titan:` are reserved). |
 | `imports` | Plain object (ordinary or null-prototype, from any realm; module maps must also be plain objects) or `(context) => importObject` supplying user WebAssembly imports declared by `--c-source` or C headers (`wasi_snapshot_preview1.*`, `env.titan_browser_*`, and `env.titan_mco_*` are reserved; invalid/reserved object forms throw `TypeError` synchronously in `create()`, while invalid/reserved function forms reject `initialize()`/`run()` with `TITAN_BROWSER_PROTOCOL` whose `cause` is that `TypeError`). |

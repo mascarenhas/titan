@@ -6348,6 +6348,14 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.equal(1, count_literal(pack_gate, contract), contract)
             end
+            local playground_gate = named_step(browser_stdlib_job, "Build and check the browser playground bundle")
+            for _, contract in ipairs({
+                "if: matrix.shard == 'scheduler'",
+                'export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"',
+                'make playground-sdk PREFIX="$PREFIX" PLAYGROUND_OUT="$RUNNER_TEMP/playground"',
+            }) do
+                assert.equal(1, count_literal(playground_gate, contract), contract)
+            end
             local stdlib_gate_step = step_containing(browser_stdlib_job,
                 '"$PREFIX/bin/busted" -c -o gtest -v')
             assert.truthy(stdlib_gate_step:find(
@@ -6386,6 +6394,7 @@ printf '%s\n' "${schedule[@]}"
                     "spec/browser_isolation_spec.lua",
                     "spec/coder/browser_stdlib_closure_spec.lua",
                     "spec/coder/browser_protocol_spec.lua",
+                    "spec/playground_spec.lua",
                 } },
             }) do
                 local actual = {}

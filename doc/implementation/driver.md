@@ -528,6 +528,7 @@ created.
 | `cache_adapter`, `header_inputs`, `c_header_analysis` | Persistent cache callbacks (default: the digest-only native adapter when available), host-validated input observations, and the per-analysis header-validation token; see [Cache adapter and persistent payloads](#cache-adapter-and-persistent-payloads). |
 | `embedded_interface_provider` | Trusted host ABI/type inventory; see [Embedded interface provider and target profile](#embedded-interface-provider-and-target-profile). |
 | `analysis_only`, `completion`, `completion_closed_world`, `transient_caches` | Semantic-analysis modes; see [Analysis loader options](#analysis-loader-options) and [Completion](completion.md). |
+| `browser_analysis_target`, `emit_c_only` | A [browser analysis handle](#browser-analysis-target) replacing the descriptor; the context is then `analysis_only` or, with `emit_c_only = true`, an [emit-only context](playground-bundle.md#emitting-c-without-a-toolchain) that checks with the compiled-module ABI and renders C in memory through `driver.emit_module_c`. Exactly one of the two modes, no `output_root`, and (when emitting) no completion options. |
 | `source_process_trace`, `c_header_process_trace`, `c_probe_cache_trace`, `c_probe_semantic_trace`, `c_probe_execution_trace` | Best-effort observers; see [Observability callbacks](#observability-callbacks). |
 | `jobs` | The invocation's local native job cap (`titanc` passes its resolved `--jobs`). Above one, ordinary checks of this resolver may batch body-phase acceptance C probes under that cap; absent or one keeps every probe synchronous. See [GNU Make jobserver participation](#gnu-make-jobserver-participation). |
 | `frontend` | Path of the executing `titanc` script (`arg[0]`), or `"api"` when omitted; hashed into the `compiler` component of the incremental configuration certificate. |
@@ -953,6 +954,15 @@ and scans the real Wasm archive, checking its C profile, target fingerprint,
 ABI and interfaces. It neither starts a process nor activates a registry.
 The handle exposes the content-derived `identity`, the SDK `directory` and
 the physical `provider_file`.
+
+`options.catalog` replaces the archive: bytes from
+`driver.browser_analysis_catalog(handle)` of a handle scanned from the same
+archive, bound to `analysis-target`'s provider digest and the compiled-module
+ABI, rehydrate the identical handle without reading `titan.a`; its
+`provider_file` is the archive's would-be path. See [the semantic
+catalog](playground-bundle.md#the-semantic-catalog).
+`driver.browser_analysis_modules(handle)` lists the provider's logical modules,
+bytewise sorted, for hosts that offer import names.
 
 Use `driver.new_resolver_context{target = "browser", analysis_only = true,
 browser_analysis_target = handle}` with this handle for saved checks,
@@ -1380,6 +1390,18 @@ Every resolver context owns exactly one validated compiler-I/O strategy in
 Omitting it constructs the canonical synchronous Lua implementation from
 `titan-compiler/io.lua`, so ordinary compiler callers retain blocking behavior.
 Missing or non-callable methods are rejected while the context is created.
+
+`compiler_io.new_memory({ files = { [absolute path] = bytes }, cwd = "/" })`
+is an owned in-memory strategy for hosts without a filesystem (the
+[playground compiler](playground-bundle.md#the-compiler-wasm)). One name is
+never both a file and a directory: the constructor refuses a file named as
+another file's ancestor, as the working directory or twice. Directories are
+implied by files or created with `mkdir`, writes stay in memory, `stat` reports
+coarse zero timestamps, `read_file` validates its bound as every strategy
+does, `rename` replaces a file or an empty directory and moves a directory
+with everything below it (never into itself or holding the working
+directory), `tmpname` reserves a fresh unused name under `/.titan-temporary`,
+and `run` never starts a process (`started = false`).
 
 The following is the complete normative language-server strategy contract. Signatures use Lua multiple-return notation. Every table that crosses
 this boundary is an ordinary Lua table: implementations must not expose

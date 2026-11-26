@@ -87,6 +87,22 @@ browser-semantic-pack: ## Package an installed browser SDK's semantic assets and
 	  --git-root $(call make_shell_quote,$(call BROWSER_PACK_PATH,$(PACK_GIT_ROOT))) \
 	  --profile $(call make_shell_quote,$(TITAN_BUILD_PROFILE))
 
+PLAYGROUND_OUT ?= $(TITAN_OUTPUT_DIR)/playground
+TITAN_PLAYGROUND_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/playground-build
+.PHONY: playground-sdk
+# Implementation notes: doc/implementation/playground-bundle.md
+playground-sdk: ## Build the browser playground compiler and its link-only SDK bundle into PLAYGROUND_OUT
+	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
+	$(BROWSER_SDK_ENV) TITAN_JOBS=$(call make_shell_quote,$(TITAN_JOBS)) \
+	$(call make_shell_quote,$(TITAN_LUA)) -E scripts/playground_sdk.lua \
+	  $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(TITAN_PLAYGROUND_BUILD_DIR))) \
+	  $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(PLAYGROUND_OUT))) \
+	  $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,.)) \
+	  $(foreach source,$(TITAN_RUNTIME_SOURCES),--runtime-source $(call make_shell_quote,$(source))) \
+	  $(foreach source,$(BROWSER_LPEGLABEL_SOURCES),--lpeglabel-source $(call make_shell_quote,$(source))) \
+	  $(BROWSER_STDLIB_ROOTS)
+
 # Implementation notes: doc/implementation/build-script-audit.md#installation-and-publication
 uninstall-browser-sdk: ## Remove the files browser-sdk installed, keeping other files in their directory
 	$(call make_shell_quote,$(TITAN_LUA)) -E scripts/titan_install.lua uninstall-browser-sdk \

@@ -776,7 +776,8 @@ jobs:
       matrix:
         include:
           # Hosted file times plus the same-host init-gate speedup estimate:
-          # sdk ~21.2 minutes including its core suite, scheduler ~21.4.
+          # sdk ~21.2 minutes including its core suite, scheduler ~21.4 before
+          # its playground spec and bundle check were added (not yet measured).
           - shard: sdk
             stdlib-suite: true
             gate-specs: >-
@@ -797,6 +798,7 @@ jobs:
               spec/browser_isolation_spec.lua
               spec/coder/browser_stdlib_closure_spec.lua
               spec/coder/browser_protocol_spec.lua
+              spec/playground_spec.lua
     permissions:
       contents: read
       # The browser gate uploads its own compiler coverage report.
@@ -1021,6 +1023,16 @@ jobs:
           done
           "$PREFIX/bin/busted" -c -o gtest -v "${gate_specs[@]}" \
             2>&1 | tee "$RUNNER_TEMP/browser-stdlib-gate.log"
+
+      # The bundle's own check (scripts/playground_smoke.mjs) drives the real
+      # titanc.wasm adapter: operations, failure recovery and disposal.
+      - name: Build and check the browser playground bundle
+        if: matrix.shard == 'scheduler'
+        run: |
+          set -euo pipefail
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
+          make playground-sdk PREFIX="$PREFIX" PLAYGROUND_OUT="$RUNNER_TEMP/playground" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playground.log"
 
       - name: Generate browser SDK and stdlib coverage report
         run: |

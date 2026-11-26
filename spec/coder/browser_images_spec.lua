@@ -255,11 +255,41 @@ describe("browser image profile and SDK readiness", function()
         -- Both resources stay visible to bundlers as `new URL` literals.
         assert.truthy(embedded:find('new URL("app.wasm.trace", import.meta.url).href', 1, true), embedded)
         assert.truthy(embedded:find('new URL("app.wasm", import.meta.url).href', 1, true), embedded)
-        assert.truthy(embedded:find('return titanCreate(instantiate, {...options, locateFile}, {identity: "' ..
-            IDENTITY .. '", wasm: "app.wasm", directory: new URL(\'.\', import.meta.url).href});', 1, true),
+        -- A hierarchical module URL keeps its directory; an opaque one with a
+        -- caller locateFile binds an empty directory instead of throwing.
+        assert.truthy(embedded:find("  const directory = options.locateFile != null && " ..
+            "!URL.canParse('.', import.meta.url) ? '' :\n    new URL('.', import.meta.url).href;\n", 1, true),
             embedded)
+        assert.truthy(embedded:find('return titanCreate(instantiate, {...options, locateFile}, {identity: "' ..
+            IDENTITY .. '", wasm: "app.wasm", directory});', 1, true), embedded)
         local _, exports = embedded:gsub("export ", "")
         assert.equal(1, exports)
+    end)
+
+    it("binds an empty directory only for an opaque module URL with a caller locateFile", function()
+        local info, why = toolchain.require({ node = true }); if not info then pending(why) return end
+        local module = assert(browserlink.embed(FACTORY, LOADER, "app.wasm", IDENTITY))
+        local directory = temporary.name(); assert(os.remove(directory)); files.mkdir(directory)
+        local filename = directory .. "/app.mjs"
+        files.write(filename, module)
+        local result = run({ info.node.path, "--input-type=module", "-e", [[
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+const file = pathToFileURL(process.argv[1]);
+const locateFile = (name, directory) => `memory:${directory}${name}`;
+const hierarchical = (await import(file.href)).default;
+assert.equal(hierarchical().image.directory, new URL('.', file).href);
+assert.equal(hierarchical({locateFile}).image.directory, new URL('.', file).href);
+const source = await readFile(file, 'utf8');
+const opaque = (await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'))).default;
+const located = opaque({locateFile});
+assert.equal(located.image.directory, '');
+assert.equal(located.options.locateFile('app.wasm', located.image.directory), 'memory:app.wasm');
+assert.throws(() => opaque(), TypeError);
+]], filename })
+        files.remove(directory)
+        assert.is_true(result.ok, result.output or result.diagnostic)
     end)
 
     it("rejects unsupported factory and loader surfaces before image publication", function()

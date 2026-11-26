@@ -834,6 +834,34 @@ function toplevel_name(node)
     end
 end
 
+-- Whether an explicit source import brings C declarations into the
+-- importer's environment: a foreign-function header, or a direct foreign
+-- include or foreign typedef anywhere in its generated `.ffi.h` closure. A
+-- closure of pure Titan modules generates headers holding only guards and
+-- includes of each other, so its C environment is empty and needs no C
+-- toolchain. A descriptor without its declaration plan counts as C.
+local function source_import_declares_c(node)
+    if node._foreign_header then return true end
+    local pending, seen = { node._ffi_header_descriptor }, {}
+    if not pending[1] then return true end
+    while #pending > 0 do
+        local descriptor = table.remove(pending)
+        if not seen[descriptor] then
+            seen[descriptor] = true
+            if type(descriptor.direct_includes) ~= "table" or
+               type(descriptor.typedef_declarations) ~= "table" or
+               type(descriptor.dependencies) ~= "table" or
+               #descriptor.direct_includes > 0 or #descriptor.typedef_declarations > 0 then
+                return true
+            end
+            for _, dependency in ipairs(descriptor.dependencies) do
+                pending[#pending + 1] = dependency
+            end
+        end
+    end
+    return false
+end
+
 -- One namespace is established from the real ordered module header. Foreign
 -- directives carry include metadata only; they do not bind ordinary symbols.
 function check_foreign_environment(module_ast, st, errors)
@@ -853,7 +881,7 @@ function check_foreign_environment(module_ast, st, errors)
                 st._native_record_fields_enabled = true
             end
         elseif not node._ignore and node._tag == "Ast.TopLevelImport"
-               and node._source_import then
+               and node._source_import and source_import_declares_c(node) then
             has_source = true
         end
     end

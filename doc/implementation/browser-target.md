@@ -2481,9 +2481,14 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    in the factory to plain `function NAME(`, removes the factory's trailing
    `export default IDENT;`, encloses the loader, and installs the single
    `export default function create(options)` wrapper binding `{identity, wasm,
-   directory: new URL('.', import.meta.url).href}` with bundler-visible
+   directory}` with bundler-visible
    `new URL("<basename>.wasm" | "<basename>.wasm.trace", import.meta.url)`
-   expressions (honoring caller `locateFile(name, directory)`). Both factory
+   expressions (honoring caller `locateFile(name, directory)`). `directory` is
+   `new URL('.', import.meta.url).href`, except that a module evaluated from an
+   opaque URL (`URL.canParse('.', import.meta.url)` is false: `blob:` and
+   `data:` modules, which the playground builds from verified bytes) binds `''`
+   when the caller supplies `locateFile`; without one, such a module still
+   fails in `create`, since neither default URL can resolve. Both factory
    and loader digests participate in image/certificate identity. Then run
    `before_commit` (which invalidates the link record);
 9. validate that any existing destination in `{ <stem>.wasm.trace,

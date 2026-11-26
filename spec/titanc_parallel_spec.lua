@@ -548,6 +548,8 @@ describe("titanc command-line orchestration", function()
     it("rejects contradictory command-line modes before creating a resolver", function()
         local compile_only_conflict = "--compile-only cannot be combined with -l, -L, " ..
             "--ldflag, -X, or --no-uv-bootstrap"
+        local no_records_conflict = "--no-source-records cannot be combined with --incremental, " ..
+            "--compile-only or --print-ast"
         for _, case in ipairs({
             { { "--print-c-objects", "app" },
               "--print-c-objects requires --compile-only and at least one --c-source" },
@@ -561,6 +563,9 @@ describe("titanc command-line orchestration", function()
               "--test-dir and --test-exclude require --test" },
             { { "--test", "--test-exclude", "app_test", "app" },
               "--test-exclude requires --test-dir" },
+            { { "--no-source-records", "--incremental", "app" }, no_records_conflict },
+            { { "--no-source-records", "-c", "app" }, no_records_conflict },
+            { { "--no-source-records", "--print-ast", "app" }, no_records_conflict },
         }) do
             local diagnostics, observed = run_titanc(command_line(case[1]))
             assert.equal(case[2] .. "\n", diagnostics)

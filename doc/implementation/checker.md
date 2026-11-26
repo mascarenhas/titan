@@ -1146,6 +1146,10 @@ type_members)`. Direct functions keep `Type.CFunction`; function-pointer
 values keep `Type.CPointer(Type.CFunction)`; neither is projected to
 `Type.Function`. C type declarations become `type_members`, which allows
 annotations such as `foreign size_t` ([FFI internals](ffi-internals.md)).
+Explicit source dependencies whose closure declares no C (pure Titan modules)
+do not start that processing: the module then needs no probe service and its
+`ffi` namespace stays empty ([C environment
+inheritance](source-import-visibility.md#combined-c-environment-inheritance)).
 
 Before conversion, the complete TypeList supplies syntactic typedef-name and
 file-scope tag metadata. A named tag-only struct/union with no same-name real

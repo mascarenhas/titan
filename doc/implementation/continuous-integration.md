@@ -372,8 +372,8 @@ disk-space step:
 The browser target's spec files (`spec/browser_isolation_spec.lua`,
 `spec/browser_target_spec.lua`, `spec/browser_sdk_spec.lua`,
 `spec/browser_stdlib_spec.lua`, `spec/browser_trace_map_spec.lua`,
-`spec/wasm_toolchain_spec.lua`, and the `spec/coder/browser_*_spec.lua`
-files) are also ordinary rows of `spec/support/ci_compiler_test_groups.txt`
+`spec/wasm_toolchain_spec.lua`, `spec/playground_spec.lua`, and the
+`spec/coder/browser_*_spec.lua` files) are also ordinary rows of `spec/support/ci_compiler_test_groups.txt`
 and run in the covered compiler shards against the SDK-only prefix. There,
 without `wasi-sdk`, Binaryen, Node, Chrome, or a browser SDK, every
 real-toolchain case is pending and the synthesized cases run (all of
@@ -430,7 +430,7 @@ installed browser SDK and a Git checkout containing the pinned objects.
    | Shard | Spec files (`spec/`-relative) |
    | --- | --- |
    | `sdk` | `coder/browser_bridge_spec.lua`, `coder/browser_stdlib_gate_spec.lua`, `coder/browser_entry_gate_spec.lua`, `coder/browser_images_spec.lua`, `coder/browser_net_spec.lua`, `minicoro_spec.lua`, `coder/browser_fixtures_spec.lua`, `coder/browser_providers_spec.lua` |
-   | `scheduler` | `coder/browser_scheduler_spec.lua`, `coder/browser_incremental_spec.lua`, `browser_sdk_spec.lua`, `browser_isolation_spec.lua`, `coder/browser_stdlib_closure_spec.lua`, `coder/browser_protocol_spec.lua` |
+   | `scheduler` | `coder/browser_scheduler_spec.lua`, `coder/browser_incremental_spec.lua`, `browser_sdk_spec.lua`, `browser_isolation_spec.lua`, `coder/browser_stdlib_closure_spec.lua`, `coder/browser_protocol_spec.lua`, `playground_spec.lua` |
 
    The CI-contract spec requires these lists to cover the full gate exactly
    once, without overlap, and the core suite to run only in `sdk`. A missing
@@ -447,13 +447,20 @@ installed browser SDK and a Git checkout containing the pinned objects.
    stream/environment harness. The scheduler and network specs require every
    test of their owners that the status inventory names to have passed
    ([test evidence](browser-target.md#subset-parity-gate)).
-10. **Browser SDK and stdlib compiler coverage.** Each shard runs the same
+10. **Playground bundle (`scheduler` only).** With `WASI_SDK_PATH` and
+    `BINARYEN_ROOT` set, `make playground-sdk PREFIX="$PREFIX"
+    PLAYGROUND_OUT="$RUNNER_TEMP/playground"` builds the
+    [playground bundle](playground-bundle.md) from the shard's validation
+    prefix, output copied to `$RUNNER_TEMP/browser-playground.log`. The
+    recipe ends with `scripts/playground_smoke.mjs`, which drives the real
+    `titanc.wasm` through its adapter.
+11. **Browser SDK and stdlib compiler coverage.** Each shard runs the same
     report commands and uploads its own `luacov.codecov.out` with
     `name: browser-stdlib-${{ matrix.shard }}` and `flags: compiler`.
     Codecov merges both with the other compiler uploads, so the real provider,
     image, SDK, and executing-protocol paths that are pending in the
     toolchain-free shards are measured.
-11. **Failure logs.** On failure, `actions/upload-artifact` uploads each
+12. **Failure logs.** On failure, `actions/upload-artifact` uploads each
     shard's evidence as `browser-stdlib-${{ matrix.shard }}-failure` for seven
     days: the `browser-*.log` files and, when present, the browser core stdlib
     suite's evidence: `out/browser-stdlib/*.log` (the
