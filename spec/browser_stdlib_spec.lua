@@ -43,7 +43,7 @@ plan:
 
     local function source_check(root)
         -- Restore a validated descriptor exactly as a worker does: source
-        -- resolution needs no Emscripten discovery or compiler invocation.
+        -- resolution needs no wasi-sdk discovery or compiler invocation.
         local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
         local context = driver._new_resolver_context({ io = strategy, target = "browser" }, descriptor)
         local called, ok, err = pcall(checks.check_sources, context, root)
@@ -333,9 +333,8 @@ plan:
     end
     local completion = { "env", "titan_browser_complete", { "i32" }, {} }
     local clock = { "wasi_snapshot_preview1", "clock_time_get", { "i32", "i64", "i32" }, { "i32" } }
-    local fixture_sleep = { "env", "emscripten_sleep", { "i32" }, {} }
-    local fixture_click = { "env", "emscripten_set_click_callback_on_thread",
-        { "i32", "i32", "i32", "i32", "i32" }, { "i32" } }
+    local fixture_sleep = { "env", "fixture_sleep", { "i32" }, {} }
+    local fixture_click = { "env", "titan_test_set_click_callback", { "i32", "i32", "i32" }, { "i32" } }
 
     it("accepts an image whose imports the reviewed allowlist lists for its classes", function()
         assert.is_true(checks.check_imports(import_image({ completion, clock }), "entry.wasm", { "entry" }))
@@ -365,18 +364,18 @@ plan:
     it("keeps a test fixture's imports out of entry images and other fixtures' images", function()
         local ok, err = checks.check_imports(import_image({ completion, fixture_sleep }), "program.wasm", { "entry" })
         assert.is_nil(ok)
-        assert.truthy(err:find("unlisted browser import env.emscripten_sleep (i32)->() (classes entry)", 1, true), err)
+        assert.truthy(err:find("unlisted browser import env.fixture_sleep (i32)->() (classes entry)", 1, true), err)
         ok, err = checks.check_imports(import_image({ completion, fixture_click }), "trace.wasm",
             { "entry", "fixture:trace" })
         assert.is_nil(ok)
-        assert.truthy(err:find("unlisted browser import env.emscripten_set_click_callback_on_thread " ..
-            "(i32,i32,i32,i32,i32)->(i32) (classes entry,fixture:trace)", 1, true), err)
+        assert.truthy(err:find("unlisted browser import env.titan_test_set_click_callback " ..
+            "(i32,i32,i32)->(i32) (classes entry,fixture:trace)", 1, true), err)
         assert.is_true(checks.check_imports(import_image({ completion, fixture_click }), "counter.wasm",
-            { "entry", "fixture:html5" }))
+            { "entry", "fixture:click" }))
     end)
 
     it("rejects an empty or unknown class list and malformed or duplicate allowlist rows", function()
-        local row = { "entry", "env", "f", "()->()", provider = "titan-browser-library.js", reason = "test" }
+        local row = { "entry", "env", "f", "()->()", provider = "titan-wasm-factory.mjs", reason = "test" }
         local function allowlist(rows) return { classes = { entry = "every image" }, imports = rows } end
         local image = import_image({})
         local ok, err = checks.check_imports(image, "x.wasm", {}, allowlist({ row }))

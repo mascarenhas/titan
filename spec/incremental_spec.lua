@@ -109,7 +109,7 @@ describe("browser generated C preprocessing", function()
             local output = "C:/temporary.i"
             local names = { reservation, output }
             ctx.target = "browser"
-            ctx.incremental_options = { compile_prefix = { "C:/tool/emcc.exe" } }
+            ctx.incremental_options = { compile_prefix = { "C:/tool/clang.exe", "--target=wasm32-wasip1" } }
             function ctx.io:tmpname()
                 local name = assert(table.remove(names, 1))
                 storage[name] = ""

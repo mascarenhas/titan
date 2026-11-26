@@ -11,16 +11,22 @@ local version = require "titan-compiler.version"
 local util = require "titan-compiler.util"
 local M = {}
 
-M.EMSCRIPTEN_VERSION = "6.0.13"
+M.WASI_SDK_VERSION = "34.0"
+M.BINARYEN_VERSION = "133"
 local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling " ..
     "+multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
-local TRIPLE = "wasm32-unknown-emscripten"
+local TRIPLE = "wasm32-wasip1"
+-- wasi-sdk's setjmp/longjmp lowering: Wasm exception handling in the standard
+-- (exnref) encoding, which LLVM does not select by default.
+local SJLJ = "wasm-exnref"
+local SJLJ_FLAGS = { "-mexception-handling", "-mllvm", "-wasm-enable-sjlj",
+    "-mllvm", "-wasm-use-legacy-eh=false" }
 local FINGERPRINT = { format = "wasm", word_size = 32, linking_version = 2, features = FEATURES }
 local ANALYSIS_LIMIT = 64 * 1024
 M.SDK_HEADERS = { "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h", "titan/browser.h" }
-local BANNER = "# Lua 5.5.1 browser build record v1\n"
+local BANNER = "# Lua 5.5.1 browser build record v2\n"
 local RECORD_KEYS = { "fork_revision", "archive_sha256", "headers_sha256",
-    "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
+    "wasi_sdk_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
 local TARGET_DEFINES = {
     "-DTITAN_TARGET_BROWSER=1",
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
@@ -44,7 +50,7 @@ end
 
 -- The owned object compile flags of one build profile. Every consumer compiles
 -- from the descriptor, so this list is the single source of the object profile.
--- Emscripten -g2 preserves names but strips object line tables (D14).
+-- The DWARF v4 line tables are the trace's only source (browsertrace.dwarf_map).
 function M.object_flags(build_profile)
     local profile = PROFILES[build_profile]
     if not profile then return nil end
@@ -53,18 +59,18 @@ function M.object_flags(build_profile)
     flags[#flags + 1] = "-Wall"
     flags[#flags + 1] = "-Wno-unused-but-set-variable"
     flags[#flags + 1] = "-Wno-unused-function"
+    flags[#flags + 1] = "-gdwarf-4"
     flags[#flags + 1] = "-gline-tables-only"
-    flags[#flags + 1] = "-sSUPPORT_LONGJMP=wasm"
-    flags[#flags + 1] = "-sWASM_LEGACY_EXCEPTIONS=1"
+    for _, flag in ipairs(SJLJ_FLAGS) do flags[#flags + 1] = flag end
+    flags[#flags + 1] = "-D_WASI_EMULATED_PROCESS_CLOCKS"
     return flags
 end
 
 -- All browser compiler execution goes through this argv policy, including
--- probes and coordinator jobs. Keep the frozen tools.cc as the raw executable.
-function M.compiler_argv(cc)
-    local argv = { "env", "EMCC_CFLAGS=" }
-    for _, argument in ipairs(cc) do argv[#argv + 1] = argument end
-    return argv
+-- probes, links and coordinator jobs: the frozen clang, the target and the
+-- SDK's sysroot, whatever its configuration file says.
+function M.compiler_argv(tools)
+    return { tools.cc[1], "--target=" .. TRIPLE, "--sysroot=" .. tools.sysroot }
 end
 
 local function hex(value, length)
@@ -146,21 +152,21 @@ local function lua_defines(value)
     if not text(value) or not utf8.len(value) then return nil, "text encoding" end
     local defines, err = canonical_words(value)
     if not defines then return nil, err end
-    local previous, browser, posix
+    local previous, browser
     for _, flag in ipairs(defines) do
         local name = flag:match("^%-D([A-Za-z_][A-Za-z0-9_]*)$") or
             flag:match("^%-D([A-Za-z_][A-Za-z0-9_]*)=[^%s]+$")
         if not name or previous and not util.bytewise_less(previous, flag) then
             return nil, "expected sorted unique -D tokens"
         end
-        if name == "LUA_USE_DLOPEN" or name == "LUA_USE_LINUX" or name == "LUA_USE_MACOSX" then
+        if name == "LUA_USE_POSIX" or name == "LUA_USE_DLOPEN" or name == "LUA_USE_LINUX" or
+                name == "LUA_USE_MACOSX" then
             return nil, name .. " is unavailable for browser Lua"
         end
         if name == "LUA_USE_BROWSER" then browser = true end
-        if name == "LUA_USE_POSIX" then posix = true end
         previous = flag
     end
-    if not (browser and posix) then return nil, "requires LUA_USE_BROWSER and LUA_USE_POSIX" end
+    if not browser then return nil, "requires LUA_USE_BROWSER" end
     return defines
 end
 
@@ -168,7 +174,7 @@ local function lua_numeric(profile)
     return "integer=" .. profile.lua_integer .. ",float=" .. profile.lua_number
 end
 
--- These are physical C ABI traits of the pinned wasm32 Emscripten target,
+-- These are physical C ABI traits of the pinned wasm32-wasip1 target,
 -- not defaults from the analysis host. Lua's typedefs are separately
 -- configurable and compared to the validated browser Lua record.
 local function validate_browser_profile(profile, numeric)
@@ -222,22 +228,9 @@ local function tool_path(directory, name)
     return compiler_paths.join(directory, name)
 end
 
--- Match emcc 6.0.13's joined/split settings, bare =1 and boolean NO_ aliases.
-local function setting_value(flags, index, name)
-    local flag = flags[index]
-    local setting = flag:match("^%-s(.+)$") or flag == "-s" and flags[index + 1]
-    if not setting then return nil end
-    local key, value = setting:match("^([%w_]+)=(.*)$")
-    if not key then key, value = setting, "1" end
-    if key == name then return value end
-    if key == "NO_" .. name then
-        return value == "0" and "1" or value == "1" and "0" or ""
-    end
-end
-
-local function longjmp_mode(flags, index)
-    local mode = setting_value(flags, index, "SUPPORT_LONGJMP")
-    return mode == "1" and "emscripten" or mode
+local function sdk_path(root, ...)
+    for _, name in ipairs({ ... }) do root = platform.join(root, name) end
+    return root
 end
 
 local validate_record
@@ -251,7 +244,7 @@ local validate_record
 local function check_owned_tail(flags, first, trace_control, build_profile)
     local override
     for index = first, #flags do
-        local owned = M.owned_compile_option(flags, index)
+        local owned = M.trace_option(flags[index]) and flags[index]
         if owned then
             if trace_control and override == nil and owned:match("^%-O[0-3s]$") then
                 override = owned
@@ -279,17 +272,26 @@ local function validate(data, context)
         return nil, "invalid browser target descriptor"
     end
     local tools = data.tools
-    if not fields(tools, { "cc", "ar", "ranlib", "version", "source", "location", "version_output" }) or
-        tools.version ~= M.EMSCRIPTEN_VERSION or (tools.source ~= "EMSDK" and tools.source ~= "PATH") or
-        not normalized_absolute(tools.location) or type(tools.version_output) ~= "string" then
+    if not fields(tools, { "cc", "ar", "ranlib", "sysroot", "version", "source", "location",
+            "version_output", "optimizer" }) or
+        tools.version ~= M.WASI_SDK_VERSION or (tools.source ~= "WASI_SDK_PATH" and tools.source ~= "PATH") or
+        not normalized_absolute(tools.location) or type(tools.version_output) ~= "string" or
+        tools.sysroot ~= sdk_path(tools.location, "share", "wasi-sysroot") then
         return nil, "invalid browser toolchain descriptor"
     end
-    for _, item in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
+    for _, item in ipairs({ { "cc", "clang" }, { "ar", "llvm-ar" }, { "ranlib", "llvm-ranlib" } }) do
         local command = tools[item[1]]
         if not argv(command) or #command ~= 1 or not normalized_absolute(command[1]) or
-            command[1] ~= tool_path(tools.location, item[2]) then
+            command[1] ~= tool_path(sdk_path(tools.location, "bin"), item[2]) then
             return nil, "invalid browser tool argv"
         end
+    end
+    local optimizer = tools.optimizer
+    if not fields(optimizer, { "argv", "version", "source", "version_output" }) or
+        optimizer.version ~= M.BINARYEN_VERSION or not argv(optimizer.argv) or #optimizer.argv ~= 1 or
+        not normalized_absolute(optimizer.argv[1]) or type(optimizer.version_output) ~= "string" or
+        (optimizer.source ~= "WASM_OPT" and optimizer.source ~= "BINARYEN_ROOT" and optimizer.source ~= "PATH") then
+        return nil, "invalid browser optimizer descriptor"
     end
     if not fields(data.paths, { "root", "lua_source", "include", "lib", "libtitan", "liblua",
             "lua_record", "titan_bin", "sdk_digests" }) then return nil, "invalid browser paths" end
@@ -309,8 +311,6 @@ local function validate(data, context)
             return nil, "inconsistent browser target defines"
         end
     end
-    local supported, flag_error = M.validate_flags(data.compile_flags, "compile_flags")
-    if not supported then return nil, flag_error end
     if data.trace_control ~= nil and type(data.trace_control) ~= "boolean" then
         return nil, "invalid browser target descriptor"
     end
@@ -325,6 +325,9 @@ local function validate(data, context)
                 " profile compile flags do not match its object profile"
         end
     end
+    local supported, flag_error = M.validate_flags({ table.unpack(data.compile_flags, #owned_flags + 1) },
+        "compile_flags")
+    if not supported then return nil, flag_error end
     local tail, tail_error = check_owned_tail(data.compile_flags,
         #owned_flags + 1, data.trace_control == true, data.build_profile)
     if not tail then return nil, tail_error end
@@ -413,7 +416,7 @@ function M.encode_analysis(context, descriptor, provider_sha256, absent_sha256)
     return M.encode_analysis_data(context, {
         target = data.label, triple = data.triple, fingerprint = copy(data.fingerprint),
         abi = version.TITAN_ABI_VERSION, release = version.TITAN_VERSION,
-        emscripten_version = data.tools.version, build_profile = data.build_profile,
+        wasi_sdk_version = data.tools.version, build_profile = data.build_profile,
         profile_data = profile_data,
         lua = {
             fork_revision = data.lua.record.fork_revision,
@@ -435,11 +438,11 @@ function M.decode_analysis(context, bytes)
     local data, err = graphcodec.decode(bytes, analysis_codec_options(context))
     if not data then return nil, err end
     if not fields(data, { "target", "triple", "fingerprint", "abi", "release",
-        "emscripten_version", "build_profile", "profile_data", "lua",
+        "wasi_sdk_version", "build_profile", "profile_data", "lua",
         "provider_sha256", "absent_sha256" }) or data.target ~= "browser" or
         data.triple ~= TRIPLE or data.abi ~= version.TITAN_ABI_VERSION or
         version.library_series(data.release) ~= version.TITAN_LIBRARY_VERSION or
-        data.emscripten_version ~= M.EMSCRIPTEN_VERSION or
+        data.wasi_sdk_version ~= M.WASI_SDK_VERSION or
         not M.valid_profile(data.build_profile) then
         return nil, "incompatible browser semantic target"
     end
@@ -461,13 +464,18 @@ function M.decode_analysis(context, bytes)
     return data
 end
 
+-- The target owns its triple, sysroot, execution model, exception handling
+-- and LLVM code-generation options; a trailing user option would change the
+-- setjmp/longjmp lowering or the ABI every archive shares. `-mllvm` and
+-- `-Xclang` reach the backend directly, and a configuration or response
+-- file could carry either.
 local UNSUPPORTED = { ["-fPIC"] = true, ["-fpic"] = true, ["-fPIE"] = true,
     ["-fpie"] = true, ["-pie"] = true, ["-shared"] = true, ["-dynamiclib"] = true,
     ["-rdynamic"] = true, ["-pthread"] = true, ["-ffat-lto-objects"] = true,
     ["-m32"] = true, ["-m64"] = true, ["-fwasm-exceptions"] = true,
     ["-fno-wasm-exceptions"] = true, ["-mexception-handling"] = true,
     ["-mno-exception-handling"] = true, ["-mlegacy-exception-handling"] = true,
-    ["-mno-legacy-exception-handling"] = true }
+    ["-mno-legacy-exception-handling"] = true, ["-mllvm"] = true, ["-target"] = true }
 
 -- Optimization, inlining, sibling-call, frame-pointer and debug choices belong
 -- to the build profile; internal descriptors contain them and trailing user
@@ -479,33 +487,17 @@ function M.trace_option(flag)
         positive:match("^%-fomit%-frame%-pointer")
 end
 
--- A compile-side spelling the build profile owns: the optimization, debug and
--- frame choices, and the trace-preserving Binaryen pass list. Both `-sKEY[=VALUE]` and the
--- two-token `-s KEY[=VALUE]` spellings count, with or without a value, and
--- `-sNO_KEY...` is the same setting.
-function M.owned_compile_option(flags, index)
-    local flag = flags[index]
-    if M.trace_option(flag) then return flag end
-    local setting = flag:match("^%-s(.+)$") or (flag == "-s" and flags[index + 1])
-    local key = setting and setting:match("^([%w_]+)")
-    if key and key:gsub("^NO_", "") == "BINARYEN_EXTRA_PASSES" then
-        return flag == "-s" and (flag .. " " .. (flags[index + 1] or "")) or flag
-    end
-    return nil
-end
-
 function M.validate_flags(flags, origin)
     if flags ~= nil and not argv(flags) then
         return nil, "invalid browser " .. origin .. " flags: expected a dense array of strings"
     end
-    for index, flag in ipairs(flags or {}) do
-        local longjmp = longjmp_mode(flags, index)
-        local legacy = setting_value(flags, index, "WASM_LEGACY_EXCEPTIONS")
+    for _, flag in ipairs(flags or {}) do
         if UNSUPPORTED[flag] or flag == "-flto" or flag:match("^%-flto=") or
             flag:match("^%-march=") or flag:match("^%-mcpu=") or flag:match("^%-mtune=") or
-            longjmp and longjmp ~= "wasm" or legacy and legacy ~= "1" then
-            local rejected = (longjmp or legacy) and flag == "-s" and flag .. " " .. flags[index + 1] or flag
-            return nil, "browser target does not support " .. origin .. " flag " .. string.format("%q", rejected)
+            flag:match("^%-mllvm=") or flag:match("^%-Xclang") or flag:match("^%-%-target=") or
+            flag:match("^%-%-sysroot") or flag:match("^%-mexec%-model") or flag:match("^%-%-config") or
+            flag:sub(1, 1) == "@" then
+            return nil, "browser target does not support " .. origin .. " flag " .. string.format("%q", flag)
         end
     end
     return true
@@ -556,7 +548,7 @@ local function tool_candidate(context, filename)
         -- An absent exact .exe may continue a PATH walk; an exact candidate
         -- with a resolution error stops it. A resolved name still has to
         -- launch at its execution boundary. Never accept libuv's appended
-        -- extension fallback: emcc is also run by MSYS env.
+        -- extension fallback.
         if stat_error then return nil, stat_error end
         if not info then return false end
         local ok, identity, selected = pcall(incremental.physical_executable, context, filename)
@@ -574,80 +566,159 @@ local function tool_candidate(context, filename)
         strategy:executable(filename) == true
 end
 
-local INSTALL = "; install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
-local function resolution_error(filename, reason)
-    return "browser target requires Emscripten 6.0.13: cannot resolve " ..
-        string.format("%q", filename) .. ": " .. reason .. INSTALL
+local SDK = "wasi-sdk " .. M.WASI_SDK_VERSION
+local SDK_INSTALL = "; install wasi-sdk " .. M.WASI_SDK_VERSION ..
+    " (https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34) and set WASI_SDK_PATH to its root"
+local OPTIMIZER = "Binaryen version_" .. M.BINARYEN_VERSION .. " wasm-opt"
+local OPTIMIZER_INSTALL = "; install Binaryen version_" .. M.BINARYEN_VERSION ..
+    " (https://github.com/WebAssembly/binaryen/releases/tag/version_133) and set BINARYEN_ROOT to its root" ..
+    " or WASM_OPT to its wasm-opt"
+local function resolution_error(requirement, filename, reason, install)
+    return "browser target requires " .. requirement .. ": cannot resolve " ..
+        string.format("%q", filename) .. ": " .. reason .. install
 end
 
+local function parent(filename)
+    return platform.windows and platform.parent(filename) or compiler_paths.dirname(filename)
+end
+
+-- The first executable `name` on PATH whose directory `accept` takes; false
+-- when there is none.
+local function search_path(context, name, requirement, install, accept)
+    local search = platform.getenv("PATH") or ""
+    local directories = platform.windows and platform.windows_path_entries(search, true) or
+        (search .. ":"):gmatch("(.-):")
+    while true do
+        local directory, err = directories()
+        if err then return nil, resolution_error(requirement, "PATH", err, install) end
+        if not directory then return false end
+        local root
+        root, err = absolute(context.io, directory == "" and "." or directory)
+        if not root then return nil, resolution_error(requirement, directory, err, install) end
+        local candidate = tool_path(root, name)
+        local present, reason = tool_candidate(context, candidate)
+        if reason then return nil, resolution_error(requirement, candidate, reason, install) end
+        if present and accept(root) then return candidate end
+    end
+end
+
+-- The tool at an explicitly configured location.
+local function configured_tool(context, filename, variable, value, requirement, install)
+    local present, reason = tool_candidate(context, filename)
+    if reason then return nil, resolution_error(requirement, filename, reason, install) end
+    if not present then
+        return nil, "browser target requires " .. requirement .. ": " .. string.format("%q", filename) ..
+            " is not an executable (" .. variable .. "=" .. string.format("%q", value) .. ")" .. install
+    end
+    return filename
+end
+
+local function version_output(context, command, requirement, install)
+    command[#command + 1] = "--version"
+    local result = context.io:run(command, { stderr_to_stdout = true })
+    if type(result) ~= "table" or not result.ok then
+        local detail = type(result) == "table" and (result.output or result.diagnostic) or tostring(result)
+        return nil, "browser target requires " .. requirement .. ": cannot execute " ..
+            string.format("%q", command[1]) .. ": " .. tostring(detail):gsub("%s+$", "") .. install
+    end
+    return result.output
+end
+
+-- wasi-sdk from WASI_SDK_PATH, else the first clang on PATH that sits in a
+-- wasi-sdk `bin` directory (one with a sibling `../VERSION`). The SDK's
+-- VERSION file names its release; clang reports only its LLVM version.
 local function discover_compiler(context)
     local strategy = context.io
-    local emsdk, cc = platform.getenv("EMSDK")
-    if emsdk and emsdk ~= "" then
-        local root, err = absolute(strategy, emsdk)
-        if not root then return nil, resolution_error(emsdk, err) end
-        local directory = platform.join(root, "upstream/emscripten")
-        cc = tool_path(directory, "emcc")
-        local present, reason = tool_candidate(context, cc)
-        if reason then return nil, resolution_error(cc, reason) end
-        if not present then
-            return nil, "browser target requires Emscripten 6.0.13: emcc not found at " ..
-                string.format("%q", cc) .. " (EMSDK=" .. string.format("%q", emsdk) .. ")" .. INSTALL
-        end
+    local configured, root, cc, err = platform.getenv("WASI_SDK_PATH")
+    if configured and configured ~= "" then
+        root, err = absolute(strategy, configured)
+        if not root then return nil, resolution_error(SDK, configured, err, SDK_INSTALL) end
+        cc, err = configured_tool(context, tool_path(sdk_path(root, "bin"), "clang"),
+            "WASI_SDK_PATH", configured, SDK, SDK_INSTALL)
+        if not cc then return nil, err end
     else
-        local search = platform.getenv("PATH") or ""
-        local directories = platform.windows and platform.windows_path_entries(search, true) or
-            (search .. ":"):gmatch("(.-):")
-        while true do
-            local directory, err = directories()
-            if err then return nil, resolution_error("PATH", err) end
-            if not directory then break end
-            local root
-            root, err = absolute(strategy, directory == "" and "." or directory)
-            if not root then return nil, resolution_error(directory, err) end
-            local candidate = tool_path(root, "emcc")
-            local present, reason = tool_candidate(context, candidate)
-            if reason then return nil, resolution_error(candidate, reason) end
-            if present then cc = candidate; break end
-        end
+        cc, err = search_path(context, "clang", SDK, SDK_INSTALL, function(directory)
+            local info = strategy:stat(sdk_path(parent(directory), "VERSION"))
+            return info and info.kind == "file"
+        end)
+        if cc == nil then return nil, err end
         if not cc then
-            return nil, "browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on PATH)" .. INSTALL
+            return nil, "browser target requires " .. SDK .. ": no wasi-sdk clang on PATH " ..
+                "(WASI_SDK_PATH unset; a wasi-sdk clang has a sibling ../VERSION)" .. SDK_INSTALL
+        end
+        root = parent(parent(cc))
+    end
+    local version_file = sdk_path(root, "VERSION")
+    local recorded = strategy:read_file(version_file, 64)
+    local found = recorded and recorded:match("^([^\r\n]*)") or "unknown"
+    if found ~= M.WASI_SDK_VERSION then
+        return nil, "browser target requires " .. SDK .. ": " .. string.format("%q", version_file) ..
+            " reports " .. found .. SDK_INSTALL
+    end
+    local tools = { cc = { cc }, sysroot = sdk_path(root, "share", "wasi-sysroot"), version = found,
+        source = configured and configured ~= "" and "WASI_SDK_PATH" or "PATH", location = root }
+    local info = strategy:stat(tools.sysroot)
+    if not (info and info.kind == "directory") then
+        return nil, "browser target requires " .. SDK .. ": no sysroot at " ..
+            string.format("%q", tools.sysroot) .. SDK_INSTALL
+    end
+    tools.version_output, err = version_output(context, M.compiler_argv(tools), SDK, SDK_INSTALL)
+    if not tools.version_output then return nil, err end
+    return tools
+end
+
+-- wasm-opt from WASM_OPT, else BINARYEN_ROOT, else PATH.
+local function discover_optimizer(context)
+    local filename, source, err
+    for _, variable in ipairs({ "WASM_OPT", "BINARYEN_ROOT" }) do
+        local value = platform.getenv(variable)
+        if value and value ~= "" then
+            local resolved
+            resolved, err = absolute(context.io, value)
+            if not resolved then return nil, resolution_error(OPTIMIZER, value, err, OPTIMIZER_INSTALL) end
+            if variable == "BINARYEN_ROOT" then resolved = tool_path(sdk_path(resolved, "bin"), "wasm-opt") end
+            filename, err = configured_tool(context, resolved, variable, value, OPTIMIZER, OPTIMIZER_INSTALL)
+            if not filename then return nil, err end
+            source = variable
+            break
         end
     end
-    local command = M.compiler_argv({ cc })
-    command[#command + 1] = "--version"
-    local result = strategy:run(command, { stderr_to_stdout = true })
-    if platform.windows and type(result) == "table" and not result.started then
-        return nil, "browser target requires Emscripten 6.0.13: cannot execute emcc at " ..
-            string.format("%q", cc) .. ": " .. tostring(result.diagnostic or "process did not start") .. INSTALL
+    if not filename then
+        filename, err = search_path(context, "wasm-opt", OPTIMIZER, OPTIMIZER_INSTALL, function() return true end)
+        if filename == nil then return nil, err end
+        if not filename then
+            return nil, "browser target requires " .. OPTIMIZER .. ": wasm-opt not found " ..
+                "(WASM_OPT and BINARYEN_ROOT unset; not on PATH)" .. OPTIMIZER_INSTALL
+        end
+        source = "PATH"
     end
-    local found = type(result) == "table" and type(result.output) == "string" and
-        result.output:match("emcc[^\n]- (%d+%.%d+%.%d+)") or "unknown"
-    if type(result) ~= "table" or not result.ok or found ~= M.EMSCRIPTEN_VERSION then
-        return nil, "browser target requires Emscripten 6.0.13: " .. string.format("%q", cc) ..
-            " reports " .. found .. INSTALL
+    local output
+    output, err = version_output(context, { filename }, OPTIMIZER, OPTIMIZER_INSTALL)
+    if not output then return nil, err end
+    local found = output:match("^wasm%-opt version (%d+)") or "unknown"
+    if found ~= M.BINARYEN_VERSION then
+        return nil, "browser target requires " .. OPTIMIZER .. ": " .. string.format("%q", filename) ..
+            " reports version " .. found .. OPTIMIZER_INSTALL
     end
-    local location = platform.windows and platform.parent(cc) or compiler_paths.dirname(cc)
-    return { cc = { cc }, version = found, source = emsdk and emsdk ~= "" and "EMSDK" or "PATH",
-        location = location, version_output = result.output }
+    return { argv = { filename }, version = found, source = source, version_output = output }
 end
 
 function M.discover_tools(context)
-    local out, err = discover_compiler(context)
-    if not out then return nil, err end
-    local location, cc = out.location, out.cc[1]
-    for _, item in ipairs({ { "ar", "emar" }, { "ranlib", "emranlib" } }) do
-        local key, name = item[1], item[2]
-        local filename = tool_path(location, name)
+    local tools, err = discover_compiler(context)
+    if not tools then return nil, err end
+    for _, item in ipairs({ { "ar", "llvm-ar" }, { "ranlib", "llvm-ranlib" } }) do
+        local filename = tool_path(sdk_path(tools.location, "bin"), item[2])
         local present, reason = tool_candidate(context, filename)
-        if reason then return nil, resolution_error(filename, reason) end
+        if reason then return nil, resolution_error(SDK, filename, reason, SDK_INSTALL) end
         if not present then
-            return nil, "browser target requires Emscripten 6.0.13: " .. name .. " not found at " ..
-                string.format("%q", filename) .. " (emcc=" .. string.format("%q", cc) .. ")" .. INSTALL
+            return nil, "browser target requires " .. SDK .. ": " .. item[2] .. " not found at " ..
+                string.format("%q", filename) .. SDK_INSTALL
         end
-        out[key] = { filename }
+        tools[item[1]] = { filename }
     end
-    return out
+    tools.optimizer, err = discover_optimizer(context)
+    if not tools.optimizer then return nil, err end
+    return tools
 end
 
 local function record_error(paths, kind, detail)
@@ -684,8 +755,8 @@ validate_record = function(record, paths)
             return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", item[1]) .. ": invalid hexadecimal value")
         end
     end
-    for _, item in ipairs({ { "sjlj", "wasm" }, { "target", TRIPLE },
-            { "emscripten_version", M.EMSCRIPTEN_VERSION } }) do
+    for _, item in ipairs({ { "sjlj", SJLJ }, { "target", TRIPLE },
+            { "wasi_sdk_version", M.WASI_SDK_VERSION } }) do
         if record[item[1]] ~= item[2] then return nil, mismatch(paths, record, item[1], item[2]) end
     end
     local features, feature_error = record_list(record, paths, "wasm_features")
@@ -697,30 +768,42 @@ validate_record = function(record, paths)
     end
     local flags, flags_error = record_list(record, paths, "cflags")
     if not flags then return nil, flags_error end
-    local flag_defines, seen, longjmp, legacy = {}, {}, nil, nil
-    for index, flag in ipairs(flags) do
-        if flag:sub(1, 2) == "-D" and not seen[flag] then
-            flag_defines[#flag_defines + 1] = flag
-            seen[flag] = true
+    -- The record's target and setjmp/longjmp lowering are the ones its cflags
+    -- select; every other cflag obeys the user-flag policy.
+    local flag_defines, seen, others, llvm, exceptions, target = {}, {}, {}, {}, false, nil
+    local index = 1
+    while index <= #flags do
+        local flag = flags[index]
+        if flag == "-mllvm" then
+            index = index + 1
+            llvm[#llvm + 1] = flags[index] or "<missing>"
+        elseif flag == "-mexception-handling" then
+            exceptions = true
+        elseif flag:match("^%-%-target=") then
+            target = flag:sub(#"--target=" + 1)
+        else
+            if flag:sub(1, 2) == "-D" and not seen[flag] then
+                flag_defines[#flag_defines + 1] = flag
+                seen[flag] = true
+            end
+            others[#others + 1] = flag
         end
-        local mode = longjmp_mode(flags, index)
-        if mode then longjmp = mode end
-        local encoding = setting_value(flags, index, "WASM_LEGACY_EXCEPTIONS")
-        if encoding then legacy = encoding end
+        index = index + 1
     end
     table.sort(flag_defines, util.bytewise_less)
     if table.concat(flag_defines, " ") ~= record.lua_defines then
         return nil, mismatch(paths, record, "lua_defines", table.concat(flag_defines, " "))
     end
-    if longjmp ~= record.sjlj then
-        return nil, mismatch(paths, record, "sjlj", longjmp or "<missing in cflags>")
+    table.sort(llvm, util.bytewise_less)
+    local sjlj = exceptions and table.concat(llvm, " ") == "-wasm-enable-sjlj -wasm-use-legacy-eh=false" and
+        SJLJ or nil
+    if sjlj ~= record.sjlj then
+        return nil, mismatch(paths, record, "sjlj", sjlj or "<missing in cflags>")
     end
-    if legacy ~= "1" then
-        return nil, record_error(paths, "is malformed",
-            "invalid field \"cflags\": required -sWASM_LEGACY_EXCEPTIONS=1, found " ..
-                string.format("%q", legacy or "<missing>"))
+    if target ~= record.target then
+        return nil, mismatch(paths, record, "target", target or "<missing in cflags>")
     end
-    local supported, unsupported = M.validate_flags(flags, "cflags")
+    local supported, unsupported = M.validate_flags(others, "cflags")
     if not supported then return nil, record_error(paths, "is malformed", "invalid field \"cflags\": " .. unsupported) end
     return record, defines
 end
@@ -762,8 +845,8 @@ end
 local function probe_fingerprint(context, descriptor)
     local reservation, err = context.io:tmpname()
     if not reservation then return nil, err end
-    -- Emscripten classifies .s before it forwards -x c to Clang; Win32
-    -- tmpname can choose that suffix for an ordinary reservation.
+    -- Win32 tmpname can choose any suffix for an ordinary reservation; the
+    -- probe source keeps a plain `.c` name beside its explicit `-x c`.
     local source = reservation .. ".c"
     local object = source .. ".o"
     local cleanup <close> = setmetatable({}, { __close = function()
@@ -806,7 +889,7 @@ local function compiler_configuration(context, tool, build_profile, defines, lua
         if not resolved then return nil, resolve_error end
         includes[index] = resolved
     end
-    local compiler = M.compiler_argv(tool.cc)
+    local compiler = M.compiler_argv(tool)
     local inputs, err = cdriver.target_profile_inputs({ io = context.io,
         cache_adapter = context.cache_adapter, compiler = compiler, language_flag = false,
         compiler_include_dirs = includes, compile_flags = flags, language_mode = "c99" })
@@ -924,7 +1007,7 @@ function M.build(context, inputs)
                 diagnostic = diagnostic .. "; user compile flags: " .. table.concat(extras, " ") ..
                     "; remove feature-changing flags from TITAN_EXTRA_CPPFLAGS/TITAN_EXTRA_CFLAGS/--cflag"
             else
-                diagnostic = diagnostic .. "; check the selected Emscripten " .. M.EMSCRIPTEN_VERSION .. " installation"
+                diagnostic = diagnostic .. "; check the selected " .. SDK .. " installation"
             end
             return nil, diagnostic
         end

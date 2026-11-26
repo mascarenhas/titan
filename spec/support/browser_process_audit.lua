@@ -30,7 +30,7 @@ end
 
 function M.read_link_response(argument)
     if not (argument and (argument:match("^@.+[.]mjs[.]rsp$") or
-                          argument:match("^@.+[.]mjs[.]link[.]rsp[.]tmp[.][^/\\]+$"))) then
+                          argument:match("^@.+[.]wasm[.]linked[.]link[.]rsp[.]tmp[.][^/\\]+$"))) then
         return nil
     end
     -- The compiler's GNU quoting only escapes backslashes and double quotes,
@@ -90,21 +90,14 @@ function M.install(options)
                  #argv == 4 and argv[2] == "--engine" and argv[3] == "node" and argv[4]:match("[.]mjs$")) then
                 operation, tool = "execute", "browser-runner"
             end
-            -- The module check reads two emcc settings, then runs emcc's Node
-            -- with emcc's acorn over the staged module.
-            local emcc = options.tools.cc and options.tools.cc[#options.tools.cc]
-            local em_config = emcc and emcc:gsub("emcc%.exe$", "em-config.exe"):gsub("emcc$", "em-config")
-            if emcc and #argv == 2 and argv[1]:gsub("\\", "/") == em_config:gsub("\\", "/") and
-                (argv[2] == "NODE_JS" or argv[2] == "EMSCRIPTEN_ROOT") then
-                operation, tool = "query", "em-config"
-            end
-            if options.module_check and #argv >= 4 and argv[#argv - 2] == options.module_check and
-                argv[#argv - 1]:gsub("\\", "/"):match("/node_modules/acorn/dist/acorn[.]mjs$") and
-                argv[#argv]:match("[.]mjs$") then
-                operation, tool = "check", "module-check"
-            end
-            for _, entry in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
+            -- Browser compiles and links run through the target's compiler
+            -- envelope (clang, --target, --sysroot). The image link writes
+            -- `<stem>.wasm.linked`; wasm-opt rewrites it as the staged `<stem>.wasm`.
+            for _, entry in ipairs({ { "cc", "clang" }, { "ar", "llvm-ar" }, { "ranlib", "llvm-ranlib" },
+                    { "optimizer", "wasm-opt" } }) do
                 local prefix = options.tools[entry[1]]
+                if entry[1] == "cc" then prefix = require("titan-compiler.browsertarget").compiler_argv(options.tools)
+                elseif entry[1] == "optimizer" then prefix = prefix and prefix.argv end
                 local matches = prefix and #argv >= #prefix
                 for index, value in ipairs(prefix or {}) do
                     if argv[index] ~= value then matches = false end
@@ -120,9 +113,15 @@ function M.install(options)
                         for index, flag in ipairs(args) do
                             if flag == "-c" then operation = "compile"
                             elseif flag == "-E" or flag == "-fsyntax-only" then operation = "preprocess" end
-                            if options.images and flag == "-o" and args[index + 1] and args[index + 1]:match("[.]mjs$") then
+                            if options.images and flag == "-o" and args[index + 1] and
+                                    args[index + 1]:match("[.]wasm[.]linked$") then
                                 operation = "link"
                             end
+                        end
+                    elseif entry[1] == "optimizer" then
+                        if options.images and #args >= 3 and args[#args - 1] == "-o" and
+                            args[#args]:match("[.]wasm$") and args[#args - 2]:match("[.]wasm[.]linked$") then
+                            operation = "optimize"
                         end
                     elseif entry[1] == "ar" and (args[1] == "qDc" or args[1] == "qc") and #args >= 2 then
                         operation = "archive"

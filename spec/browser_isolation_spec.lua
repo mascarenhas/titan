@@ -147,7 +147,7 @@ describe("published browser analysis target", function()
         function offline:stat(filename)
             -- Windows selects an exact .exe by stat before launching it;
             -- unlike POSIX it does not consult the executable capability.
-            if platform.windows and path.basename(filename):lower() == "emcc.exe" then return nil end
+            if platform.windows and path.basename(filename):lower() == "clang.exe" then return nil end
             return strategy:stat(filename)
         end
         local original = assert(subject.browser_analysis_target(installed, { io = offline }))
@@ -221,7 +221,7 @@ end
 
         ok, _, diagnostics = loader("foreign_header")
         assert.is_true(ok)
-        assert.truthy(table.concat(diagnostics, "\n"):find("browser foreign C work needs Emscripten 6.0.13", 1, true))
+        assert.truthy(table.concat(diagnostics, "\n"):find("browser foreign C work needs wasi-sdk 34.0", 1, true))
         assert.equal("browser-foreign-unavailable", subject.browser_foreign_cache_identity({ context = browser }))
         assert.same({ foreign_header = true }, browser.browser_foreign_modules)
         assert.equal(cache_identity, assert(subject.language_server_cache_identity({ context = browser })))
@@ -391,9 +391,9 @@ end
         local live = setmetatable({}, { __index = strategy })
         local calls = 0
         function live:run(argv, options)
-            assert.equal("env", argv[1])
-            assert.equal("EMCC_CFLAGS=", argv[2])
-            assert.equal(info.tools.cc[1], argv[3])
+            assert.equal(info.tools.cc[1], argv[1])
+            assert.equal("--target=wasm32-wasip1", argv[2])
+            assert.equal("--sysroot=" .. info.tools.sysroot, argv[3])
             calls = calls + 1
             return strategy:run(argv, options)
         end
@@ -406,7 +406,7 @@ end
         assert(subject.language_server_cache_identity({ context = first }))
         assert.equal(0, calls)
         files.write(path.join(root, "for_browser.h"), [[
-#if !defined(__EMSCRIPTEN__) || !defined(TITAN_TARGET_BROWSER) || __SIZEOF_POINTER__ != 4
+#if !defined(__wasi__) || !defined(TITAN_TARGET_BROWSER) || __SIZEOF_POINTER__ != 4
 #error browser-only header used with the wrong target
 #endif
 #include <titan/browser.h>
@@ -1097,7 +1097,7 @@ describe("browser object and link certificate identity", function()
     end)
     it("uses archive tools only and refuses cross-target link records without changing the output-only key", function()
         files.write(root .. "/provider.a", "published archive")
-        local ar, ranlib = tool_path("emar"), tool_path("emranlib")
+        local ar, ranlib = tool_path("llvm-ar"), tool_path("llvm-ranlib")
         files.write(ar, "archive tool")
         files.write(ranlib, "archive index tool")
         local ctx = tool_context()

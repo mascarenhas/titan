@@ -710,7 +710,7 @@ end
 -- Browser trace identity needs user-selected archives before the synthetic entry
 -- is compiled. Reuse the existing resolver and its diagnostics; other trailing
 -- options remain in the full ordered identity recipe, not a second flag parser.
-function certificate.browser_trace_libraries(context, compiler_argv, flags)
+function certificate.browser_trace_libraries(context, tools, flags)
     local argv, filtered = link_arguments(flags), {}
     local index = 1
     while index <= #argv do
@@ -726,7 +726,7 @@ function certificate.browser_trace_libraries(context, compiler_argv, flags)
     end
     if #filtered == 0 then return {} end
     return compiler_libraries(context, {
-        compiler_argv = require("titan-compiler.browsertarget").compiler_argv(compiler_argv),
+        compiler_argv = require("titan-compiler.browsertarget").compiler_argv(tools),
         argv = filtered, static = true,
     })
 end

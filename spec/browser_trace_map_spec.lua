@@ -548,7 +548,7 @@ describe("browser content-derived image identity", function()
         assert.equal(original, identity())
         assert.not_equal(original, identity("entry changed"))
         assert.not_equal(original, identity(nil, { "-O2" }))
-        assert.not_equal(original, identity(nil, nil, { "-gsource-map" }))
+        assert.not_equal(original, identity(nil, nil, { "-Wl,--wrap=malloc" }))
         assert.not_equal(original, identity(nil, nil, nil, { { right, left } }))
         files.write(left, "changed")
         assert.not_equal(original, identity())
@@ -560,6 +560,7 @@ describe("browser content-derived image identity", function()
         local copy = root .. "/copy.o"; files.write(copy, "left")
         assert.not_equal(original, identity(nil, nil, nil, { { copy, right } }))
         assert.truthy(trace.declaration(original):find('"' .. original .. '"', 1, true))
+        assert.truthy(trace.declaration(original):find('TITAN_WASM_EXPORT("titan_browser_trace_identity")', 1, true))
         assert.has_error(function() identity(nil, nil, nil, { { root .. "/missing.o" } }) end)
     end)
     it("resolves user static library flags through the existing certificate resolver", function()
@@ -568,18 +569,103 @@ describe("browser content-derived image identity", function()
         local library = root .. "/libnamed.a"
         files.write(library, "!<arch>\n")
         local context = { io = compiler_io.new_sync(), target_descriptor = fixtures.descriptor() }
+        local tools = context.target_descriptor.tools
         local certificate = require "titan-compiler.linkcertificate"
-        local resolved = assert(certificate.browser_trace_libraries(context, { "unused-compiler" },
-            { "-sWASM_BIGINT=1", "-L", root, "-l", "named", "-Wl,-L," .. root .. ",-lnamed" }))
+        local resolved = assert(certificate.browser_trace_libraries(context, tools,
+            { "-Wl,--wrap=malloc", "-L", root, "-l", "named", "-Wl,-L," .. root .. ",-lnamed" }))
         for index, filename in ipairs(resolved) do resolved[index] = paths.to_slash(filename) end
         assert.same({ paths.to_slash(library), paths.to_slash(library) }, resolved)
         assert.same({}, assert(certificate.browser_trace_libraries(context, nil, { "-g2" })))
-        function context.io:run() return { started = true, ok = true, output = "libabsent.a\n" } end
-        local missing, why = certificate.browser_trace_libraries(context, { "unused-compiler" }, { "-labsent" })
+        local argv
+        function context.io:run(command)
+            argv = command
+            return { started = true, ok = true, output = "libabsent.a\n" }
+        end
+        local missing, why = certificate.browser_trace_libraries(context, tools, { "-labsent" })
         assert.is_nil(missing)
         assert.equal("cannot resolve native library: absent", why)
-        missing, why = certificate.browser_trace_libraries(context, { "unused-compiler" }, { "-l" })
+        assert.same({ tools.cc[1], "--target=wasm32-wasip1", "--sysroot=" .. tools.sysroot },
+            { table.unpack(argv, 1, 3) })
+        missing, why = certificate.browser_trace_libraries(context, tools, { "-l" })
         assert.is_nil(missing)
         assert.equal("incomplete native library option", why)
+    end)
+end)
+
+describe("browser DWARF line map", function()
+    local L, custom = fixtures.line, fixtures.custom_section
+    local DIRECTORIES = { "app" }
+    local FILES = { { "demo.titan", 1 }, { "/abs/x.c", 1 }, { "plain.c", 0 }, { "C:\\w\\y.titan", 1 } }
+    local function with_lines(payload) return image(custom(".debug_line", payload)) end
+    local function unit(program, options) return fixtures.line_unit(DIRECTORIES, FILES, program, options) end
+
+    it("maps live rows to final offsets and cuts every debug section byte for byte", function()
+        local define = "def.titan\0\1\0\0"
+        local function_one = L.set_address(2) .. L.advance_line(9) .. L.copy ..
+            string.char(13 + (1 - -5) + 14) .. L.set_file(4) .. L.copy .. L.advance_pc(1) .. L.end_sequence
+        local function_two = L.set_address(5) .. L.set_file(2) .. L.set_column(3) .. L.advance_line(4) ..
+            L.copy .. "\9\1\0" .. L.set_file(3) .. "\6\7\10\12\1" .. L.copy .. L.advance_line(-5) .. L.copy ..
+            "\0\2\4\9" .. "\0" .. leb(#define + 1) .. "\3" .. define .. L.set_file(5) .. L.advance_line(7) ..
+            L.copy .. L.advance_pc(2) .. L.end_sequence
+        local tombstoned = L.set_address(0xffff0000) .. "\8" .. L.copy .. L.end_sequence
+        local dead = L.set_address(0) .. L.copy .. L.end_sequence
+        local named = names("\1\0" .. text("run"))
+        local wasm = HEADER .. FUNCTIONS .. custom(".debug_info", "info") .. CODE .. named ..
+            custom("sourceMappingURL", text("old.map")) ..
+            custom(".debug_line", unit(tombstoned .. function_two .. L.end_sequence) .. unit(function_one .. dead))
+        local stripped, map = assert(trace.dwarf_map(wasm, "t.wasm.map", "t.wasm"))
+        assert.equal(HEADER .. FUNCTIONS .. CODE .. named .. custom("sourceMappingURL", text("t.wasm.map")), stripped)
+        local code = #HEADER + #FUNCTIONS + 2
+        local mappings = table.concat({
+            vlq(code + 2) .. vlq(0) .. vlq(9) .. vlq(0), vlq(1) .. vlq(0) .. vlq(1) .. vlq(0),
+            vlq(0) .. vlq(1) .. vlq(0) .. vlq(0), vlq(2) .. vlq(1) .. vlq(-6) .. vlq(2),
+            vlq(1) .. vlq(1) .. vlq(0) .. vlq(0), vlq(0) .. vlq(1) .. vlq(2) .. vlq(0) }, ",")
+        assert.equal('{"version":3,"sources":["app/demo.titan","C:\\u005cw\\u005cy.titan","/abs/x.c",' ..
+            '"plain.c","app/def.titan"],"names":[],"mappings":"' .. mappings .. '"}', map)
+        assert.equal('"/abs/x.c":5:3', assert(trace.function_source(map, { code + 5, code + 8 })))
+        local final, table_bytes = assert(trace.rewrite(stripped, map, ID, "t.wasm.map"))
+        assert.truthy(final:find('"x_titan_function_ranges":[[' .. code + 2 .. ',' .. code + 4 .. '],[' ..
+            code + 5 .. ',' .. code + 8 .. ']]', 1, true))
+        assert.equal("TTRC", table_bytes:sub(1, 4))
+    end)
+
+    it("names the origin of every malformed image and line table", function()
+        local hand_header = string.pack("<BBBbBB", 1, 1, 1, -5, 14, 13) .. "\0\1\1\1\1\0\0\0\1\0\0\1" .. "app"
+        local unterminated = string.pack("<I2I4", 4, #hand_header) .. hand_header .. "\0\0\0"
+        local files = { { "a.c", 0 } }
+        for _, case in ipairs({
+            { nil, "invalid Wasm header" },
+            { HEADER .. "\10\5\0", "truncated Wasm section" },
+            { HEADER .. "\10\128", "truncated LEB128 value" },
+            { HEADER .. "\10" .. string.rep("\128", 10) .. "\0", "LEB128 value is too long" },
+            { HEADER .. section(0, "\5ab"), "truncated Wasm custom section name" },
+            { image(custom(".debug_line", "") .. custom(".debug_line", "")), "duplicate .debug_line section" },
+            { HEADER .. custom(".debug_line", ""), "Wasm image has no code section" },
+            { image(), "Wasm image has no .debug_line section" },
+            { with_lines("\1\0"), "truncated .debug_line value" },
+            { with_lines("\255\255\255\255"), "64-bit DWARF .debug_line is unsupported" },
+            { with_lines(string.pack("<I4", 100) .. "\4\0"), "truncated .debug_line unit" },
+            { with_lines(unit("", { version = 5 })), "expected DWARF v4 .debug_line, found version 5" },
+            { with_lines(string.pack("<I4I2I4", 6, 4, 50)), "truncated .debug_line header" },
+            { with_lines(unit("", { max_ops = 2 })), "unsupported .debug_line header" },
+            { with_lines(string.pack("<I4", #unterminated) .. unterminated), "unterminated .debug_line string" },
+            { with_lines(fixtures.line_unit({}, { { "a.c", 3 } }, "")), "invalid .debug_line directory index" },
+            { with_lines(fixtures.line_unit({}, files, L.set_address(2) .. L.set_file(9) .. L.copy)),
+                "a .debug_line row names an undefined file" },
+            { with_lines(fixtures.line_unit({}, files, "\0\9\2\0")), "truncated .debug_line extended opcode" },
+            { with_lines(fixtures.line_unit({}, files, "\0\0")), "truncated .debug_line extended opcode" },
+            { with_lines(fixtures.line_unit({}, files, "\0\11\2" .. string.rep("\0", 10))),
+                "invalid .debug_line address size" },
+            { with_lines(fixtures.line_unit({}, files, L.set_address(2) .. L.copy)), "unterminated .debug_line sequence" },
+            { with_lines(fixtures.line_unit({}, files, "\9\1")), "truncated .debug_line value" },
+            { with_lines(fixtures.line_unit({}, files, "\2")), "truncated LEB128 value" },
+        }) do
+            local stripped, err = trace.dwarf_map(case[1], "t.wasm.map", "t.wasm")
+            assert.is_nil(stripped)
+            assert.equal("t.wasm: " .. case[2], err)
+        end
+        local stripped, err = trace.dwarf_map(image(), "t.wasm.map")
+        assert.is_nil(stripped)
+        assert.equal("browser trace: Wasm image has no .debug_line section", err)
     end)
 end)

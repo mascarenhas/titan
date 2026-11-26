@@ -2025,7 +2025,7 @@ describe("compiler installation discovery", function()
     it("exports the language-server compiler API independently of the ABI",
        function()
         assert.equal("2", driver.TITAN_ABI_VERSION)
-        assert.equal("0.6.1", driver.TITAN_VERSION)
+        assert.equal("0.6.2", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
         assert.equal(1, driver.LANGUAGE_SERVER_API_VERSION)
@@ -13779,21 +13779,23 @@ describe("Windows link response files", function()
     end
 
     it("keeps the browser compiler envelope ahead of a long GNU response file", function()
-        local compiler = "C:/browser tools/emcc.exe"
-        local arguments = { "-o", "out result.mjs", [[C:\a space\trailing\]] }
+        local tools = browser_fixtures.descriptor().tools
+        local envelope = require("titan-compiler.browsertarget").compiler_argv(tools)
+        local arguments = { "-o", "out result.wasm.linked", [[C:\a space\trailing\]] }
         for index = 1, 800 do
             arguments[#arguments + 1] = ("C:/generated output directory/module-%04d.o"):format(index)
         end
         local payload = assert(platform.windows_response_contents(arguments))
         assert.is_true(#payload > 32767)
         process.run = function(argv)
-            assert.same({ "env", "EMCC_CFLAGS=", compiler, "@" .. response }, argv)
+            assert.same({ tools.cc[1], "--target=wasm32-wasip1", "--sysroot=" .. tools.sysroot,
+                "@" .. response }, argv)
             assert.equal(payload, assert(util.get_file_contents(response, "rb")))
             return true, "exit", 0
         end
-        assert.is_true(driver.run_link_command(
-            { "env", "EMCC_CFLAGS=", compiler, table.unpack(arguments) },
-            false, "out result.mjs", { compiler }))
+        local command = { table.unpack(envelope) }
+        for _, argument in ipairs(arguments) do command[#command + 1] = argument end
+        assert.is_true(driver.run_link_command(command, false, "out result.wasm.linked", tools))
         assert.is_nil(lfs.attributes(response))
     end)
 
@@ -13819,7 +13821,15 @@ describe("Windows link response files", function()
         local stage = response .. "/stage"
         assert(lfs.mkdir(stage))
         subject.staged_library_output = function() return staged, stage end
+        local optimized
         process.run = function(argv)
+            if argv[1] == descriptor.tools.optimizer.argv[1] then
+                -- wasm-opt reads the link output and writes the staged image.
+                assert.same({ response .. "/image.wasm.linked", "-o", response .. "/image.wasm" },
+                    { table.unpack(argv, #argv - 2) })
+                optimized = true
+                return true, "exit", 0
+            end
             assert.equal("-c", argv[#argv - 3], "only the entrypoint is compiled through process.run")
             return true, "exit", 0
         end
@@ -13830,23 +13840,25 @@ describe("Windows link response files", function()
             return true
         end }
         function strategy:run(argv, options)
-            assert.same({ "env", "EMCC_CFLAGS=", descriptor.tools.cc[1], "@" .. staged .. ".rsp" }, argv)
+            assert.same({ descriptor.tools.cc[1], "--target=wasm32-wasip1",
+                "--sysroot=" .. descriptor.tools.sysroot, "@" .. staged .. ".rsp" }, argv)
             assert.is_false(options.stderr_to_stdout)
             local payload = assert(outputs[staged .. ".rsp"])
             assert.truthy(payload:find('"-Wl,--trace"\n', 1, true))
             assert.truthy(payload:find('"C:\\\\generated path\\\\app.o"\n', 1, true))
-            assert.falsy(payload:find("EMCC_CFLAGS=", 1, true))
+            assert.falsy(payload:find("--target=", 1, true))
             return { started = true, ok = true, output = "one.o\r\ntwo.o\r\n" }
         end
         local ok, err = subject.compile_browser_image("entrypoint", response .. "/entry.c",
             response .. "/program.mjs", { [[C:\generated path\app.o]] }, {}, {}, false, {
                 context = { target = "browser", target_descriptor = descriptor, io = strategy },
-                profile = { purpose = "protocol", assertions = 2 }, link_extra_flags = {},
+                profile = { purpose = "protocol" }, link_extra_flags = {},
                 final_link_flags = { "-Wl,--trace" }, dependency_output = dependencies,
             })
         assert.is_nil(ok)
         assert.matches("is not a regular file", err, 1, true)
         assert.equal("one.o\r\ntwo.o\r\n", outputs[dependencies])
+        assert.is_true(optimized)
         assert.is_nil(lfs.attributes(stage))
     end)
 
@@ -13999,7 +14011,7 @@ describe("Windows archive command batching", function()
             if name == "archive_batches" then batches = value; break end
         end
         assert.is_function(batches)
-        local prefix = { "C:/" .. ("SDK tools with spaces/"):rep(16) .. "emar.exe",
+        local prefix = { "C:/" .. ("SDK tools with spaces/"):rep(16) .. "llvm-ar.exe",
             "qDc", [[C:\output dir\output.a]] }
         local source, total = {}, { table.unpack(prefix) }
         for index = 1, 350 do
