@@ -355,8 +355,10 @@ end
 -- its code) becomes the standard map; every `.debug_*` section is then cut
 -- out byte for byte, so the code keeps the offsets its rows name. A row's
 -- address is an offset in the code section's payload. Sequences outside the
--- function bodies are dead functions the linker tombstoned, and line 0 rows
--- have no source; neither is mapped.
+-- function bodies are dead functions the linker tombstoned and are dropped.
+-- A line 0 row has no source, and a sequence ends just past its last
+-- instruction; both become unmapped segments, so neither the map nor the
+-- trace table carries the previous line past them.
 local WASM_HEADER = "\0asm\1\0\0\0"
 
 local function leb(bytes, pos, limit, signed)
@@ -384,7 +386,8 @@ local function c_string(bytes, pos, limit)
 end
 
 -- The live sequences of `bytes[pos, limit]`, each a flat array of
--- (address, path, line, column) rows. `live` bounds the body addresses.
+-- (address, path, line, column) rows, ending in its end address; an unmapped
+-- row's path is false. `live` bounds the body addresses.
 local function line_sequences(bytes, pos, limit, live)
     local sequences = {}
     while pos <= limit do
@@ -432,9 +435,8 @@ local function line_sequences(bytes, pos, limit, live)
         pos = program
         local address, file, line, column, rows = 0, 1, 1, 0, {}
         local function row()
-            if line <= 0 then return end
-            local path = files[file]
-            require_value(path, "a .debug_line row names an undefined file")
+            local path = line > 0 and files[file]
+            require_value(path or line <= 0, "a .debug_line row names an undefined file")
             rows[#rows + 1], rows[#rows + 2], rows[#rows + 3], rows[#rows + 4] = address, path, line, column
         end
         while pos <= stop do
@@ -452,7 +454,9 @@ local function line_sequences(bytes, pos, limit, live)
                 require_value(size > 0 and finish <= stop, "truncated .debug_line extended opcode")
                 local sub = bytes:byte(pos)
                 if sub == 1 then
-                    if #rows > 0 and rows[1] >= live[1] and rows[#rows - 3] < live[2] then
+                    if #rows > 0 and rows[1] >= live[1] and address <= live[2] then
+                        line = 0
+                        row()
                         sequences[#sequences + 1] = rows
                     end
                     address, file, line, column, rows = 0, 1, 1, 0, {}
@@ -562,17 +566,22 @@ function M.dwarf_map(wasm, map_name, origin)
         for _, rows in ipairs(sequences) do
             for index = 1, #rows, 4 do
                 local path = rows[index + 1]
-                local next_source = indexes[path]
-                if not next_source then
-                    sources[#sources + 1] = quote(path)
-                    next_source = #sources - 1
-                    indexes[path] = next_source
-                end
                 local next_generated = code_offset + rows[index]
-                local next_line, next_column = rows[index + 2] - 1, math.max(rows[index + 3], 1) - 1
-                segments[#segments + 1] = vlq(next_generated - generated) .. vlq(next_source - source) ..
-                    vlq(next_line - line) .. vlq(next_column - column)
-                generated, source, line, column = next_generated, next_source, next_line, next_column
+                local segment = vlq(next_generated - generated)
+                if path then
+                    local next_source = indexes[path]
+                    if not next_source then
+                        sources[#sources + 1] = quote(path)
+                        next_source = #sources - 1
+                        indexes[path] = next_source
+                    end
+                    local next_line, next_column = rows[index + 2] - 1, math.max(rows[index + 3], 1) - 1
+                    segment = segment .. vlq(next_source - source) .. vlq(next_line - line) ..
+                        vlq(next_column - column)
+                    source, line, column = next_source, next_line, next_column
+                end
+                segments[#segments + 1] = segment
+                generated = next_generated
             end
         end
         local url = uleb(#"sourceMappingURL") .. "sourceMappingURL" .. uleb(#map_name) .. map_name
@@ -675,6 +684,8 @@ function M.trace_table(bytes)
 end
 
 -- The recipe never contains staging paths or the injected identity itself.
+-- The compiler, linker and optimizer that make the image count by their
+-- bytes, not only by their paths and version banners.
 function M.identity(context, contents, compile_flags, link_flags, groups)
     local inputs = {}
     for _, group in ipairs(groups) do
@@ -685,9 +696,12 @@ function M.identity(context, contents, compile_flags, link_flags, groups)
         end
         inputs[#inputs + 1] = files
     end
+    local tools = require("titan-compiler.browsertarget").export(context.target_descriptor).tools
     return incremental.digest(context, "browser-trace-image", {
-        entrypoint = contents, target = context.target_descriptor.identity,
-        toolchain = require("titan-compiler.browsertarget").export(context.target_descriptor).tools,
+        entrypoint = contents, target = context.target_descriptor.identity, toolchain = tools,
+        executables = { incremental.file_digest(context, tools.cc[1]),
+            incremental.file_digest(context, tools.ld[1]),
+            (incremental.file_digest(context, tools.optimizer.argv[1])) },
         compile_flags = compile_flags, link_flags = link_flags, inputs = inputs,
     })
 end

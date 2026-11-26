@@ -14771,3 +14771,55 @@ function fourth(): integer return third() + 4 end
         end
     end)
 end)
+
+describe("browser output tool certification", function()
+    it("certifies the SDK archive tools, wasm-ld and wasm-opt for every browser output kind", function()
+        local subject = assert(loadfile("titan-compiler/driver.lua"))()
+        local descriptor = browser_fixtures.descriptor()
+        subject.context_target_descriptor = function() return descriptor end
+        -- The compiler's own identity is certified elsewhere; this pins the output tools.
+        local toolchain_identity = incremental.toolchain_identity
+        local restore <close> = setmetatable({}, { __close = function()
+            incremental.toolchain_identity = toolchain_identity
+        end })
+        incremental.toolchain_identity = function() return "toolchain", { stage_policy = "llvm", tools = {} } end
+        local context = { target = "browser", target_descriptor = descriptor, io = compiler_io.new_sync() }
+        for _, kind in ipairs({ "library", "program", "test" }) do
+            local request = assert(subject.output_tool_descriptors(context, kind))
+            assert.same({ ar = descriptor.tools.ar, ranlib = descriptor.tools.ranlib, ld = descriptor.tools.ld,
+                optimizer = descriptor.tools.optimizer.argv }, request.tools)
+        end
+    end)
+end)
+
+describe("browser link option ownership", function()
+    local browserlink = require "titan-compiler.browserlink"
+    it("refuses inverse, response-file and linker-selection escapes before any tool runs", function()
+        local owned = "browser production link profile owns option "
+        local response = "browser production link profile does not accept linker response file "
+        for _, case in ipairs({
+            { { "-Wl,--no-stack-first" }, owned .. "-Wl,--no-stack-first" },
+            { { "-Wl,--wrap=malloc,--stack-first" }, owned .. "-Wl,--wrap=malloc,--stack-first" },
+            { { "-Xlinker", "--no-gc-sections" }, owned .. "--no-gc-sections" },
+            { { "-Wl,--no-growable-memory" }, owned .. "-Wl,--no-growable-memory" },
+            { { "-Wl,-z,stack-size=65536" }, owned .. "-Wl,-z,stack-size=65536" },
+            { { "-z", "stack-size=65536" }, owned .. "-z" },
+            { { "-e", "start" }, owned .. "-e" },
+            { { "-fuse-ld=lld" }, owned .. "-fuse-ld=lld" },
+            { { "--ld-path=/other/wasm-ld" }, owned .. "--ld-path=/other/wasm-ld" },
+            { { "-B/other/bin" }, owned .. "-B/other/bin" },
+            { { "--prefix=/other" }, owned .. "--prefix=/other" },
+            { { "-Wl,@extra.rsp" }, response .. "-Wl,@extra.rsp" },
+            { { "-Xlinker", "@extra.rsp" }, response .. "@extra.rsp" },
+        }) do
+            local ok, err = browserlink.validate_extras(case[1], { purpose = "program" }, "production", "link")
+            assert.is_nil(ok)
+            assert.equal(case[2], err)
+        end
+        local ok, err = browserlink.validate_extras({ "-Wl,@extra.rsp" }, nil, "validation", "compile")
+        assert.is_nil(ok)
+        assert.equal("browser validation profile does not accept linker response file -Wl,@extra.rsp", err)
+        assert.is_true(browserlink.validate_extras({ "-Wl,--wrap=malloc", "-Wl,--no-demangle", "-lfixture" },
+            { purpose = "program" }, "production", "link"))
+    end)
+end)

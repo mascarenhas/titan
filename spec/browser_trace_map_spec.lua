@@ -420,6 +420,27 @@ describe("browser trace table", function()
         assert.is_nil(result)
         assert.equal("too many Titan source names for the trace table", err)
     end)
+
+    it("ends a DWARF row at its sequence end and line 0 inside a body, and restarts at the same offset", function()
+        local L = fixtures.line
+        local program = L.set_address(2) .. L.advance_line(4) .. L.copy ..
+            L.advance_pc(2) .. L.advance_line(1) .. L.copy ..
+            L.advance_pc(1) .. L.advance_line(-6) .. L.copy ..
+            L.advance_pc(1) .. L.end_sequence ..
+            L.set_address(6) .. L.advance_line(9) .. L.copy ..
+            L.advance_pc(2) .. L.end_sequence
+        local wasm = HEADER .. section(3, "\1\0") .. section(10, "\1\8\0" .. string.rep("\1", 6) .. "\11") ..
+            fixtures.custom_section(".debug_line", fixtures.line_unit({}, { { "inside.titan", 0 } }, program))
+        local stripped, map = assert(trace.dwarf_map(wasm, "inside.wasm.map", "inside.wasm"))
+        local code = #HEADER + 6
+        assert.truthy(map:find('"mappings":"' .. table.concat({ vlq(code + 2) .. "AIA", vlq(2) .. "ACA",
+            vlq(1), vlq(1), "AAIA", vlq(2) }, ",") .. '"', 1, true), map)
+        local _, table_bytes = assert(trace.rewrite(stripped, map, ID, "inside.wasm.map"))
+        local result = decode(table_bytes)
+        for pc, expected in pairs({ [2] = 5, [3] = 5, [4] = 6, [5] = 0, [6] = 10, [7] = 10, [8] = 0, [9] = 0 }) do
+            assert.same({ "inside.titan", expected }, { locate(result, code + pc) }, "pc " .. pc)
+        end
+    end)
 end)
 
 describe("browser image byte limits", function()
@@ -531,12 +552,18 @@ describe("browser rejected-body source attribution", function()
 end)
 
 describe("browser content-derived image identity", function()
-    it("changes for entry, target, toolchain, flags, file contents, paths and order but not timestamps", function()
+    it("changes for entry, target, toolchain bytes, flags, file contents, paths and order but not timestamps", function()
         local root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
         local cleanup <close> = setmetatable({}, { __close = function() files.remove(root) end })
         local left, right = root .. "/left.o", root .. "/right.o"
         files.write(left, "left"); files.write(right, "right")
-        local descriptor = fixtures.descriptor()
+        local clang, wasm_ld, wasm_opt = root .. "/clang", root .. "/wasm-ld", root .. "/wasm-opt"
+        files.write(clang, "clang bytes"); files.write(wasm_ld, "wasm-ld bytes"); files.write(wasm_opt, "wasm-opt bytes")
+        local function with_tools(target)
+            target.tools.cc[1], target.tools.ld[1], target.tools.optimizer.argv[1] = clang, wasm_ld, wasm_opt
+            return target
+        end
+        local descriptor = with_tools(fixtures.descriptor())
         local function identity(contents, compile, link, groups, target)
             return trace.identity({ io = compiler_io.new_sync(), target_descriptor = target or descriptor },
                 contents or "entry", compile or { "-O1" }, link or { "-g2" }, groups or { { left, right } })
@@ -553,10 +580,18 @@ describe("browser content-derived image identity", function()
         files.write(left, "changed")
         assert.not_equal(original, identity())
         files.write(left, "left")
-        local other = fixtures.descriptor(); other.identity = "other"
+        local other = with_tools(fixtures.descriptor()); other.identity = "other"
         assert.not_equal(original, identity(nil, nil, nil, nil, other))
-        other = fixtures.descriptor(); other.tools.version_output = "other toolchain"
+        other = with_tools(fixtures.descriptor()); other.tools.version_output = "other toolchain"
         assert.not_equal(original, identity(nil, nil, nil, nil, other))
+        -- The same tool paths and banners with other bytes are another image.
+        for _, tool in ipairs({ clang, wasm_ld, wasm_opt }) do
+            local bytes = files.read(tool)
+            files.write(tool, bytes .. " replaced in place")
+            assert.not_equal(original, identity(), tool)
+            files.write(tool, bytes)
+            assert.equal(original, identity(), tool)
+        end
         local copy = root .. "/copy.o"; files.write(copy, "left")
         assert.not_equal(original, identity(nil, nil, nil, { { copy, right } }))
         assert.truthy(trace.declaration(original):find('"' .. original .. '"', 1, true))
@@ -618,8 +653,8 @@ describe("browser DWARF line map", function()
         local code = #HEADER + #FUNCTIONS + 2
         local mappings = table.concat({
             vlq(code + 2) .. vlq(0) .. vlq(9) .. vlq(0), vlq(1) .. vlq(0) .. vlq(1) .. vlq(0),
-            vlq(0) .. vlq(1) .. vlq(0) .. vlq(0), vlq(2) .. vlq(1) .. vlq(-6) .. vlq(2),
-            vlq(1) .. vlq(1) .. vlq(0) .. vlq(0), vlq(0) .. vlq(1) .. vlq(2) .. vlq(0) }, ",")
+            vlq(0) .. vlq(1) .. vlq(0) .. vlq(0), vlq(1), vlq(1) .. vlq(1) .. vlq(-6) .. vlq(2),
+            vlq(1) .. vlq(1) .. vlq(0) .. vlq(0), vlq(0), vlq(0) .. vlq(1) .. vlq(2) .. vlq(0), vlq(2) }, ",")
         assert.equal('{"version":3,"sources":["app/demo.titan","C:\\u005cw\\u005cy.titan","/abs/x.c",' ..
             '"plain.c","app/def.titan"],"names":[],"mappings":"' .. mappings .. '"}', map)
         assert.equal('"/abs/x.c":5:3', assert(trace.function_source(map, { code + 5, code + 8 })))

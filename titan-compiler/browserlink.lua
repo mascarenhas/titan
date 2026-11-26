@@ -189,16 +189,23 @@ end
 -- Target-owned settings cannot be weakened by trailing user flags: the
 -- linker options that place the stack, size and grow memory, choose the
 -- exports, imports and entry, or drop the names and line tables traces need.
+-- An option's `--no-` spelling is the same option; a linker response file
+-- could carry any of them.
 local OWNED_LINKER = { ["stack-first"] = true, z = true, ["stack-size"] = true, ["initial-heap"] = true,
-    ["initial-memory"] = true, ["max-memory"] = true, ["no-growable-memory"] = true, export = true,
+    ["initial-memory"] = true, ["max-memory"] = true, ["growable-memory"] = true, export = true,
     ["export-all"] = true, ["export-dynamic"] = true, ["export-if-defined"] = true, ["export-memory"] = true,
     ["export-table"] = true, ["import-memory"] = true, ["import-table"] = true, ["import-undefined"] = true,
     ["allow-undefined"] = true, ["allow-undefined-file"] = true, ["unresolved-symbols"] = true,
-    e = true, entry = true, ["no-entry"] = true, ["shared-memory"] = true, ["gc-sections"] = true,
-    ["no-gc-sections"] = true, s = true, S = true, ["strip-all"] = true, ["strip-debug"] = true,
+    e = true, entry = true, ["shared-memory"] = true, ["gc-sections"] = true,
+    s = true, S = true, ["strip-all"] = true, ["strip-debug"] = true,
     ["global-base"] = true, ["table-base"] = true, ["growable-table"] = true, ["experimental-pic"] = true }
-local OWNED_DRIVER = { ["-s"] = true, ["-nostartfiles"] = true, ["-nostdlib"] = true,
-    ["-nodefaultlibs"] = true }
+local OWNED_DRIVER = { ["-s"] = true, ["-z"] = true, ["-e"] = true, ["-nostartfiles"] = true,
+    ["-nostdlib"] = true, ["-nodefaultlibs"] = true }
+-- Driver options that select another linker than the SDK's certified wasm-ld.
+local function selects_linker(flag)
+    return flag:match("^%-fuse%-ld=") or flag:match("^%-%-ld%-path=") or flag:match("^%-B") or
+        flag:match("^%-%-prefix")
+end
 local OWNED_DEFINES = { TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
     TITAN_CODEC_DEPTH_LIMIT = true, _WASI_EMULATED_PROCESS_CLOCKS = true }
 -- Emscripten options that put JavaScript or files into the generated module
@@ -237,10 +244,17 @@ function M.validate_extras(flags, options, build_profile, origin)
             return owns(flag)
         end
         local define = flag:match("^%-[DU](.+)") or (flag == "-D" or flag == "-U") and flags[index + 1]
-        if OWNED_DRIVER[flag] or define and OWNED_DEFINES[define:match("^([%w_]+)")] then return owns(flag) end
+        if OWNED_DRIVER[flag] or selects_linker(flag) or define and OWNED_DEFINES[define:match("^([%w_]+)")] then
+            return owns(flag)
+        end
         local linker = flag:match("^%-Wl,(.*)$") or flags[index - 1] == "-Xlinker" and flag
         for argument in ((linker or "") .. ","):gmatch("([^,]*),") do
-            if OWNED_LINKER[argument:match("^%-%-?([%w-]+)") or ""] then return owns(flag) end
+            if argument:sub(1, 1) == "@" then
+                return nil, (origin == "compile" and compile_label or label) ..
+                    " does not accept linker response file " .. flag
+            end
+            local name = argument:match("^%-%-?([%w-]+)") or ""
+            if OWNED_LINKER[name] or OWNED_LINKER[(name:gsub("^no%-", ""))] then return owns(flag) end
         end
     end
     return true

@@ -1141,4 +1141,36 @@ describe("browser object and link certificate identity", function()
         assert.is_true(certificate.check(ctx, certificate.prepare(ctx, spec)))
         assert.equal(before, files.read(native.record))
     end)
+    it("certifies the browser linker and optimizer by their physical identity at fixed paths", function()
+        files.write(root .. "/provider.a", "published archive")
+        local paths_ = { ar = tool_path("llvm-ar"), ranlib = tool_path("llvm-ranlib"),
+            ld = tool_path("wasm-ld"), optimizer = tool_path("wasm-opt") }
+        for role, filename in pairs(paths_) do files.write(filename, role .. " bytes") end
+        local function prepared()
+            local ctx = tool_context()
+            ctx.target_descriptor = descriptor(root)
+            ctx.relocation_roots = { sdk = root }
+            local request = {}
+            for role, filename in pairs(paths_) do request[role] = { filename } end
+            local tools = assert(certificate.output_tools(ctx, { tools = request }))
+            for role in pairs(paths_) do assert.is_table(tools[role].identity, role) end
+            return ctx, certificate.prepare(ctx, { output_root = root, outputs = { root .. "/provider.a" },
+                kind = "library", toolchain = { output_tools = tools },
+                native_libraries = { backend = "archive" } })
+        end
+        local ctx, ticket = prepared()
+        assert(certificate.commit(ctx, ticket))
+        assert.is_true(certificate.check(prepared()))
+        -- Physical tool identity is the file's observed state, so an in-place
+        -- replacement at the same path is another certificate input.
+        local previous = ticket
+        for _, role in ipairs({ "ld", "optimizer" }) do
+            files.write(paths_[role], files.read(paths_[role]) .. " replaced in place")
+            local replaced, changed = prepared()
+            assert.equal(ticket.key, changed.key)
+            assert.not_equal(previous.input, changed.input, role)
+            assert.is_false(certificate.check(replaced, changed))
+            previous = changed
+        end
+    end)
 end)

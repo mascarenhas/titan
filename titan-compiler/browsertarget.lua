@@ -272,14 +272,15 @@ local function validate(data, context)
         return nil, "invalid browser target descriptor"
     end
     local tools = data.tools
-    if not fields(tools, { "cc", "ar", "ranlib", "sysroot", "version", "source", "location",
+    if not fields(tools, { "cc", "ar", "ranlib", "ld", "sysroot", "version", "source", "location",
             "version_output", "optimizer" }) or
         tools.version ~= M.WASI_SDK_VERSION or (tools.source ~= "WASI_SDK_PATH" and tools.source ~= "PATH") or
         not normalized_absolute(tools.location) or type(tools.version_output) ~= "string" or
         tools.sysroot ~= sdk_path(tools.location, "share", "wasi-sysroot") then
         return nil, "invalid browser toolchain descriptor"
     end
-    for _, item in ipairs({ { "cc", "clang" }, { "ar", "llvm-ar" }, { "ranlib", "llvm-ranlib" } }) do
+    for _, item in ipairs({ { "cc", "clang" }, { "ar", "llvm-ar" }, { "ranlib", "llvm-ranlib" },
+            { "ld", "wasm-ld" } }) do
         local command = tools[item[1]]
         if not argv(command) or #command ~= 1 or not normalized_absolute(command[1]) or
             command[1] ~= tool_path(sdk_path(tools.location, "bin"), item[2]) then
@@ -706,7 +707,9 @@ end
 function M.discover_tools(context)
     local tools, err = discover_compiler(context)
     if not tools then return nil, err end
-    for _, item in ipairs({ { "ar", "llvm-ar" }, { "ranlib", "llvm-ranlib" } }) do
+    -- clang drives the SDK's own wasm-ld; the descriptor names it so link
+    -- certificates and image identities cover its bytes.
+    for _, item in ipairs({ { "ar", "llvm-ar" }, { "ranlib", "llvm-ranlib" }, { "ld", "wasm-ld" } }) do
         local filename = tool_path(sdk_path(tools.location, "bin"), item[2])
         local present, reason = tool_candidate(context, filename)
         if reason then return nil, resolution_error(SDK, filename, reason, SDK_INSTALL) end
@@ -845,12 +848,9 @@ end
 local function probe_fingerprint(context, descriptor)
     local reservation, err = context.io:tmpname()
     if not reservation then return nil, err end
-    -- Win32 tmpname can choose any suffix for an ordinary reservation; the
-    -- probe source keeps a plain `.c` name beside its explicit `-x c`.
-    local source = reservation .. ".c"
-    local object = source .. ".o"
+    -- The explicit `-x c` compiles the reservation as C whatever its suffix.
+    local source, object = reservation, reservation .. ".o"
     local cleanup <close> = setmetatable({}, { __close = function()
-        context.io:unlink(reservation)
         context.io:unlink(source)
         context.io:unlink(object)
     end })

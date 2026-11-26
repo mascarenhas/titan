@@ -47,7 +47,7 @@ end
 -- A fake filesystem holding the browser Lua installation, one wasi-sdk 34.0
 -- (`<tool_root>/wasi-sdk`) and one Binaryen 133 (`<tool_root>/binaryen`).
 -- `missing` names one installed file to remove: "clang", "llvm-ar",
--- "llvm-ranlib", "wasm-opt" or "VERSION". `unstartable` and `failing` name a
+-- "llvm-ranlib", "wasm-ld", "wasm-opt" or "VERSION". `unstartable` and `failing` name a
 -- tool whose `--version` run does not start or exits nonzero.
 local function fake_context(options)
     options = options or {}
@@ -66,7 +66,7 @@ local function fake_context(options)
     local sdk = tool_root .. "/wasi-sdk"
     local suffix = tool_suffix()
     local installed = { VERSION = sdk .. "/VERSION", ["wasm-opt"] = tool_root .. "/binaryen/bin/wasm-opt" .. suffix }
-    for _, tool in ipairs({ "clang", "llvm-ar", "llvm-ranlib" }) do
+    for _, tool in ipairs({ "clang", "llvm-ar", "llvm-ranlib", "wasm-ld" }) do
         installed[tool] = sdk .. "/bin/" .. tool .. suffix
     end
     for _, filename in pairs(installed) do files[key(filename)] = "fake launcher" end
@@ -223,7 +223,8 @@ describe("browser target descriptor", function()
         assert.equal("browser", descriptor.label)
         assert.equal("wasm32-wasip1", descriptor.triple)
         assert.same({ cc = { clang }, ar = { sdk .. "/bin/llvm-ar" .. suffix },
-            ranlib = { sdk .. "/bin/llvm-ranlib" .. suffix }, sysroot = sysroot, version = "34.0",
+            ranlib = { sdk .. "/bin/llvm-ranlib" .. suffix }, ld = { sdk .. "/bin/wasm-ld" .. suffix },
+            sysroot = sysroot, version = "34.0",
             source = "WASI_SDK_PATH", location = sdk, version_output = CLANG_VERSION,
             optimizer = { argv = { optimizer }, version = "133", source = "BINARYEN_ROOT",
                 version_output = OPTIMIZER_VERSION } }, browser.export(descriptor.tools))
@@ -260,18 +261,26 @@ describe("browser target descriptor", function()
         end
     end)
 
-    it("uses a C source suffix and cleans up a raw .s reservation in the fingerprint probe", function()
+    it("compiles a raw .s reservation as C and cleans up exactly its files in the fingerprint probe", function()
         local context, inputs, calls, storage = fake_context()
         local reservation = inputs.paths.root .. "/fingerprint.s"
         function context.io:tmpname()
             storage[reservation] = ""
             return reservation
         end
+        local unlinked = {}
+        local unlink = context.io.unlink
+        function context.io:unlink(filename)
+            unlinked[#unlinked + 1] = filename
+            return unlink(self, filename)
+        end
         assert(browser.build(context, inputs))
         local command = calls[#calls]
-        assert.same({ "-c", reservation .. ".c", "-o", reservation .. ".c.o" },
-            { table.unpack(command, #command - 3) })
-        for _, filename in ipairs({ reservation, reservation .. ".c", reservation .. ".c.o" }) do
+        assert.same({ "-x", "c", "-c", reservation, "-o", reservation .. ".o" },
+            { table.unpack(command, #command - 5) })
+        table.sort(unlinked)
+        assert.same({ reservation, reservation .. ".o" }, unlinked)
+        for _, filename in ipairs({ reservation, reservation .. ".o" }) do
             assert.is_nil(storage[filename])
         end
     end)
@@ -479,6 +488,13 @@ assert(file:close())
             { "invalid browser tool argv", function(tools) tools.cc[1] = tools.location .. "/emcc" .. suffix end },
             { "invalid browser tool argv", function(tools) tools.ar[1] = tools.location .. "/bin/emar" .. suffix end },
             { "invalid browser tool argv", function(tools) tools.ar = {} end },
+            { "invalid browser toolchain descriptor", function(tools) tools.ld = nil end },
+            { "invalid browser tool argv", function(tools) tools.ld = { tools.ld[1], "--no-entry" } end },
+            { "invalid browser tool argv", function(tools) tools.ld[1] = tools.location .. "/bin/lld" .. suffix end },
+            { "invalid browser tool argv", function(tools)
+                tools.ld[1] = tools.location .. "/bin/./wasm-ld" .. suffix
+            end },
+            { "invalid browser tool argv", function(tools) tools.ld[1] = "wasm-ld" .. suffix end },
             { "invalid browser tool argv", function(tools)
                 tools.ranlib[1] = tools.location .. "/bin/llvm-ar" .. suffix
             end },
@@ -558,6 +574,9 @@ assert(file:close())
         end },
         { "tool outside its installation", function(data)
             data.tools.ar[1] = data.tools.location .. "/other/llvm-ar" .. tool_suffix()
+        end },
+        { "linker outside its installation", function(data)
+            data.tools.ld[1] = data.tools.location .. "/other/wasm-ld" .. tool_suffix()
         end },
         { "sysroot outside its installation", function(data)
             data.tools.sysroot = data.tools.location .. "/sysroot"
@@ -961,6 +980,8 @@ assert(file:close())
                 "llvm-ar not found at %q", sdk .. "/bin/llvm-ar" .. suffix)) },
             { "a missing llvm-ranlib", { missing = "llvm-ranlib" }, 1, requires_sdk(string.format(
                 "llvm-ranlib not found at %q", sdk .. "/bin/llvm-ranlib" .. suffix)) },
+            { "a missing wasm-ld", { missing = "wasm-ld" }, 1, requires_sdk(string.format(
+                "wasm-ld not found at %q", sdk .. "/bin/wasm-ld" .. suffix)) },
             { "a missing wasm-opt", { missing = "wasm-opt" }, 1, requires_optimizer(string.format(
                 "%q is not an executable (BINARYEN_ROOT=%q)", optimizer, FAKE_ROOT .. "/binaryen")) },
             { "a different wasm-opt release", { optimizer_output = "wasm-opt version 132 (version_132)\n" }, 2,
@@ -1008,6 +1029,7 @@ assert(file:close())
             assert.equal("PATH", descriptor.tools.source)
             assert.equal(FAKE_ROOT .. "/wasi-sdk", descriptor.tools.location)
             assert.equal(FAKE_ROOT .. "/wasi-sdk/bin/clang" .. suffix, descriptor.tools.cc[1])
+            assert.equal(FAKE_ROOT .. "/wasi-sdk/bin/wasm-ld" .. suffix, descriptor.tools.ld[1])
             assert.equal(FAKE_ROOT .. "/wasi-sdk/share/wasi-sysroot", descriptor.tools.sysroot)
         end
         local empty = "browser target requires wasi-sdk 34.0: no wasi-sdk clang on PATH " ..
@@ -1091,6 +1113,7 @@ assert(file:close())
             assert.equal(sdk .. "/bin/clang.exe", descriptor.tools.cc[1])
             assert.equal(sdk .. "/bin/llvm-ar.exe", descriptor.tools.ar[1])
             assert.equal(sdk .. "/bin/llvm-ranlib.exe", descriptor.tools.ranlib[1])
+            assert.equal(sdk .. "/bin/wasm-ld.exe", descriptor.tools.ld[1])
             assert.equal(sdk .. "/share/wasi-sysroot", descriptor.tools.sysroot)
             assert.equal(binaryen .. "/wasm-opt.exe", descriptor.tools.optimizer.argv[1])
             assert.equal(3, #calls, "descriptor creation never launches archive tools")
@@ -1108,6 +1131,12 @@ assert(file:close())
             assert.is_nil(imported)
             assert.equal("invalid browser tool argv", err)
             data.tools.ranlib[1] = sdk .. "/bin/llvm-ranlib.exe"
+            data.tools.ld[1] = sdk .. "/bin/wasm-ld"
+            fixtures.identify(data)
+            imported, err = browser.import(data)
+            assert.is_nil(imported)
+            assert.equal("invalid browser tool argv", err)
+            data.tools.ld[1] = sdk .. "/bin/wasm-ld.exe"
             data.tools.optimizer.argv[1] = data.tools.optimizer.argv[1]:gsub("/", "\\")
             fixtures.identify(data)
             imported, err = browser.import(data)
@@ -1145,7 +1174,7 @@ assert(file:close())
                 return resolved
             end
             local function installed(...) return table.concat({ resolved, ... }, sep) end
-            for _, name in ipairs({ "clang", "llvm-ar", "llvm-ranlib" }) do
+            for _, name in ipairs({ "clang", "llvm-ar", "llvm-ranlib", "wasm-ld" }) do
                 storage[installed("bin", name .. ".exe")] = "launcher"
             end
             storage[installed("VERSION")] = "34.0\n"
@@ -1155,6 +1184,7 @@ assert(file:close())
             assert.same({ installed("bin", "clang.exe") }, tools.cc)
             assert.same({ installed("bin", "llvm-ar.exe") }, tools.ar)
             assert.same({ installed("bin", "llvm-ranlib.exe") }, tools.ranlib)
+            assert.same({ installed("bin", "wasm-ld.exe") }, tools.ld)
             assert.equal(installed("share", "wasi-sysroot"), tools.sysroot)
             assert.same({ installed("bin", "clang.exe"), "--target=wasm32-wasip1",
                 "--sysroot=" .. installed("share", "wasi-sysroot"), "--version" }, calls[1])
@@ -1235,6 +1265,7 @@ assert(file:close())
             { root .. "/wasi-sdk/bin/clang.exe", "wasi-sdk 34.0", SDK_INSTALL, 0 },
             { root .. "/wasi-sdk/bin/llvm-ar.exe", "wasi-sdk 34.0", SDK_INSTALL, 1 },
             { root .. "/wasi-sdk/bin/llvm-ranlib.exe", "wasi-sdk 34.0", SDK_INSTALL, 1 },
+            { root .. "/wasi-sdk/bin/wasm-ld.exe", "wasi-sdk 34.0", SDK_INSTALL, 1 },
             { root .. "/binaryen/bin/wasm-opt.exe", "Binaryen version_133 wasm-opt", OPTIMIZER_INSTALL, 1 },
         }) do
             local candidate, requirement, install, launched = table.unpack(row)

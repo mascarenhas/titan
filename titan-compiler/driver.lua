@@ -2020,8 +2020,12 @@ function driver.output_tool_descriptors(context, kind)
     local tools, uncacheable = {}, nil
     local browser = context.target_descriptor
     if browser then
+        -- Every browser output either links an image or validates its archive
+        -- through a linked protocol image: wasm-ld and wasm-opt make both.
         tools.ar = { table.unpack(browser.tools.ar) }
         tools.ranlib = { table.unpack(browser.tools.ranlib) }
+        tools.ld = { table.unpack(browser.tools.ld) }
+        tools.optimizer = { table.unpack(browser.tools.optimizer.argv) }
     elseif kind == "library" and not platform.windows then
         local ar, ar_error = perf.tool_command(driver.AR, "AR")
         if not ar then return nil, ar_error end

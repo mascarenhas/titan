@@ -100,7 +100,7 @@ local function context(files)
 end
 
 describe("browser generated C preprocessing", function()
-    it("preserves C mode and retires the .s reservation and its products on Windows", function()
+    it("preprocesses a .s reservation as C through clang's -x c and retires it and its products on Windows", function()
         local windows = platform.windows
         local ok, failure = xpcall(function()
             platform.windows = true
@@ -116,9 +116,9 @@ describe("browser generated C preprocessing", function()
                 return name
             end
             function ctx.io:run(argv)
-                assert.same({ "-E", "-P", "-x", "c", reservation .. ".c", "-o", output },
+                assert.same({ "-E", "-P", "-x", "c", reservation, "-o", output },
                     { table.unpack(argv, #argv - 6) })
-                assert.equal("int input;", storage[reservation .. ".c"])
+                assert.equal("int input;", storage[reservation])
                 storage[output] = "int input;\n"
                 return { ok = true }
             end
