@@ -80,7 +80,7 @@ function sinkResult(result, stream, role = 'sink') {
 
 // These continuations deliberately live outside the image/instance factory.
 // An externally retained host promise or listener keeps only its detachable
-// cell, never an otherwise retired Module or an instance lexical environment.
+// cell, never an otherwise retired image context or an instance lexical environment.
 function mailboxFulfilled(cell, value) {
   const target = cell.target;
   if (target) target.resolve(value);
@@ -615,7 +615,7 @@ class BrowserOwner {
     const pending = {id, kind: operationKinds[kind], completion: undefined};
     this.pending = pending;
     try {
-      const entry = this.module[`_titan_browser_${kind}`];
+      const entry = this.module.exports[`titan_browser_${kind}`];
       if (typeof entry !== 'function') throw failure('PROTOCOL', `browser image has no ${kind} entry`);
       // Fulfillment is physical retirement, not an application return value.
       await Promise.race([entry(id, ...args), this.active.fatal.promise]);
@@ -688,32 +688,39 @@ class BrowserOwner {
     (stream === 2 ? this.err : this.out).admit(this.bytesAt(pointer, length));
   }
 
+  // A fatal abort: a load or link failure, or a fixture or runtime abort.
+  abortEngine(cause) {
+    this.abortSeen = true;
+    this.poison(cause, this.originalTrap ? 'trap' : 'abort');
+  }
+
+  trapEngine(cause) {
+    this.originalTrap ||= cause;
+    this.poison(cause, 'trap');
+  }
+
+  // The embedder's raw Wasm imports, a fresh table the factory may extend.
+  userImports(context) {
+    const imports = this.options.imports;
+    return importTable(typeof imports === 'function' ? imports(context) : imports ?? {});
+  }
+
   async instantiate() {
     if (typeof WebAssembly.promising !== 'function' ||
         typeof WebAssembly.Suspending !== 'function') {
       throw failure('CAPABILITY', 'Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)');
     }
-    // Avoid AllocationSite -> literal boilerplate -> instance-bound accessor -> Module.
-    // Emscripten mutates this input, so it must not share a cached literal map.
-    const incoming = Object.create(null);
-    incoming.onAbort = cause => { this.abortSeen = true; this.poison(cause, this.originalTrap ? 'trap' : 'abort'); };
-    incoming.titanBrowserAttach = backend => { this.backend = backend; };
-    incoming.titanBrowserSafePoint = () => this.scheduleSafePoint();
-    incoming.titanBrowserTrap = cause => { this.originalTrap ||= cause; this.poison(cause, 'trap'); };
-    incoming.titanBrowserComplete = record => this.complete(record);
-    incoming.titanBrowserBridge = this;
-    if (this.options.locateFile !== undefined) incoming.locateFile = this.options.locateFile;
     try {
-      this.module = await Promise.race([this.factory(incoming), this.active.fatal.promise]);
+      this.module = await Promise.race([this.factory(this), this.active.fatal.promise]);
       this.factory = undefined;
       if (this.terminal) throw this.terminal;
       if (!this.backend || !(this.module?.HEAPU8 instanceof Uint8Array) ||
-          typeof this.module._titan_browser_trace_identity !== 'function') {
+          typeof this.module.exports?.titan_browser_trace_identity !== 'function') {
         throw failure('PROTOCOL', 'browser image does not provide Titan channels');
       }
       // Only the host sees both the identity this module was generated with
       // and the one its Wasm exports; a pair from two links never runs.
-      const identity = new TextDecoder().decode(this.bytesAt(this.module._titan_browser_trace_identity(), 64));
+      const identity = new TextDecoder().decode(this.bytesAt(this.module.exports.titan_browser_trace_identity(), 64));
       if (identity !== this.image.identity) {
         const stem = this.image.wasm.replace(/\.wasm$/, '');
         throw failure('PROTOCOL', `browser image mismatch: ${stem}.mjs belongs to image ` +
@@ -812,7 +819,7 @@ class BrowserOwner {
   allocate(size, allocations) {
     if (this.terminal) throw this.terminal;
     if (!size) return 0;
-    const pointer = this.module._malloc(size) >>> 0;
+    const pointer = this.module.exports.malloc(size) >>> 0;
     if (this.terminal) throw this.terminal;
     if (!pointer) throw new RangeError('not enough memory for browser arguments');
     allocations.push(pointer);
@@ -822,7 +829,7 @@ class BrowserOwner {
   free(allocations) {
     if (!this.terminal && this.module) {
       for (let index = allocations.length - 1; index >= 0 && !this.terminal; --index) {
-        this.module._free(allocations[index]);
+        this.module.exports.free(allocations[index]);
       }
     }
   }
@@ -863,7 +870,7 @@ class BrowserOwner {
     record.owner = undefined;
     this.callables.delete(record.key);
     if (this.module && !this.closing && !this.terminal) {
-      try { this.module._titan_browser_release_callable(record.state, record.slot, record.generation); }
+      try { this.module.exports.titan_browser_release_callable(record.state, record.slot, record.generation); }
       catch (cause) { this.poison(cause); }
     }
   }
@@ -1962,7 +1969,7 @@ class BrowserOwner {
   }
 
   trace() {
-    const trace = this.module?.titanBrowserTrace || this.lastTrace;
+    const trace = this.module?.trace || this.lastTrace;
     return Object.freeze({state: trace?.state ?? 'created', reason: trace?.reason ?? null});
   }
 
@@ -2086,6 +2093,27 @@ async function retireOwner(owner) {
   return disposal;
 }
 
+// Raw Wasm imports for C in the image, copied into prototype-less maps. The
+// WASI module and the env.titan_browser_* and env.titan_mco_* names belong
+// to the Titan runtime, including names it does not import today.
+function importTable(imports) {
+  if (imports === null || typeof imports !== 'object') {
+    throw new TypeError('browser imports must be an object or a function returning one');
+  }
+  const table = Object.create(null);
+  for (const [module, entries] of Object.entries(imports)) {
+    if (entries === null || typeof entries !== 'object') throw new TypeError(`browser imports.${module} must be an object`);
+    const copy = table[module] = Object.create(null);
+    for (const [name, value] of Object.entries(entries)) {
+      if (module === 'wasi_snapshot_preview1' || module === 'env' && /^titan_(browser|mco)_/.test(name)) {
+        throw new TypeError(`browser import ${module}.${name} is reserved for the Titan runtime`);
+      }
+      copy[name] = value;
+    }
+  }
+  return table;
+}
+
 /** Create one persistent instance; the image supplies its private factory. */
 export function create(factory, options = {}, image) {
   if (typeof factory !== 'function') throw new TypeError('browser factory must be a function');
@@ -2112,7 +2140,10 @@ export function create(factory, options = {}, image) {
     if (!name || /[=\0]/.test(name) || typeof value !== 'string' || value.includes('\0')) throw new TypeError('browser env must contain valid names and string values without NUL');
     return `${name}=${value}`;
   });
-  const owner = new BrowserOwner(factory, {...options, env}, image);
+  // A function form runs at instantiation, with the instance context.
+  const imports = options.imports === undefined || typeof options.imports === 'function' ?
+    options.imports : importTable(options.imports);
+  const owner = new BrowserOwner(factory, {...options, env, imports}, image);
   return Object.freeze({
     initialize: () => owner.initialize(),
     run: (args = []) => owner.run(args),

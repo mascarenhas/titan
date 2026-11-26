@@ -4,7 +4,7 @@
 # with configuration + digest reuse verification.
 #
 # Reuses an existing installation only when:
-#   - the effective browser-config (fork revision, Emscripten version, target,
+#   - the effective browser-config (fork revision, wasi-sdk version, target,
 #     sjlj mode, normalized cflags, sorted lua_defines, preprocessed numeric
 #     configuration, and Wasm target features) matches the installed record;
 #   - all installed headers in PREFIX/lib/browser/include/*.h match both the
@@ -14,8 +14,6 @@
 #     exists in lua-5.5.1/src/browser/liblua.a, matches it as well).
 
 set -eu
-# Reuse probes run emcc directly before entering the fork's Make/install paths.
-unset EMCC_CFLAGS
 
 fail() {
 	printf 'lua-browser: %s\n' "$*" >&2
@@ -39,21 +37,24 @@ myldflags=${LUA_BROWSER_MYLDFLAGS-${MYLDFLAGS-}}
 	exit 1
 }
 
-# Select emsdk sibling tools when EMSDK is set or emcc is on PATH.
+# Select the wasi-sdk's sibling tools: LUA_BROWSER_CC when set, else clang in
+# WASI_SDK_PATH, else clang on PATH. The fork's Make goals check the pinned
+# release named by the sdk's VERSION file.
 browser_cc=${LUA_BROWSER_CC-}
 browser_ar=${LUA_BROWSER_AR-}
 browser_ranlib=${LUA_BROWSER_RANLIB-}
-emsdk=${EMSDK-}
+wasi_sdk=${WASI_SDK_PATH-}
 
 tool_suffix=
 if [ "${OS:-}" = Windows_NT ]; then
 	tool_suffix=.exe
 	if [ -n "$browser_cc" ]; then browser_cc=$(printf '%s' "$browser_cc" | tr '\\' /); fi
-	if [ -n "$emsdk" ]; then emsdk=$(printf '%s' "$emsdk" | tr '\\' /); fi
+	if [ -n "$wasi_sdk" ]; then wasi_sdk=$(printf '%s' "$wasi_sdk" | tr '\\' /); fi
 fi
-emcc=emcc$tool_suffix
-emar=emar$tool_suffix
-emranlib=emranlib$tool_suffix
+clang=clang$tool_suffix
+llvm_ar=llvm-ar$tool_suffix
+llvm_ranlib=llvm-ranlib$tool_suffix
+remedy="install wasi-sdk-34.0 from https://github.com/WebAssembly/wasi-sdk/releases and set WASI_SDK_PATH to its directory"
 
 resolved_cc=
 if [ -n "$browser_cc" ]; then
@@ -61,32 +62,32 @@ if [ -n "$browser_cc" ]; then
 	*/*) [ -x "$browser_cc" ] && resolved_cc=$browser_cc ;;
 	*) resolved_cc=$(command -v "$browser_cc" 2>/dev/null || true) ;;
 	esac
-elif [ -n "$emsdk" ]; then
-	candidate="$emsdk/upstream/emscripten/$emcc"
+elif [ -n "$wasi_sdk" ]; then
+	candidate="$wasi_sdk/bin/$clang"
 	if [ -x "$candidate" ]; then
 		resolved_cc=$candidate
 	else
-		fail "browser target requires Emscripten 6.0.13: emcc not found at \"$candidate\" (EMSDK=\"$EMSDK\"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
+		fail "browser target requires wasi-sdk 34.0: clang not found at \"$candidate\" (WASI_SDK_PATH=\"$WASI_SDK_PATH\"); $remedy"
 	fi
 else
-	resolved_cc=$(command -v "$emcc" 2>/dev/null || true)
+	resolved_cc=$(command -v "$clang" 2>/dev/null || true)
 fi
 
 if [ -n "$resolved_cc" ]; then
-	em_dir=$(CDPATH= cd "$(dirname "$resolved_cc")" && pwd)
-	if [ -z "$browser_ar" ] && [ ! -x "$em_dir/$emar" ]; then
-		fail "browser target requires Emscripten 6.0.13: emar not found at \"$em_dir/$emar\" (emcc=\"$resolved_cc\"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
+	sdk_bin=$(CDPATH= cd "$(dirname "$resolved_cc")" && pwd)
+	if [ -z "$browser_ar" ] && [ ! -x "$sdk_bin/$llvm_ar" ]; then
+		fail "browser target requires wasi-sdk 34.0: llvm-ar not found at \"$sdk_bin/$llvm_ar\" (clang=\"$resolved_cc\"); $remedy"
 	fi
-	if [ -z "$browser_ranlib" ] && [ ! -x "$em_dir/$emranlib" ]; then
-		fail "browser target requires Emscripten 6.0.13: emranlib not found at \"$em_dir/$emranlib\" (emcc=\"$resolved_cc\"); install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh"
+	if [ -z "$browser_ranlib" ] && [ ! -x "$sdk_bin/$llvm_ranlib" ]; then
+		fail "browser target requires wasi-sdk 34.0: llvm-ranlib not found at \"$sdk_bin/$llvm_ranlib\" (clang=\"$resolved_cc\"); $remedy"
 	fi
-	PATH="$em_dir:$PATH"
+	PATH="$sdk_bin:$PATH"
 	export PATH
 fi
 
-effective_cc=${browser_cc:-$emcc}
-effective_ar=${browser_ar:-$emar rcu}
-effective_ranlib=${browser_ranlib:-$emranlib}
+effective_cc=${browser_cc:-$clang}
+effective_ar=${browser_ar:-$llvm_ar rc}
+effective_ranlib=${browser_ranlib:-$llvm_ranlib}
 if [ "$tool_suffix" = .exe ] && [ -n "$resolved_cc" ]; then
 	# The directory is now first on PATH. Pass the basename through the
 	# fork's recursive Make command variables without quoting a drive path
@@ -184,7 +185,7 @@ check_reuse() {
 	cfg_headers=
 	cfg_cc=
 	cfg_target=
-	cfg_emscripten=
+	cfg_wasi_sdk=
 	cfg_sjlj=
 	cfg_cflags=
 	while IFS= read -r line || [ -n "$line" ]; do
@@ -195,7 +196,7 @@ check_reuse() {
 		browser_headers=*) cfg_headers=$(trim "${line#browser_headers=}") ;;
 		browser_cc=*) cfg_cc=$(trim "${line#browser_cc=}") ;;
 		browser_target=*) cfg_target=$(trim "${line#browser_target=}") ;;
-		browser_emscripten_version=*) cfg_emscripten=$(trim "${line#browser_emscripten_version=}") ;;
+		browser_wasi_sdk_version=*) cfg_wasi_sdk=$(trim "${line#browser_wasi_sdk_version=}") ;;
 		browser_sjlj=*) cfg_sjlj=$(trim "${line#browser_sjlj=}") ;;
 		browser_cflags=*) cfg_cflags=$(trim "${line#browser_cflags=}") ;;
 		*) return 1 ;;
@@ -203,12 +204,12 @@ check_reuse() {
 	done <"$tmp/config"
 
 	[ -n "$cfg_archive" ] && [ -n "$cfg_headers" ] && [ -n "$cfg_cc" ] &&
-		[ -n "$cfg_target" ] && [ -n "$cfg_emscripten" ] &&
+		[ -n "$cfg_target" ] && [ -n "$cfg_wasi_sdk" ] &&
 		[ -n "$cfg_sjlj" ] && [ -n "$cfg_cflags" ] || return 1
 
-	banner=$("$cfg_cc" --version 2>/dev/null | head -n 1 || true)
-	found_ver=$(printf '%s\n' "$banner" | sed -n 's/.*) \([0-9][0-9.]*\).*/\1/p')
-	[ "$found_ver" = "$cfg_emscripten" ] || return 1
+	cc_path=$(command -v "$cfg_cc" 2>/dev/null) || return 1
+	found_ver=$(sed -n 1p "${cc_path%/*}/../VERSION" 2>/dev/null || true)
+	[ "$found_ver" = "$cfg_wasi_sdk" ] || return 1
 
 	src_abs=$(CDPATH= cd "$lua_dir/src" && pwd)
 	root_abs=$(CDPATH= cd "$lua_dir" && pwd)
@@ -225,9 +226,11 @@ check_reuse() {
 
 	cflags_normalized=
 	defines=
-	longjmp=
-	legacy_exceptions=
-	eh_flags=
+	flag_target=
+	eh=
+	wasm_sjlj=
+	legacy_eh=
+	js_sjlj=
 	pic_flags=
 	previous=
 	for flag in $cfg_cflags; do
@@ -235,24 +238,20 @@ check_reuse() {
 		case $flag in
 		-D*) defines=${defines:+$defines }$flag ;;
 		-fPIC | -fpic | -fPIE | -fpie) pic_flags="$pic_flags $flag" ;;
-		-fwasm-exceptions | -fno-wasm-exceptions | -mexception-handling | \
-		-mno-exception-handling | -mlegacy-exception-handling | \
-		-mno-legacy-exception-handling) eh_flags="$eh_flags $flag" ;;
+		--target=*) flag_target=${flag#--target=} ;;
+		-mexception-handling) eh=1 ;;
+		-mno-exception-handling) eh=0 ;;
 		esac
-		setting=
-		case $flag in
-		-s?*) setting=${flag#-s} ;;
-		*) if [ "$previous" = "-s" ]; then setting=$flag; fi ;;
-		esac
-		case $setting in
-		SUPPORT_LONGJMP | SUPPORT_LONGJMP=1 | NO_SUPPORT_LONGJMP=0) longjmp=emscripten ;;
-		SUPPORT_LONGJMP=*) longjmp=${setting#*=} ;;
-		NO_SUPPORT_LONGJMP | NO_SUPPORT_LONGJMP=*) longjmp=0 ;;
-		WASM_LEGACY_EXCEPTIONS | WASM_LEGACY_EXCEPTIONS=1 | \
-		NO_WASM_LEGACY_EXCEPTIONS=0) legacy_exceptions=1 ;;
-		WASM_LEGACY_EXCEPTIONS=*) legacy_exceptions=${setting#*=} ;;
-		NO_WASM_LEGACY_EXCEPTIONS | NO_WASM_LEGACY_EXCEPTIONS=*) legacy_exceptions=0 ;;
-		esac
+		if [ "$previous" = -target ]; then flag_target=$flag; fi
+		if [ "$previous" = -mllvm ]; then
+			case $flag in
+			-wasm-enable-sjlj | -wasm-enable-sjlj=true | -wasm-enable-sjlj=1) wasm_sjlj=1 ;;
+			-wasm-enable-sjlj=*) wasm_sjlj=0 ;;
+			-wasm-use-legacy-eh=false | -wasm-use-legacy-eh=0) legacy_eh=0 ;;
+			-wasm-use-legacy-eh | -wasm-use-legacy-eh=*) legacy_eh=1 ;;
+			-enable-emscripten-sjlj*) js_sjlj=1 ;;
+			esac
+		fi
 		previous=$flag
 	done
 	if [ -n "$defines" ]; then
@@ -260,16 +259,18 @@ check_reuse() {
 	else
 		lua_defines=
 	fi
-	[ "$cfg_sjlj" = wasm ] && [ "$legacy_exceptions" = 1 ] || return 1
-	[ -z "$eh_flags" ] || return 1
-	[ "$longjmp" = "$cfg_sjlj" ] || return 1
+	[ "$flag_target" = "$cfg_target" ] || return 1
+	[ "$cfg_sjlj" = wasm-exnref ] && [ "$eh" = 1 ] && [ "$wasm_sjlj" = 1 ] &&
+		[ "$legacy_eh" = 0 ] && [ -z "$js_sjlj" ] || return 1
 	[ -z "$pic_flags" ] || return 1
 
 	cat >"$tmp/macros.c" <<'EOF'
 #include "luaconf.h"
 EOF
 	macros=$("$cfg_cc" -dM -E -I"$src_abs" $cfg_cflags "$tmp/macros.c" 2>/dev/null) || return 1
-	printf '%s\n' "$macros" | awk '$1 == "#define" && $2 == "LUA_USE_POSIX" { f = 1 } END { exit !f }' || return 1
+	if printf '%s\n' "$macros" | awk '$1 == "#define" && $2 == "LUA_USE_POSIX" { f = 1 } END { exit !f }'; then
+		return 1
+	fi
 	printf '%s\n' "$macros" | awk '$1 == "#define" && $2 == "LUA_USE_BROWSER" { f = 1 } END { exit !f }' || return 1
 	if printf '%s\n' "$macros" | awk '$1 == "#define" && $2 == "LUA_USE_DLOPEN" { f = 1 } END { exit !f }'; then
 		return 1
@@ -326,13 +327,13 @@ EOF
 	}' || return 1
 
 	first_line=$(head -n 1 "$record_file" 2>/dev/null || true)
-	[ "$first_line" = "# Lua 5.5.1 browser build record v1" ] || return 1
+	[ "$first_line" = "# Lua 5.5.1 browser build record v2" ] || return 1
 
 	tail -n +2 "$record_file" >"$tmp/record_body" || return 1
 	rec_fork_revision=
 	rec_archive_sha256=
 	rec_headers_sha256=
-	rec_emscripten_version=
+	rec_wasi_sdk_version=
 	rec_target=
 	rec_wasm_features=
 	rec_sjlj=
@@ -356,7 +357,7 @@ EOF
 			fork_revision) rec_fork_revision=$val ;;
 			archive_sha256) rec_archive_sha256=$val ;;
 			headers_sha256) rec_headers_sha256=$val ;;
-			emscripten_version) rec_emscripten_version=$val ;;
+			wasi_sdk_version) rec_wasi_sdk_version=$val ;;
 			target) rec_target=$val ;;
 			wasm_features) rec_wasm_features=$val ;;
 			sjlj) rec_sjlj=$val ;;
@@ -373,7 +374,7 @@ EOF
 
 	expected_features="+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
 	[ "$rec_fork_revision" = "$revision" ] || return 1
-	[ "$rec_emscripten_version" = "$cfg_emscripten" ] || return 1
+	[ "$rec_wasi_sdk_version" = "$cfg_wasi_sdk" ] || return 1
 	[ "$rec_target" = "$cfg_target" ] || return 1
 	[ "$rec_wasm_features" = "$expected_features" ] || return 1
 	[ "$rec_sjlj" = "$cfg_sjlj" ] || return 1

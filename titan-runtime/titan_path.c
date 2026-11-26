@@ -29,16 +29,18 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+/* The browser has no dynamic loader and no processes: its SDK root query and
+** provider loading are compiled out below. */
 #if !defined(TITAN_TARGET_BROWSER)
 #include <dlfcn.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #endif
 #include <fcntl.h>
 #include <limits.h>
-#include <signal.h>
-#include <spawn.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <crt_externs.h>

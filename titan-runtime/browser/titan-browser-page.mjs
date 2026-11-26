@@ -69,9 +69,13 @@ function byteSink(sink) {
 export async function execute(config, host) {
     const stdout = byteSink(host.stdout);
     const stderr = byteSink(host.stderr);
+    // --imports names a module whose default export is create's `imports`.
+    const imports = config.imports === undefined ? undefined : (await host.module(config.imports)).default;
+    if (config.imports !== undefined && imports === undefined) throw new Error("--imports module must have a default export");
     const context = Object.freeze({
         engine: config.engine,
         args: Object.freeze([...config.args]),
+        imports,
         image: async path => Object.freeze(await host.image(relativePath(path))),
         bytes: async path => new Uint8Array(await host.bytes(relativePath(path))),
         stdout, stderr,
@@ -103,7 +107,7 @@ export async function execute(config, host) {
         return;
     }
     const { create, locateFile } = await context.image(config.file);
-    const instance = create({ stdout, stderr, locateFile, stdoutKind: config.stdoutKind, stderrKind: config.stderrKind });
+    const instance = create({ stdout, stderr, locateFile, imports, stdoutKind: config.stdoutKind, stderrKind: config.stderrKind });
     try {
         try { await instance.initialize(); }
         catch (error) {

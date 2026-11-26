@@ -16,13 +16,15 @@
 #include "titan.h"
 #include "titan_winloader.h"
 #else
+/* The browser has no dynamic loader, signals or advisory file locks; the
+** helpers that need them are compiled out or replaced below. */
 #if !defined(TITAN_TARGET_BROWSER)
 #include <dlfcn.h>
-#endif
-#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/file.h>
+#endif
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -1340,6 +1342,9 @@ static int output_lock_try(lua_State *L) {
       titan_win_loader_error(L, "cannot lock build lock", lock->identity, error);
       return 2;
     }
+#elif defined(TITAN_TARGET_BROWSER)
+    /* The lock excludes other processes, and no other process shares a
+    ** browser instance's files. */
 #else
     int result;
     do result = flock(lock->fd, LOCK_EX | LOCK_NB);
