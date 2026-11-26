@@ -110,8 +110,11 @@ local function exhaust(context: test.Context)
   local released: integer = ffi.budget_heap_size()
   local fresh = coroutine.create(function(_: value): value return 43 end, "fresh")
   test.assert(fresh:resume(nil) == 43)
-  test.assert(cap == 2147483648 and exhausted == cap,
-              "exhaustion did not exercise the delivered actual 2-GiB maximum")
+  -- wasi-libc's allocator grows memory per request, so the failing request
+  -- leaves less than one coroutine allocation below the delivered maximum.
+  local stack: integer = ffi.TITAN_COROUTINE_STACK_SIZE
+  test.assert(cap == 2147483648 and exhausted <= cap and cap - exhausted < stack,
+              "exhaustion did not reach the delivered actual 2-GiB maximum")
   test.assert(initial < exhausted and released == exhausted,
               "Wasm heap did not grow or unexpectedly shrank after release")
   local description = "non-string allocation failure"

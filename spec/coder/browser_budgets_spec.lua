@@ -151,10 +151,15 @@ describe("browser measured delivered budget limits", function()
                 elseif mode == "create-failure" then
                     assert.truthy(log:find("deterministic_mco_failure=1 fresh_after_failure=1", 1, true), log)
                 elseif mode == "exhaust" then
-                    -- Initial memory is static data and the stack plus the heap.
-                    local initial = tonumber(log:match("initial_heap=(%d+) exhausted_heap=2147483648 " ..
-                        "released_heap=2147483648 maximum=2147483648"))
+                    -- Initial memory is static data and the stack plus the
+                    -- heap. The failing request leaves less than one 256-KiB
+                    -- coroutine allocation below the 2-GiB maximum.
+                    local initial, exhausted, released = log:match("initial_heap=(%d+) exhausted_heap=(%d+) " ..
+                        "released_heap=(%d+) maximum=2147483648 ")
+                    initial, exhausted, released = tonumber(initial), tonumber(exhausted), tonumber(released)
                     assert.truthy(initial and initial % 65536 == 0 and initial > 1048576 + 15728640, log)
+                    assert.truthy(exhausted and exhausted % 65536 == 0 and exhausted <= 2147483648 and
+                        2147483648 - exhausted < 262144 and released == exhausted, log)
                     assert.truthy(log:find("existing_canary=42 fresh_after_gc=43", 1, true), log)
                 end
                 io.stdout:write(string.format("BUDGET MODE engine=%s mode=%s elapsed_ms=%.2f PASS\n",
