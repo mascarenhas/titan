@@ -14,6 +14,11 @@
 #     exists in lua-5.5.1/src/browser/liblua.a, matches it as well).
 
 set -eu
+# Reuse probes run clang directly before entering the fork's Make/install
+# paths; clang reads extra options, include and library directories and the
+# tools it runs from these variables.
+unset CCC_OVERRIDE_OPTIONS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH \
+	OBJC_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH
 
 fail() {
 	printf 'lua-browser: %s\n' "$*" >&2
