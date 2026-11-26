@@ -46,7 +46,7 @@ export function makeHost(context, image, extra = {}) {
       host.pinned[name] = [Number(state), Number(slot), Number(generation)];
     },
   };
-  host.instance = image.create({locateFile: image.locateFile, bindings: host.bindings,
+  host.instance = image.create({locateFile: image.locateFile, imports: context.imports, bindings: host.bindings,
     stdout(bytes) {
       sinkCalled();
       host.stdout.push(bytes.slice());

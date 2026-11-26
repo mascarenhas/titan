@@ -52,7 +52,7 @@ assert(driver.close_resolver_context(resolver))
 assert(incremental.load_sdk_digests(context, layout.sdk_digests))
 local recorded = assert(context.incremental.sdk, "sdk-digests: missing or invalid final SDK manifest")
 print(driver.TITAN_VERSION, driver.TITAN_LIBRARY_VERSION, driver.TITAN_ABI_VERSION,
-    driver.LANGUAGE_SERVER_API_VERSION, semantic.emscripten_version, semantic.build_profile)
+    driver.LANGUAGE_SERVER_API_VERSION, semantic.wasi_sdk_version, semantic.build_profile)
 for _, asset in ipairs({ "absent-modules", "analysis-target", "titan.a" }) do
     local filename = paths.join(layout.titan_bin, asset)
     local physical = assert(strategy:realpath(filename))

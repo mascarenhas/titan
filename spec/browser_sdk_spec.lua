@@ -170,15 +170,12 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local expected_bin = paths.to_slash(paths.normalize(installed.titan_bin))
         assert.same({
             runtime = expected_bin .. "/libtitan.a",
-            js_library = expected_bin .. "/titan-browser-library.js",
-            bridge_library = expected_bin .. "/titan-browser-bridge.js",
-            trace_library = expected_bin .. "/titan-browser-trace.js",
+            factory = expected_bin .. "/titan-wasm-factory.mjs",
             loader = expected_bin .. "/titan-browser.mjs",
             runner = expected_bin .. "/titan-browser-run",
             runner_module = expected_bin .. "/titan-browser-run.mjs",
             node_worker = expected_bin .. "/titan-browser-node-worker.mjs",
             page = expected_bin .. "/titan-browser-page.mjs",
-            module_check = expected_bin .. "/titan-browser-module-check.mjs",
             build_profile = expected_bin .. "/build-profile",
             lpeglabel = expected_bin .. "/libtitan-lpeglabel.a",
             provider = expected_bin .. "/titan.a",
@@ -204,8 +201,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             end,
         }
         local required_order = {
-            "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
-            "runner_module", "node_worker", "page", "module_check", "build_profile",
+            "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page", "build_profile",
         }
         for _, key in ipairs(required_order) do
             local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
@@ -401,9 +397,7 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
             paths.join(browser_paths.include, "titan/ffi.h"),
             paths.join(browser_paths.include, "titan/browser.h"),
             assets.runtime,
-            assets.js_library,
-            assets.bridge_library,
-            assets.trace_library,
+            assets.factory,
             assets.loader,
             assets.runner,
             assets.runner_module,
@@ -473,7 +467,7 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
     it("bootstraps lfs and compiler modules from TITAN_INSTALL_TREE before PREFIX and rejects incomplete PREFIX browser Lua", function()
         if platform.windows then
             local info, why = toolchain.require()
-            if not info then pending("capability: Windows bootstrap fixture needs emsdk: " .. why); return end
+            if not info then pending("capability: Windows bootstrap fixture needs wasi-sdk and Binaryen: " .. why); return end
         end
         local active_prefix = installed_prefix.active()
         local root = new_workspace("-sdk-bootstrap-order")
@@ -506,15 +500,22 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
 
         local env = { PREFIX = bare_prefix, TITAN_INSTALL_TREE = rocks_tree, ROCKS_TREE = rocks_tree }
         if not platform.windows then
-            local fake_em = paths.join(root, "emscripten")
-            files.mkdir(fake_em)
-            for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do
-                local p = paths.join(fake_em, tool)
-                assert(strategy:write_file(p, "#!/bin/sh\necho 'emcc (Emscripten) 6.0.13'\n"))
-                assert(strategy:run({ "chmod", "0755", p }, { stderr_to_stdout = true }).ok)
+            -- A wasi-sdk and Binaryen that only report their pinned versions:
+            -- discovery passes, so the missing PREFIX browser Lua is the failure.
+            local sdk, binaryen = paths.join(root, "wasi-sdk"), paths.join(root, "binaryen")
+            files.mkdir(paths.join(sdk, "share/wasi-sysroot"))
+            assert(strategy:write_file(paths.join(sdk, "VERSION"), "34.0\nwasi-libc: fixture\n"))
+            local fakes = { [paths.join(sdk, "bin/clang")] = "echo 'clang version 23.1.0-wasi-sdk'",
+                [paths.join(sdk, "bin/llvm-ar")] = "exit 0", [paths.join(sdk, "bin/llvm-ranlib")] = "exit 0",
+                [paths.join(sdk, "bin/wasm-ld")] = "exit 0",
+                [paths.join(binaryen, "bin/wasm-opt")] = "echo 'wasm-opt version 133 (version_133)'" }
+            for filename, body in pairs(fakes) do
+                files.mkdir(paths.dirname(filename))
+                assert(strategy:write_file(filename, "#!/bin/sh\n" .. body .. "\n"))
+                assert(strategy:run({ "chmod", "0755", filename }, { stderr_to_stdout = true }).ok)
             end
-            env.PATH = fake_em .. ":/usr/bin:/bin"
-            env.EMSDK = ""
+            env.PATH = "/usr/bin:/bin"
+            env.WASI_SDK_PATH, env.BINARYEN_ROOT, env.WASM_OPT = sdk, binaryen, ""
         end
 
         local res = run_with_env(strategy, env, {
@@ -545,9 +546,9 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
 
         local record_bytes = assert(strategy:read_file(info.record_path))
         local fork_rev = assert(record_bytes:match("fork_revision=([0-9a-f]+)"))
-        local em_dir = paths.dirname(info.tools.cc[1])
+        local sdk_bin = paths.dirname(info.tools.cc[1])
         local base_env = {
-            PATH = em_dir .. path_separator .. (os.getenv("PATH") or ""),
+            PATH = sdk_bin .. path_separator .. (os.getenv("PATH") or ""),
             FORK_REVISION = fork_rev,
             CCACHE_DISABLE = "1",
         }
@@ -578,9 +579,9 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
         local clean_liblua_bytes = assert(strategy:read_file(liblua))
         local clean_record_bytes = assert(strategy:read_file(record))
         local clean_luah_bytes = assert(strategy:read_file(lua_h))
-        contains(clean_record_bytes, "sjlj=wasm\n")
+        contains(clean_record_bytes, "sjlj=wasm-exnref\n")
         contains(clean_record_bytes, "+exception-handling")
-        contains(clean_record_bytes, "-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1")
+        contains(clean_record_bytes, "-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false")
 
         -- 2. Warm matching configuration is reused without touching installed or object files,
         -- and explicit empty LUA_BROWSER_MYCFLAGS= overrides ambient MYCFLAGS.
@@ -607,17 +608,19 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
         assert.equal(clean_liblua_bytes, assert(strategy:read_file(liblua)))
         assert.equal(clean_record_bytes, assert(strategy:read_file(record)))
 
-        -- 4. Malformed records and records for the previous JS-SJLJ or implicit
-        -- EH encoding configuration are rejected and regenerated cleanly.
+        -- 4. Malformed records and records for the legacy or implicit EH
+        -- encoding configuration are rejected and regenerated cleanly.
         for _, bad_record in ipairs({
             clean_record_bytes:sub(1, -2),
             clean_record_bytes .. "# trailing comment not allowed\n",
             (clean_record_bytes:gsub("\n", "\r\n", 1)),
             clean_record_bytes:sub(1, -2) .. "\0\n",
             clean_record_bytes:sub(1, -2) .. "\255\n",
-            (clean_record_bytes:gsub("sjlj=wasm", "sjlj=emscripten")),
-            (clean_record_bytes:gsub(" %-sWASM_LEGACY_EXCEPTIONS=1", "")),
-            (clean_record_bytes:gsub("WASM_LEGACY_EXCEPTIONS=1", "WASM_LEGACY_EXCEPTIONS=0")),
+            (clean_record_bytes:gsub("# Lua 5%.5%.1 browser build record v2", "# Lua 5.5.1 browser build record v1")),
+            (clean_record_bytes:gsub("sjlj=wasm%-exnref", "sjlj=wasm")),
+            (clean_record_bytes:gsub(" %-mexception%-handling", "")),
+            (clean_record_bytes:gsub("%-wasm%-use%-legacy%-eh=false", "-wasm-use-legacy-eh=true")),
+            (clean_record_bytes:gsub("wasi_sdk_version=34", "wasi_sdk_version=33")),
             (clean_record_bytes:gsub(" %+exception%-handling", "")),
         }) do
             assert(strategy:write_file(record, bad_record))
@@ -641,23 +644,32 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
         assert.is_true(changed_cfg.ok, changed_cfg.output)
         local updated_record = assert(strategy:read_file(record))
         contains(updated_record, "fork_revision=" .. fork_rev)
-        contains(updated_record, "lua_defines=-DLUAI_MAXCCALLS=100 -DLUA_USER_DEFAULT=1 -DLUA_USE_BROWSER -DLUA_USE_POSIX")
-        contains(updated_record, "cflags=-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER " ..
-            "-DLUAI_MAXCCALLS=100 -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1 -DLUA_USER_DEFAULT=1")
+        contains(updated_record, "lua_defines=-DLUAI_MAXCCALLS=100 -DLUA_USER_DEFAULT=1 -DLUA_USE_BROWSER " ..
+            "-DLUA_USE_OFF_T -D_WASI_EMULATED_PROCESS_CLOCKS -Dl_signalT=int")
+        contains(updated_record, "cflags=-O2 -Wall -Wextra --target=wasm32-wasip1 -DLUA_USE_BROWSER " ..
+            "-DLUA_USE_OFF_T -Dl_signalT=int -DLUAI_MAXCCALLS=100 -D_WASI_EMULATED_PROCESS_CLOCKS " ..
+            "-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false " ..
+            "-gdwarf-4 -gline-tables-only -DLUA_USER_DEFAULT=1")
 
         local updated_liblua = assert(strategy:read_file(liblua))
         -- Inspect wrong effective settings using the real installer and an
         -- existing archive: rejection must precede installation, not bless it
         -- with a new record. This does not rebuild a Lua archive per bad flag.
         local configuration = paths.join(root, "rejected-config")
-        for _, flag in ipairs({ "-sSUPPORT_LONGJMP=emscripten", "-s SUPPORT_LONGJMP=emscripten",
-                "-sSUPPORT_LONGJMP", "-sNO_SUPPORT_LONGJMP=1",
-                "-sWASM_LEGACY_EXCEPTIONS=0", "-s WASM_LEGACY_EXCEPTIONS=0",
-                "-sNO_WASM_LEGACY_EXCEPTIONS", "-s NO_WASM_LEGACY_EXCEPTIONS=1",
-                "-mno-exception-handling" }) do
+        for _, case in ipairs({
+            { "-mno-exception-handling", "install-browser: the browser build owns the target, ABI and Wasm " ..
+                "exception lowering; remove -mno-exception-handling" },
+            { "-mllvm=-wasm-use-legacy-eh=true", "install-browser: the browser build owns the target, ABI and " ..
+                "Wasm exception lowering; remove -mllvm=-wasm-use-legacy-eh=true" },
+            { "-mllvm -wasm-use-legacy-eh=true", "install-browser: sjlj=wasm-exnref requires -mexception-handling, " ..
+                "-mllvm -wasm-enable-sjlj and -mllvm -wasm-use-legacy-eh=false, with no other -mllvm option" },
+            { "--target=wasm32-wasip2", "install-browser: the browser build must compile with " ..
+                "--target=wasm32-wasip1, but the effective target is 'wasm32-wasip2'" },
+            { "-fPIC", "install-browser: the browser build must not compile position-independent objects" },
+        }) do
             local config = run_with_env(strategy, base_env, {
                 toolchain.make, "-s", "--no-print-directory", "-C", paths.join(temp_lua, "src"),
-                "browser-config", "BROWSER_CC=" .. info.tools.cc[1], "MYCFLAGS=" .. flag,
+                "browser-config", "BROWSER_CC=" .. info.tools.cc[1], "MYCFLAGS=" .. case[1],
             })
             assert.is_true(config.ok, config.output)
             local config_text, replacements = config.output:gsub("browser_src= %.\n",
@@ -670,13 +682,13 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
                 paths.join(temp_prefix, "lib/browser"), configuration,
             })
             assert.is_false(rejected.ok, rejected.output)
-            contains(rejected.output, "install-browser: the browser build")
+            contains(rejected.output, case[2])
             assert.equal(updated_record, strategy:read_file(record))
             assert.equal(updated_liblua, strategy:read_file(liblua))
         end
     end)
 
-    it("clears ambient EMCC_CFLAGS in fork browser entrypoints and reuse without changing native goals", function()
+    it("clears ambient clang configuration in fork browser entrypoints and reuse without changing native goals", function()
         if platform.windows then
             pending("platform: the flag-isolation fixture uses executable POSIX shebang compiler wrappers")
             return
@@ -690,24 +702,38 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
             copy_tree(strategy, paths.join(repository, "lua-5.5.1", name), paths.join(temp_lua, name))
         end
         local revision = assert(assert(strategy:read_file(info.record_path)):match("fork_revision=([0-9a-f]+)"))
-        local guarded_cc = paths.join(root, "guarded-emcc")
+        -- The guard is a wasi-sdk clang to the fork: its ../VERSION names the release.
+        local guarded_cc = paths.join(root, "guarded-sdk/bin/clang")
         local native_cc = paths.join(root, "native-cc")
+        files.mkdir(paths.dirname(guarded_cc))
+        assert(strategy:write_file(paths.join(root, "guarded-sdk/VERSION"),
+            assert(strategy:read_file(paths.join(info.tools.location, "VERSION")))))
         assert(strategy:write_file(guarded_cc, [[#!/bin/sh
 set -eu
-[ -z "${EMCC_CFLAGS:-}" ] || { echo "ambient EMCC_CFLAGS reached browser compiler" >&2; exit 91; }
-exec "$TITAN_TEST_REAL_EMCC" "$@"
+for variable in CCC_OVERRIDE_OPTIONS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH \
+        LIBRARY_PATH COMPILER_PATH; do
+    eval "value=\${$variable:-}"
+    [ -z "$value" ] || { echo "ambient $variable reached browser compiler" >&2; exit 91; }
+done
+exec "$TITAN_TEST_REAL_CLANG" "$@"
 ]]))
         assert(strategy:write_file(native_cc, [[#!/bin/sh
 set -eu
-[ "${EMCC_CFLAGS-}" = "$TITAN_TEST_EXPECT_EMCC_CFLAGS" ] || { echo "native environment changed" >&2; exit 92; }
+[ "${CCC_OVERRIDE_OPTIONS-}" = "$TITAN_TEST_EXPECT_OVERRIDE" ] &&
+    [ "${C_INCLUDE_PATH-}" = "$TITAN_TEST_EXPECT_INCLUDE" ] || { echo "native environment changed" >&2; exit 92; }
 exec cc "$@"
 ]]))
         assert(strategy:run({ "chmod", "0755", guarded_cc, native_cc }).ok)
-        for _, ambient in ipairs({ "-sWASM_LEGACY_EXCEPTIONS=0", "-sSUPPORT_LONGJMP=emscripten" }) do
+        local missing_include = paths.join(root, "missing-include")
+        for _, ambient in ipairs({ { CCC_OVERRIDE_OPTIONS = "# +-DTITAN_AMBIENT_OVERRIDE=1" },
+                { C_INCLUDE_PATH = missing_include } }) do
             local env = {
                 PATH = paths.dirname(info.tools.cc[1]) .. ":" .. (os.getenv("PATH") or ""),
-                EMCC_CFLAGS = ambient, TITAN_TEST_EXPECT_EMCC_CFLAGS = ambient,
-                TITAN_TEST_REAL_EMCC = info.tools.cc[1], FORK_REVISION = revision, CCACHE_DISABLE = "1",
+                CCC_OVERRIDE_OPTIONS = ambient.CCC_OVERRIDE_OPTIONS or "",
+                C_INCLUDE_PATH = ambient.C_INCLUDE_PATH or "",
+                TITAN_TEST_EXPECT_OVERRIDE = ambient.CCC_OVERRIDE_OPTIONS or "",
+                TITAN_TEST_EXPECT_INCLUDE = ambient.C_INCLUDE_PATH or "",
+                TITAN_TEST_REAL_CLANG = info.tools.cc[1], FORK_REVISION = revision, CCACHE_DISABLE = "1",
             }
             local function run_make(directory, arguments)
                 local argv = { "make", "--no-print-directory", "-C", directory }
@@ -742,14 +768,15 @@ exec cc "$@"
             local reused = run_with_env(strategy, env, {
                 "make", "--no-print-directory", "lua-browser", "PREFIX=" .. temp_prefix,
                 "LUA_DIR=" .. temp_lua, "LUA_BROWSER_CC=" .. guarded_cc,
-                "LUA_BROWSER_AR=" .. info.tools.ar[1] .. " rcu",
+                "LUA_BROWSER_AR=" .. info.tools.ar[1] .. " rc",
                 "LUA_BROWSER_RANLIB=" .. info.tools.ranlib[1],
             })
             assert.is_true(reused.ok, reused.output)
             assert.same(before, assert(strategy:stat(archive)))
             local record = assert(strategy:read_file(paths.join(temp_prefix, "lib/browser/liblua-config.txt")))
-            contains(record, "sjlj=wasm\n")
-            contains(record, "-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1")
+            contains(record, "sjlj=wasm-exnref\n")
+            contains(record, "-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false")
+            assert.is_nil(record:find("TITAN_AMBIENT_OVERRIDE", 1, true), record)
             local native = run_make(paths.join(temp_lua, "src"), { "-B", "lapi.o", "CC=" .. native_cc })
             assert.is_true(native.ok, native.output)
         end
@@ -767,10 +794,10 @@ exec cc "$@"
         files.mkdir(app_dir)
         files.mkdir(app_out)
 
-        local em_dir = paths.dirname(info.tools.cc[1])
+        local sdk_bin = paths.dirname(info.tools.cc[1])
         local node_dir = paths.dirname(info.node.path)
         local sdk_env = {
-            PATH = table.concat({ em_dir, node_dir, paths.join(info.prefix, "bin"), os.getenv("PATH") or "" },
+            PATH = table.concat({ sdk_bin, node_dir, paths.join(info.prefix, "bin"), os.getenv("PATH") or "" },
                 path_separator),
             TITAN_NODE = info.node.path,
             CCACHE_DISABLE = "1",
@@ -858,29 +885,27 @@ end
                 runtime, sdk_remedy, no_sdk_root))
         assert.is_nil(link_empty_rocks_res.output:find("ROCKS_TREE=", 1, true), link_empty_rocks_res.output)
 
-        -- An explicit old Node is diagnosed. An old EMSDK-bundled Node must
-        -- not override the qualifying Node selected through ordinary PATH.
-        local bad_node, bad_version, candidate_path, emsdk
+        -- An explicit old Node is diagnosed, and an old Node later on PATH
+        -- must not override the qualifying Node found first.
+        local fake_node_dir = paths.join(root, "fake-node24")
+        local bad_node, bad_version = paths.join(fake_node_dir, "node"), "v24.19.0"
+        local candidate_path
+        files.mkdir(fake_node_dir)
         if platform.windows then
-            bad_node = assert(os.getenv("EMSDK_NODE"), "activate emsdk to test with its bundled Node")
-            local version_result = strategy:run({ bad_node, "--version" })
-            assert.is_true(version_result.ok, version_result.output or version_result.diagnostic)
-            bad_version = assert(version_result.output:match("^(v24%.[%d.]+)"))
-            candidate_path = table.concat({ node_dir, paths.dirname(bad_node), sdk_env.PATH }, path_separator)
+            -- Windows runs no shebang scripts: build the old Node with the native compiler.
+            local source = paths.join(root, "fake-node24.c")
+            bad_node = bad_node .. ".exe"
+            assert(strategy:write_file(source,
+                '#include <stdio.h>\nint main(void) { puts("v24.19.0"); return 0; }\n'))
+            local built = strategy:run({ os.getenv("CC") or "gcc", source, "-o", bad_node }, { stderr_to_stdout = true })
+            assert.is_true(built.ok, built.output or built.diagnostic)
+            candidate_path = table.concat({ node_dir, fake_node_dir, sdk_env.PATH }, path_separator)
         else
-            local fake_node_dir = paths.join(root, "fake-node24")
             local good_node_dir = paths.join(root, "node26")
-            emsdk = paths.join(root, "fake-emsdk")
-            local bundled_node_dir = paths.join(emsdk, "node/24.19.0_64bit/bin")
-            files.mkdir(fake_node_dir)
-            files.mkdir(bundled_node_dir)
             files.mkdir(good_node_dir)
-            bad_node, bad_version = paths.join(fake_node_dir, "node"), "v24.19.0"
             assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v24.19.0'\n"))
             assert(strategy:run({ "chmod", "0755", bad_node }, { stderr_to_stdout = true }).ok)
-            assert(lfs.link(bad_node, paths.join(bundled_node_dir, "node"), true))
             assert(lfs.link(info.node.path, paths.join(good_node_dir, "node"), true))
-            assert(lfs.link(paths.dirname(em_dir), paths.join(emsdk, "upstream"), true))
             candidate_path = table.concat({ good_node_dir, fake_node_dir, sdk_env.PATH }, path_separator)
         end
 
@@ -921,7 +946,6 @@ end
         end
         local sdk_res = run_with_env(strategy, {
             PATH = candidate_path,
-            EMSDK = emsdk or os.getenv("EMSDK"),
             TITAN_NODE = "",
             CCACHE_DISABLE = "1",
             -- Both ambient spellings must be replaced, not appended to the
@@ -1056,13 +1080,14 @@ end
         assert.equal(live.lua.record.lua_defines, semantic.lua.defines)
         assert.equal(live.lua.record.numeric, semantic.lua.numeric)
         assert.equal(live.lua.record.fork_revision, semantic.lua.fork_revision)
-        assert.equal(live.tools.version, semantic.emscripten_version)
+        assert.equal(live.tools.version, semantic.wasi_sdk_version)
         assert.equal(version.TITAN_ABI_VERSION, semantic.abi)
         assert.equal(version.TITAN_VERSION, semantic.release)
         assert.equal("validation", semantic.build_profile)
         assert.equal(incremental.file_digest(digest_ctx, assets.provider), semantic.provider_sha256)
         assert.equal(incremental.file_digest(digest_ctx, absent_file), semantic.absent_sha256)
-        for _, producer_path in ipairs({ rocks_tree, info.prefix, build_dir, repository, em_dir, info.tools.cc[1] }) do
+        for _, producer_path in ipairs({ rocks_tree, info.prefix, build_dir, repository, sdk_bin, info.tools.location,
+                info.tools.cc[1], info.tools.optimizer.argv[1] }) do
             assert.is_nil(semantic_bytes:find(producer_path, 1, true), producer_path)
         end
         assert.is_nil(browser.decode_analysis(digest_ctx, semantic_bytes:sub(1, -2)))
@@ -1100,8 +1125,8 @@ end
             expected_digest_files[#expected_digest_files + 1] = paths.join(browser_paths.include, rel)
         end
         for _, key in ipairs({
-            "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
-            "runner_module", "node_worker", "page", "module_check", "build_profile", "lpeglabel", "provider",
+            "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page", "build_profile",
+            "lpeglabel", "provider",
         }) do
             expected_digest_files[#expected_digest_files + 1] = assets[key]
         end
@@ -1147,7 +1172,7 @@ end
         contains(run_test.output, "[  PASSED  ] 1 test.")
 
         -- 3b. Publish a browser library from a catch-bearing Titan module plus a setjmp C helper
-        -- alongside non-setjmp counterparts: Wasm SJLJ uses the same EH fingerprint without JS-SJLJ's -shared-mem marker.
+        -- alongside non-setjmp counterparts: exnref SJLJ objects carry the same feature fingerprint.
         local sjlj_src = paths.join(root, "sjlj-src")
         local sjlj_out = paths.join(root, "sjlj-out")
         files.mkdir(paths.join(sjlj_src, "sjlj_pkg"))
@@ -1227,10 +1252,14 @@ end
         local plain_helper_obj = assert(staticmetadata.classify_object(
             assert(strategy:read_file(plain_c_obj)), "plain_helper.o", expected_fp))
 
-        assert.equal(fixtures.features, catcher_obj.fingerprint.features)
-        assert.equal(fixtures.features, plain_mod_obj.fingerprint.features)
-        assert.equal(fixtures.features, sjlj_helper_obj.fingerprint.features)
-        assert.equal(fixtures.features, plain_helper_obj.fingerprint.features)
+        -- Clang marks an object that may use setjmp as unable to share
+        -- memory: every object carries the record's exnref features exactly,
+        -- plus at most that one negative marker, never atomics or shared memory.
+        for _, object in ipairs({ catcher_obj, plain_mod_obj, sjlj_helper_obj, plain_helper_obj }) do
+            local features = object.fingerprint.features
+            assert(staticmetadata.fingerprint_matches(object.fingerprint, expected_fp))
+            assert.equal(fixtures.features, (features:gsub(" %-shared%-mem$", "")))
+        end
 
         local sjlj_archive_path = paths.join(sjlj_out, "sjlj_pkg.a")
         local scanned_untargeted = assert(staticmetadata.scan_archive(sjlj_archive_path))
@@ -1244,7 +1273,7 @@ end
 
     end)
 
-    it("installs the native static compiler SDK without emsdk and checks its coroutine stack", function()
+    it("installs the native static compiler SDK without wasi-sdk or Binaryen and checks its coroutine stack", function()
         if platform.windows then
             pending("platform: this native link fixture uses the Unix static Lua, Titan, and libbacktrace archives")
             return
@@ -1253,16 +1282,18 @@ end
         if not info then pending(why) return end
         local root = new_workspace("-native-compiler-sdk")
         local native_tree = paths.join(root, "native-compiler-sdk")
+        local browser_tools = { [paths.dirname(info.tools.cc[1])] = true,
+            [paths.dirname(info.tools.optimizer.argv[1])] = true }
         local clean_path = {}
         for entry in (os.getenv("PATH") or ""):gmatch("[^:]+") do
-            if not entry:find("emsdk", 1, true) and not entry:find("emscripten", 1, true) then
+            if not browser_tools[entry] and not entry:find("wasi-sdk", 1, true) and
+                    not entry:find("binaryen", 1, true) then
                 clean_path[#clean_path + 1] = entry
             end
         end
-        local native_res = run_with_env(strategy, {
-            PATH = table.concat(clean_path, ":"),
-            EMSDK = "",
-        }, {
+        local native_env = { PATH = table.concat(clean_path, ":"), WASI_SDK_PATH = "", BINARYEN_ROOT = "",
+            WASM_OPT = "" }
+        local native_res = run_with_env(strategy, native_env, {
             "make", "--no-print-directory", "install-compiler-sdk",
             "PREFIX=" .. info.prefix,
             "ROCKS_TREE=" .. native_tree,
@@ -1290,10 +1321,7 @@ int main(void) {
     return 0;
 }
 ]]))
-        local cc_res = run_with_env(strategy, {
-            PATH = table.concat(clean_path, ":"),
-            EMSDK = "",
-        }, {
+        local cc_res = run_with_env(strategy, native_env, {
             os.getenv("CC") or "cc", "--std=c99",
             "-I" .. paths.join(native_tree, "src/lua-5.5.1"),
             "-I" .. paths.join(native_tree, "include"),

@@ -2,8 +2,8 @@
 #define TITAN_BROWSER_GATE_H
 #include <stdint.h>
 #include <titan/browser.h>
+#include "fixture_controls.h"
 int titan_browser_gate_guarded(uint64_t operation_id);
-void gate_test_publish(void);
 void gate_lifetime_operation(lua_State *L, int requested_phase);
 int gate_lifetime_is_child(lua_State *L);
 unsigned int titan_browser_gate_observe(void);

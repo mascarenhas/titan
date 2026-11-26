@@ -3,7 +3,7 @@ local protobuf = import "protobuf"
 local reflect = import "reflect"
 local string = import "string"
 local test = import "test"
-foreign import "emscripten/heap.h"
+foreign import "heap.h"
 
 local type Value = browser.BrowserValue
 local type Callable = function (...: Value): Value
@@ -379,7 +379,7 @@ end
 function test_heap_growth_tools(_: test.Context)
   local codec = protobuf.portable({reflect.Type.is_string()})
   control("heap", function(...: Value): Value
-    return Value.is_integer(ffi.emscripten_get_heap_size() as integer)
+    return Value.is_integer(ffi.titan_test_heap_size() as integer)
   end)
   control("grow_out", function(...: Value): Value
     return Value.is_bytes(codec:encode(string.rep("\0\255A", 11184811)))

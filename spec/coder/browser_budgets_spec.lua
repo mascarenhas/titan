@@ -8,10 +8,40 @@ local hrtime = require("titan-compiler.process").library().hrtime
 local support = require "spec.fixtures.browser_runtime.support"
 local workspace
 
-local function build(info, root, assertions, name, budgets)
-    local options = { purpose = "budget", assertions = assertions, optimization = "O2" }
+-- The flags, minimum and maximum pages of the one memory a Wasm module
+-- defines, read from its memory section rather than from the link arguments.
+local function memory_limits(bytes)
+    assert(bytes:sub(1, 8) == "\0asm\1\0\0\0", "not a Wasm module")
+    local position = 9
+    local function leb()
+        local result, shift = 0, 0
+        while true do
+            local byte = assert(bytes:byte(position), "truncated Wasm module")
+            position = position + 1
+            result = result | ((byte & 0x7f) << shift)
+            if byte < 0x80 then return result end
+            shift = shift + 7
+        end
+    end
+    while position <= #bytes do
+        local id = bytes:byte(position)
+        position = position + 1
+        local size = leb()
+        local after = position + size
+        if id == 5 then
+            assert(leb() == 1, "the image defines more or fewer than one memory")
+            local flags, minimum = leb(), leb()
+            return flags, minimum, flags & 1 == 1 and leb() or nil
+        end
+        position = after
+    end
+    error("the image defines no memory")
+end
+
+local function build(info, root, name, budgets)
+    local options = { purpose = "budget", optimization = "O2" }
     if budgets then options.budgets = budgets end
-    local output = root .. "/objects-" .. assertions .. "-" .. name
+    local output = root .. "/objects-" .. name
     support.files.mkdir(output)
     local ok, log = support.cli(info, output, options, {
         "--exe", root .. "/" .. name .. ".mjs", "--c-source", support.fixture .. "/budget.c",
@@ -30,7 +60,12 @@ local function limit_failure(status, log, mode)
     assert.truthy(status == 70 or status == 71, "unexpected budget failure category " .. tostring(status) .. "\n" .. log)
     local lower = log:lower()
     if mode:find("shadow", 1, true) then
-        assert.truthy(lower:find("stack overflow", 1, true), "unchecked shadow-stack failure\n" .. log)
+        -- Binaryen 133's wasm-opt --stack-check traps in the overflowing
+        -- prologue with a plain unreachable, before it moves the stack
+        -- pointer; its version_134 handler restores a named diagnostic. A
+        -- clobbered coroutine stack cookie aborts with "stack overflow".
+        assert.truthy(lower:find("stack overflow", 1, true) or
+            (status == 71 and lower:find("unreachable", 1, true)), "unchecked shadow-stack failure\n" .. log)
         return "checked-C-stack"
     end
     assert.truthy(lower:find("stack overflow", 1, true) or lower:find("unreachable", 1, true) or
@@ -45,7 +80,7 @@ describe("browser measured delivered budget limits", function()
 
     it("retains the 2 MiB native coroutine stack default and explicit browser profile budgets", function()
         local descriptor = fixtures.descriptor()
-        local plan = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
+        local plan = assert(browserlink.profile(descriptor, { purpose = "program" }))
         assert.same({
             stack_size = 1048576,
             initial_heap = 15728640,
@@ -76,90 +111,114 @@ describe("browser measured delivered budget limits", function()
         assert.equal(262144, tonumber(browser_stack.value))
     end)
 
-    for _, assertions in ipairs({ 2, 0 }) do
-        it("measures all seven rows at the delivered limits on Node and Chromium with ASSERTIONS=" .. assertions, function()
-            local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
-            workspace = support.workspace()
-            build(info, workspace, assertions, "budget")
-            for _, engine in ipairs({ "node", "chromium" }) do
-                local started = hrtime()
-                local probes, positive, negative = 0, 0, 0
-                local results = {}
-                local function probe(image, mode, value)
-                    local key = image .. ":" .. mode .. ":" .. value
-                    if results[key] then return table.unpack(results[key]) end
-                    local ok, log, status = support.image(info, workspace, engine, image,
-                        { mode, tostring(value) }, mode == "exhaust" and 120000 or 15000)
-                    probes = probes + 1
-                    if ok then
-                        positive = positive + 1
-                        support.count(log, 1)
-                        assert.truthy(log:find("coroutine_bytes=262144", 1, true), log)
-                        assert.truthy(log:find("BUDGET END mode=" .. mode, 1, true), log)
-                    else negative = negative + 1 end
-                    results[key] = { ok, log, status }
-                    return ok, log, status
+    it("measures all seven rows at the delivered limits on Node and Chromium", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = support.workspace()
+        build(info, workspace, "budget")
+        -- The delivered maximum is the image's own: one unshared 32-bit memory
+        -- of exactly 32768 pages (2 GiB).
+        local flags, _, maximum = memory_limits(support.files.read(workspace .. "/budget.wasm"))
+        assert.equal(1, flags)
+        assert.equal(32768, maximum)
+        local imports = support.fixture_imports(workspace)
+        for _, engine in ipairs({ "node", "chromium" }) do
+            local started = hrtime()
+            local probes, positive, negative = 0, 0, 0
+            local results = {}
+            local function probe(image, mode, value)
+                local key = image .. ":" .. mode .. ":" .. value
+                if results[key] then return table.unpack(results[key]) end
+                local ok, log, status = support.image(info, workspace, engine, image,
+                    { mode, tostring(value) }, mode == "exhaust" and 120000 or 15000, imports)
+                probes = probes + 1
+                if ok then
+                    positive = positive + 1
+                    support.count(log, 1)
+                    assert.truthy(log:find("coroutine_bytes=262144", 1, true), log)
+                    assert.truthy(log:find("BUDGET END mode=" .. mode, 1, true), log)
+                else negative = negative + 1 end
+                results[key] = { ok, log, status }
+                return ok, log, status
+            end
+            local function measure(image, mode, unit, ceiling)
+                local m_started = hrtime()
+                local low, high = unit, ceiling
+                local failure_log, failure_status
+                local ok, log = probe(image, mode, low)
+                assert.is_true(ok, log)
+                -- Each row declares a unit-aligned ceiling. Verify that
+                -- failing bound instead of rediscovering it by doubling.
+                ok, failure_log, failure_status = probe(image, mode, high)
+                assert.is_false(ok, "budget probe never reached its real limit: " .. mode)
+                limit_failure(failure_status, failure_log, mode)
+                while high - low > unit do
+                    local middle = ((low + high) // (2 * unit)) * unit
+                    local status
+                    ok, log, status = probe(image, mode, middle)
+                    if ok then low = middle
+                    else high, failure_log, failure_status = middle, log, status end
                 end
-                local function measure(image, mode, unit, ceiling)
-                    local m_started = hrtime()
-                    local low, high = unit, ceiling
-                    local failure_log, failure_status
-                    local ok, log = probe(image, mode, low)
-                    assert.is_true(ok, log)
-                    -- Each row declares a unit-aligned ceiling. Verify that
-                    -- failing bound instead of rediscovering it by doubling.
-                    ok, failure_log, failure_status = probe(image, mode, high)
-                    assert.is_false(ok, "budget probe never reached its real limit: " .. mode)
-                    limit_failure(failure_status, failure_log, mode)
-                    while high - low > unit do
-                        local middle = ((low + high) // (2 * unit)) * unit
-                        local status
-                        ok, log, status = probe(image, mode, middle)
-                        if ok then low = middle
-                        else high, failure_log, failure_status = middle, log, status end
-                    end
-                    local attribution = limit_failure(failure_status, failure_log, mode)
-                    io.stdout:write(string.format("BUDGET LIMIT assertions=%d engine=%s image=%s mode=%s largest_safe=%d first_failing=%d unit=%d category=%s status=%d elapsed_ms=%.2f\n",
-                        assertions, engine, image, mode, low, high, unit, attribution, failure_status, (hrtime() - m_started) / 1e6))
-                    io.stdout:flush()
-                    return low, high
-                end
+                local attribution = limit_failure(failure_status, failure_log, mode)
+                io.stdout:write(string.format("BUDGET LIMIT engine=%s image=%s mode=%s largest_safe=%d first_failing=%d unit=%d category=%s status=%d elapsed_ms=%.2f\n",
+                    engine, image, mode, low, high, unit, attribution, failure_status, (hrtime() - m_started) / 1e6))
+                io.stdout:flush()
+                return low, high
+            end
 
-                -- Native Titan recursion is measured separately from a direct,
-                -- checked, non-yielding shadow-stack overrun in each context.
-                measure("budget", "main-titan", 1, 65536)
-                measure("budget", "main-shadow", 16, 4194304)
-                measure("budget", "coroutine-titan", 1, 65536)
-                measure("budget", "coroutine-shadow", 16, 1048576)
-                -- Live Wasm locals now belong to JSPI engine continuations;
-                -- there is no separate instrumentation-data buffer or budget.
-                measure("budget", "outer-wait", 1, 65536)
-                measure("budget", "coroutine-wait", 1, 65536)
-                measure("budget", "nested-entry", 1, 65536)
+            -- Native Titan recursion is measured separately from a direct,
+            -- checked, non-yielding shadow-stack overrun in each context.
+            measure("budget", "main-titan", 1, 65536)
+            measure("budget", "main-shadow", 16, 4194304)
+            measure("budget", "coroutine-titan", 1, 65536)
+            measure("budget", "coroutine-shadow", 16, 1048576)
+            -- Live Wasm locals now belong to JSPI engine continuations;
+            -- there is no separate instrumentation-data buffer or budget.
+            measure("budget", "outer-wait", 1, 65536)
+            measure("budget", "coroutine-wait", 1, 65536)
+            measure("budget", "nested-entry", 1, 65536)
 
-                for _, mode in ipairs({ "lua-limit", "create-failure", "exhaust" }) do
-                    local mode_started = hrtime()
-                    local ok, log = probe("budget", mode, 0)
-                    assert.is_true(ok, log)
-                    if mode == "lua-limit" then
-                        assert.truthy(log:find("allocator=Lua ordinary_error=C stack overflow", 1, true), log)
-                    elseif mode == "create-failure" then
-                        assert.truthy(log:find("deterministic_mco_failure=1 fresh_after_failure=1", 1, true), log)
-                    elseif mode == "exhaust" then
-                        -- Initial memory is static data and the stack plus the heap.
-                        local initial = tonumber(log:match("initial_heap=(%d+) exhausted_heap=2147483648 " ..
-                            "released_heap=2147483648 maximum=2147483648"))
-                        assert.truthy(initial and initial % 65536 == 0 and initial > 1048576 + 15728640, log)
-                        assert.truthy(log:find("existing_canary=42 fresh_after_gc=43", 1, true), log)
-                    end
-                    io.stdout:write(string.format("BUDGET MODE assertions=%d engine=%s mode=%s elapsed_ms=%.2f PASS\n",
-                        assertions, engine, mode, (hrtime() - mode_started) / 1e6))
-                    io.stdout:flush()
+            for _, mode in ipairs({ "lua-limit", "create-failure", "exhaust" }) do
+                local mode_started = hrtime()
+                local ok, log = probe("budget", mode, 0)
+                assert.is_true(ok, log)
+                if mode == "lua-limit" then
+                    assert.truthy(log:find("allocator=Lua ordinary_error=C stack overflow", 1, true), log)
+                elseif mode == "create-failure" then
+                    assert.truthy(log:find("deterministic_mco_failure=1 fresh_after_failure=1", 1, true), log)
+                elseif mode == "exhaust" then
+                    -- Initial memory is static data and the stack plus the
+                    -- heap. The failing request leaves less than one 256-KiB
+                    -- coroutine allocation below the 2-GiB maximum.
+                    local initial, exhausted, released = log:match("initial_heap=(%d+) exhausted_heap=(%d+) " ..
+                        "released_heap=(%d+) maximum=2147483648 ")
+                    initial, exhausted, released = tonumber(initial), tonumber(exhausted), tonumber(released)
+                    assert.truthy(initial and initial % 65536 == 0 and initial > 1048576 + 15728640, log)
+                    assert.truthy(exhausted and exhausted % 65536 == 0 and exhausted <= 2147483648 and
+                        2147483648 - exhausted < 262144 and released == exhausted, log)
+                    assert.truthy(log:find("existing_canary=42 fresh_after_gc=43", 1, true), log)
                 end
-                io.stdout:write(string.format("BUDGET VERDICT assertions=%d engine=%s rows=7 probes=%d positive=%d reported_negative=%d wall_s=%.3f PASS\n",
-                    assertions, engine, probes, positive, negative, (hrtime() - started) / 1e9))
+                io.stdout:write(string.format("BUDGET MODE engine=%s mode=%s elapsed_ms=%.2f PASS\n",
+                    engine, mode, (hrtime() - mode_started) / 1e6))
                 io.stdout:flush()
             end
-        end)
-    end
+
+            -- D2's cookie boundary, apart from the prologue checks above: the
+            -- main stack's zero end carries no cookie, a coroutine's cookie
+            -- survives a switch, and overwriting it aborts the next switch
+            -- with the factory's diagnostic instead of a prologue trap.
+            local ok, log = probe("budget", "cookie-boundary", 0)
+            assert.is_true(ok, log)
+            assert.truthy(log:find("BUDGET COOKIE main_low=0 main_cookie=absent coroutine_cookie=intact",
+                1, true), log)
+            local overwritten, status
+            ok, overwritten, status = probe("budget", "cookie-overwrite", 0)
+            assert.is_false(ok, overwritten)
+            assert.equal(70, status, overwritten)
+            assert.truthy(overwritten:find("Stack overflow! Stack cookie has been overwritten at 0x", 1, true),
+                overwritten)
+            io.stdout:write(string.format("BUDGET VERDICT engine=%s rows=7 cookie_checks=2 probes=%d positive=%d reported_negative=%d wall_s=%.3f PASS\n",
+                engine, probes, positive, negative, (hrtime() - started) / 1e9))
+            io.stdout:flush()
+        end
+    end)
 end)

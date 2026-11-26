@@ -48,12 +48,13 @@ async function until(context, predicate, message) {
 
 // Preparation must return before collection: a suspended frame can conservatively
 // retain a target it used earlier even after its visible local has been cleared.
-async function collected(context, references, phase, kinds = ['Module', 'ArrayBuffer', 'instance']) {
+async function collected(context, references, phase, kinds = ['context', 'ArrayBuffer', 'instance']) {
   for (let attempt = 0; attempt < 40; attempt++) {
     await context.tick(); await context.gc(); await context.tick();
     if (references.every(reference => reference.deref() === undefined)) return;
   }
-  // weakTargets() returns Module then its heap buffer; finalizerDrain appends the facade.
+  // weakTargets() returns the instance's import context then its heap buffer;
+  // finalizerDrain appends the facade.
   const survivors = references.flatMap((reference, index) => reference.deref() === undefined ? [] :
     [{kind: kinds[index], identity: `${phase}/target-${index}`}]);
   context.assert(false, `${phase}: ${survivors.length} native/instance targets survived acknowledged GC; targets=${JSON.stringify(survivors)}`);
@@ -1035,7 +1036,7 @@ async function requestHolds(context, host) {
     'idle double fault did not report once and retain the callables');
   await host.call('close_request');
   context.assert(await collectedPins() === 3n, 'close did not release idle double-fault holds');
-  // Injected JavaScript Error stack frames retain the fixture's Module closure.
+  // Injected JavaScript Error stack frames retain the fixture's import context.
   // Discard only this case's observations before the later whole-image GC proof.
   host.notificationErrors.length = errors;
   host.failures.length = failures;

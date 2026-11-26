@@ -19,10 +19,11 @@ function result(action) {
 
 test('Playwright CLI keeps engine, policy, image mode and test arguments explicit', () => {
   assert.deepEqual(parseOptions(['--engine', 'webkit', '--root', '/output', '--sdk', '/sdk',
-    '--timeout', '20000', '--grace', '10', '--allow-degraded-trace', '--image',
-    '/output/main.mjs', '--', '--filter=^case$']), {
+    '--timeout', '20000', '--grace', '10', '--allow-degraded-trace', '--imports', '/output/imports.mjs',
+    '--image', '/output/main.mjs', '--', '--filter=^case$']), {
     engine: 'webkit', root: '/output', sdk: '/sdk', timeout: 20000, grace: 10,
-    allowDegradedTrace: true, jsTest: false, file: '/output/main.mjs', args: ['--filter=^case$'],
+    allowDegradedTrace: true, jsTest: false, imports: '/output/imports.mjs', file: '/output/main.mjs',
+    args: ['--filter=^case$'],
   });
   for (const engine of ['chromium', 'firefox', 'webkit']) {
     const parsed = parseOptions(['--engine', engine, 'suite.mjs']);
@@ -30,6 +31,7 @@ test('Playwright CLI keeps engine, policy, image mode and test arguments explici
     assert.equal(parsed.jsTest, true);
     assert.equal(parsed.allowDegradedTrace, false);
     assert.equal(parsed['persistent-context'], undefined);
+    assert.equal(parsed.imports, undefined);
   }
   const persistent = parseOptions(['--engine', 'webkit', '--persistent-context', '/output/profile', 'suite.mjs']);
   assert.equal(persistent['persistent-context'], '/output/profile');
@@ -39,7 +41,7 @@ test('Playwright CLI keeps engine, policy, image mode and test arguments explici
 test('Playwright CLI rejects missing, extra and unsafe timer values', () => {
   for (const argv of [[], ['--engine', 'node', 'suite.mjs'], ['--engine'],
     ['--engine', 'firefox'], ['--engine', 'webkit', 'a.mjs', 'b.mjs'],
-    ['--engine', 'webkit', '--persistent-context'],
+    ['--engine', 'webkit', '--persistent-context'], ['--engine', 'webkit', '--imports'],
     ['--engine', 'chromium', '--unknown', 'a.mjs']]) {
     assert.throws(() => parseOptions(argv));
   }

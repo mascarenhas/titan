@@ -11,8 +11,10 @@ local M = {}
 M.features = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling " ..
     "+multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
 M.record_keys = { "fork_revision", "archive_sha256", "headers_sha256",
-    "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
-M.banner = "# Lua 5.5.1 browser build record v1\n"
+    "wasi_sdk_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
+M.banner = "# Lua 5.5.1 browser build record v2\n"
+M.sjlj_flags = { "-mexception-handling", "-mllvm", "-wasm-enable-sjlj",
+    "-mllvm", "-wasm-use-legacy-eh=false" }
 M.target_defines = {
     "-DTITAN_TARGET_BROWSER=1",
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
@@ -91,12 +93,12 @@ function M.record(overrides)
     end
     local record = { fork_revision = string.rep("a", 40),
         archive_sha256 = sha256.hex(archive), headers_sha256 = sha256.hex(table.concat(header_lines)),
-        emscripten_version = "6.0.13", target = "wasm32-unknown-emscripten",
-        wasm_features = M.features, sjlj = "wasm",
-        lua_defines = "-DLUA_USE_BROWSER -DLUA_USE_POSIX",
+        wasi_sdk_version = "34", target = "wasm32-wasip1",
+        wasm_features = M.features, sjlj = "wasm-exnref",
+        lua_defines = "-DLUA_USE_BROWSER -D_WASI_EMULATED_PROCESS_CLOCKS",
         numeric = "integer=long long,float=double",
-        cflags = "-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER " ..
-            "-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1" }
+        cflags = "--target=wasm32-wasip1 -O2 -Wall -Wextra -DLUA_USE_BROWSER -D_WASI_EMULATED_PROCESS_CLOCKS " ..
+            table.concat(M.sjlj_flags, " ") .. " -gdwarf-4 -gline-tables-only" }
     for key, value in pairs(overrides or {}) do record[key] = value end
     local text = { M.banner }
     for _, key in ipairs(M.record_keys) do text[#text + 1] = key .. "=" .. record[key] .. "\n" end
@@ -119,72 +121,115 @@ for _, profile in pairs(M.object_flags) do
     profile[#profile + 1] = "-Wall"
     profile[#profile + 1] = "-Wno-unused-but-set-variable"
     profile[#profile + 1] = "-Wno-unused-function"
+    profile[#profile + 1] = "-gdwarf-4"
     profile[#profile + 1] = "-gline-tables-only"
-    profile[#profile + 1] = "-sSUPPORT_LONGJMP=wasm"
-    profile[#profile + 1] = "-sWASM_LEGACY_EXCEPTIONS=1"
+    for _, flag in ipairs(M.sjlj_flags) do profile[#profile + 1] = flag end
+    profile[#profile + 1] = "-D_WASI_EMULATED_PROCESS_CLOCKS"
 end
 
 function M.descriptor(root, overrides)
     local paths = M.paths(root)
     local record, record_text = M.record()
     local profile = M.profile_data()
-    local tools = (platform.windows and "C:" or "") .. "/emsdk/upstream/emscripten/"
+    local sdk = (platform.windows and "C:" or "") .. "/wasi-sdk"
     local suffix = platform.windows and ".exe" or ""
     local build_profile = overrides and overrides.build_profile or "validation"
     local flags = { table.unpack(M.object_flags[build_profile] or {}) }
-    for _, define in ipairs({ "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX" }) do
+    for _, define in ipairs({ "-DLUA_USE_BROWSER", "-D_WASI_EMULATED_PROCESS_CLOCKS" }) do
         flags[#flags + 1] = define
     end
     for _, define in ipairs(M.target_defines) do flags[#flags + 1] = define end
-    local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
+    local data = { label = "browser", triple = "wasm32-wasip1", memory_bits = 32,
         build_profile = build_profile, trace_control = (overrides and overrides.trace_control) or nil,
-        tools = { cc = { tools .. "emcc" .. suffix }, ar = { tools .. "emar" .. suffix },
-            ranlib = { tools .. "emranlib" .. suffix }, version = "6.0.13", source = "EMSDK",
-            location = tools:sub(1, -2), version_output = "emcc (Emscripten) 6.0.13\n" },
+        tools = { cc = { sdk .. "/bin/clang" .. suffix }, ar = { sdk .. "/bin/llvm-ar" .. suffix },
+            ranlib = { sdk .. "/bin/llvm-ranlib" .. suffix }, ld = { sdk .. "/bin/wasm-ld" .. suffix },
+            sysroot = sdk .. "/share/wasi-sysroot",
+            version = "34", source = "WASI_SDK_PATH", location = sdk,
+            version_output = "clang version 23.1.0-wasi-sdk\n",
+            optimizer = { argv = { (platform.windows and "C:" or "") .. "/binaryen/bin/wasm-opt" .. suffix },
+                version = "133", source = "BINARYEN_ROOT", version_output = "wasm-opt version 133 (version_133)\n" } },
         compile_flags = flags, include_dirs = { paths.lua_source, paths.include },
         target_defines = { table.unpack(M.target_defines) }, paths = paths,
         lua = { path = paths.lua_record, record = record, record_sha256 = sha256.hex(record_text) },
         profile_data = profile, profile_identity = profile.identity, fingerprint = M.fingerprint(),
-        probe_cache_directory = paths.root .. "/var/cache/titan-probes/browser-6.0.13/" .. cprobe_cache.VERSION,
+        probe_cache_directory = paths.root .. "/var/cache/titan-probes/browser-34/" .. cprobe_cache.VERSION,
         output_policy = { requires_output = true, marker = ".titan-target", marker_contents = "browser\n" },
         provider_policy = { archive_only = true, sdk_first = true, dynamic = false } }
     for key, value in pairs(overrides or {}) do data[key] = value end
     return M.identify(data)
 end
 
--- A valid, named (or deliberately unnamed) final module just above the JS
--- embedding body bound. Real-link rejection specs replace only staged bytes.
-function M.oversized_body(name, source)
-    local function leb(value)
-        local out = {}
-        repeat
-            local digit = value & 127
-            value = value >> 7
-            out[#out + 1] = string.char(digit | (value > 0 and 128 or 0))
-        until value == 0
-        return table.concat(out)
+function M.leb(value)
+    local out = {}
+    repeat
+        local digit = value & 127
+        value = value >> 7
+        out[#out + 1] = string.char(digit | (value > 0 and 128 or 0))
+    until value == 0
+    return table.concat(out)
+end
+
+function M.sleb(value)
+    local out = {}
+    while true do
+        local digit = value & 127
+        value = value >> 7
+        if (value == 0 and digit < 64) or (value == -1 and digit >= 64) then
+            out[#out + 1] = string.char(digit)
+            return table.concat(out)
+        end
+        out[#out + 1] = string.char(digit | 128)
     end
-    local function text(value) return leb(#value) .. value end
-    local function section(id, payload) return string.char(id) .. leb(#payload) .. payload end
+end
+
+function M.wasm_section(id, payload) return string.char(id) .. M.leb(#payload) .. payload end
+function M.custom_section(name, payload) return M.wasm_section(0, M.leb(#name) .. name .. payload) end
+
+-- DWARF v4 line-program opcodes for hand-made `.debug_line` sections.
+M.line = {
+    copy = "\1",
+    end_sequence = "\0\1\1",
+    set_address = function(address) return "\0\5\2" .. string.pack("<I4", address) end,
+    advance_pc = function(delta) return "\2" .. M.leb(delta) end,
+    advance_line = function(delta) return "\3" .. M.sleb(delta) end,
+    set_file = function(index) return "\4" .. M.leb(index) end,
+    set_column = function(column) return "\5" .. M.leb(column) end,
+}
+
+-- One 32-bit DWARF v4 `.debug_line` unit with clang's header layout
+-- (line_base -5, line_range 14, opcode_base 13). `files` rows are
+-- { name, directory_index }; `options` may override `version` and `max_ops`.
+function M.line_unit(directories, files, program, options)
+    options = options or {}
+    local header = { string.pack("<BBBbBB", 1, options.max_ops or 1, 1, -5, 14, 13),
+        "\0\1\1\1\1\0\0\0\1\0\0\1" }
+    for _, directory in ipairs(directories) do header[#header + 1] = directory .. "\0" end
+    header[#header + 1] = "\0"
+    for _, file in ipairs(files) do header[#header + 1] = file[1] .. "\0" .. M.leb(file[2]) .. "\0\0" end
+    header[#header + 1] = "\0"
+    header = table.concat(header)
+    local body = string.pack("<I2I4", options.version or 4, #header) .. header .. program
+    return string.pack("<I4", #body) .. body
+end
+
+-- A valid, named (or deliberately unnamed) final module just above the JS
+-- embedding body bound, as wasm-opt leaves it: its `.debug_line` maps the
+-- body to `source` line 42, column 7. Real-link rejection specs replace only
+-- the staged optimizer output.
+function M.oversized_body(name, source)
+    local function text(value) return M.leb(#value) .. value end
+    local section = M.wasm_section
     local header = "\0asm\1\0\0\0" .. section(1, "\1\96\0\0") .. section(3, "\1\0")
     local body = "\0" .. string.rep("\1", 7654320) .. "\11"
-    local prefix = "\1" .. leb(#body)
-    local start = #header + 1 + #leb(#prefix + #body) + #prefix
+    local prefix = "\1" .. M.leb(#body)
     local wasm = header .. section(10, prefix .. body)
     if name then wasm = wasm .. section(0, text("name") .. section(1, "\1\0" .. text(name))) end
-    local mappings = ""
+    local program = ""
     if source then
-        local alphabet, value, digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", (start + 1) * 2, {}
-        repeat
-            local digit = value & 31
-            value = value >> 5
-            digits[#digits + 1] = alphabet:sub(digit + (value > 0 and 32 or 0) + 1,
-                digit + (value > 0 and 32 or 0) + 1)
-        until value == 0
-        mappings = table.concat(digits) .. "AyCM" -- source 0, line 42, column 7
+        program = M.line.set_address(#prefix) .. M.line.set_column(7) .. M.line.advance_line(41) ..
+            M.line.copy .. M.line.set_address(#prefix + #body) .. M.line.end_sequence
     end
-    return wasm, '{"version":3,"sources":[' .. (source and string.format("%q", source) or "") ..
-        '],"names":[],"mappings":"' .. mappings .. '"}'
+    return wasm .. M.custom_section(".debug_line", M.line_unit({}, { { source or "unmapped.c", 0 } }, program))
 end
 
 return M

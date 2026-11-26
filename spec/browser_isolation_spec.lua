@@ -147,7 +147,7 @@ describe("published browser analysis target", function()
         function offline:stat(filename)
             -- Windows selects an exact .exe by stat before launching it;
             -- unlike POSIX it does not consult the executable capability.
-            if platform.windows and path.basename(filename):lower() == "emcc.exe" then return nil end
+            if platform.windows and path.basename(filename):lower() == "clang.exe" then return nil end
             return strategy:stat(filename)
         end
         local original = assert(subject.browser_analysis_target(installed, { io = offline }))
@@ -221,7 +221,7 @@ end
 
         ok, _, diagnostics = loader("foreign_header")
         assert.is_true(ok)
-        assert.truthy(table.concat(diagnostics, "\n"):find("browser foreign C work needs Emscripten 6.0.13", 1, true))
+        assert.truthy(table.concat(diagnostics, "\n"):find("browser foreign C work needs wasi-sdk 34", 1, true))
         assert.equal("browser-foreign-unavailable", subject.browser_foreign_cache_identity({ context = browser }))
         assert.same({ foreign_header = true }, browser.browser_foreign_modules)
         assert.equal(cache_identity, assert(subject.language_server_cache_identity({ context = browser })))
@@ -391,9 +391,8 @@ end
         local live = setmetatable({}, { __index = strategy })
         local calls = 0
         function live:run(argv, options)
-            assert.equal("env", argv[1])
-            assert.equal("EMCC_CFLAGS=", argv[2])
-            assert.equal(info.tools.cc[1], argv[3])
+            local envelope = browser_target.compiler_argv(info.tools)
+            assert.same(envelope, { table.unpack(argv, 1, #envelope) })
             calls = calls + 1
             return strategy:run(argv, options)
         end
@@ -406,7 +405,7 @@ end
         assert(subject.language_server_cache_identity({ context = first }))
         assert.equal(0, calls)
         files.write(path.join(root, "for_browser.h"), [[
-#if !defined(__EMSCRIPTEN__) || !defined(TITAN_TARGET_BROWSER) || __SIZEOF_POINTER__ != 4
+#if !defined(__wasi__) || !defined(TITAN_TARGET_BROWSER) || __SIZEOF_POINTER__ != 4
 #error browser-only header used with the wrong target
 #endif
 #include <titan/browser.h>
@@ -1097,7 +1096,7 @@ describe("browser object and link certificate identity", function()
     end)
     it("uses archive tools only and refuses cross-target link records without changing the output-only key", function()
         files.write(root .. "/provider.a", "published archive")
-        local ar, ranlib = tool_path("emar"), tool_path("emranlib")
+        local ar, ranlib = tool_path("llvm-ar"), tool_path("llvm-ranlib")
         files.write(ar, "archive tool")
         files.write(ranlib, "archive index tool")
         local ctx = tool_context()
@@ -1140,5 +1139,37 @@ describe("browser object and link certificate identity", function()
         local before = files.read(native.record)
         assert.is_true(certificate.check(ctx, certificate.prepare(ctx, spec)))
         assert.equal(before, files.read(native.record))
+    end)
+    it("certifies the browser linker and optimizer by their physical identity at fixed paths", function()
+        files.write(root .. "/provider.a", "published archive")
+        local paths_ = { ar = tool_path("llvm-ar"), ranlib = tool_path("llvm-ranlib"),
+            ld = tool_path("wasm-ld"), optimizer = tool_path("wasm-opt") }
+        for role, filename in pairs(paths_) do files.write(filename, role .. " bytes") end
+        local function prepared()
+            local ctx = tool_context()
+            ctx.target_descriptor = descriptor(root)
+            ctx.relocation_roots = { sdk = root }
+            local request = {}
+            for role, filename in pairs(paths_) do request[role] = { filename } end
+            local tools = assert(certificate.output_tools(ctx, { tools = request }))
+            for role in pairs(paths_) do assert.is_table(tools[role].identity, role) end
+            return ctx, certificate.prepare(ctx, { output_root = root, outputs = { root .. "/provider.a" },
+                kind = "library", toolchain = { output_tools = tools },
+                native_libraries = { backend = "archive" } })
+        end
+        local ctx, ticket = prepared()
+        assert(certificate.commit(ctx, ticket))
+        assert.is_true(certificate.check(prepared()))
+        -- Physical tool identity is the file's observed state, so an in-place
+        -- replacement at the same path is another certificate input.
+        local previous = ticket
+        for _, role in ipairs({ "ld", "optimizer" }) do
+            files.write(paths_[role], files.read(paths_[role]) .. " replaced in place")
+            local replaced, changed = prepared()
+            assert.equal(ticket.key, changed.key)
+            assert.not_equal(previous.input, changed.input, role)
+            assert.is_false(certificate.check(replaced, changed))
+            previous = changed
+        end
     end)
 end)

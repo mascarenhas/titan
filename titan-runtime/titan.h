@@ -71,10 +71,6 @@ typedef struct lua_longjmp {
 ** The same selection (_setjmp on POSIX, setjmp otherwise) keeps the buffer
 ** read/written by the same routine the linked liblua.a uses for LUAI_THROW.
 */
-#if defined(__wasm__) && defined(LUA_USE_POSIX)
-int _setjmp(jmp_buf) __attribute__((__returns_twice__));
-_Noreturn void _longjmp(jmp_buf, int);
-#endif
 #if defined(LUA_USE_POSIX)
 #define TITAN_SETJMP(buf) _setjmp(buf)
 #else
@@ -149,7 +145,7 @@ TITAN_RUNTIME_FUNC TITAN_COLD l_noret titan_unwind_guard_failed(lua_State *L,
    library paths plus the versioned TITAN_PATH override. */
 /* Implementation notes: doc/implementation/codegen-overview.md#compiled-module-abi */
 #define TITAN_ABI_VERSION "2"
-#define TITAN_VERSION "0.6.1"
+#define TITAN_VERSION "0.6.2"
 #define TITAN_LIBRARY_VERSION "0.6"
 #define TITAN_LIBRARY_VERSION_SUFFIX "_0_6"
 #define TITAN_PATH_VAR "TITAN_PATH"

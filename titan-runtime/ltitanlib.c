@@ -16,13 +16,15 @@
 #include "titan.h"
 #include "titan_winloader.h"
 #else
+/* The browser has no dynamic loader, signals, advisory file locks or
+** filesystem; the helpers that need them are compiled out below. */
 #if !defined(TITAN_TARGET_BROWSER)
 #include <dlfcn.h>
-#endif
-#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/file.h>
+#endif
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -650,7 +652,7 @@ static const luaL_Reg sha256_stream_methods[] = {
   { NULL, NULL },
 };
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 static int push_errno(lua_State *L, const char *what, int error_number) {
   lua_pushnil(L);
   lua_pushfstring(L, "%s: %s", what, strerror(error_number));
@@ -1187,6 +1189,10 @@ static const luaL_Reg jobserver_methods[] = {
 };
 #endif
 
+/* The build lock and precise file metadata serve the compiler, which never
+** runs in a browser image: there they would only link WASI file-status
+** imports for a filesystem the image does not have. */
+#if !defined(TITAN_TARGET_BROWSER)
 /* Private compiler helper: the whole-output-tree build lock. A permanent
 ** lock file is opened without following a substituted leaf, and an exclusive
 ** OS lock on that handle (POSIX flock on the open-file description, Windows
@@ -1641,6 +1647,7 @@ static int stat_precise(lua_State *L) {
   }
   return 1;
 }
+#endif
 #if defined(_WIN32)
 /* Query the same native policy as libuv instead of guessing from getenv. */
 static int executable_search_cwd(lua_State *L) {
@@ -1704,11 +1711,13 @@ static const luaL_Reg titanlib[] = {
   { "_loadlibglobal", lazyglobalload },
   { "_sha256_binary", sha256_binary },
   { "_sha256_stream", sha256_stream_new },
+  { "_executable_dir", titan_path_lua_executable_dir },
+  { "_expand_titan_path", titan_path_lua_expand },
+#if !defined(TITAN_TARGET_BROWSER)
   { "_output_lock_open", output_lock_open },
   { "_stat_precise", stat_precise },
-  { "_executable_dir", titan_path_lua_executable_dir },
   { "_compiler_root", titan_path_lua_compiler_root },
-  { "_expand_titan_path", titan_path_lua_expand },
+#endif
 #if defined(_WIN32)
   { "_abivalue", abivalue },
   { "_native_process_tree_guard", native_process_tree_guard },
@@ -1730,6 +1739,7 @@ static const luaL_Reg titanlib[] = {
 ** It does not initialize the standard library or compute any path. */
 TITAN_SUPPORT_API int luaopen_titan(lua_State *L) {
   titan_install_searcher(L);
+#if !defined(TITAN_TARGET_BROWSER)
   if (luaL_newmetatable(L, TITAN_OUTPUT_LOCK_TYPE)) {
     luaL_newlib(L, output_lock_methods);
     lua_setfield(L, -2, "__index");
@@ -1739,6 +1749,7 @@ TITAN_SUPPORT_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "__close");
   }
   lua_pop(L, 1);
+#endif
   if (luaL_newmetatable(L, TITAN_SHA256_STREAM_TYPE)) {
     luaL_newlib(L, sha256_stream_methods);
     lua_setfield(L, -2, "__index");

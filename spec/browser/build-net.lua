@@ -16,8 +16,8 @@ local function mkdir(directory)
     if parent ~= directory then mkdir(parent) end
     assert(lfs.mkdir(directory))
 end
-local function copy(name)
-    local input = assert(io.open(path.join(fixture, name), "rb"))
+local function copy(name, directory)
+    local input = assert(io.open(path.join(directory or fixture, name), "rb"))
     local bytes = assert(input:read("a")); assert(input:close())
     local file = assert(io.open(path.join(images, name), "wb"))
     assert(file:write(bytes)); assert(file:close())
@@ -38,12 +38,13 @@ compile({"--tree", fixture, "--output", path.join(output, "native"),
 compile({"--target", "browser", "--no-uv-bootstrap", "--test", "--tree", path.join(repository, "spec/stdlib/titan"),
     "--output", path.join(output, "objects/http"), "--exe", path.join(images, "http.mjs"), "http.browser_tests"}, true)
 compile({"--target", "browser", "--no-uv-bootstrap", "--test", "--tree", path.join(repository, "spec/stdlib/titan"),
-    "--c-source", path.join(fixture, "controls.c"),
     "--output", path.join(output, "objects/websocket"), "--exe", path.join(images, "websocket.mjs"),
     "websocket.browser_tests"}, true)
 copy("net.test.mjs")
 copy("same-origin.mjs")
 copy("websocket.test.mjs")
+-- The WebSocket image's host controls (titan_net_test_publish).
+copy("fixture-imports.mjs", path.join(repository, "spec/fixtures/browser_runtime"))
 -- Each image uses only reviewed imports (scripts/browser_imports.lua).
 local checks = dofile(path.join(repository, "scripts/browser_stdlib.lua"))
 local strategy = require("titan-compiler.io").new_sync()

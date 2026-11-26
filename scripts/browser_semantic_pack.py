@@ -114,10 +114,10 @@ def compiler_receipt(args, prefix, pins):
                                       str(prefix), args.profile, pins["lua-5.5.1"], lua_path, lua_cpath],
                                      env=env, text=True, encoding="utf-8")
     version_row, *files = result.splitlines()
-    release, library, abi, api, emscripten, profile = version_row.split("\t")
+    release, library, abi, api, wasi_sdk, profile = version_row.split("\t")
     verified = dict(row.split("\t") for row in files)
     require(tuple(verified) == SEMANTIC_FILES, "unexpected compiler semantic receipt")
-    return release, library, abi, int(api), emscripten, profile, verified
+    return release, library, abi, int(api), wasi_sdk, profile, verified
 
 
 def write_pack(output, payloads):
@@ -167,7 +167,7 @@ def produce(args):
         for name, original in sorted(expected.items()):
             require(regular(directory / name) == regular(source / original),
                     f"{directory / name}: compiler source disagrees with the source rock")
-    release, library, abi, api, emscripten, profile, verified = compiler_receipt(args, prefix, pins)
+    release, library, abi, api, wasi_sdk, profile, verified = compiler_receipt(args, prefix, pins)
     require(rock.name == f"titan-{release}-1.src.rock", "SOURCE_ROCK release disagrees with the SDK compiler")
     require(output.name == f"titan-{release}-1-browser-semantics.tar.gz", "unexpected PACK_OUTPUT basename")
 
@@ -190,7 +190,7 @@ def produce(args):
     manifest = {
         "abi": abi,
         "build_profile": profile,
-        "emscripten_version": emscripten,
+        "wasi_sdk_version": wasi_sdk,
         "files": [{"path": name, "sha256": digests[name], "size": len(data)}
                   for name, data in sorted(payloads.items())],
         "language_server_api": api,

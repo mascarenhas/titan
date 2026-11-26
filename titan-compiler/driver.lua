@@ -713,7 +713,7 @@ function driver._finish_target_initialization(context)
                 local cache_root, cache_error = normalize_root(probe_prefix or driver.TITAN_ROOT, context.io)
                 if not cache_root then return nil, cache_error end
                 probe_cache_directory = root_join(cache_root, "var/cache/titan-probes/browser-" ..
-                    driver._browser_target.EMSCRIPTEN_VERSION .. "/" .. cprobe_cache.VERSION)
+                    driver._browser_target.WASI_SDK_VERSION .. "/" .. cprobe_cache.VERSION)
             end
             local runtime_include = driver.SOURCE_CHECKOUT_ROOT and
                 root_join(driver.SOURCE_CHECKOUT_ROOT, "titan-runtime") or paths.include
@@ -808,7 +808,7 @@ function driver.browser_link_plan(context, purpose)
     resolved, err = driver.browser_link_purpose(context, purpose)
     if not resolved then return nil, err end
     if options == nil then
-        options = { purpose = resolved, assertions = 2 }
+        options = { purpose = resolved }
     elseif options.purpose == nil then
         -- A harness that presets link options must say which profile it wants;
         -- inheriting the image kind would silently give a measurement build a
@@ -1700,7 +1700,7 @@ end
 -- Keep the configured compiler/wrapper prefix outside the response file.
 -- Only Windows links need this transport; ordinary compile/tool commands and
 -- every POSIX command retain their existing execution and diagnostics.
-function driver.run_link_command(argv, verbose, output, browser_cc)
+function driver.run_link_command(argv, verbose, output, browser_tools)
     if not platform.windows then return run_argv(argv, verbose) end
     if type(argv) ~= "table" or #argv == 0 then
         return nil, "link command must be a nonempty argument array"
@@ -1717,8 +1717,8 @@ function driver.run_link_command(argv, verbose, output, browser_cc)
         end
     end
     local command, err
-    if browser_cc then
-        command = driver._browser_target.compiler_argv(browser_cc)
+    if browser_tools then
+        command = driver._browser_target.compiler_argv(browser_tools)
     else
         command, err = perf.tool_command(driver.CC, "CC")
         if not command then return nil, err end
@@ -1910,7 +1910,7 @@ local function compiler_argv(include_extra_compile_flags, context, user_c_helper
     if context and context.target == "browser" then
         local descriptor, err = driver.context_target_descriptor(context)
         if not descriptor then return nil, err end
-        local args = driver._browser_target.compiler_argv(descriptor.tools.cc)
+        local args = driver._browser_target.compiler_argv(descriptor.tools)
         append_argv(args, descriptor.compile_flags)
         return args
     end
@@ -2020,8 +2020,12 @@ function driver.output_tool_descriptors(context, kind)
     local tools, uncacheable = {}, nil
     local browser = context.target_descriptor
     if browser then
+        -- Every browser output either links an image or validates its archive
+        -- through a linked protocol image: wasm-ld and wasm-opt make both.
         tools.ar = { table.unpack(browser.tools.ar) }
         tools.ranlib = { table.unpack(browser.tools.ranlib) }
+        tools.ld = { table.unpack(browser.tools.ld) }
+        tools.optimizer = { table.unpack(browser.tools.optimizer.argv) }
     elseif kind == "library" and not platform.windows then
         local ar, ar_error = perf.tool_command(driver.AR, "AR")
         if not ar then return nil, ar_error end
@@ -2085,8 +2089,8 @@ function driver.toolchain_descriptor(context)
         local descriptor, err = driver.context_target_descriptor(context)
         if not descriptor then return nil, err end
         return {
-            io = context.io, compiler_argv = driver._browser_target.compiler_argv(descriptor.tools.cc),
-            -- `env` is the launch wrapper; emcc remains a physical tool input.
+            io = context.io, compiler_argv = driver._browser_target.compiler_argv(descriptor.tools),
+            -- `env` is the launch wrapper; clang remains the physical tool input.
             stage_tools = { descriptor.tools.cc[1] },
             compile_flags = { table.unpack(descriptor.compile_flags) },
             language_mode = "c99", language_flag = false, cppflags = {}, cflags = {},
@@ -2268,14 +2272,14 @@ function perf.browser_probe_configuration(context)
     cache_root, err = normalize_root(probe_prefix or semantic.paths.root, context.io)
     if not cache_root then return nil, err end
     return toolchain, root_join(cache_root, "var/cache/titan-probes/browser-" ..
-        driver._browser_target.EMSCRIPTEN_VERSION .. "/" .. cprobe_cache.VERSION)
+        driver._browser_target.WASI_SDK_VERSION .. "/" .. cprobe_cache.VERSION)
 end
 
 function perf.browser_probe_error(context, reason)
     if reason ~= nil and type(reason) ~= "string" then error(reason, 0) end
     context.browser_foreign_identity = "browser-foreign-unavailable"
-    context.probe_service_error = "browser foreign C work needs Emscripten " ..
-        driver._browser_target.EMSCRIPTEN_VERSION .. " and matching SDK headers: " ..
+    context.probe_service_error = "browser foreign C work needs wasi-sdk " ..
+        driver._browser_target.WASI_SDK_VERSION .. " and matching SDK headers: " ..
         (reason or "could not initialize the browser C probe")
     return nil, context.probe_service_error
 end
@@ -11488,7 +11492,7 @@ end
 function driver.windows_launcher_manifest()
     return [[<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity name="Titan.Launcher" version="0.6.1.0" processorArchitecture="amd64" type="win32"/>
+  <assemblyIdentity name="Titan.Launcher" version="0.6.2.0" processorArchitecture="amd64" type="win32"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security><requestedPrivileges>
       <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
@@ -15479,23 +15483,35 @@ function driver.run_standalone_archive_probe(
         base, err = create_compile_log()
         if not base then return nil, err end
         os.remove(base)
-        local source, image = base .. ".c", base .. ".mjs"
+        local source, image, stand_ins = base .. ".c", base .. ".mjs", base .. ".imports.mjs"
         local cleanup <close> = setmetatable({}, { __close = function()
             os.remove(source); os.remove(base .. ".o")
             os.remove(image); os.remove(base .. ".wasm"); os.remove(base .. ".wasm.map")
-            os.remove(base .. ".wasm.trace")
+            os.remove(base .. ".wasm.trace"); os.remove(stand_ins)
         end })
         local linked, term, code = driver.compile_browser_image(
             standalone_archive_probe_source(entries, module_names, true),
             source, image, libnames, static_archives, extra_objects, verbose,
-            { context = context, profile = { purpose = "protocol", assertions = 2 },
+            { context = context, profile = { purpose = "protocol" },
               link_extra_flags = protocol_flags })
         if not linked then
             return nil, "selected static provider failed executable-context protocol linking (" ..
                 tostring(term) .. (code and (", exit " .. tostring(code)) or "") .. ")"
         end
-        local result = context.io:run(driver.browserlink.runner_argv(assets.runner, "--engine", "node", image),
-            { stderr_to_stdout = true })
+        local bytes, inventory
+        bytes, err = context.io:read_file(base .. ".wasm")
+        if not bytes then return nil, err end
+        inventory, err = driver.browserlink.image_inventory(bytes)
+        if not inventory then return nil, err end
+        local argv = driver.browserlink.runner_argv(assets.runner, "--engine", "node")
+        local module = driver.browserlink.protocol_imports(inventory.imports)
+        if module then
+            valid, err = context.io:write_file(stand_ins, module)
+            if not valid then return nil, err end
+            append_argv(argv, { "--root", path.dirname(image), "--imports", stand_ins })
+        end
+        argv[#argv + 1] = image
+        local result = context.io:run(argv, { stderr_to_stdout = true })
         if type(result) ~= "table" or not result.ok then
             local detail = type(result) == "table" and (result.output or result.diagnostic)
             return nil, "selected static provider failed executable-context protocol validation " ..
@@ -15743,10 +15759,11 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     if not valid then return nil, err end
     local library_flags = { table.unpack(extra_flags) }
     append_argv(library_flags, options.final_link_flags)
+    local tools = context.target_descriptor.tools
     local libraries
     libraries, err = require("titan-compiler.linkcertificate").browser_trace_libraries(
-        context, context.target_descriptor.tools.cc, library_flags)
-    -- emcc also understands system/JS libraries the static resolver cannot
+        context, tools, library_flags)
+    -- clang also understands system libraries the static resolver cannot
     -- inventory. Keep their flags in the identity; the CLI withholds reuse.
     libraries = libraries or {}
     local runtime
@@ -15757,9 +15774,9 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local wasm
     executable, wasm = driver.browser_program_path(executable, executable)
     if not executable then return nil, wasm end
-    local inputs = { assets.runtime, context.target_descriptor.paths.liblua,
-        context.target_descriptor.paths.lua_record, assets.js_library, assets.bridge_library,
-        assets.trace_library, assets.loader }
+    local sdk_inputs = { assets.runtime, context.target_descriptor.paths.liblua,
+        context.target_descriptor.paths.lua_record, assets.factory, assets.loader }
+    local inputs = { table.unpack(sdk_inputs) }
     append_argv(inputs, objects)
     append_argv(inputs, archives)
     append_argv(inputs, extra_objects)
@@ -15777,20 +15794,23 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     compile, err = driver.generated_compile_prefix(context)
     if not compile then return nil, err end
     append_argv(compile, plan.compile_flags)
-    local identity_flags
-    identity_flags, err = compiler_argv(false, context)
-    if not identity_flags then return nil, err end
-    append_argv(identity_flags, plan.link_flags)
-    append_argv(identity_flags, { "-Wl,--start-group", assets.runtime })
-    append_argv(identity_flags, archives)
-    append_argv(identity_flags, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
-    append_argv(identity_flags, extra_flags)
-    append_argv(identity_flags, options.final_link_flags)
+    -- The link: every object, then the SDK runtime and browser Lua; wasm-ld
+    -- resolves archive references in any order.
+    local link = driver._browser_target.compiler_argv(tools)
+    append_argv(link, plan.link_flags)
+    local link_inputs = { table.unpack(objects or {}) }
+    append_argv(link_inputs, archives)
+    append_argv(link_inputs, extra_objects)
+    append_argv(link_inputs, { assets.runtime, context.target_descriptor.paths.liblua })
+    append_argv(link_inputs, extra_flags)
+    append_argv(link_inputs, options.final_link_flags)
+    local optimize = { table.unpack(tools.optimizer.argv) }
+    append_argv(optimize, plan.optimizer_flags)
+    local identity_flags = { table.unpack(link) }
+    append_argv(identity_flags, link_inputs)
+    append_argv(identity_flags, optimize)
     local called, identity = pcall(browsertrace.identity, context, contents, compile, identity_flags,
-        { objects or {}, archives or {}, extra_objects or {}, libraries,
-          { assets.runtime, context.target_descriptor.paths.liblua,
-            context.target_descriptor.paths.lua_record, assets.js_library, assets.bridge_library,
-            assets.trace_library, assets.loader } })
+        { objects or {}, archives or {}, extra_objects or {}, libraries, sdk_inputs })
     if not called then
         if type(identity) ~= "string" then error(identity, 0) end
         return nil, identity
@@ -15804,27 +15824,18 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     if not staged then return nil, directory end
     local cleanup <close> = setmetatable({}, { __close = function() remove_path(directory) end })
     local staged_wasm = staged:gsub("[.]mjs$", ".wasm")
+    local linked_wasm = staged_wasm .. ".linked"
     local staged_map, map = staged_wasm .. ".map", wasm .. ".map"
     local staged_trace, trace = staged_wasm .. ".trace", wasm .. ".trace"
-    local command
-    command, err = compiler_argv(false, context)
-    if not command then return nil, err end
-    append_argv(command, plan.link_flags)
-    append_argv(command, { "-o", staged, object })
-    append_argv(command, objects)
-    append_argv(command, archives)
-    append_argv(command, extra_objects)
-    append_argv(command, { "-Wl,--start-group", assets.runtime })
-    append_argv(command, archives)
-    append_argv(command, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
-    append_argv(command, extra_flags)
-    append_argv(command, options.final_link_flags)
-    local linked, term, code
+    local command = { table.unpack(link) }
+    append_argv(command, { "-o", linked_wasm, object })
+    append_argv(command, link_inputs)
+    local linked
     if options.dependency_output then
         if verbose then io.stderr:write(assert(command_argv(command)), "\n") end
         if platform.windows then
-            -- The link and the trace must receive the same emcc arguments.
-            local wrapped = driver._browser_target.compiler_argv(context.target_descriptor.tools.cc)
+            -- The link and the trace must receive the same clang arguments.
+            local wrapped = driver._browser_target.compiler_argv(tools)
             local response, response_error = platform.windows_response_contents(
                 { table.unpack(command, #wrapped + 1) })
             if not response then return nil, response_error end
@@ -15840,51 +15851,50 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         linked, err = context.io:write_file(options.dependency_output, result.output or "")
         if not linked then return nil, err end
     else
-        linked, term, code = driver.run_link_command(command, verbose, staged, context.target_descriptor.tools.cc)
+        linked, term, code = driver.run_link_command(command, verbose, linked_wasm, tools)
         if not linked then return nil, term, code end
     end
-    for _, filename in ipairs({ staged, staged_wasm, staged_map }) do
-        if lfs.symlinkattributes(filename, "mode") ~= "file" then
-            return nil, "staged browser image '" .. filename .. "' is not a regular file"
-        end
+    -- wasm-opt keeps the DWARF line tables in step with the code it emits;
+    -- browsertrace turns them into the map and the trace table, then cuts
+    -- every `.debug_*` section out without touching the code.
+    append_argv(optimize, { linked_wasm, "-o", staged_wasm })
+    compiled, term, code = run_argv(optimize, verbose)
+    if not compiled then return nil, term, code end
+    if lfs.symlinkattributes(staged_wasm, "mode") ~= "file" then
+        return nil, "staged browser image '" .. staged_wasm .. "' is not a regular file"
     end
-    local image_bytes
+    local image_bytes, map_bytes
     image_bytes, err = context.io:read_file(staged_wasm)
     if not image_bytes then return nil, err end
+    image_bytes, map_bytes = browsertrace.dwarf_map(image_bytes, wasm:match("([^/\\]+)$") .. ".map", staged_wasm)
+    if not image_bytes then return nil, map_bytes end
     local inventory, oversized_body
     inventory, err, oversized_body = driver.browserlink.image_inventory(image_bytes)
     if not inventory then
         if oversized_body then
-            local source_map, source_error = context.io:read_file(staged_map)
-            local location
-            if source_map then
-                location, source_error = browsertrace.function_source(source_map, oversized_body)
-            end
+            local location, source_error = browsertrace.function_source(map_bytes, oversized_body)
             err = err .. (location and ("; first mapped source " .. location) or
                 ("; source unavailable (" .. tostring(source_error) .. ")"))
         end
         return nil, err
     end
-    local map_bytes, table_bytes
-    map_bytes, err = context.io:read_file(staged_map)
-    if not map_bytes then return nil, err end
+    local table_bytes
     map_bytes, table_bytes = browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)
     if not map_bytes then return nil, table_bytes end
+    valid, err = context.io:write_file(staged_wasm, image_bytes)
+    if not valid then return nil, err end
     valid, err = context.io:write_file(staged_map, map_bytes)
     if not valid then return nil, err end
     valid, err = context.io:write_file(staged_trace, table_bytes)
     if not valid then return nil, err end
-    local module_bytes, loader_bytes
-    module_bytes, err = context.io:read_file(staged)
-    if not module_bytes then return nil, err end
+    local factory_bytes, loader_bytes, module_bytes
+    factory_bytes, err = context.io:read_file(assets.factory)
+    if not factory_bytes then return nil, err end
     loader_bytes, err = context.io:read_file(assets.loader)
     if not loader_bytes then return nil, err end
-    module_bytes, err = driver.browserlink.embed(module_bytes, loader_bytes, wasm:match("([^/\\]+)$"), identity)
+    module_bytes, err = driver.browserlink.embed(factory_bytes, loader_bytes, wasm:match("([^/\\]+)$"), identity)
     if not module_bytes then return nil, err end
     valid, err = context.io:write_file(staged, module_bytes)
-    if not valid then return nil, err end
-    valid, err = driver.browserlink.check_module(context, context.target_descriptor.tools,
-        assets.module_check, staged)
     if not valid then return nil, err end
     if options.before_commit then
         valid, err = options.before_commit()

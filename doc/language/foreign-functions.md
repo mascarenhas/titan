@@ -190,4 +190,4 @@ end
 
 Here `compare_desc` stays `local` and purely C, while `sort_descending` owns the GC-managed `owned int[]` scratch buffer, validates integer conversions at the Titan/C boundary, and returns an ordinary Titan `{integer}` Array.
 
-If a C callback must invoke Titan code (for example, an Emscripten browser event callback or a native library callback), do not call arbitrary Lua API functions from an unmanaged C thread; on the browser target, use `browser.pin` and `titan_browser_call_sync` ([Chapter 18](browser-target.md#synchronous-c-callbacks)), and for native libuv callbacks use [`import "uv"`](standard-library-uv.md).
+If a C callback must invoke Titan code (for example, a browser host callback dispatched from JavaScript or a native library callback), do not call arbitrary Lua API functions from an unmanaged C thread; on the browser target, use `browser.pin` and `titan_browser_call_sync` ([Chapter 18](browser-target.md#synchronous-c-callbacks)), and for native libuv callbacks use [`import "uv"`](standard-library-uv.md).

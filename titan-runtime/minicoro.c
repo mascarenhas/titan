@@ -5,7 +5,10 @@
 static int minicoro_tag_equal(void *t1, void *t2);
 
 #define MCO_NO_DEBUG
+/* Wasm has no virtual memory; its coroutine stacks use the default calloc. */
+#if !defined(__wasm__)
 #define MCO_USE_VMEM_ALLOCATOR
+#endif
 #define MCO_TAG_COMPARATOR minicoro_tag_equal
 #define MINICORO_IMPL
 #include "minicoro.h"

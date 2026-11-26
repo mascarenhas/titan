@@ -14,7 +14,7 @@ collector.
 
 Titan compiles to native executables and libraries on Linux and macOS, with
 experimental support for Windows and a WebAssembly browser target through
-[Emscripten](https://emscripten.org).
+[wasi-sdk](https://github.com/WebAssembly/wasi-sdk) and [Binaryen](https://github.com/WebAssembly/binaryen).
 
 ```titan
 local io = import "io"

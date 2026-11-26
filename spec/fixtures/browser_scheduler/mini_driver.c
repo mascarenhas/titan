@@ -1,4 +1,3 @@
-#include <emscripten.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <lauxlib.h>
@@ -9,7 +8,7 @@
 extern int luaopen_titan(lua_State *L);
 extern int luaopen_mini_child(lua_State *L);
 
-/* A synchronous C callback, the way an Emscripten API makes one: JavaScript
+/* A synchronous C callback, the way a host API makes one: JavaScript
  * calls this function through the Wasm table and it calls the pinned
  * callable through titan_browser_call_sync. */
 static int mini_driver_fire(uint32_t state, uint32_t slot, uint32_t generation) {
@@ -24,35 +23,12 @@ static int mini_driver_fire(uint32_t state, uint32_t slot, uint32_t generation) 
 }
 
 /* Loader observations for the harness, published only to its explicit
- * __miniDriver binding; generated images never expose the Module. `allocate`
- * calls the plain _malloc/_free exports, which no admission gate guards.
- * `fire` makes a synchronous C callback; `hooks.poke` is what
- * mini_driver_poke calls, JavaScript reached from C without a binding. */
-EM_JS_DEPS(mini_driver, "$getWasmTableEntry");
-EM_JS(void, mini_driver_controls, (int fire), {
-  var owner = Module['titanBrowserBridge'];
-  var publish = owner.options.bindings?.__miniDriver;
-  if (!publish) return;
-  var hooks = Module['miniDriverHooks'] = {poke: undefined};
-  publish(Object.freeze({
-    snapshot: () => Object.freeze({driving: !!owner.drive, parked: !!owner.drive?.gate,
-      queue: owner.queue.length, batch: owner.batch.length,
-      openTasks: owner.openTasks.size, requests: owner.requests.size, inHost: owner.inHost,
-      ownerState: owner.ownerState, exited: owner.exited ? owner.exited.status : null,
-      operationId: owner.operationId, active: !!owner.active, turnScheduled: !!owner.turnScheduled}),
-    allocate: () => {
-      var pointer = Module['_malloc'](16);
-      Module['_free'](pointer);
-      return pointer !== 0;
-    },
-    fire: (state, slot, generation) => getWasmTableEntry(fire)(state, slot, generation),
-    hooks,
-  }));
-});
-
-EM_JS(void, mini_driver_poke, (), {
-  Module['miniDriverHooks']?.poke?.();
-});
+ * __miniDriver binding; generated images never expose their instance.
+ * `allocate` calls the plain malloc/free exports, which no admission gate
+ * guards. `fire` makes a synchronous C callback through the function table;
+ * `hooks.poke` is what mini_driver_poke calls, JavaScript reached from C
+ * without a binding (fixture-imports.mjs). */
+TITAN_WASM_IMPORT("mini_driver_controls") void mini_driver_controls(int fire);
 
 void mini_driver_publish_controls(void) {
   mini_driver_controls((int)(intptr_t)mini_driver_fire);
@@ -114,7 +90,7 @@ TValue mini_driver_new_child(lua_State *L) {
 }
 
 /* A checked C-stack overflow: each frame takes 64 KiB of the linear stack,
- * so Emscripten's stack check aborts long before the engine stack fills. */
+ * so wasm-opt's stack check traps long before the engine stack fills. */
 static int __attribute__((noinline)) overflow(volatile unsigned char *previous) {
   volatile unsigned char frame[65536];
   frame[0] = (unsigned char)(previous ? previous[0] + 1 : 1);

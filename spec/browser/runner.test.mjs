@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, execFile } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -13,6 +14,9 @@ import {create} from "../../titan-runtime/browser/titan-browser.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runner = resolve(process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run"));
 const fixture = join(root, "spec/browser/runner-fixtures.mjs");
+const importsFixture = join(root, "spec/browser/runner-imports.mjs");
+// The loader fixture images (TITAN_BROWSER_LOADER_IMAGE) import these.
+const fixtureImports = join(root, "spec/fixtures/browser_runtime/fixture-imports.mjs");
 const windows = process.platform === "win32";
 const strict = process.env.TITAN_REQUIRE_BROWSER_TOOLCHAIN === "1";
 const exec = promisify(execFile);
@@ -361,7 +365,7 @@ test("public image observation forwards aborts and traps but leaves handled prot
     assert.deepEqual(observed, events);
     assert.deepEqual(controls, [
         {type: "abort", reason: "abort"},
-        {type: "failure", category: "trap", reason: "trap", knownTrap: true},
+        {type: "trap", reason: "trap"},
     ]);
 });
 
@@ -391,15 +395,11 @@ test("launcher rejects absent and wrong-major Node without stdout", async t => {
     await t.test("wrong-major interpreter", async st => {
         const directory = await mkdtemp(join(tmpdir(), "titan-node-resolver-"));
         st.after(() => rm(directory, { recursive: true, force: true }));
-        let oldNode = process.env.EMSDK_NODE;
-        if (windows && !oldNode) return st.skip("capability: EMSDK_NODE does not name the pinned older Node executable");
-        if (!windows) {
-            oldNode = join(directory, "node");
-            await writeFile(oldNode, "#!/bin/sh\nprintf 'v24.19.0\\n'\n", { mode: 0o755 });
-        }
-        const { stdout } = await exec(oldNode, ["--version"]);
-        const version = stdout.trim();
-        assert.ok(Number(version.match(/^v(\d+)\./)?.[1]) < 26, version);
+        // A stand-in interpreter that reports an older major version. The
+        // launcher runs it through sh, which honours the #! line everywhere.
+        const oldNode = join(directory, "node");
+        const version = "v24.19.0";
+        await writeFile(oldNode, `#!/bin/sh\nprintf '${version}\\n'\n`, { mode: 0o755 });
         const wrong = await run(["--probe"], { TITAN_NODE: oldNode });
         assert.equal(wrong.status, 75);
         assert.equal(wrong.stdout.length, 0);
@@ -500,6 +500,11 @@ for (const engine of ["node", "chromium"]) {
             assert.equal(forwarded.status, 0, forwarded.stderr.toString());
             assert.deepEqual(forwarded.stdout, Buffer.from(JSON.stringify(args)));
             if (engine === "chromium") await cleanChromium(forwarded);
+            const imported = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--root", root,
+                "--imports", importsFixture, "--js-test", fixture, "--", "imports"]);
+            assert.equal(imported.status, 0, imported.stderr.toString());
+            assert.deepEqual(imported.stdout, Buffer.from("imports"));
+            if (engine === "chromium") await cleanChromium(imported);
         });
         test(`real CLI test image preserves bytes and 0/1/2 status (${engine}/${cdp})`, async t => {
             const image = testImage(t);
@@ -558,9 +563,10 @@ for (const engine of ["node", "chromium"]) {
                 return;
             }
             if (engine === "chromium" && !await chromium(t)) return;
+            const image = resolve(named);
             for (const mode of ["duplicate", "invalid"]) await t.test(mode, async () => {
                 const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000",
-                    "--grace", "20", resolve(named), "--", mode]);
+                    "--grace", "20", "--root", fixtureRoot(image), "--imports", fixtureImports, image, "--", mode]);
                 assert.equal(result.status, 75, result.stderr.toString());
                 assert.equal(result.signal, null);
                 assert.match(result.stderr.toString(), /titan-browser-run: harness failure: browser entry reported a duplicate or mismatched completion/);
@@ -635,6 +641,7 @@ for (const engine of ["node", "chromium"]) {
                 const directory = fixtureRoot(image);
                 const before = performance.now();
                 const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000", "--grace", "200", "--root", directory,
+                    "--imports", fixtureImports,
                     "--js-test", join(root, `spec/fixtures/browser_loader/${fixtureName}.mjs`), "--",
                     relative(directory, image).split(sep).join("/"), ...args]);
                 assert.equal(result.status, 70, result.stderr.toString());
@@ -1201,6 +1208,108 @@ test("required trace uses the existing lazy initialization and disposal lifecycl
     }
 });
 
+test("initialization waits for one delayed trace lookup and degrades a throwing trace locator", async t => {
+    const image = testImage(t);
+    if (!image) return;
+    const {default: createImage} = await import(pathToFileURL(image).href);
+    const directory = dirname(image);
+    const wasmName = basename(image).replace(/\.mjs$/, ".wasm");
+    const traceName = `${wasmName}.trace`;
+    const table = await readFile(join(directory, traceName));
+    const args = ["--filter=^runner_image[.]test_bytes$"];
+    // An HTTP source holds the table until the test releases it, while the
+    // Wasm itself loads from the image directory.
+    let requests = 0, release, requested;
+    const held = new Promise(resolve => { release = resolve; });
+    const firstRequest = new Promise(resolve => { requested = resolve; });
+    const server = createServer(async (request, response) => {
+        requests++;
+        requested();
+        await held;
+        response.writeHead(200, {"Content-Type": "application/octet-stream"});
+        response.end(table);
+    });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const tableUrl = `http://127.0.0.1:${server.address().port}/${traceName}`;
+    const lookups = [];
+    const delayed = createImage({
+        locateFile(name) {
+            lookups.push(name);
+            return name === traceName ? tableUrl : join(directory, name);
+        },
+        stdout() {},
+    });
+    try {
+        let settled = false;
+        const initializing = delayed.initialize();
+        initializing.then(() => { settled = true; }, () => { settled = true; });
+        // Wait for the held request, but no longer than initialization lasts
+        // or a bounded time.
+        const early = initializing.then(() => {
+            throw new Error("initialization finished before requesting its trace table");
+        });
+        early.catch(() => {});
+        let timer;
+        await Promise.race([
+            firstRequest,
+            early,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("the image never requested its trace table")), 30000);
+            }),
+        ]).finally(() => clearTimeout(timer));
+        // The Wasm compiles while the table is held; the loader runs the C
+        // constructors only after the factory has indexed the table.
+        await new Promise(resolve => setTimeout(resolve, 250));
+        assert.equal(settled, false, "initialization finished before its trace table arrived");
+        assert.notEqual(delayed.trace.state, "ready");
+        release();
+        await initializing;
+        assert.equal(delayed.trace.state, "ready");
+        const result = await delayed.run(args);
+        assert.equal(result.kind, "returned");
+        assert.equal(result.status, 0);
+        assert.deepEqual(lookups.slice().sort(), [wasmName, traceName].sort(),
+            "the image looked a resource up more than once");
+        assert.equal(requests, 1, "the trace table was fetched more than once");
+    } finally {
+        release();
+        await delayed.dispose();
+    }
+
+    // A locator that throws for the optional table degrades the trace like a
+    // missing file; a required table fails initialization with its reason.
+    const decoder = new TextDecoder();
+    for (const requireTrace of [false, true]) {
+        const instance = createImage({
+            requireTrace,
+            locateFile(name) {
+                if (name === traceName) throw new Error("trace locator refused");
+                return join(directory, name);
+            },
+            stdout() {},
+            stderr() {},
+        });
+        try {
+            if (!requireTrace) {
+                await instance.initialize();
+                assert.equal(instance.trace.state, "degraded");
+                assert.match(instance.trace.reason, /trace locator refused/);
+                const result = await instance.run(args);
+                assert.equal(result.kind, "returned");
+                assert.equal(result.status, 0);
+            } else {
+                let error;
+                try { await instance.initialize(); } catch (cause) { error = cause; }
+                assert.equal(error?.code, "TITAN_BROWSER_TITAN");
+                assert.match(decoder.decode(error.bytes), /^degraded browser trace: .*trace locator refused/);
+            }
+        } finally {
+            await instance.dispose();
+        }
+    }
+});
+
 test("image observer forwards trace policy without owning another lifecycle", () => {
     for (const allow of [false, true]) {
         const instance = {};
@@ -1227,6 +1336,34 @@ test("imported runner helpers leave CLI dormant and preserve supervisor behavior
     assert.equal(within(root, dirname(root)), false);
 });
 
+test("an observed engine trap waits for the harness that caught it, then reports 71", async () => {
+    const settled = monitor => Promise.race([monitor.done.then(() => "done"),
+        new Promise(resolve => setTimeout(() => resolve("pending"), 20))]);
+    const observe = async (messages, expected) => {
+        const monitor = new Monitor({timeout: 2000, grace: 1000});
+        try {
+            for (const message of messages.slice(0, -1)) {
+                monitor.control(message);
+                assert.equal(await settled(monitor), "pending", `${JSON.stringify(message)} ended the run`);
+            }
+            monitor.control(messages.at(-1));
+            await monitor.done;
+            assert.equal(monitor.result(), expected);
+        } finally { monitor.stop(); }
+    };
+    const trap = {type: "trap", reason: "unreachable"};
+    // The harness finishes its own checks after catching the trap.
+    await observe([trap, {type: "complete", kind: "host-test", status: 0}], 71);
+    // Execute's terminal failure ends the wait; a nonterminal one does not.
+    await observe([trap, {type: "failure", category: "trap", reason: "unreachable"},
+        {type: "failure", category: "trap", reason: "unreachable", terminal: true}], 71);
+    // A trap replaces an observed abort, and an abort never replaces a trap.
+    await observe([{type: "abort", reason: "abort"}, trap, {type: "complete", kind: "host-test", status: 0}], 71);
+    await observe([trap, {type: "abort", reason: "abort"}, {type: "complete", kind: "host-test", status: 0}], 71);
+    // Observed after completion, it is a late engine failure.
+    await observe([{type: "complete", kind: "host-test", status: 0}, trap], 73);
+});
+
 test("direct invocation through a symlink still runs the runner CLI",
     { skip: windows && "capability: unprivileged Windows links may not be traversable" }, async () => {
     const directory = await mkdtemp(join(tmpdir(), "titan-runner-import-"));
@@ -1249,18 +1386,20 @@ const LINKED = {identity: IMAGE, wasm: "app.wasm"};
 // Transport-only unit fixture, not linked-image acceptance evidence. Each
 // promised gateway uses the current operation-id/kind completion protocol.
 function entryOutcomeFactory(entry) {
-    return options => {
-        const backend = {safe: () => true, poison() {}};
-        options.titanBrowserAttach(backend);
+    return owner => {
+        owner.backend = {safe: () => true, poison() {}};
         const complete = (id, kind, status = 0, bytes = new Uint8Array()) =>
-            options.titanBrowserComplete({id, kind, failed: false, status, bytes,
+            owner.complete({id, kind, failed: false, status, bytes,
                 trace: new Uint8Array(), values: []});
         return {
             HEAPU8: new TextEncoder().encode(IMAGE),
-            _titan_browser_trace_identity() { return 0; },
-            _titan_browser_initialize(id) { complete(id, 1); return Promise.resolve(0); },
-            _titan_browser_entry(id) { return entry(options, id); },
-            _titan_browser_close(id) { complete(id, 5); return Promise.resolve(0); },
+            exports: {
+                _initialize() {},
+                titan_browser_trace_identity() { return 0; },
+                titan_browser_initialize(id) { complete(id, 1); return Promise.resolve(0); },
+                titan_browser_entry(id) { return entry(owner, id); },
+                titan_browser_close(id) { complete(id, 5); return Promise.resolve(0); },
+            },
         };
     };
 }
@@ -1268,9 +1407,9 @@ function entryOutcomeFactory(entry) {
 test("a Wasm from another link is a protocol failure before Lua", {timeout: 1000}, async () => {
     let entered = false;
     const other = "f".repeat(64);
-    const instance = create(options => {
-        const image = entryOutcomeFactory(() => Promise.resolve(0))(options);
-        image._titan_browser_initialize = () => { entered = true; return Promise.resolve(0); };
+    const instance = create(owner => {
+        const image = entryOutcomeFactory(() => Promise.resolve(0))(owner);
+        image.exports.titan_browser_initialize = () => { entered = true; return Promise.resolve(0); };
         return image;
     }, {}, {identity: other, wasm: "app.wasm"});
     try {
@@ -1289,9 +1428,9 @@ test("the loader refuses a malformed image binding and a Wasm without its identi
         assert.throws(() => create(factory, {}, image), {name: "TypeError",
             message: "browser image binding must name a 64-digit identity and its .wasm"});
     }
-    const instance = create(options => {
-        const image = factory(options);
-        delete image._titan_browser_trace_identity;
+    const instance = create(owner => {
+        const image = factory(owner);
+        delete image.exports.titan_browser_trace_identity;
         return image;
     }, {}, LINKED);
     try {
@@ -1349,8 +1488,8 @@ test("loader refuses missing JSPI and memoizes failure for initialize and run", 
 test("completion waits for promised retirement and ignores numeric fulfillment", {timeout: 1000}, async () => {
     let release;
     const retired = new Promise(resolve => { release = resolve; });
-    const instance = create(entryOutcomeFactory((options, id) => {
-        options.titanBrowserComplete({id, kind: 2, failed: false, status: 17,
+    const instance = create(entryOutcomeFactory((owner, id) => {
+        owner.complete({id, kind: 2, failed: false, status: 17,
             bytes: new Uint8Array([0, 255]), trace: new Uint8Array(), values: []});
         return retired;
     }), {}, LINKED);
@@ -1369,8 +1508,8 @@ test("completion waits for promised retirement and ignores numeric fulfillment",
 test("dispose waits accepted retirement but interrupts the application result", {timeout: 1000}, async () => {
     let release;
     const retired = new Promise(resolve => { release = resolve; });
-    const instance = create(entryOutcomeFactory((options, id) => {
-        options.titanBrowserComplete({id, kind: 2, failed: false, status: 17,
+    const instance = create(entryOutcomeFactory((owner, id) => {
+        owner.complete({id, kind: 2, failed: false, status: 17,
             bytes: new Uint8Array(), trace: new Uint8Array(), values: []});
         return retired;
     }), {}, LINKED);

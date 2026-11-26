@@ -2,7 +2,7 @@
 -- depend on driver.lua without creating an initialization cycle.
 local version = {
     TITAN_ABI_VERSION = "2",
-    TITAN_VERSION = "0.6.1",
+    TITAN_VERSION = "0.6.2",
     LUA_VERSION = "5.5",
     OBJECT_RECORD_SCHEMA = "1",
     DIGEST_CACHE_SCHEMA = "1",

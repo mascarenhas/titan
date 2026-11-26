@@ -16,3 +16,9 @@ function main(_args: {string}): integer
   async_middle()
   return 0
 end
+
+-- The gate reads its trace observations as soon as initialization finishes.
+foreign import "trace_support.h"
+do
+  ffi.trace_fixture_publish_controls()
+end

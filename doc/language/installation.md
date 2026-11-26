@@ -74,8 +74,8 @@ LuaRocks itself is unmodified.
 | OpenSSL 3.0+ development files and `pkg-config` | Default system-OpenSSL mode for `titan.ssl`. |
 | Perl | Only for `OPENSSL_MODE=bundled`. |
 | `clang-format` | Only for `titanc --pretty-print` (`CLANG_FORMAT` overrides). |
-| Emscripten 6.0.13 | Only for `--target browser` and [the browser Lua and SDK](#the-browser-lua-and-sdk). |
-| Node 26+ with WebAssembly JSPI | Only for browser SDK publication, linking, and CLI execution (`TITAN_NODE` or `PATH`; not emsdk's bundled Node 24). |
+| `wasi-sdk` 34 and Binaryen `version_133` | Only for `--target browser` and [the browser Lua and SDK](#the-browser-lua-and-sdk). |
+| Node 26+ with WebAssembly JSPI | Only for browser SDK publication, linking, and CLI execution (`TITAN_NODE` or `PATH`). |
 | JSPI-capable Chrome or Chromium headless shell | Only for browser-engine runs via `titan-browser-run`. |
 
 Package-manager commands for the core prerequisites:
@@ -108,16 +108,16 @@ layout.
   for module lookup, but LuaRocks's Unix `bin/titanc` wrapper embeds the
   original interpreter path. After copying or moving a Unix prefix, reinstall
   Titan in the copy or set `TITAN_ROOT` to the new directory.
-- **Versions:** Titan `0.6.1` uses library version `0.6` in paths such as
+- **Versions:** Titan `0.6.2` uses library version `0.6` in paths such as
   `lib/titan/0.6` and `TITAN_PATH_0_6`. Patch releases in the same series share
   that namespace and stay compatible when the ABI, artifact format versions,
-  and (for browser companions) the pinned Emscripten version do not change:
-  compiled native providers, browser `analysis-target` descriptors and semantic
-  companion packs, and saved language-server project manifests are accepted
-  across patch releases of the same series. `--incremental` objects compiled
-  from source still rebuild after a compiler change because their certificates
-  hash the compiler files and SDK headers. Always install into a fresh prefix
-  when upgrading across breaking prereleases.
+  and (for browser companions) the pinned `wasi-sdk` and Binaryen versions do
+  not change: compiled native providers, browser `analysis-target` descriptors
+  and semantic companion packs, and saved language-server project manifests are
+  accepted across patch releases of the same series. `--incremental` objects
+  compiled from source still rebuild after a compiler change because their
+  certificates hash the compiler files and SDK headers. Always install into a
+  fresh prefix when upgrading across breaking prereleases.
 
 ## Other installation types
 
@@ -229,7 +229,7 @@ Windows requires `PREFIX` and `ROCKS_TREE` to be identical.
 After installing Titan into a prefix, pack a binary rock from a checkout with
 `make binary-rock` (do not use `luarocks pack --pack-binary-rock`, and note
 that plain `luarocks pack titan` mislabels native files as `.all.rock`).
-Install the resulting `titan-0.6.1-1.<arch>.rock` with `luarocks install` to
+Install the resulting `titan-0.6.2-1.<arch>.rock` with `luarocks install` to
 deploy without compiling.
 
 ### A debug (validation) installation
@@ -265,14 +265,17 @@ workflow, see [Repository workflow](../implementation/repository-workflow.md).
 
 ### The browser Lua and SDK
 
-Targeting WebAssembly (`titanc --target browser`) requires Emscripten 6.0.13,
-Node 26+ with JSPI, the browser Lua archive, and the browser SDK in the same
-prefix as Titan (plus headless Chrome/Chromium for browser-engine runs with
-`titan-browser-run`). Plain `luarocks install titan` and `luarocks make` never
-require Emscripten.
+Targeting WebAssembly (`titanc --target browser`) requires **`wasi-sdk` 34**
+(LLVM 23.1), **Binaryen `version_133`** (`wasm-opt`), Node 26+ with JSPI, the
+browser Lua archive, and the browser SDK in the same prefix as Titan (plus
+headless Chrome/Chromium for browser-engine runs with `titan-browser-run`).
+Plain `luarocks install titan` and `luarocks make` never require `wasi-sdk` or
+Binaryen.
 
-After installing Titan from a checkout and activating Emscripten 6.0.13
-(`source <emsdk>/emsdk_env.sh`), install the browser Lua and browser SDK:
+After installing Titan from a checkout and making `wasi-sdk` 34 and Binaryen
+`version_133` available (for example, by setting `WASI_SDK_PATH` and
+`BINARYEN_ROOT`, or placing their `bin` directories on `PATH`), install the
+browser Lua and browser SDK:
 
 <!-- doc-check: run -->
 ```sh
@@ -284,27 +287,30 @@ On Windows, run `make -f Makefile.win lua-browser` and
 `make -f Makefile.win browser-sdk` from MSYS2 CLANG64 (see
 [Build for the browser](windows-build.md#build-for-the-browser)).
 
-- `titanc` locates `emcc` (along with `emar` and `emranlib`) under
-  `$EMSDK/upstream/emscripten` when `EMSDK` is set, or via `PATH`, and
-  requires exact Emscripten **6.0.13**.
+- `titanc` locates `clang` (along with `llvm-ar`, `llvm-ranlib`, `wasm-ld`,
+  `VERSION`, and `share/wasi-sysroot`) under `$WASI_SDK_PATH` when
+  `WASI_SDK_PATH` is set, or via `PATH`, and requires `wasi-sdk` **34** (any `34.x` point release).
+  It locates `wasm-opt` from `WASM_OPT`, then `$BINARYEN_ROOT/bin/wasm-opt`,
+  then `PATH`, and requires exact Binaryen **133** (`version_133`).
 - `make lua-browser` builds the fork's `browser` target into
-  `$PREFIX/lib/browser/` using Emscripten's legacy Wasm exception contract
-  (`-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1`) without touching
-  native Lua. Existing installations are reused only when the fork commit,
-  Emscripten version, compile settings, and file digests all match.
-- `make browser-sdk` builds the browser runtime, loader, runner, and standard
-  library into `lib/titan-browser/0.6/` under the active `TITAN_BUILD_PROFILE`
-  (recorded in `build-profile`; links under the other profile are refused). It
-  validates the standard library with `TITAN_NODE` (or `node` on `PATH`,
-  requiring Node 26+ with JSPI; emsdk's bundled Node is ignored). In a
+  `$PREFIX/lib/browser/` using `wasm32-wasip1` and Phase 5 Wasm-EH `exnref`
+  SJLJ (`-mexception-handling -mllvm -wasm-enable-sjlj
+  -mllvm -wasm-use-legacy-eh=false`) without touching native Lua. Existing
+  installations are reused only when the fork commit, `wasi-sdk` version,
+  compile settings, and file digests all match.
+- `make browser-sdk` builds the browser runtime, Wasm factory, loader, runner,
+  and standard library into `lib/titan-browser/0.6/` under the active
+  `TITAN_BUILD_PROFILE` (recorded in `build-profile`; links under the other
+  profile are refused). It validates the standard library with `TITAN_NODE` (or
+  `node` on `PATH`, requiring Node 26+ with JSPI). In a
   [separate rocks tree](#a-separate-rocks-tree), pass both `PREFIX` and
   `ROCKS_TREE`.
 - To install the browser Lua directly from a standalone source archive of the
   pinned fork commit, pass `FORK_REVISION=<40-hex commit>` to
   `make install-browser PREFIX="$PREFIX"`.
-- Re-run both targets after updating Emscripten, the Lua fork, or Titan. Use
-  `make uninstall-browser-sdk PREFIX="$PREFIX"` to remove only the browser
-  SDK.
+- Re-run both targets after updating `wasi-sdk`, Binaryen, the Lua fork, or
+  Titan. Use `make uninstall-browser-sdk PREFIX="$PREFIX"` to remove only the
+  browser SDK.
 
 ## What gets installed
 

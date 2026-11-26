@@ -2025,7 +2025,7 @@ describe("compiler installation discovery", function()
     it("exports the language-server compiler API independently of the ABI",
        function()
         assert.equal("2", driver.TITAN_ABI_VERSION)
-        assert.equal("0.6.1", driver.TITAN_VERSION)
+        assert.equal("0.6.2", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
         assert.equal(1, driver.LANGUAGE_SERVER_API_VERSION)
@@ -13779,21 +13779,24 @@ describe("Windows link response files", function()
     end
 
     it("keeps the browser compiler envelope ahead of a long GNU response file", function()
-        local compiler = "C:/browser tools/emcc.exe"
-        local arguments = { "-o", "out result.mjs", [[C:\a space\trailing\]] }
+        local tools = browser_fixtures.descriptor().tools
+        local envelope = require("titan-compiler.browsertarget").compiler_argv(tools)
+        local arguments = { "-o", "out result.wasm.linked", [[C:\a space\trailing\]] }
         for index = 1, 800 do
             arguments[#arguments + 1] = ("C:/generated output directory/module-%04d.o"):format(index)
         end
         local payload = assert(platform.windows_response_contents(arguments))
         assert.is_true(#payload > 32767)
         process.run = function(argv)
-            assert.same({ "env", "EMCC_CFLAGS=", compiler, "@" .. response }, argv)
+            local expected = { table.unpack(envelope) }
+            expected[#expected + 1] = "@" .. response
+            assert.same(expected, argv)
             assert.equal(payload, assert(util.get_file_contents(response, "rb")))
             return true, "exit", 0
         end
-        assert.is_true(driver.run_link_command(
-            { "env", "EMCC_CFLAGS=", compiler, table.unpack(arguments) },
-            false, "out result.mjs", { compiler }))
+        local command = { table.unpack(envelope) }
+        for _, argument in ipairs(arguments) do command[#command + 1] = argument end
+        assert.is_true(driver.run_link_command(command, false, "out result.wasm.linked", tools))
         assert.is_nil(lfs.attributes(response))
     end)
 
@@ -13819,7 +13822,15 @@ describe("Windows link response files", function()
         local stage = response .. "/stage"
         assert(lfs.mkdir(stage))
         subject.staged_library_output = function() return staged, stage end
+        local optimized
         process.run = function(argv)
+            if argv[1] == descriptor.tools.optimizer.argv[1] then
+                -- wasm-opt reads the link output and writes the staged image.
+                assert.same({ response .. "/image.wasm.linked", "-o", response .. "/image.wasm" },
+                    { table.unpack(argv, #argv - 2) })
+                optimized = true
+                return true, "exit", 0
+            end
             assert.equal("-c", argv[#argv - 3], "only the entrypoint is compiled through process.run")
             return true, "exit", 0
         end
@@ -13830,23 +13841,27 @@ describe("Windows link response files", function()
             return true
         end }
         function strategy:run(argv, options)
-            assert.same({ "env", "EMCC_CFLAGS=", descriptor.tools.cc[1], "@" .. staged .. ".rsp" }, argv)
+            local expected = require("titan-compiler.browsertarget").compiler_argv(descriptor.tools)
+            expected[#expected + 1] = "@" .. staged .. ".rsp"
+            assert.same(expected, argv)
             assert.is_false(options.stderr_to_stdout)
             local payload = assert(outputs[staged .. ".rsp"])
             assert.truthy(payload:find('"-Wl,--trace"\n', 1, true))
             assert.truthy(payload:find('"C:\\\\generated path\\\\app.o"\n', 1, true))
-            assert.falsy(payload:find("EMCC_CFLAGS=", 1, true))
+            assert.falsy(payload:find("--target=", 1, true))
+            assert.falsy(payload:find("CCC_OVERRIDE_OPTIONS=", 1, true))
             return { started = true, ok = true, output = "one.o\r\ntwo.o\r\n" }
         end
         local ok, err = subject.compile_browser_image("entrypoint", response .. "/entry.c",
             response .. "/program.mjs", { [[C:\generated path\app.o]] }, {}, {}, false, {
                 context = { target = "browser", target_descriptor = descriptor, io = strategy },
-                profile = { purpose = "protocol", assertions = 2 }, link_extra_flags = {},
+                profile = { purpose = "protocol" }, link_extra_flags = {},
                 final_link_flags = { "-Wl,--trace" }, dependency_output = dependencies,
             })
         assert.is_nil(ok)
         assert.matches("is not a regular file", err, 1, true)
         assert.equal("one.o\r\ntwo.o\r\n", outputs[dependencies])
+        assert.is_true(optimized)
         assert.is_nil(lfs.attributes(stage))
     end)
 
@@ -13999,7 +14014,7 @@ describe("Windows archive command batching", function()
             if name == "archive_batches" then batches = value; break end
         end
         assert.is_function(batches)
-        local prefix = { "C:/" .. ("SDK tools with spaces/"):rep(16) .. "emar.exe",
+        local prefix = { "C:/" .. ("SDK tools with spaces/"):rep(16) .. "llvm-ar.exe",
             "qDc", [[C:\output dir\output.a]] }
         local source, total = {}, { table.unpack(prefix) }
         for index = 1, 350 do
@@ -14757,5 +14772,155 @@ function fourth(): integer return third() + 4 end
             assert.equal("file", lfs.attributes(root .. "/parts" .. suffix, "mode"), suffix)
             assert.is_nil(lfs.attributes(root .. "/parts.native" .. suffix))
         end
+    end)
+end)
+
+describe("browser output tool certification", function()
+    it("certifies the SDK archive tools, wasm-ld and wasm-opt for every browser output kind", function()
+        local subject = assert(loadfile("titan-compiler/driver.lua"))()
+        local descriptor = browser_fixtures.descriptor()
+        subject.context_target_descriptor = function() return descriptor end
+        -- The compiler's own identity is certified elsewhere; this pins the output tools.
+        local toolchain_identity = incremental.toolchain_identity
+        local restore <close> = setmetatable({}, { __close = function()
+            incremental.toolchain_identity = toolchain_identity
+        end })
+        incremental.toolchain_identity = function() return "toolchain", { stage_policy = "llvm", tools = {} } end
+        local context = { target = "browser", target_descriptor = descriptor, io = compiler_io.new_sync() }
+        for _, kind in ipairs({ "library", "program", "test" }) do
+            local request = assert(subject.output_tool_descriptors(context, kind))
+            assert.same({ ar = descriptor.tools.ar, ranlib = descriptor.tools.ranlib, ld = descriptor.tools.ld,
+                optimizer = descriptor.tools.optimizer.argv }, request.tools)
+        end
+    end)
+end)
+
+describe("browser link option ownership", function()
+    local browserlink = require "titan-compiler.browserlink"
+    it("refuses inverse, response-file and linker-selection escapes before any tool runs", function()
+        local owned = "browser production link profile owns option "
+        local response = "browser production link profile does not accept linker response file "
+        for _, case in ipairs({
+            { { "-Wl,--no-stack-first" }, owned .. "-Wl,--no-stack-first" },
+            { { "-Wl,--wrap=malloc,--stack-first" }, owned .. "-Wl,--wrap=malloc,--stack-first" },
+            { { "-Xlinker", "--no-gc-sections" }, owned .. "--no-gc-sections" },
+            { { "-Wl,--no-growable-memory" }, owned .. "-Wl,--no-growable-memory" },
+            { { "-Wl,-z,stack-size=65536" }, owned .. "-Wl,-z,stack-size=65536" },
+            { { "-z", "stack-size=65536" }, owned .. "-z" },
+            { { "-e", "start" }, owned .. "-e" },
+            { { "-fuse-ld=lld" }, owned .. "-fuse-ld=lld" },
+            { { "--ld-path=/other/wasm-ld" }, owned .. "--ld-path=/other/wasm-ld" },
+            { { "-B/other/bin" }, owned .. "-B/other/bin" },
+            { { "--prefix=/other" }, owned .. "--prefix=/other" },
+            { { "-Wl,@extra.rsp" }, response .. "-Wl,@extra.rsp" },
+            { { "-Xlinker", "@extra.rsp" }, response .. "@extra.rsp" },
+        }) do
+            local ok, err = browserlink.validate_extras(case[1], { purpose = "program" }, "production", "link")
+            assert.is_nil(ok)
+            assert.equal(case[2], err)
+        end
+        local ok, err = browserlink.validate_extras({ "-Wl,@extra.rsp" }, nil, "validation", "compile")
+        assert.is_nil(ok)
+        assert.equal("browser validation profile does not accept linker response file -Wl,@extra.rsp", err)
+        assert.is_true(browserlink.validate_extras({ "-Wl,--wrap=malloc", "-Wl,--no-demangle", "-lfixture" },
+            { purpose = "program" }, "production", "link"))
+    end)
+end)
+
+describe("browser protocol probe host imports", function()
+    local function wasm_name(value) return string.char(#value) .. value end
+    local function wasm_section(id, payload)
+        local size, digits = #payload, {}
+        repeat
+            local digit = size & 127; size = size >> 7
+            digits[#digits + 1] = string.char(digit | (size > 0 and 128 or 0))
+        until size == 0
+        return string.char(id) .. table.concat(digits) .. payload
+    end
+    local function probe_image(imports)
+        local types = wasm_section(1, "\3" .. "\96\1\127\0" .. "\96\0\1\126" .. "\96\0\2\127\124")
+        local entries = {}
+        for _, import in ipairs(imports) do
+            entries[#entries + 1] = wasm_name(import[1]) .. wasm_name(import[2]) .. import[3]
+        end
+        return "\0asm\1\0\0\0" .. types .. wasm_section(2, string.char(#entries) .. table.concat(entries))
+    end
+
+    local function run_probe(imports)
+        local subject = assert(loadfile("titan-compiler/driver.lua"))()
+        local browserlink = require "titan-compiler.browserlink"
+        subject.require_browser_sdk = function() return { runner = "/sdk/bin/titan-browser-run" } end
+        subject.browser_node_ready = function() return true end
+        subject.link_extra_flags = function() return {} end
+        subject.compile_browser_image = function(_, _, image)
+            assert(util.set_file_contents(image:gsub("%.mjs$", ".wasm"), probe_image(imports), "wb"))
+            return true
+        end
+        local seen = {}
+        local context = { target = "browser", target_descriptor = browser_fixtures.descriptor(),
+            io = compiler_io.new_sync() }
+        function context.io:run(argv)
+            seen.argv = argv
+            local imports_at
+            for index, argument in ipairs(argv) do
+                if argument == "--imports" then imports_at = index + 1 end
+            end
+            seen.stand_ins = imports_at and argv[imports_at]
+            seen.module = seen.stand_ins and assert(util.get_file_contents(seen.stand_ins, "rb"))
+            return { started = true, ok = true, output = "" }
+        end
+        assert.is_true(subject.run_standalone_archive_probe({ ["pkg.mod"] = { abi = "a", types = "t", layouts = "l" } },
+            { "pkg.mod" }, {}, {}, nil, false, nil, { context = context }))
+        return seen, browserlink.runner_argv("/sdk/bin/titan-browser-run", "--engine", "node")
+    end
+
+    it("gives the program's own host function imports zero-valued stand-ins and leaves the runtime's alone", function()
+        local seen, prefix = run_probe({
+            { "env", "host_note", "\0\0" }, { "env", "host_clock", "\0\1" },
+            { "env", "titan_browser_relinquish", "\0\0" }, { "env", "titan_mco_transfer", "\0\0" },
+            { "wasi_snapshot_preview1", "fd_write", "\0\0" }, { "other", "pair", "\0\2" },
+            { "env", "host_memory", "\2\0\1" },
+        })
+        local image = seen.argv[#seen.argv]
+        local expected = { table.unpack(prefix) }
+        for _, argument in ipairs({ "--root", paths.dirname(image), "--imports", image:gsub("%.mjs$", ".imports.mjs"), image }) do
+            expected[#expected + 1] = argument
+        end
+        assert.same(expected, seen.argv)
+        assert.equal('export default {\n  ["env"]: {["host_note"]: () => undefined, ["host_clock"]: () => 0n},\n' ..
+            '  ["other"]: {["pair"]: () => [0, 0]}\n};\n', seen.module)
+        assert.is_nil(lfs.attributes(seen.stand_ins))
+    end)
+
+    it("runs an image that imports only what the runtime owns without an imports module", function()
+        local seen, prefix = run_probe({ { "env", "titan_browser_complete", "\0\0" },
+            { "wasi_snapshot_preview1", "proc_exit", "\0\0" } })
+        local expected = { table.unpack(prefix) }
+        expected[#expected + 1] = seen.argv[#seen.argv]
+        assert.same(expected, seen.argv)
+        assert.is_nil(seen.module)
+    end)
+
+    it("makes every module and member name, __proto__ included, an own property returning typed zeros", function()
+        local node = os.getenv("TITAN_NODE")
+        if not node or node == "" then pending("TITAN_NODE is not set") return end
+        local module = assert(require("titan-compiler.browserlink").protocol_imports({
+            { module = "__proto__", name = "__proto__", kind = 0, signature = "()->(i64)" },
+            { module = "env", name = "constructor", kind = 0, signature = "(i32)->(i32,f64,externref)" },
+            { module = "env", name = 'quote"\\\n', kind = 0, signature = "()->()" },
+        }))
+        local file = temporary.name(".mjs")
+        local cleanup <close> = setmetatable({}, { __close = function() os.remove(file) end })
+        assert(util.set_file_contents(file, module, "wb"))
+        local result = compiler_io.new_sync():run({ node, "--input-type=module", "-e", [[
+const own = (object, key) => Object.getOwnPropertyDescriptor(object, key)?.value;
+const imports = (await import((await import('node:url')).pathToFileURL(process.argv[1]).href)).default;
+const proto = own(own(imports, '__proto__'), '__proto__');
+const env = own(imports, 'env');
+console.log(JSON.stringify([Object.getPrototypeOf(imports) === Object.prototype, typeof proto, typeof proto?.(),
+    own(env, 'constructor')(), own(env, 'quote"\\\n')()]));
+]], file }, { stderr_to_stdout = true })
+        assert.is_true(result.ok, result.output)
+        assert.equal('[true,"function","bigint",[0,0,null],null]', (result.output:gsub("%s+$", "")))
     end)
 end)

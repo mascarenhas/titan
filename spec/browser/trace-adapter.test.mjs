@@ -1,13 +1,17 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {readFile, writeFile, mkdtemp, rm} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
-import {dirname, join, resolve} from 'node:path';
-import {fileURLToPath, pathToFileURL} from 'node:url';
+import {readFile} from 'node:fs/promises';
+import {dirname, resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import vm from 'node:vm';
+import {createTrace, createWasiImports} from '../../titan-runtime/browser/titan-wasm-factory.mjs';
 
-const source = await readFile(new URL('../../titan-runtime/browser/titan-browser-trace.js', import.meta.url), 'utf8');
+// Units load the factory into a fresh realm, so a case can replace that
+// realm's Error and Object built-ins. Its exports become plain declarations,
+// as the compiler embeds them in an image.
+const factory = (await readFile(new URL('../../titan-runtime/browser/titan-wasm-factory.mjs', import.meta.url), 'utf8'))
+    .replace(/^export function /gm, 'function ').replace(/^export default \w+;\s*$/m, '');
 const stacks = JSON.parse(await readFile(new URL('../fixtures/browser_trace_adapter/stacks.json', import.meta.url), 'utf8'));
 const currentStacks = JSON.parse(await readFile(new URL('../fixtures/browser_trace_adapter/stacks-jspi-current.json', import.meta.url), 'utf8'));
 const identity = 'a'.repeat(64);
@@ -38,37 +42,13 @@ function table(data) {
         io.stdout:write(bytes)`], {input})));
     return tables.get(input);
 }
-function adapter({realError = false, bytes = table(map()), node = true, fetch: fetcher} = {}) {
-    const hooks = [], dependencies = new Set(), warnings = [], reads = [];
+function adapter({realError = false, bytes = table(map())} = {}) {
+    const warnings = [];
     const heap = new Uint8Array(16384);
-    let library;
-    const context = vm.createContext({
-        HEAPU32: new Uint32Array(heap.buffer), Module: {},
-        TextDecoder, TextEncoder, performance,
-        addToLibrary(value) { library = value; },
-        addOnPreRun(hook) { hooks.push(hook); },
-        addRunDependency(name) { dependencies.add(name); },
-        removeRunDependency(name) { dependencies.delete(name); },
-        ENVIRONMENT_IS_NODE: node,
-        locateFile(name) { reads.push(name); return '/maps/' + name; },
-        readBinary(path) { reads.push(path); return bytes; },
-        fetch: fetcher,
-        wasmExports: {titan_browser_trace_identity() { return 64; }},
-        UTF8ToString(pointer) { assert.equal(pointer, 64); return identity; },
-        stringToUTF8(text, pointer, size) {
-            // Match Emscripten's bounded UTF-8 behavior, including whole codepoints.
-            let length = 0;
-            for (const character of text) {
-                const bytes = new TextEncoder().encode(character);
-                if (length + bytes.length >= size) break;
-                heap.set(bytes, pointer + length); length += bytes.length;
-            }
-            heap[pointer + length] = 0;
-        },
-        console: {warn(text) { warnings.push(text); }},
-    });
-    vm.runInContext(source.replaceAll('{{{ WASM_BINARY_FILE }}}', 'image.wasm'), context);
-    context.TitanBrowserTrace = library.$TitanBrowserTrace;
+    const views = {HEAPU8: heap, HEAPU32: new Uint32Array(heap.buffer)};
+    const context = vm.createContext({TextDecoder, TextEncoder, performance, WebAssembly, views,
+        console: {warn(text) { warnings.push(text); }}});
+    vm.runInContext(factory, context);
     if (!realError) vm.runInContext(`
         globalThis.stackText = 'Error\\n    at leaf (wasm://wasm/image:wasm-function[1]:0x6e)';
         globalThis.constructed = 0; globalThis.stackReads = 0;
@@ -81,12 +61,12 @@ function adapter({realError = false, bytes = table(map()), node = true, fetch: f
             }});
         };
     `, context);
-    const api = context.TitanBrowserTrace;
-    vm.runInContext(library.$TitanBrowserTrace__postset, context);
+    const api = vm.runInContext('createTrace(views)', context);
     api.index = api.readTable(bytes, identity);
-    return {context, api, library, heap, hooks, dependencies, warnings, reads,
+    return {context, api, heap, views, warnings,
         evaluate(code) { return vm.runInContext(code, context); },
-        capture(capacity = 512) { return library.titan_browser_trace_capture(1024, capacity); },
+        capture(capacity = 512) { return api.capture(1024, capacity); },
+        symbolize() { return api.symbolize(1032, 8000, 9, 8100, 8, 8200); },
         records() {
             const words = new Uint32Array(heap.buffer);
             return Array.from({length: words[256]}, (_, i) => Array.from(words.slice(258 + i * 3, 261 + i * 3)));
@@ -381,8 +361,8 @@ for (const operation of ['descriptor read', 'prepare descriptor read', 'limit re
         } else if (operation === 'capture') unit.context.captureFailure = true;
         else if (operation === 'stack read') unit.context.stackReadFailure = true;
         else if (operation === 'parse') unit.context.stackText = {};
-        else unit.evaluate(`globalThis.originalHeap = HEAPU32; globalThis.writes = 0;
-            globalThis.HEAPU32 = new Proxy(HEAPU32, {get(target, key) { return Reflect.get(target, key, target); }, set(target, key, value) {
+        else unit.evaluate(`globalThis.originalHeap = views.HEAPU32; globalThis.writes = 0;
+            views.HEAPU32 = new Proxy(originalHeap, {get(target, key) { return Reflect.get(target, key, target); }, set(target, key, value) {
                 if (++writes === 3) throw 'storage write'; return Reflect.set(target, key, value);
             }});`);
         assert.equal(unit.capture(), 2);
@@ -394,7 +374,7 @@ for (const operation of ['descriptor read', 'prepare descriptor read', 'limit re
         unit.context.captureFailure = false;
         unit.context.stackReadFailure = false;
         unit.context.stackText = 'Error\n    at leaf (wasm://wasm/image:wasm-function[1]:0x6e)';
-        if (operation === 'storage') unit.evaluate('HEAPU32 = originalHeap;');
+        if (operation === 'storage') unit.evaluate('views.HEAPU32 = originalHeap;');
         assert.equal(unit.capture(), 0);
         assert.equal(unit.records().length, 1);
     });
@@ -419,16 +399,19 @@ for (const key of ['stackTraceLimit', 'prepareStackTrace']) test('absent descrip
 test('symbolization writes bounded UTF-8 and contains output failures', () => {
     const unit = adapter({bytes: table(map({x_titan_function_names: [null, 'ℳ'.repeat(100), 'dynCall_v', 'two_titan']}))});
     assert.equal(unit.capture(), 0);
-    assert.equal(unit.library.titan_browser_trace_symbolize(1032, 8000, 9, 8100, 8, 8200), 1);
+    assert.equal(unit.symbolize(), 1);
     assert.equal(unit.text(8000), 'one.brow');
     assert.equal(unit.text(8100), 'ℳℳ');
-    const write = unit.context.stringToUTF8;
+    // Each string write reads the byte view once: '?', '?', then the base.
     let calls = 0;
-    unit.context.stringToUTF8 = (...args) => { if (++calls === 3) throw new Error('output limit'); return write(...args); };
-    assert.equal(unit.library.titan_browser_trace_symbolize(1032, 8000, 9, 8100, 8, 8200), 2);
+    Object.defineProperty(unit.views, 'HEAPU8', {configurable: true, get() {
+        if (++calls === 3) throw new Error('output limit');
+        return unit.heap;
+    }});
+    assert.equal(unit.symbolize(), 2);
     assert.equal(new Uint32Array(unit.heap.buffer)[2050], 0);
     assert.equal(unit.text(8000), '?');
-    assert.equal(unit.library.titan_browser_trace_symbolize(1032, 8000, 9, 8100, 8, 8200), 1);
+    assert.equal(unit.symbolize(), 1);
 });
 
 test('real Node Error capture preserves host descriptors and never runs prepare callback', () => {
@@ -440,27 +423,15 @@ test('real Node Error capture preserves host descriptors and never runs prepare 
     assert.deepEqual(unit.evaluate('Object.getOwnPropertyDescriptor(Error, "stackTraceLimit")'), before);
 });
 
-async function settle(unit) {
-    for (let i = 0; i < 20 && unit.dependencies.size; ++i) await new Promise(resolve => setImmediate(resolve));
-    assert.equal(unit.dependencies.size, 0);
-}
-
-test('eager preRun dependency gates readiness until exports-verified browser fetch finishes', async () => {
-    let deliver;
-    const unit = adapter({node: false, fetch: path => {
-        assert.equal(path, '/maps/image.wasm.trace');
-        return new Promise(resolve => { deliver = resolve; });
-    }});
+test('load gates capture until the table resolves, then reports its cost', async () => {
+    const unit = adapter();
     unit.api.index = null;
-    assert.equal(unit.hooks.length, 1);
-    unit.hooks[0]();
-    assert.equal(unit.dependencies.has('titan-trace-table'), true);
+    let deliver;
+    const loading = unit.api.load(new Promise(resolve => { deliver = resolve; }), identity, performance.now());
     await Promise.resolve();
-    assert.equal(unit.context.Module.titanBrowserTrace, undefined);
     assert.equal(unit.capture(), 1);
-    deliver({ok: true, arrayBuffer: async () => valid.slice().buffer});
-    await settle(unit);
-    const result = unit.context.Module.titanBrowserTrace;
+    deliver(valid.slice());
+    const result = await loading;
     assert.equal(result.state, 'ready');
     assert.equal(result.reason, null);
     assert.equal(result.traceBytes, valid.length);
@@ -471,89 +442,95 @@ test('eager preRun dependency gates readiness until exports-verified browser fet
     assert.equal(unit.warnings.length, 0);
 });
 
-for (const [name, bytes] of [['ready', valid], ['a map instead of a table', new TextEncoder().encode(JSON.stringify(map()))],
-    ['wrong image', table(map({x_titan_image: 'b'.repeat(64)}))]]) {
-    test('Node eager load: ' + name, async () => {
-        // Build a valid unit first; the eager loader reads the independently supplied bytes.
-        const unit = adapter();
-        unit.context.readBinary = path => { unit.reads.push(path); return bytes; };
+// Errors come from the factory's realm, as in an image.
+for (const [name, bytes, reason] of [
+    ['a map instead of a table', () => Promise.resolve(new TextEncoder().encode(JSON.stringify(map()))), 'invalid trace table'],
+    ['wrong image', () => Promise.resolve(table(map({x_titan_image: 'b'.repeat(64)}))), 'trace table image does not match'],
+    ['failed request', unit => unit.evaluate("Promise.reject(new Error('trace table request failed (404)'))"),
+        'trace table request failed (404)'],
+]) {
+    test('load degrades: ' + name, async () => {
+        const unit = adapter({realError: true});
         unit.api.index = null;
-        unit.hooks[0]();
-        await settle(unit);
-        assert.equal(unit.context.Module.titanBrowserTrace.state, name === 'ready' ? 'ready' : 'degraded');
-        assert.equal(unit.warnings.length, name === 'ready' ? 0 : 1);
-        if (name !== 'ready') assert.match(unit.warnings[0], /^Titan browser trace: /);
-        const requests = unit.reads.length;
-        assert.equal(unit.capture(), name === 'ready' ? 0 : 1);
-        assert.equal(unit.capture(), name === 'ready' ? 0 : 1);
-        assert.equal(unit.reads.length, requests, 'capture never reloads a table');
+        const result = await unit.api.load(bytes(unit), identity);
+        assert.equal(result.state, 'degraded');
+        assert.equal(result.reason, reason);
+        assert.equal(result.indexBytes, 0);
+        assert.deepEqual(unit.warnings, ['Titan browser trace: ' + reason]);
+        assert.equal(unit.capture(), 1);
+        assert.equal(unit.capture(), 1);
     });
 }
 
-test('pinned generated Emscripten factory waits for trace initialization with instantiated exports', {
+// A plain reactor module built by the CI step, instantiated with the
+// factory's own trace and WASI imports, so its captures cross real Wasm frames.
+async function unitImage(path, table) {
+    const memory = () => instance.exports.memory.buffer;
+    const views = {get HEAPU8() { return new Uint8Array(memory()); }, get HEAPU32() { return new Uint32Array(memory()); }};
+    const trace = createTrace(views);
+    const host = {output() {}, options: {env: []}};
+    table.catch(() => { /* trace.load reports it after instantiation. */ });
+    const {instance} = await WebAssembly.instantiate(await readFile(resolve(path)), {
+        env: {
+            titan_browser_trace_capture: (out, capacity) => trace.capture(out, capacity),
+            titan_browser_trace_symbolize: (...args) => trace.symbolize(...args),
+        },
+        wasi_snapshot_preview1: createWasiImports(host, views, message => { throw new Error(message); }),
+    });
+    const exports = instance.exports;
+    const pointer = exports.titan_browser_trace_identity();
+    const image = new TextDecoder().decode(views.HEAPU8.subarray(pointer, views.HEAPU8.indexOf(0, pointer)));
+    const metadata = await trace.load(table, image);
+    exports._initialize();
+    return {exports, views, metadata};
+}
+
+test('a real Wasm capture is ready only with its table', {
     skip: !process.env.TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE,
 }, async () => {
-    const image = resolve(process.env.TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE);
-    const directory = await mkdtemp(join(tmpdir(), 'titan-trace-lifecycle-'));
-    try {
-        const originalMap = JSON.parse(await readFile(image.replace(/\.mjs$/, '.wasm.map'), 'utf8'));
-        const tablePath = join(directory, 'lifecycle.wasm.trace');
-        await writeFile(tablePath, table({...originalMap, x_titan_image: identity, x_titan_function_imports: 0,
-            x_titan_function_ranges: [], x_titan_function_names: []}));
-        const {default: factory} = await import(pathToFileURL(image).href);
-        let tableRequested = 0;
-        const module = await factory({locateFile(name) {
-            if (name.endsWith('.trace')) { ++tableRequested; return tablePath; }
-            return join(dirname(image), name);
-        }});
-        assert.equal(tableRequested, 1);
-        assert.equal(module.titanBrowserTrace.state, 'ready', module.titanBrowserTrace.reason);
-        assert.equal(module._trace_capture_once(), 0);
-        // Without its table the image runs degraded.
-        const degraded = await factory({locateFile: name => join(dirname(image), name)});
-        assert.equal(degraded.titanBrowserTrace.state, 'degraded');
-        assert.equal(degraded._trace_capture_once(), 1);
-    } finally { await rm(directory, {recursive: true, force: true}); }
+    const image = process.env.TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE;
+    const ready = await unitImage(image, Promise.resolve(table(map({sources: [], mappings: '',
+        x_titan_function_imports: 0, x_titan_function_ranges: [], x_titan_function_names: []}))));
+    assert.equal(ready.metadata.state, 'ready', ready.metadata.reason);
+    assert.equal(ready.exports.trace_capture_once(), 0);
+    // Without its table the image runs degraded.
+    const degraded = await unitImage(image, Promise.reject(new Error('trace table request failed (404)')));
+    assert.equal(degraded.metadata.state, 'degraded');
+    assert.equal(degraded.exports.trace_capture_once(), 1);
 });
 
 test('C merge keeps entry and known names and drops symbols with no .titan source', {
     skip: !process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE,
 }, async () => {
-    const image = resolve(process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE);
-    const directory = await mkdtemp(join(tmpdir(), 'titan-trace-filter-'));
+    const index = map({sources: ['titan.c', 'lvm.c'],
+        mappings: [[100, 1, 0, 0], [10, -1, 0, 0], [10, 1, 0, 0],
+            [10, -1, 0, 0], [10, 0, 0, 0], [10, 1, 0, 0]]
+            .map(row => row.map(vlq).join('')).join(','),
+        x_titan_function_ranges: [[100, 110], [110, 120], [120, 130],
+            [130, 140], [140, 150], [150, 160]],
+        x_titan_function_names: [null, 'filter_inner_native', 'filter_inner_titanentry_lua',
+            'filter_outer_native', 'filter_outer_titanentry_lua', 'unregistered_titan', 'lua_helper']});
+    const {exports, views, metadata} = await unitImage(process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE,
+        Promise.resolve(table(index)));
+    assert.equal(metadata.state, 'ready', metadata.reason);
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'Error');
+    const captured = 'Error\n' + [
+        [1, 101], [5, 141], [2, 111], [3, 121], [6, 151], [4, 131],
+    ].map(([index, pc]) => `    at frame (wasm://wasm/image:wasm-function[${index}]:0x${pc.toString(16)})`).join('\n');
+    let pointer;
     try {
-        const index = map({sources: ['titan.c', 'lvm.c'],
-            mappings: [[100, 1, 0, 0], [10, -1, 0, 0], [10, 1, 0, 0],
-                [10, -1, 0, 0], [10, 0, 0, 0], [10, 1, 0, 0]]
-                .map(row => row.map(vlq).join('')).join(','),
-            x_titan_function_ranges: [[100, 110], [110, 120], [120, 130],
-                [130, 140], [140, 150], [150, 160]],
-            x_titan_function_names: [null, 'filter_inner_native', 'filter_inner_titanentry_lua',
-                'filter_outer_native', 'filter_outer_titanentry_lua', 'unregistered_titan', 'lua_helper']});
-        const tablePath = join(directory, 'filter.wasm.trace');
-        await writeFile(tablePath, table(index));
-        const {default: factory} = await import(pathToFileURL(image).href);
-        const module = await factory({locateFile: name => name.endsWith('.trace') ? tablePath : join(dirname(image), name)});
-        assert.equal(module.titanBrowserTrace.state, 'ready', module.titanBrowserTrace.reason);
-        const original = Object.getOwnPropertyDescriptor(globalThis, 'Error');
-        const captured = 'Error\n' + [
-            [1, 101], [5, 141], [2, 111], [3, 121], [6, 151], [4, 131],
-        ].map(([index, pc]) => `    at frame (wasm://wasm/image:wasm-function[${index}]:0x${pc.toString(16)})`).join('\n');
-        let pointer;
-        try {
-            Object.defineProperty(globalThis, 'Error', {...original,
-                value: function Error() { this.stack = captured; }});
-            pointer = module._trace_filter_case();
-        } finally { Object.defineProperty(globalThis, 'Error', original); }
-        assert.equal(module._trace_filter_status(), 2, 'original Lua error outcome is preserved');
-        const bytes = module.HEAPU8;
-        const trace = new TextDecoder().decode(bytes.subarray(pointer, bytes.indexOf(0, pointer)));
-        const inner = trace.indexOf('in filter.inner');
-        const between = trace.indexOf('filter-wrapper.lua:2:');
-        const outer = trace.indexOf('in filter.outer');
-        assert.ok(inner >= 0 && between > inner && outer > between, trace);
-        assert.equal(trace.match(/in filter[.]inner/g)?.length, 1, trace);
-        assert.equal(trace.match(/in filter[.]outer/g)?.length, 1, trace);
-        assert.doesNotMatch(trace, /titanentry|unregistered_titan|lua_helper/);
-    } finally { await rm(directory, {recursive: true, force: true}); }
+        Object.defineProperty(globalThis, 'Error', {...original,
+            value: function Error() { this.stack = captured; }});
+        pointer = exports.trace_filter_case();
+    } finally { Object.defineProperty(globalThis, 'Error', original); }
+    assert.equal(exports.trace_filter_status(), 2, 'original Lua error outcome is preserved');
+    const bytes = views.HEAPU8;
+    const trace = new TextDecoder().decode(bytes.subarray(pointer, bytes.indexOf(0, pointer)));
+    const inner = trace.indexOf('in filter.inner');
+    const between = trace.indexOf('filter-wrapper.lua:2:');
+    const outer = trace.indexOf('in filter.outer');
+    assert.ok(inner >= 0 && between > inner && outer > between, trace);
+    assert.equal(trace.match(/in filter[.]inner/g)?.length, 1, trace);
+    assert.equal(trace.match(/in filter[.]outer/g)?.length, 1, trace);
+    assert.doesNotMatch(trace, /titanentry|unregistered_titan|lua_helper/);
 });

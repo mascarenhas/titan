@@ -1,43 +1,12 @@
 #include "loader.h"
-#include <emscripten.h>
+#include <stdint.h>
 #include <stdio.h>
-#include <titan/browser.h>
 #include "../browser_runtime/fixture_controls.h"
 
-EM_JS(void, browser_loader_initialize_hook, (), {
-    const bindings = Module['titanBrowserBridge'].options.bindings;
-    const publish = bindings?.__loaderTest;
-    if (publish) publish(Object.freeze({
-        rawEntry: () => Module['_titan_browser_entry'](0n, 0, 0, 0),
-        privateEntry: () => Module['_titan_mco_entry'](0),
-        abort: () => abort('loader abort inside bridge binding'),
-        watchMemoryCalls: callback => {
-            const owner = Module['titanBrowserBridge'];
-            const allocate = Module['_malloc'], free = Module['_free'];
-            Module['_malloc'] = size => {
-                callback(Object.freeze({kind: 'allocate', poisoned: !!owner.terminal}));
-                return allocate(size);
-            };
-            Module['_free'] = pointer => {
-                callback(Object.freeze({kind: 'free', poisoned: !!owner.terminal}));
-                return free(pointer);
-            };
-            return () => {
-                Module['_malloc'] = allocate;
-                Module['_free'] = free;
-            };
-        },
-        watchResponses: callback => {
-            const owner = Module['titanBrowserBridge'], respond = owner.importResponse;
-            owner.importResponse = (pointer, state, action) => {
-                callback(Object.freeze({copy: () => Module.HEAPU8.slice(pointer, pointer + 56)}));
-                return respond.call(owner, pointer, state, action);
-            };
-            return () => { owner.importResponse = respond; };
-        },
-    }));
-    bindings?.initialize_hook?.();
-});
+/* Loader-suite host hooks and waits (fixture-imports.mjs). */
+TITAN_WASM_IMPORT("browser_loader_initialize_hook") void browser_loader_initialize_hook(void);
+TITAN_WASM_IMPORT("browser_loader_async_wait") void browser_loader_async_wait(void);
+TITAN_WASM_IMPORT("browser_loader_current_operation") uint64_t browser_loader_current_operation(void);
 
 void browser_loader_publish(void) {
     gate_test_publish();
@@ -53,25 +22,10 @@ int browser_loader_buffer_stdio(void) {
     return out != 0 || err != 0;
 }
 
-EM_ASYNC_JS(void, browser_loader_async_wait, (), {
-    await new Promise(resolve => setTimeout(resolve, 15));
-});
-
-/* Abort while a real JSPI entry is parked and never resolve its import.
- * Fatal disposal must not wait for that permanently pending Promise. */
-EM_ASYNC_JS(void, browser_loader_abort_wait, (), {
-    setTimeout(() => abort('loader abort while suspended'), 10);
-    await new Promise(() => {});
-});
-
 void browser_loader_wait(int kind) {
-    if (kind == 0) emscripten_sleep(15);
+    if (kind == 0) fixture_sleep(15);
     else browser_loader_async_wait();
 }
-
-EM_JS(uint64_t, browser_loader_current_operation, (), {
-    return Module['titanBrowserBridge'].pending.id;
-});
 
 void browser_loader_completion(int kind) {
     titan_browser_completion completion = {0};

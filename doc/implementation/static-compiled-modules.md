@@ -65,7 +65,7 @@ with the object that defines the module's `_abi`, `_types`, `_layouts`, `_init`,
 metadata member to regenerate and no archive leaf name used as logical
 identity.
 
-When Emscripten or Clang compiles for `wasm32`, `__ELF__`, `__APPLE__`, and
+When `wasi-sdk` Clang compiles for `wasm32`, `__ELF__`, `__APPLE__`, and
 `_WIN32` are all undefined, so the `__wasm__` branch selects the same
 `.titan.meta` name; the trusted `.titan.source` emitter has the same branch
 and the enum-carrier `.titan.cprobe` emitter already used the generic name.
@@ -259,9 +259,9 @@ knowing the active target.
 
 ### Relocatable WebAssembly
 
-The reader accepts relocatable Wasm objects as produced by `emcc -c` and by
-Clang's `wasm32-unknown-emscripten` target, alone or as regular-archive
-members written by `emar`/`llvm-ar`. It uses the same `Reader:range` bounds,
+The reader accepts relocatable Wasm objects as produced by `wasi-sdk`'s
+`clang --target=wasm32-wasip1 -c`, alone or as regular-archive members written
+by `llvm-ar`. It uses the same `Reader:range` bounds,
 `fail(origin, ...)` diagnostics, and archive-member origins as the other
 formats, reads the input once, and starts no subprocess.
 
@@ -363,15 +363,15 @@ feature matches exactly: a subset is not compatible, `-x` never matches `+x`,
 and a lookalike name such as `-shared-mem+atomics` is an ordinary feature. A
 regular archive that contains any Wasm member requires every member to be Wasm
 with a matching fingerprint, even when the caller supplies no expected target,
-and names the offending member. In real `emar` archives the symbol index is
+and names the offending member. In real `llvm-ar` archives the symbol index is
 record #1, so the first object is `archive member #2`.
 
 `scan_archive(filename, { independent_members = true })` relaxes only that
 implicit cross-member inference: without an explicit `target`, each member is
 classified on its own, so members with different feature vectors are
-accepted. Emscripten's `libclang_rt.builtins.a` has such a member
-(`__c_longjmp.o`, with an empty feature vector beside normally featured
-members). Only the browser stdlib's
+accepted. `wasi-sdk`'s `libclang_rt.builtins.a` can carry members with
+different feature vectors beside normally featured members. Only the browser
+stdlib's
 [dependency-closure check](browser-target.md#the-dependency-closure-check)
 passes the option, because it inspects archive contents rather than selecting
 a provider. An explicit `target` still applies to every member, and member
@@ -570,6 +570,7 @@ Public `Type.Module` metadata does not expose private imports. An object's
 producer-chosen lowering remains in place; when it elects a dynamic provider,
 the [linked provider set](codegen-overview.md#the-linked-provider-set) can
 supply an owner from the same executable without changing that lowering.
+
 ## Generated import paths
 
 The `direct`, `handle`, and `global` bindings and their generated sequences are
@@ -626,8 +627,8 @@ The configured `AR` creates a regular archive with order-preserving `qDc`
 operations, split into command batches below a 64 KiB command-line ceiling
 (`archive_batches`, `ARCHIVE_SHELL_COMMAND_LIMIT`). The configured `RANLIB`
 indexes it with `-D`. `archive_tool_capabilities` probes both tools (for native
-`AR`/`RANLIB` and browser `emar`/`emranlib`) and falls back to `qc` and plain
-`ranlib` only when deterministic `D` is unsupported; it never substitutes
+`AR`/`RANLIB` and browser `llvm-ar`/`llvm-ranlib`) and falls back to `qc` and
+plain `ranlib` only when deterministic `D` is unsupported; it never substitutes
 another tool. Those four capability probes run through `run_argv`'s
 output-discard mode (`process.capture`), capturing and discarding tool
 stderr/stdout independently of `driver.LIVE_PROGRESS` so expected `qDc` or `-D`

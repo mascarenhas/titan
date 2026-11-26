@@ -25,9 +25,13 @@ typedef struct {
     TitanBrowserTraceRecord records[TITAN_BROWSER_TRACE_CAPACITY];
 } TitanBrowserTraceBuffer;
 
+/* Host imports. This header stands alone, without titan/ffi.h's
+ * TITAN_WASM_IMPORT, because adapter units compile it by itself. */
 /* Capture: 0 OK, 1 map unavailable, 2 capture failed. */
+__attribute__((import_module("env"), import_name("titan_browser_trace_capture")))
 int titan_browser_trace_capture(TitanBrowserTraceBuffer *out, uint32_t capacity);
 /* Symbolize: 0 unknown/no-line, 1 resolved, 2 symbolization failed. */
+__attribute__((import_module("env"), import_name("titan_browser_trace_symbolize")))
 int titan_browser_trace_symbolize(const TitanBrowserTraceRecord *record,
     char *base, uint32_t base_bytes, char *symbol, uint32_t symbol_bytes,
     uint32_t *line);

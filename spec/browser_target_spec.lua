@@ -21,8 +21,26 @@ local version = require "titan-compiler.version"
 local other_library_series = require "spec.support.other_library_series"
 local FAKE_ROOT = platform.windows and "C:/fake" or "/fake"
 local LUA_REMEDY = platform.windows and "mingw32-make -f Makefile.win lua-browser" or "make install-browser"
+local PATH_SEPARATOR = platform.windows and ";" or ":"
+local SDK_INSTALL = "; install wasi-sdk 34 (https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34)" ..
+    " and set WASI_SDK_PATH to its root"
+local OPTIMIZER_INSTALL = "; install Binaryen version_133" ..
+    " (https://github.com/WebAssembly/binaryen/releases/tag/version_133)" ..
+    " and set BINARYEN_ROOT to its root or WASM_OPT to its wasm-opt"
+local CLANG_VERSION = "clang version 23.1.0-wasi-sdk\nTarget: wasm32-unknown-wasip1\nThread model: single\n"
+local OPTIMIZER_VERSION = "wasm-opt version 133 (version_133)\n"
+-- The environment variables toolchain discovery reads. Specs give each one
+-- an explicit value (or none) so an ambient installation cannot leak in.
+local TOOLCHAIN_VARIABLES = { WASI_SDK_PATH = true, BINARYEN_ROOT = true, WASM_OPT = true, PATH = true }
 local function tool_suffix()
     return platform.windows and ".exe" or ""
+end
+
+-- The `--version` query discovery runs through the compiler argv policy.
+local function version_query(tools)
+    local argv = browser.compiler_argv(tools)
+    argv[#argv + 1] = "--version"
+    return argv
 end
 
 local function fresh_driver()
@@ -33,6 +51,11 @@ local function fresh_driver()
     return subject
 end
 
+-- A fake filesystem holding the browser Lua installation, one wasi-sdk 34
+-- (`<tool_root>/wasi-sdk`) and one Binaryen 133 (`<tool_root>/binaryen`).
+-- `missing` names one installed file to remove: "clang", "llvm-ar",
+-- "llvm-ranlib", "wasm-ld", "wasm-opt" or "VERSION". `unstartable` and `failing` name a
+-- tool whose `--version` run does not start or exits nonzero.
 local function fake_context(options)
     options = options or {}
     local function key(filename)
@@ -47,16 +70,20 @@ local function fake_context(options)
     for name, contents in pairs(headers) do files[key(paths.lua_source .. "/" .. name)] = contents end
     if options.header then files[key(paths.lua_source .. "/lua.h")] = options.header end
     local tool_root = options.tool_root or FAKE_ROOT
-    local directory = tool_root .. "/emsdk/upstream/emscripten"
+    local sdk = tool_root .. "/wasi-sdk"
     local suffix = tool_suffix()
-    for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do
-        files[key(directory .. "/" .. tool .. suffix)] = "fake launcher"
+    local installed = { VERSION = sdk .. "/VERSION", ["wasm-opt"] = tool_root .. "/binaryen/bin/wasm-opt" .. suffix }
+    for _, tool in ipairs({ "clang", "llvm-ar", "llvm-ranlib", "wasm-ld" }) do
+        installed[tool] = sdk .. "/bin/" .. tool .. suffix
     end
-    if options.missing then files[key(directory .. "/" .. options.missing .. suffix)] = nil end
+    for _, filename in pairs(installed) do files[key(filename)] = "fake launcher" end
+    files[key(installed.VERSION)] = options.version_file or "34.0\nwasi-libc: fixture\nllvm: fixture\n"
+    if options.missing then files[key(installed[options.missing])] = nil end
     if options.missing_record then files[key(paths.lua_record)] = nil end
     if options.missing_archive then files[key(paths.liblua)] = nil end
     local calls, serial = {}, 0
     local directories = { [key(paths.lua_source)] = true }
+    if not options.missing_sysroot then directories[key(sdk .. "/share/wasi-sysroot")] = true end
     local strategy = setmetatable({}, { __index = compiler_io.new_sync() })
     function strategy:cwd() return tool_root end
     function strategy:realpath(filename) return key(filename) end
@@ -88,11 +115,29 @@ local function fake_context(options)
         calls[#calls + 1] = { table.unpack(argv) }
         if argv[1] == "uname" then return { started = true, ok = true, output = options.uname or "Linux\n" } end
         if argv[#argv] == "--version" then
-            if options.unstartable and key(argv[#argv - 1]) ==
-                    directory .. "/" .. options.unstartable .. suffix then
+            -- The physical tool follows an `env` launch wrapper's
+            -- `NAME=value` and `-u NAME` operands.
+            local index = 1
+            if argv[1] == "env" then
+                index = 2
+                while true do
+                    if argv[index] == "-u" then index = index + 2
+                    elseif argv[index]:find("=", 1, true) then index = index + 1
+                    else break end
+                end
+            end
+            local tool = key(argv[index]):match("([^/\\]+)$"):gsub("%.exe$", "")
+            if options.unstartable == tool then
                 return { started = false, ok = false, diagnostic = "not a Windows executable" }
             end
-            return { started = true, ok = true, output = "emcc (Emscripten) " .. (options.version or "6.0.13") .. "\n" }
+            if options.failing == tool then
+                return { started = true, ok = false, output = "fixture: unsupported option\n",
+                    why = "exit", status = 1 }
+            end
+            if tool == "wasm-opt" then
+                return { started = true, ok = true, output = options.optimizer_output or OPTIMIZER_VERSION }
+            end
+            return { started = true, ok = true, output = CLANG_VERSION }
         end
         for index, flag in ipairs(argv) do
             if flag == "-o" then files[key(argv[index + 1])] = "fake relocatable Wasm object" end
@@ -102,8 +147,8 @@ local function fake_context(options)
     return { io = strategy, extra_ffi_include_dirs = {} },
         { paths = paths, runtime_include = paths.include,
             build_profile = options.build_profile or "validation",
-            probe_cache_directory = tool_root .. "/probes/browser-6.0.13/" .. cprobe_cache.VERSION },
-        calls, files, record
+            probe_cache_directory = tool_root .. "/probes/browser-34/" .. cprobe_cache.VERSION },
+        calls, files, record, directories
 end
 
 local function contains(message, fragment)
@@ -120,15 +165,20 @@ end
 describe("browser target descriptor", function()
     local saved_getenv, saved_profile, saved_classify, saved_registry, saved_windows
     local workspace
+    -- Discovery sees exactly `values` for the toolchain variables; every
+    -- other variable keeps its real value.
+    local function environment(values)
+        return function(name)
+            if TOOLCHAIN_VARIABLES[name] then return values[name] end
+            return saved_getenv(name)
+        end
+    end
     before_each(function()
         saved_registry, saved_windows = types.registry, platform.windows
         saved_getenv, saved_profile, saved_classify = platform.getenv,
             cdriver.target_profile_inputs, staticmetadata.classify_object
-        platform.getenv = function(name)
-            if name == "EMSDK" then return FAKE_ROOT .. "/emsdk" end
-            if name == "PATH" then return FAKE_ROOT .. "/emsdk/upstream/emscripten" end
-            return saved_getenv(name)
-        end
+        platform.getenv = environment({ WASI_SDK_PATH = FAKE_ROOT .. "/wasi-sdk",
+            BINARYEN_ROOT = FAKE_ROOT .. "/binaryen", PATH = FAKE_ROOT .. "/wasi-sdk/bin" })
         cdriver.target_profile_inputs = function() return fixtures.profile_inputs() end
         staticmetadata.classify_object = function() return { fingerprint = fixtures.fingerprint() } end
     end)
@@ -162,48 +212,107 @@ describe("browser target descriptor", function()
         assert.is_nil(strategy:stat(directory))
     end)
 
+    it("pins wasi-sdk 34, Binaryen 133, the target compiler argv and both object profiles", function()
+        assert.equal("34", browser.WASI_SDK_VERSION)
+        assert.equal("133", browser.BINARYEN_VERSION)
+        assert.is_nil(browser.EMSCRIPTEN_VERSION)
+        -- One launch envelope unsets every variable clang reads to edit its
+        -- command line, search paths or linker (D11), around the physical
+        -- clang. Unset, not emptied: an empty CCC_OVERRIDE_OPTIONS still
+        -- prints a `###` banner into clang's merged output (CC-7).
+        local pinned = { "env", "-u", "CCC_OVERRIDE_OPTIONS", "-u", "CPATH", "-u", "C_INCLUDE_PATH",
+            "-u", "CPLUS_INCLUDE_PATH", "-u", "OBJC_INCLUDE_PATH", "-u", "LIBRARY_PATH", "-u", "COMPILER_PATH",
+            "/sdk/bin/clang", "--target=wasm32-wasip1", "--sysroot=/sdk/share/wasi-sysroot" }
+        assert.same(pinned, browser.compiler_argv({ cc = { "/sdk/bin/clang" }, sysroot = "/sdk/share/wasi-sysroot" }))
+        local envelope = { table.unpack(pinned, 1, #pinned - 3) }
+        local descriptor = assert(browser.import(fixtures.descriptor()))
+        local argv = browser.compiler_argv(descriptor.tools)
+        assert.same(envelope, { table.unpack(argv, 1, #envelope) })
+        assert.same({ descriptor.tools.cc[1], "--target=wasm32-wasip1", "--sysroot=" .. descriptor.tools.sysroot },
+            { table.unpack(argv, #envelope + 1) })
+        assert.equal(fixtures.descriptor().tools.cc[1], descriptor.tools.cc[1])
+        argv[1] = "changed by a caller"
+        assert.equal("env", browser.compiler_argv(descriptor.tools)[1])
+        for build_profile, flags in pairs(fixtures.object_flags) do
+            assert.is_true(browser.valid_profile(build_profile))
+            assert.same(flags, browser.object_flags(build_profile))
+        end
+        local flags = browser.object_flags("validation")
+        flags[1] = "changed by a caller"
+        assert.equal("--std=c99", browser.object_flags("validation")[1])
+        assert.is_false(browser.valid_profile("release"))
+        assert.is_nil(browser.object_flags("release"))
+    end)
+
     it("builds a verified closed descriptor, retains all record facts, and freezes every level", function()
         local context, inputs, calls = fake_context()
         local descriptor = assert(browser.build(context, inputs))
+        local sdk, suffix = FAKE_ROOT .. "/wasi-sdk", tool_suffix()
+        local clang, sysroot = sdk .. "/bin/clang" .. suffix, sdk .. "/share/wasi-sysroot"
+        local optimizer = FAKE_ROOT .. "/binaryen/bin/wasm-opt" .. suffix
         assert.equal("browser", descriptor.label)
-        assert.equal("6.0.13", descriptor.tools.version)
-        assert.equal("EMSDK", descriptor.tools.source)
+        assert.equal("wasm32-wasip1", descriptor.triple)
+        assert.same({ cc = { clang }, ar = { sdk .. "/bin/llvm-ar" .. suffix },
+            ranlib = { sdk .. "/bin/llvm-ranlib" .. suffix }, ld = { sdk .. "/bin/wasm-ld" .. suffix },
+            sysroot = sysroot, version = "34",
+            source = "WASI_SDK_PATH", location = sdk, version_output = CLANG_VERSION,
+            optimizer = { argv = { optimizer }, version = "133", source = "BINARYEN_ROOT",
+                version_output = OPTIMIZER_VERSION } }, browser.export(descriptor.tools))
         assert.same({ inputs.paths.lua_source, inputs.paths.include }, browser.export(descriptor.include_dirs))
         assert.equal("integer=long long,float=double", descriptor.lua.record.numeric)
+        assert.equal("wasm-exnref", descriptor.lua.record.sjlj)
+        assert.equal("wasm32-wasip1", descriptor.lua.record.target)
+        assert.equal("34", descriptor.lua.record.wasi_sdk_version)
         assert.equal(32, descriptor.profile_data.integers.long.bits)
         assert.equal(64, descriptor.profile_data.integers["long long"].bits)
         assert.equal(fixtures.features, descriptor.fingerprint.features)
         assert.has_error(function() descriptor.label = "linux" end, "browser target descriptor is immutable")
         assert.has_error(function() descriptor.extra = true end, "browser target descriptor is immutable")
         assert.has_error(function() descriptor.tools.cc[1] = "cc" end, "browser target descriptor is immutable")
-        assert.has_error(function() descriptor.lua.record.sjlj = "emscripten" end, "browser target descriptor is immutable")
+        assert.has_error(function() descriptor.tools.optimizer.argv[1] = "wasm-opt" end,
+            "browser target descriptor is immutable")
+        assert.has_error(function() descriptor.lua.record.sjlj = "wasm" end, "browser target descriptor is immutable")
         assert.has_error(function() table.insert(descriptor.compile_flags, "-flto") end,
             "browser target descriptor is immutable")
-        assert.equal(2, #calls)
-        assert.same({ "env", "EMCC_CFLAGS=", descriptor.tools.cc[1], "--version" }, calls[1])
-        local flags = table.concat(calls[#calls], " ")
+        assert.equal(3, #calls)
+        assert.same(version_query(descriptor.tools), calls[1])
+        assert.equal(clang, calls[1][#calls[1] - 3])
+        assert.same({ optimizer, "--version" }, calls[2])
+        local probe = calls[#calls]
+        local compiler = browser.compiler_argv(descriptor.tools)
+        assert.same(compiler, { table.unpack(probe, 1, #compiler) })
+        local flags = table.concat(probe, " ")
         contains(flags, "-c")
-        contains(flags, "-sSUPPORT_LONGJMP=wasm")
-        contains(flags, "-sWASM_LEGACY_EXCEPTIONS=1")
+        contains(flags, "-gdwarf-4 -gline-tables-only " .. table.concat(fixtures.sjlj_flags, " ") ..
+            " -D_WASI_EMULATED_PROCESS_CLOCKS")
         contains(flags, "-DTITAN_TARGET_BROWSER=1")
         contains(flags, "-DTITAN_COROUTINE_STACK_SIZE=262144")
         assert.same(fixtures.target_defines, browser.export(descriptor.target_defines))
-        assert.is_nil(flags:find("-fPIC", 1, true))
-        assert.is_nil(flags:find("-flto", 1, true))
+        for _, absent in ipairs({ "-fPIC", "-flto", "EMCC_CFLAGS", "-sSUPPORT_LONGJMP", "-sWASM_LEGACY_EXCEPTIONS" }) do
+            assert.is_nil(flags:find(absent, 1, true), absent)
+        end
     end)
 
-    it("uses a C source suffix and cleans up a raw .s reservation in the fingerprint probe", function()
+    it("compiles a raw .s reservation as C and cleans up exactly its files in the fingerprint probe", function()
         local context, inputs, calls, storage = fake_context()
         local reservation = inputs.paths.root .. "/fingerprint.s"
         function context.io:tmpname()
             storage[reservation] = ""
             return reservation
         end
+        local unlinked = {}
+        local unlink = context.io.unlink
+        function context.io:unlink(filename)
+            unlinked[#unlinked + 1] = filename
+            return unlink(self, filename)
+        end
         assert(browser.build(context, inputs))
         local command = calls[#calls]
-        assert.same({ "-c", reservation .. ".c", "-o", reservation .. ".c.o" },
-            { table.unpack(command, #command - 3) })
-        for _, filename in ipairs({ reservation, reservation .. ".c", reservation .. ".c.o" }) do
+        assert.same({ "-x", "c", "-c", reservation, "-o", reservation .. ".o" },
+            { table.unpack(command, #command - 5) })
+        table.sort(unlinked)
+        assert.same({ reservation, reservation .. ".o" }, unlinked)
+        for _, filename in ipairs({ reservation, reservation .. ".o" }) do
             assert.is_nil(storage[filename])
         end
     end)
@@ -216,7 +325,7 @@ describe("browser target descriptor", function()
         local rebuilt = assert(browser.import(data))
         assert.same(data, browser.export(rebuilt))
         assert.equal(descriptor.identity, rebuilt.identity)
-        assert.equal(2, #calls)
+        assert.equal(3, #calls)
         data.compile_flags[1] = "changed after import"
         assert.equal("--std=c99", rebuilt.compile_flags[1])
         assert.is_nil(browser.import(data))
@@ -229,6 +338,9 @@ describe("browser target descriptor", function()
             local bytes = assert(browser.encode_analysis(nil, descriptor, provider, absent))
             local data = assert(browser.decode_analysis(nil, bytes))
             assert.equal(build_profile, data.build_profile)
+            assert.equal("wasm32-wasip1", data.triple)
+            assert.equal("34", data.wasi_sdk_version)
+            assert.is_nil(data.emscripten_version)
             assert.equal(provider, data.provider_sha256)
             assert.equal(absent, data.absent_sha256)
             assert.equal(descriptor.lua.record.numeric, data.lua.numeric)
@@ -300,12 +412,16 @@ assert(file:close())
         for _, case in ipairs({
             { "incompatible", function(data) data.target = "linux" end },
             { "incompatible", function(data) data.triple = "wasm64" end },
+            { "incompatible", function(data) data.triple = "wasm32-unknown-emscripten" end },
             { "incompatible", function(data) data.abi = "1" end },
             { "incompatible", function(data) data.release = version.TITAN_LIBRARY_VERSION end },
             { "incompatible", function(data) data.release = version.TITAN_LIBRARY_VERSION .. ".01" end },
             { "incompatible", function(data) data.release = {} end },
             { "incompatible", function(data) data.build_profile = "debug" end },
-            { "incompatible", function(data) data.emscripten_version = "6.0.0" end },
+            { "incompatible", function(data) data.wasi_sdk_version = "33.0" end },
+            { "incompatible", function(data) data.wasi_sdk_version = nil end },
+            { "incompatible", function(data) data.wasi_sdk_version = nil; data.emscripten_version = "6.0.13" end },
+            { "incompatible", function(data) data.emscripten_version = "6.0.13" end },
             { "incompatible", function(data) data.paths = {} end },
             { "fingerprint", function(data) data.fingerprint.features = "" end },
             { "Lua facts", function(data) data.lua.headers_sha256 = nil end },
@@ -321,15 +437,24 @@ assert(file:close())
             assert.is_nil(decoded)
             contains(err, case[1])
         end
-        for _, defines in ipairs({
-            "-DFOO=1", " '-DLUA_USE_BROWSER' -DLUA_USE_POSIX ", "-DLUA_USE_BROWSER!bad -DLUA_USE_POSIX",
-            "-DLUA_USE_BROWSER -DLUA_USE_POSIX=\255", "-DLUA_USE_BROWSER -DLUA_USE_DLOPEN=1 -DLUA_USE_POSIX",
+        for _, case in ipairs({
+            { "-DFOO=1", "requires LUA_USE_BROWSER" },
+            { "-D_WASI_EMULATED_PROCESS_CLOCKS", "requires LUA_USE_BROWSER" },
+            { " '-DLUA_USE_BROWSER' ", "noncanonical list" },
+            { "-DLUA_USE_BROWSER!bad", "expected sorted unique -D tokens" },
+            { "-D_WASI_EMULATED_PROCESS_CLOCKS -DLUA_USE_BROWSER", "expected sorted unique -D tokens" },
+            { "-DLUA_USE_BROWSER -DLUA_USE_BROWSER", "expected sorted unique -D tokens" },
+            { "-DLUA_USE_BROWSER=\255", "text encoding" },
+            { "-DLUA_USE_BROWSER -DLUA_USE_DLOPEN=1", "LUA_USE_DLOPEN is unavailable for browser Lua" },
+            { "-DLUA_USE_BROWSER -DLUA_USE_POSIX", "LUA_USE_POSIX is unavailable for browser Lua" },
+            { "-DLUA_USE_BROWSER -DLUA_USE_LINUX", "LUA_USE_LINUX is unavailable for browser Lua" },
+            { "-DLUA_USE_BROWSER -DLUA_USE_MACOSX", "LUA_USE_MACOSX is unavailable for browser Lua" },
         }) do
             local data = assert(browser.decode_analysis(nil, bytes))
-            data.lua.defines = defines
+            data.lua.defines = case[1]
             local decoded, err = browser.decode_analysis(nil, assert(graphcodec.encode(data)))
             assert.is_nil(decoded)
-            contains(err, "invalid browser Lua defines")
+            assert.equal("invalid browser Lua defines: " .. case[2], err)
         end
         local data = assert(browser.decode_analysis(nil, bytes))
         local profile = assert(csemantics.import_profile(data.profile_data))
@@ -355,13 +480,84 @@ assert(file:close())
         for _, change in ipairs({
             function(data) data.unknown = true end,
             function(data) data.tools.execute = function() end end,
+            function(data) data.tools.optimizer.execute = function() end end,
             function(data) data.paths.root = data end,
-            function(data) data.lua.record.sjlj = "emscripten"; fixtures.identify(data) end,
+            function(data) data.lua.record.sjlj = "wasm"; fixtures.identify(data) end,
         }) do
             local data = fixtures.descriptor()
             change(data)
             assert.is_nil(browser.import(data))
         end
+    end)
+
+    it("rejects an Emscripten-era transported Lua record", function()
+        for _, change in ipairs({
+            function(record) record.emscripten_version = "6.0.13" end,
+            function(record) record.emscripten_version, record.wasi_sdk_version = "6.0.13", nil end,
+        }) do
+            local data = fixtures.descriptor()
+            change(data.lua.record)
+            fixtures.identify(data)
+            local descriptor, err = browser.import(data)
+            assert.is_nil(descriptor)
+            assert.equal("invalid browser Lua descriptor", err)
+        end
+    end)
+
+    it("requires the wasi-sdk tool layout and a Binaryen optimizer in transported descriptors", function()
+        local suffix = tool_suffix()
+        for _, case in ipairs({
+            { "invalid browser toolchain descriptor", function(tools) tools.sysroot = nil end },
+            { "invalid browser toolchain descriptor", function(tools) tools.sysroot = tools.location .. "/sysroot" end },
+            { "invalid browser toolchain descriptor", function(tools) tools.version = "33.0" end },
+            { "invalid browser toolchain descriptor", function(tools) tools.source = "EMSDK" end },
+            { "invalid browser toolchain descriptor", function(tools) tools.version_output = false end },
+            { "invalid browser toolchain descriptor", function(tools) tools.location = "./wasi-sdk" end },
+            { "invalid browser toolchain descriptor", function(tools) tools.optimizer = nil end },
+            { "invalid browser toolchain descriptor", function(tools) tools.clang = { tools.cc[1] } end },
+            { "invalid browser tool argv", function(tools) tools.cc = { tools.cc[1], "--target=wasm32-wasip2" } end },
+            { "invalid browser tool argv", function(tools) tools.cc = tools.cc[1] end },
+            { "invalid browser tool argv", function(tools) tools.cc[1] = tools.location .. "/emcc" .. suffix end },
+            { "invalid browser tool argv", function(tools) tools.ar[1] = tools.location .. "/bin/emar" .. suffix end },
+            { "invalid browser tool argv", function(tools) tools.ar = {} end },
+            { "invalid browser toolchain descriptor", function(tools) tools.ld = nil end },
+            { "invalid browser tool argv", function(tools) tools.ld = { tools.ld[1], "--no-entry" } end },
+            { "invalid browser tool argv", function(tools) tools.ld[1] = tools.location .. "/bin/lld" .. suffix end },
+            { "invalid browser tool argv", function(tools)
+                tools.ld[1] = tools.location .. "/bin/./wasm-ld" .. suffix
+            end },
+            { "invalid browser tool argv", function(tools) tools.ld[1] = "wasm-ld" .. suffix end },
+            { "invalid browser tool argv", function(tools)
+                tools.ranlib[1] = tools.location .. "/bin/llvm-ar" .. suffix
+            end },
+            { "invalid browser optimizer descriptor", function(tools) tools.optimizer = "wasm-opt" end },
+            { "invalid browser optimizer descriptor", function(tools) tools.optimizer.version = "132" end },
+            { "invalid browser optimizer descriptor", function(tools) tools.optimizer.source = "EMSDK" end },
+            { "invalid browser optimizer descriptor", function(tools) tools.optimizer.argv = { "wasm-opt" } end },
+            { "invalid browser optimizer descriptor", function(tools) tools.optimizer.argv[2] = "-O2" end },
+            { "invalid browser optimizer descriptor", function(tools)
+                tools.optimizer.argv[1] = tools.optimizer.argv[1]:gsub("/bin/", "/./bin/")
+            end },
+            { "invalid browser optimizer descriptor", function(tools) tools.optimizer.version_output = nil end },
+            { "invalid browser optimizer descriptor", function(tools) tools.optimizer.passes = { "-O2" } end },
+        }) do
+            local data = fixtures.descriptor()
+            case[2](data.tools)
+            fixtures.identify(data)
+            local descriptor, err = browser.import(data)
+            assert.is_nil(descriptor)
+            assert.equal(case[1], err)
+        end
+        for _, source in ipairs({ "WASM_OPT", "BINARYEN_ROOT", "PATH" }) do
+            local data = fixtures.descriptor()
+            data.tools.optimizer.source = source
+            fixtures.identify(data)
+            assert(browser.import(data))
+        end
+        local data = fixtures.descriptor()
+        data.tools.source = "PATH"
+        fixtures.identify(data)
+        assert(browser.import(data))
     end)
 
     for _, case in ipairs({
@@ -382,27 +578,42 @@ assert(file:close())
         { "missing coroutine stack define", function(data) remove_flag(data, "-DTITAN_COROUTINE_STACK_SIZE=262144") end },
         { "inconsistent target defines", function(data) data.target_defines = { "-DTITAN_TARGET_BROWSER=1" } end },
         { "missing Lua define", function(data) remove_flag(data, "-DLUA_USE_BROWSER") end },
-        { "missing longjmp mode", function(data) remove_flag(data, "-sSUPPORT_LONGJMP=wasm") end },
-        { "missing legacy EH encoding", function(data) remove_flag(data, "-sWASM_LEGACY_EXCEPTIONS=1") end },
+        { "missing WASI clock emulation", function(data) remove_flag(data, "-D_WASI_EMULATED_PROCESS_CLOCKS") end },
+        { "missing exception handling", function(data) remove_flag(data, "-mexception-handling") end },
+        { "missing setjmp/longjmp lowering", function(data) remove_flag(data, "-wasm-enable-sjlj") end },
+        { "missing exnref EH encoding", function(data) remove_flag(data, "-wasm-use-legacy-eh=false") end },
+        { "missing DWARF version", function(data) remove_flag(data, "-gdwarf-4") end },
         { "LTO flag", function(data) data.compile_flags[#data.compile_flags + 1] = "-flto" end },
         { "PIC flag", function(data) data.compile_flags[#data.compile_flags + 1] = "-fPIC" end },
-        { "split conflicting longjmp flag", function(data)
-            data.compile_flags[#data.compile_flags + 1] = "-s"
-            data.compile_flags[#data.compile_flags + 1] = "SUPPORT_LONGJMP=emscripten"
+        { "split conflicting LLVM option", function(data)
+            data.compile_flags[#data.compile_flags + 1] = "-mllvm"
+            data.compile_flags[#data.compile_flags + 1] = "-wasm-enable-sjlj=false"
         end },
-        { "split conflicting EH encoding", function(data)
-            data.compile_flags[#data.compile_flags + 1] = "-s"
-            data.compile_flags[#data.compile_flags + 1] = "WASM_LEGACY_EXCEPTIONS=0"
+        { "joined conflicting EH encoding", function(data)
+            data.compile_flags[#data.compile_flags + 1] = "-mllvm=-wasm-use-legacy-eh=true"
+        end },
+        { "conflicting target", function(data)
+            data.compile_flags[#data.compile_flags + 1] = "--target=wasm32-wasip2"
+        end },
+        { "conflicting sysroot", function(data)
+            data.compile_flags[#data.compile_flags + 1] = "--sysroot=/elsewhere"
         end },
         { "sparse flags", function(data) data.compile_flags[2] = nil end },
-        { "relative tool location", function(data) data.tools.location = "./emscripten" end },
+        { "relative tool location", function(data) data.tools.location = "./wasi-sdk" end },
         { "unnormalized tool location", function(data) data.tools.location = data.tools.location .. "/." end },
         { "unnormalized tool argv", function(data)
-            data.tools.cc[1] = data.tools.location .. "/./emcc" .. tool_suffix()
+            data.tools.cc[1] = data.tools.location .. "/bin/./clang" .. tool_suffix()
         end },
         { "tool outside its installation", function(data)
-            data.tools.ar[1] = data.tools.location .. "/other/emar" .. tool_suffix()
+            data.tools.ar[1] = data.tools.location .. "/other/llvm-ar" .. tool_suffix()
         end },
+        { "linker outside its installation", function(data)
+            data.tools.ld[1] = data.tools.location .. "/other/wasm-ld" .. tool_suffix()
+        end },
+        { "sysroot outside its installation", function(data)
+            data.tools.sysroot = data.tools.location .. "/sysroot"
+        end },
+        { "relative optimizer", function(data) data.tools.optimizer.argv[1] = "wasm-opt" .. tool_suffix() end },
         { "unnormalized probe root", function(data) data.probe_cache_directory = data.probe_cache_directory .. "/." end },
         { "invalid cflags syntax", function(data) data.lua.record.cflags = "'" end },
         { "inconsistent Lua defines", function(data) data.lua.record.lua_defines = "-DINVALID" end },
@@ -561,8 +772,9 @@ assert(file:close())
 
     it("validates direct build compile extras before tool discovery", function()
         for _, flags in ipairs({
-            { "-fPIC" }, { "-flto" }, { "-s", "SUPPORT_LONGJMP=emscripten" },
-            { "-s", "WASM_LEGACY_EXCEPTIONS=0" },
+            { "-fPIC" }, { "-flto" }, { "-mllvm", "-wasm-enable-sjlj=false" },
+            { "-mllvm", "-wasm-use-legacy-eh=true" }, { "--target=wasm32-wasip2" },
+            { "--sysroot=/elsewhere" }, { "-mno-exception-handling" },
             "not an array", { [1] = "-O0", [3] = "-g" }, { debug = "-O0" }, { true },
         }) do
             local context, inputs, calls = fake_context()
@@ -575,11 +787,10 @@ assert(file:close())
     end)
 
     for _, flag in ipairs({
-        "-O0", "-O3", "-Os", "-g", "-g0", "-g2", "-gline-tables-only",
+        "-O0", "-O2", "-O3", "-Os", "-g", "-g0", "-g2", "-gline-tables-only", "-gdwarf-4", "-gdwarf-5",
         "-finline-functions", "-fno-inline", "-fno-inline-functions",
         "-foptimize-sibling-calls", "-fno-optimize-sibling-calls",
         "-fomit-frame-pointer", "-fno-omit-frame-pointer",
-        "-sBINARYEN_EXTRA_PASSES=--coalesce-locals", "-sBINARYEN_EXTRA_PASSES",
     }) do
         it("rejects the profile-owned compile option " .. flag .. " before tool discovery", function()
             local context, inputs, calls = fake_context()
@@ -591,13 +802,13 @@ assert(file:close())
         end)
     end
 
-    it("rejects the two-token Binaryen extras spelling naming the profile", function()
+    it("names the production profile when it refuses an owned option before tool discovery", function()
         local context, inputs, calls = fake_context()
         inputs.build_profile = "production"
-        inputs.compile_flags = { "-s", "BINARYEN_EXTRA_PASSES=--coalesce-locals" }
+        inputs.compile_flags = { "-gdwarf-5" }
         local descriptor, err = browser.build(context, inputs)
         assert.is_nil(descriptor)
-        assert.equal('browser production profile owns compile option "-s BINARYEN_EXTRA_PASSES=--coalesce-locals"', err)
+        assert.equal('browser production profile owns compile option "-gdwarf-5"', err)
         assert.equal(0, #calls)
     end)
 
@@ -635,8 +846,9 @@ assert(file:close())
         assert.equal("production", descriptor.build_profile)
         assert.same({
             "--std=c99", "-O3", "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function",
-            "-gline-tables-only", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1",
-            "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(fixtures.target_defines),
+            "-gdwarf-4", "-gline-tables-only", "-mexception-handling", "-mllvm", "-wasm-enable-sjlj",
+            "-mllvm", "-wasm-use-legacy-eh=false", "-D_WASI_EMULATED_PROCESS_CLOCKS",
+            "-DLUA_USE_BROWSER", "-D_WASI_EMULATED_PROCESS_CLOCKS", table.unpack(fixtures.target_defines),
         }, descriptor.compile_flags)
         assert.is_true(#calls > 0, "the production build never probed its toolchain")
         -- The same inputs under the validation profile produce #330's frozen set.
@@ -644,28 +856,30 @@ assert(file:close())
         assert.same({
             "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls",
             "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function",
-            "-gline-tables-only", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1",
-            "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(fixtures.target_defines),
+            "-gdwarf-4", "-gline-tables-only", "-mexception-handling", "-mllvm", "-wasm-enable-sjlj",
+            "-mllvm", "-wasm-use-legacy-eh=false", "-D_WASI_EMULATED_PROCESS_CLOCKS",
+            "-DLUA_USE_BROWSER", "-D_WASI_EMULATED_PROCESS_CLOCKS", table.unpack(fixtures.target_defines),
         }, validation.compile_flags)
         assert.not_equal(descriptor.identity, validation.identity)
     end)
 
-    it("refuses every spelling of the owned pass list before tool discovery", function()
+    it("refuses every target-owned code-generation spelling before tool discovery", function()
         for _, extras in ipairs({
-            { "-s", "BINARYEN_EXTRA_PASSES" },
-            { "-s", "BINARYEN_EXTRA_PASSES=--coalesce-locals" },
-            { "-sBINARYEN_EXTRA_PASSES" },
-            { "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" },
-            { "-sNO_BINARYEN_EXTRA_PASSES=1" },
-            { "-s", "NO_BINARYEN_EXTRA_PASSES=1" },
+            { "-mllvm", "-wasm-enable-sjlj" }, { "-mllvm=-wasm-use-legacy-eh=true" },
+            { "-mexception-handling" }, { "-mno-exception-handling" },
+            { "-mlegacy-exception-handling" }, { "-mno-legacy-exception-handling" },
+            { "-fwasm-exceptions" }, { "-fno-wasm-exceptions" },
+            { "--target=wasm32-wasip2" }, { "-target", "wasm32-wasip1" },
+            { "--sysroot=/elsewhere" }, { "--sysroot", "/elsewhere" },
+            { "-mexec-model=reactor" }, { "-Xclang", "-target-feature" }, { "-Xclang=-mllvm" },
+            { "--config", "browser.cfg" }, { "--config=browser.cfg" }, { "--config-system-dir=/etc/clang" },
+            { "@browser.rsp" },
         }) do
             local context, inputs, calls = fake_context()
             inputs.compile_flags = extras
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor)
-            local expected = extras[1]
-            if extras[1] == "-s" then expected = "-s " .. extras[2] end
-            assert.equal('browser validation profile owns compile option "' .. expected .. '"', err)
+            assert.equal('browser target does not support compile_flags flag "' .. extras[1] .. '"', err)
             assert.equal(0, #calls)
         end
     end)
@@ -724,8 +938,7 @@ assert(file:close())
     end)
 
     it("refuses a profile-owned option smuggled in after the profile flags", function()
-        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-foptimize-sibling-calls",
-            "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" }) do
+        for _, flag in ipairs({ "-O2", "-g2", "-gdwarf-5", "-fno-inline", "-foptimize-sibling-calls" }) do
             local data = fixtures.descriptor()
             data.compile_flags[#data.compile_flags + 1] = flag
             fixtures.identify(data)
@@ -735,52 +948,211 @@ assert(file:close())
         end
     end)
 
-    for _, case in ipairs({
-        { "missing emcc", { missing = "emcc" }, "emcc not found at" },
-        { "wrong emcc", { version = "6.0.12" }, "reports 6.0.12" },
-        { "missing emar", { missing = "emar" }, "emar not found at" },
-        { "missing emranlib", { missing = "emranlib" }, "emranlib not found at" },
-    }) do
-        it("diagnoses " .. case[1] .. " with location and install instructions", function()
-            local context, inputs = fake_context(case[2])
-            local descriptor, err = browser.build(context, inputs)
-            assert.is_nil(descriptor)
-            contains(err, case[3]); contains(err, "/fake/emsdk/upstream/emscripten/")
-            contains(err, "emsdk install 6.0.13 && emsdk activate 6.0.13")
-        end)
+    it("compares the owned object prefix exactly and applies the user-flag policy only to its tail", function()
+        -- The profile's own setjmp/longjmp selection is outside the user-flag
+        -- policy: the descriptor compares it rather than filtering it.
+        local refused, policy_error = browser.validate_flags(fixtures.object_flags.validation, "compile_flags")
+        assert.is_nil(refused)
+        assert.equal('browser target does not support compile_flags flag "-mexception-handling"', policy_error)
+        assert(browser.import(fixtures.descriptor()))
+        for _, case in ipairs({
+            { "-mexception-handling", "-mno-exception-handling" },
+            { "-wasm-enable-sjlj", "-wasm-enable-eh" },
+            { "-wasm-use-legacy-eh=false", "-wasm-use-legacy-eh=true" },
+            { "-gdwarf-4", "-gdwarf-5" },
+            { "-D_WASI_EMULATED_PROCESS_CLOCKS", "-DOTHER" },
+        }) do
+            local data = fixtures.descriptor()
+            for index, flag in ipairs(data.compile_flags) do
+                if flag == case[1] then data.compile_flags[index] = case[2]; break end
+            end
+            fixtures.identify(data)
+            local imported, err = browser.import(data)
+            assert.is_nil(imported, case[2])
+            assert.equal("browser validation profile compile flags do not match its object profile", err)
+        end
+        for _, extras in ipairs({
+            { "-mllvm", "-wasm-enable-sjlj" }, { "-mllvm=-wasm-use-legacy-eh=true" },
+            { "-mexception-handling" }, { "-mno-exception-handling" }, { "--target=wasm32-wasip2" },
+            { "-target", "wasm32-wasip1" }, { "--sysroot=/elsewhere" }, { "--sysroot", "/elsewhere" },
+            { "-mexec-model=reactor" }, { "-fPIC" }, { "-flto" }, { "-Xclang", "-target-feature" },
+            { "--config=browser.cfg" }, { "@browser.rsp" },
+        }) do
+            local data = fixtures.descriptor()
+            for _, flag in ipairs(extras) do data.compile_flags[#data.compile_flags + 1] = flag end
+            fixtures.identify(data)
+            local imported, err = browser.import(data)
+            assert.is_nil(imported, extras[1])
+            assert.equal('browser target does not support compile_flags flag "' .. extras[1] .. '"', err)
+        end
+    end)
+
+    do
+        local sdk, suffix = FAKE_ROOT .. "/wasi-sdk", platform.windows and ".exe" or ""
+        local optimizer = FAKE_ROOT .. "/binaryen/bin/wasm-opt" .. suffix
+        local function requires_sdk(detail)
+            return "browser target requires wasi-sdk 34: " .. detail .. SDK_INSTALL
+        end
+        local function requires_optimizer(detail)
+            return "browser target requires Binaryen version_133 wasm-opt: " .. detail .. OPTIMIZER_INSTALL
+        end
+        -- { case, fake options, tool runs before the diagnostic, diagnostic }
+        for _, case in ipairs({
+            { "a missing clang", { missing = "clang" }, 0, requires_sdk(string.format(
+                "%q is not an executable (WASI_SDK_PATH=%q)", sdk .. "/bin/clang" .. suffix, sdk)) },
+            { "a different wasi-sdk release", { version_file = "33.0\nwasi-libc: fixture\n" }, 0,
+                requires_sdk(string.format("%q reports 33.0", sdk .. "/VERSION")) },
+            { "a missing wasi-sdk VERSION", { missing = "VERSION" }, 0,
+                requires_sdk(string.format("%q reports unknown", sdk .. "/VERSION")) },
+            { "a missing WASI sysroot", { missing_sysroot = true }, 0,
+                requires_sdk(string.format("no sysroot at %q", sdk .. "/share/wasi-sysroot")) },
+            { "a failing clang", { failing = "clang" }, 1, requires_sdk(string.format(
+                "cannot execute %q: fixture: unsupported option", sdk .. "/bin/clang" .. suffix)) },
+            { "a missing llvm-ar", { missing = "llvm-ar" }, 1, requires_sdk(string.format(
+                "llvm-ar not found at %q", sdk .. "/bin/llvm-ar" .. suffix)) },
+            { "a missing llvm-ranlib", { missing = "llvm-ranlib" }, 1, requires_sdk(string.format(
+                "llvm-ranlib not found at %q", sdk .. "/bin/llvm-ranlib" .. suffix)) },
+            { "a missing wasm-ld", { missing = "wasm-ld" }, 1, requires_sdk(string.format(
+                "wasm-ld not found at %q", sdk .. "/bin/wasm-ld" .. suffix)) },
+            { "a missing wasm-opt", { missing = "wasm-opt" }, 1, requires_optimizer(string.format(
+                "%q is not an executable (BINARYEN_ROOT=%q)", optimizer, FAKE_ROOT .. "/binaryen")) },
+            { "a different wasm-opt release", { optimizer_output = "wasm-opt version 132 (version_132)\n" }, 2,
+                requires_optimizer(string.format("%q reports version 132", optimizer)) },
+            { "an unrecognized wasm-opt version", { optimizer_output = "Binaryen 133\n" }, 2,
+                requires_optimizer(string.format("%q reports version unknown", optimizer)) },
+            { "a failing wasm-opt", { failing = "wasm-opt" }, 2, requires_optimizer(string.format(
+                "cannot execute %q: fixture: unsupported option", optimizer)) },
+        }) do
+            it("diagnoses " .. case[1] .. " with its location and install instructions", function()
+                local context, inputs, calls = fake_context(case[2])
+                local descriptor, err = browser.build(context, inputs)
+                assert.is_nil(descriptor)
+                assert.equal(case[4], err)
+                assert.equal(case[3], #calls)
+            end)
+        end
     end
 
-    it("searches PATH only when EMSDK is absent and diagnoses an empty search", function()
-        platform.getenv = function(name)
-            if name == "EMSDK" then return nil end
-            if name == "PATH" then return FAKE_ROOT .. "/emsdk/upstream/emscripten" end
-            return saved_getenv(name)
+    it("accepts the wasi-sdk major series and its numeric point releases from VERSION line 1", function()
+        for _, row in ipairs({
+                { "34.0\r\nwasi-libc: fixture\r\n", true }, { "34.0", true },
+                { "34.1\n", true }, { "34.0.1\n", true }, { "34\n", true },
+                { "33.0\n", false }, { "35.0\n", false }, { "340\n", false },
+                { "34.\n", false }, { "34..0\n", false }, { "34.0-rc1\n", false },
+                { "\n34.0\n", false } }) do
+            local context, inputs = fake_context({ version_file = row[1] })
+            local descriptor, err = browser.build(context, inputs)
+            if row[2] then
+                assert.truthy(descriptor, err)
+                assert.equal("34", descriptor.tools.version)
+            else
+                assert.is_nil(descriptor)
+                contains(err, '/wasi-sdk/VERSION" reports ')
+            end
         end
-        local context, inputs = fake_context()
-        assert.equal("PATH", assert(browser.build(context, inputs)).tools.source)
-        platform.getenv = function(name) if name == "PATH" or name == "EMSDK" then return nil end; return saved_getenv(name) end
-        local _, err = browser.build(context, inputs)
-        contains(err, "emcc not found (EMSDK unset; not on PATH)")
+    end)
+
+    it("searches PATH for a wasi-sdk clang only when WASI_SDK_PATH is unset or empty", function()
+        local suffix = tool_suffix()
+        for _, configured in ipairs({ false, "" }) do
+            platform.getenv = environment({ WASI_SDK_PATH = configured or nil,
+                BINARYEN_ROOT = FAKE_ROOT .. "/binaryen",
+                PATH = "usr/bin" .. PATH_SEPARATOR .. "wasi-sdk/bin" })
+            local context, inputs, _, storage = fake_context()
+            -- A host clang without a sibling ../VERSION is not a wasi-sdk clang.
+            storage[FAKE_ROOT .. "/usr/bin/clang" .. suffix] = "host clang"
+            local descriptor = assert(browser.build(context, inputs))
+            assert.equal("PATH", descriptor.tools.source)
+            assert.equal(FAKE_ROOT .. "/wasi-sdk", descriptor.tools.location)
+            assert.equal(FAKE_ROOT .. "/wasi-sdk/bin/clang" .. suffix, descriptor.tools.cc[1])
+            assert.equal(FAKE_ROOT .. "/wasi-sdk/bin/wasm-ld" .. suffix, descriptor.tools.ld[1])
+            assert.equal(FAKE_ROOT .. "/wasi-sdk/share/wasi-sysroot", descriptor.tools.sysroot)
+        end
+        local empty = "browser target requires wasi-sdk 34: no wasi-sdk clang on PATH " ..
+            "(WASI_SDK_PATH unset; a wasi-sdk clang has a sibling ../VERSION)" .. SDK_INSTALL
+        for _, search in ipairs({ FAKE_ROOT .. "/usr/bin", false }) do
+            platform.getenv = environment({ BINARYEN_ROOT = FAKE_ROOT .. "/binaryen", PATH = search or nil })
+            local context, inputs, calls, storage = fake_context()
+            storage[FAKE_ROOT .. "/usr/bin/clang" .. suffix] = "host clang"
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            assert.equal(empty, err)
+            assert.equal(0, #calls)
+        end
+    end)
+
+    it("selects wasm-opt from WASM_OPT, then BINARYEN_ROOT, then PATH", function()
+        local suffix = tool_suffix()
+        local sdk = FAKE_ROOT .. "/wasi-sdk"
+        local installed = FAKE_ROOT .. "/binaryen/bin/wasm-opt" .. suffix
+        local explicit = FAKE_ROOT .. "/tools/wasm-opt" .. suffix
+        for _, row in ipairs({
+            { { WASM_OPT = explicit, BINARYEN_ROOT = FAKE_ROOT .. "/binaryen" }, "WASM_OPT", explicit },
+            { { WASM_OPT = "tools/wasm-opt" .. suffix }, "WASM_OPT", explicit },
+            { { WASM_OPT = "", BINARYEN_ROOT = FAKE_ROOT .. "/binaryen", PATH = FAKE_ROOT .. "/tools" },
+                "BINARYEN_ROOT", installed },
+            { { BINARYEN_ROOT = "binaryen" }, "BINARYEN_ROOT", installed },
+            { { WASM_OPT = "", BINARYEN_ROOT = "", PATH = sdk .. "/bin" .. PATH_SEPARATOR .. "binaryen/bin" ..
+                PATH_SEPARATOR .. FAKE_ROOT .. "/tools" }, "PATH", installed },
+        }) do
+            local values = row[1]
+            values.WASI_SDK_PATH = sdk
+            platform.getenv = environment(values)
+            local context, inputs, calls, storage = fake_context()
+            storage[explicit] = "another wasm-opt launcher"
+            local descriptor = assert(browser.build(context, inputs))
+            assert.same({ argv = { row[3] }, version = "133", source = row[2], version_output = OPTIMIZER_VERSION },
+                browser.export(descriptor.tools.optimizer))
+            assert.same({ row[3], "--version" }, calls[2])
+        end
+        platform.getenv = environment({ WASI_SDK_PATH = sdk, WASM_OPT = "", BINARYEN_ROOT = "", PATH = sdk .. "/bin" })
+        local context, inputs, calls = fake_context()
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        assert.equal("browser target requires Binaryen version_133 wasm-opt: wasm-opt not found " ..
+            "(WASM_OPT and BINARYEN_ROOT unset; not on PATH)" .. OPTIMIZER_INSTALL, err)
+        assert.equal(1, #calls)
+        -- An explicit WASM_OPT that names no executable never falls back.
+        local missing = FAKE_ROOT .. "/missing/wasm-opt"
+        platform.getenv = environment({ WASI_SDK_PATH = sdk, WASM_OPT = missing,
+            BINARYEN_ROOT = FAKE_ROOT .. "/binaryen", PATH = FAKE_ROOT .. "/binaryen/bin" })
+        context, inputs, calls = fake_context()
+        descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        assert.equal(string.format("browser target requires Binaryen version_133 wasm-opt: " ..
+            "%q is not an executable (WASM_OPT=%q)", missing, missing) .. OPTIMIZER_INSTALL, err)
+        assert.equal(1, #calls)
     end)
 
     it("uses native Windows executable names for both routes and transported sibling tools", function()
         platform.windows = true
         local root = "C:/Windows fixture"
-        local directory = root .. "/emsdk/upstream/emscripten"
-        for _, route in ipairs({ "EMSDK", "PATH" }) do
+        local sdk = root .. "/wasi-sdk"
+        local binaryen = root .. "/binaryen/bin"
+        for _, route in ipairs({ "WASI_SDK_PATH", "PATH" }) do
             platform.getenv = function(name)
-                if name == "EMSDK" and route == "EMSDK" then return root .. "/emsdk" end
-                if name == "PATH" then return [["D:\missing; not a delimiter";"]] .. directory .. '"' end
+                if route == "WASI_SDK_PATH" and name == "WASI_SDK_PATH" then return sdk end
+                if route == "WASI_SDK_PATH" and name == "BINARYEN_ROOT" then return root .. "/binaryen" end
+                if name == "PATH" then
+                    return [["D:\missing; not a delimiter";D:/not-empty;"]] .. sdk .. '/bin";' .. binaryen
+                end
             end
             local context, inputs, calls, files = fake_context({ root = root, tool_root = root })
-            files["D:/not-empty/emcc.com"] = "not the pinned SDK executable"
-            files["D:/not-empty/emcc.bat"] = "not the pinned SDK executable"
+            -- Windows spawn lookup would append these; only the exact .exe counts.
+            for _, name in ipairs({ "clang.com", "clang.bat", "wasm-opt.com", "wasm-opt.bat" }) do
+                files["D:/not-empty/" .. name] = "not the pinned SDK executable"
+            end
             local descriptor = assert(browser.build(context, inputs))
             assert.equal(route, descriptor.tools.source)
-            assert.equal(directory .. "/emcc.exe", descriptor.tools.cc[1])
-            assert.equal(directory .. "/emar.exe", descriptor.tools.ar[1])
-            assert.equal(directory .. "/emranlib.exe", descriptor.tools.ranlib[1])
-            assert.equal(2, #calls, "descriptor creation never launches archive tools")
+            assert.equal(route == "PATH" and "PATH" or "BINARYEN_ROOT", descriptor.tools.optimizer.source)
+            assert.equal(sdk, descriptor.tools.location)
+            assert.equal(sdk .. "/bin/clang.exe", descriptor.tools.cc[1])
+            assert.equal(sdk .. "/bin/llvm-ar.exe", descriptor.tools.ar[1])
+            assert.equal(sdk .. "/bin/llvm-ranlib.exe", descriptor.tools.ranlib[1])
+            assert.equal(sdk .. "/bin/wasm-ld.exe", descriptor.tools.ld[1])
+            assert.equal(sdk .. "/share/wasi-sysroot", descriptor.tools.sysroot)
+            assert.equal(binaryen .. "/wasm-opt.exe", descriptor.tools.optimizer.argv[1])
+            assert.equal(3, #calls, "descriptor creation never launches archive tools")
             local data = browser.export(descriptor)
             assert(browser.import(data))
             data.tools.cc[1] = data.tools.cc[1]:gsub("/", "\\")
@@ -788,84 +1160,204 @@ assert(file:close())
             local invalid, spelling_error = browser.import(data)
             assert.is_nil(invalid)
             assert.equal("invalid browser tool argv", spelling_error)
-            data.tools.cc[1] = directory .. "/emcc.exe"
-            data.tools.ranlib[1] = directory .. "/emranlib"
+            data.tools.cc[1] = sdk .. "/bin/clang.exe"
+            data.tools.ranlib[1] = sdk .. "/bin/llvm-ranlib"
             fixtures.identify(data)
             local imported, err = browser.import(data)
             assert.is_nil(imported)
             assert.equal("invalid browser tool argv", err)
+            data.tools.ranlib[1] = sdk .. "/bin/llvm-ranlib.exe"
+            data.tools.ld[1] = sdk .. "/bin/wasm-ld"
+            fixtures.identify(data)
+            imported, err = browser.import(data)
+            assert.is_nil(imported)
+            assert.equal("invalid browser tool argv", err)
+            data.tools.ld[1] = sdk .. "/bin/wasm-ld.exe"
+            data.tools.optimizer.argv[1] = data.tools.optimizer.argv[1]:gsub("/", "\\")
+            fixtures.identify(data)
+            imported, err = browser.import(data)
+            assert.is_nil(imported)
+            assert.equal("invalid browser optimizer descriptor", err)
+            data.tools.optimizer.argv[1] = binaryen .. "/wasm-opt.exe"
+            data.tools.sysroot = data.tools.sysroot:gsub("/", "\\")
+            fixtures.identify(data)
+            imported, err = browser.import(data)
+            assert.is_nil(imported)
+            assert.equal("invalid browser toolchain descriptor", err)
+            data.tools.sysroot = sdk .. "/share/wasi-sysroot"
+            fixtures.identify(data)
+            assert(browser.import(data))
         end
     end)
 
-    it("resolves Win32 EMSDK paths without destroying their root or namespace", function()
+    it("resolves Win32 WASI_SDK_PATH roots without destroying their root or namespace", function()
         platform.windows = true
+        local optimizer = "C:/project/binaryen/bin/wasm-opt.exe"
         for _, row in ipairs({
             { [[\kit]], "C:/kit", "/" },
             { "D:kit", "D:/per-drive/kit", "/" },
             { [[\\?\C:\long root\kit]], [[\\?\C:\long root\kit]], "\\" },
         }) do
             local input, resolved, sep = table.unpack(row)
-            platform.getenv = function(name) if name == "EMSDK" then return input end end
-            local context, _, _, storage = fake_context({ root = "C:/project", tool_root = "C:/project" })
+            platform.getenv = function(name)
+                if name == "WASI_SDK_PATH" then return input end
+                if name == "WASM_OPT" then return optimizer end
+            end
+            local context, _, calls, storage, _, directories =
+                fake_context({ root = "C:/project", tool_root = "C:/project" })
             function context.io:absolute(filename)
                 assert.equal("D:kit", filename)
                 return resolved
             end
-            local location = table.concat({ resolved, "upstream", "emscripten" }, sep)
-            for _, name in ipairs({ "emcc", "emar", "emranlib" }) do
-                storage[location .. sep .. name .. ".exe"] = "launcher"
+            local function installed(...) return table.concat({ resolved, ... }, sep) end
+            for _, name in ipairs({ "clang", "llvm-ar", "llvm-ranlib", "wasm-ld" }) do
+                storage[installed("bin", name .. ".exe")] = "launcher"
             end
+            storage[installed("VERSION")] = "34.0\n"
+            directories[installed("share", "wasi-sysroot")] = true
             local tools = assert(browser.discover_tools(context))
-            assert.equal(location, tools.location)
-            assert.same({ location .. sep .. "emcc.exe" }, tools.cc)
+            assert.equal(resolved, tools.location)
+            assert.same({ installed("bin", "clang.exe") }, tools.cc)
+            assert.same({ installed("bin", "llvm-ar.exe") }, tools.ar)
+            assert.same({ installed("bin", "llvm-ranlib.exe") }, tools.ranlib)
+            assert.same({ installed("bin", "wasm-ld.exe") }, tools.ld)
+            assert.equal(installed("share", "wasi-sysroot"), tools.sysroot)
+            assert.same(version_query(tools), calls[1])
+            assert.equal("WASM_OPT", tools.optimizer.source)
+            assert.same({ optimizer }, tools.optimizer.argv)
         end
     end)
 
-    it("reports a Windows relative EMSDK lookup error without a Lua source location", function()
-        platform.windows = true
-        platform.getenv = function(name) if name == "EMSDK" then return "kit" end end
-        local context = fake_context({ root = "C:/project", tool_root = "C:/project" })
-        function context.io:cwd() return nil, "injected cwd failure" end
-        local tools, err = browser.discover_tools(context)
-        assert.is_nil(tools)
-        assert.equal('browser target requires Emscripten 6.0.13: cannot resolve "kit": injected cwd failure; ' ..
-            "install it with 'emsdk install 6.0.13 && emsdk activate 6.0.13' and source emsdk_env.sh", err)
+    it("reports a relative toolchain root lookup error without a Lua source location", function()
+        for _, windows in ipairs({ false, true }) do
+            local root = windows and "C:/project" or "/project"
+            local function check()
+                for _, row in ipairs({
+                    { { WASI_SDK_PATH = "kit" }, "wasi-sdk 34", "kit", SDK_INSTALL },
+                    { { WASI_SDK_PATH = root .. "/wasi-sdk", BINARYEN_ROOT = "binaryen" },
+                        "Binaryen version_133 wasm-opt", "binaryen", OPTIMIZER_INSTALL },
+                    { { WASI_SDK_PATH = root .. "/wasi-sdk", WASM_OPT = "bin/wasm-opt" },
+                        "Binaryen version_133 wasm-opt", "bin/wasm-opt", OPTIMIZER_INSTALL },
+                    { { PATH = "relative/bin" }, "wasi-sdk 34", "relative/bin", SDK_INSTALL },
+                    { { WASI_SDK_PATH = root .. "/wasi-sdk", PATH = "relative/bin" },
+                        "Binaryen version_133 wasm-opt", "relative/bin", OPTIMIZER_INSTALL },
+                }) do
+                    platform.getenv = function(name) return row[1][name] end
+                    local context = fake_context({ root = root, tool_root = root })
+                    function context.io:cwd() return nil, "injected cwd failure" end
+                    local tools, err = browser.discover_tools(context)
+                    assert.is_nil(tools)
+                    assert.equal("browser target requires " .. row[2] .. ": cannot resolve " ..
+                        string.format("%q", row[3]) .. ": injected cwd failure" .. row[4], err)
+                end
+            end
+            if windows then
+                platform.windows = true
+                check()
+            else
+                fixtures.with_posix_host(check)
+            end
+        end
     end)
 
     it("does not continue past an existing Windows candidate with a resolution error", function()
         platform.windows = true
         local root = "C:/fixture"
-        local candidate = "D:/unresolved/emcc.exe"
-        platform.getenv = function(name)
-            if name == "PATH" then return "D:/unresolved;" .. root .. "/emsdk/upstream/emscripten" end
+        for _, row in ipairs({
+            { "clang", false, root .. "/wasi-sdk/bin", "wasi-sdk 34", 0 },
+            { "wasm-opt", root .. "/wasi-sdk", root .. "/binaryen/bin", "Binaryen version_133 wasm-opt", 1 },
+        }) do
+            local tool, configured, directory, requirement, launched = table.unpack(row)
+            local candidate = "D:/unresolved/" .. tool .. ".exe"
+            platform.getenv = function(name)
+                if name == "WASI_SDK_PATH" then return configured or nil end
+                if name == "PATH" then return "D:/unresolved;" .. directory end
+            end
+            local context, inputs, calls, files = fake_context({ root = root, tool_root = root })
+            files[candidate] = "candidate with inaccessible metadata"
+            local lstat = context.io.lstat
+            function context.io:lstat(filename)
+                if filename == candidate then return nil, "fixture access denied" end
+                return lstat(self, filename)
+            end
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, "browser target requires " .. requirement .. ": cannot resolve")
+            contains(err, candidate)
+            contains(err, "fixture access denied")
+            assert.equal(launched, #calls)
         end
-        local context, inputs, calls, files = fake_context({ root = root, tool_root = root })
-        files[candidate] = "candidate with inaccessible metadata"
-        local lstat = context.io.lstat
-        function context.io:lstat(filename)
-            if filename == candidate then return nil, "fixture access denied" end
-            return lstat(self, filename)
-        end
-        local descriptor, err = browser.build(context, inputs)
-        assert.is_nil(descriptor)
-        contains(err, "cannot resolve")
-        contains(err, candidate)
-        contains(err, "fixture access denied")
-        assert.equal(0, #calls)
     end)
 
-    it("reports a Windows emcc launch failure without mistaking it for a missing file", function()
+    it("stops at a configured Windows tool whose metadata cannot be resolved", function()
         platform.windows = true
         local root = "C:/fixture"
         platform.getenv = function(name)
-            if name == "EMSDK" then return root .. "/emsdk" end
+            if name == "WASI_SDK_PATH" then return root .. "/wasi-sdk" end
+            if name == "BINARYEN_ROOT" then return root .. "/binaryen" end
         end
-        local context, inputs = fake_context({ root = root, tool_root = root, unstartable = "emcc" })
-        local descriptor, err = browser.build(context, inputs)
-        assert.is_nil(descriptor)
-        contains(err, "cannot execute emcc")
-        contains(err, "/emcc.exe")
-        contains(err, "not a Windows executable")
+        for _, row in ipairs({
+            { root .. "/wasi-sdk/bin/clang.exe", "wasi-sdk 34", SDK_INSTALL, 0 },
+            { root .. "/wasi-sdk/bin/llvm-ar.exe", "wasi-sdk 34", SDK_INSTALL, 1 },
+            { root .. "/wasi-sdk/bin/llvm-ranlib.exe", "wasi-sdk 34", SDK_INSTALL, 1 },
+            { root .. "/wasi-sdk/bin/wasm-ld.exe", "wasi-sdk 34", SDK_INSTALL, 1 },
+            { root .. "/binaryen/bin/wasm-opt.exe", "Binaryen version_133 wasm-opt", OPTIMIZER_INSTALL, 1 },
+        }) do
+            local candidate, requirement, install, launched = table.unpack(row)
+            local context, inputs, calls = fake_context({ root = root, tool_root = root })
+            local lstat = context.io.lstat
+            function context.io:lstat(filename)
+                if filename == candidate then return nil, "fixture access denied" end
+                return lstat(self, filename)
+            end
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, "browser target requires " .. requirement .. ": cannot resolve " ..
+                string.format("%q", candidate) .. ": ")
+            contains(err, "fixture access denied")
+            assert.equal(install, err:sub(-#install))
+            assert.equal(launched, #calls)
+        end
+    end)
+
+    it("diagnoses a malformed Windows PATH in either tool search", function()
+        platform.windows = true
+        local root = "C:/fixture"
+        for _, row in ipairs({
+            { false, "wasi-sdk 34", SDK_INSTALL, 0 },
+            { root .. "/wasi-sdk", "Binaryen version_133 wasm-opt", OPTIMIZER_INSTALL, 1 },
+        }) do
+            local configured, requirement, install, launched = table.unpack(row)
+            platform.getenv = function(name)
+                if name == "WASI_SDK_PATH" then return configured or nil end
+                if name == "PATH" then return '"' end
+            end
+            local context, inputs, calls = fake_context({ root = root, tool_root = root })
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            assert.equal("browser target requires " .. requirement ..
+                ': cannot resolve "PATH": malformed Windows executable PATH' .. install, err)
+            assert.equal(launched, #calls)
+        end
+    end)
+
+    it("reports a Windows tool launch failure without mistaking it for a missing file", function()
+        platform.windows = true
+        local root = "C:/fixture"
+        platform.getenv = function(name)
+            if name == "WASI_SDK_PATH" then return root .. "/wasi-sdk" end
+            if name == "BINARYEN_ROOT" then return root .. "/binaryen" end
+        end
+        for _, row in ipairs({
+            { "clang", root .. "/wasi-sdk/bin/clang.exe", "wasi-sdk 34", SDK_INSTALL },
+            { "wasm-opt", root .. "/binaryen/bin/wasm-opt.exe", "Binaryen version_133 wasm-opt", OPTIMIZER_INSTALL },
+        }) do
+            local context, inputs = fake_context({ root = root, tool_root = root, unstartable = row[1] })
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            assert.equal("browser target requires " .. row[3] .. ": cannot execute " ..
+                string.format("%q", row[2]) .. ": not a Windows executable" .. row[4], err)
+        end
     end)
 
     it("diagnoses a missing Lua record with the exact host install command and raw prefix", function()
@@ -875,7 +1367,10 @@ assert(file:close())
         }) do
             local windows, root, prefix, command = table.unpack(row)
             local function check()
-                platform.getenv = function(name) if name == "EMSDK" then return root .. "/emsdk" end end
+                platform.getenv = function(name)
+                    if name == "WASI_SDK_PATH" then return root .. "/wasi-sdk" end
+                    if name == "BINARYEN_ROOT" then return root .. "/binaryen" end
+                end
                 local context, inputs = fake_context({ root = root, tool_root = root, missing_record = true })
                 inputs.install_prefix = prefix
                 local descriptor, err = browser.build(context, inputs)
@@ -894,9 +1389,12 @@ assert(file:close())
 
     for _, case in ipairs({
         { "unknown field", function(text) return text .. "unknown=yes\n" end, 'unknown field "unknown"' },
-        { "duplicate field", function(text) return text .. "sjlj=wasm\n" end, 'duplicate field "sjlj"' },
-        { "missing field", function(text) return text:gsub("sjlj=wasm\n", "") end, 'missing field "sjlj"' },
-        { "banner", function(text) return text:gsub("record v1", "record v0") end, "invalid banner" },
+        { "Emscripten-era field", function(text)
+            return text:gsub("wasi_sdk_version=[^\n]*", "emscripten_version=6.0.13")
+        end, 'unknown field "emscripten_version"' },
+        { "duplicate field", function(text) return text .. "sjlj=wasm-exnref\n" end, 'duplicate field "sjlj"' },
+        { "missing field", function(text) return text:gsub("sjlj=wasm%-exnref\n", "") end, 'missing field "sjlj"' },
+        { "banner", function(text) return text:gsub("record v2", "record v1") end, "invalid banner" },
         { "revision", function(text) return text:gsub("fork_revision=[^\n]*", "fork_revision=bad") end, 'invalid field "fork_revision"' },
         { "digest", function(text) return text:gsub("archive_sha256=[^\n]*", "archive_sha256=bad") end, 'invalid field "archive_sha256"' },
         { "UTF-8", function(text) return text .. "\255\n" end, "text encoding" },
@@ -937,11 +1435,11 @@ assert(file:close())
     end
 
     for _, case in ipairs({
-        { "emscripten_version", "6.0.12" }, { "target", "wasm64-unknown-emscripten" },
-        { "sjlj", "emscripten" }, { "wasm_features", "+sign-ext" },
+        { "wasi_sdk_version", "33.0" }, { "target", "wasm32-unknown-emscripten" },
+        { "sjlj", "wasm" }, { "wasm_features", "+sign-ext" },
         { "numeric", "integer=int,float=float" },
         { "archive_sha256", string.rep("0", 64) }, { "headers_sha256", string.rep("0", 64) },
-        { "lua_defines", "-DEXTRA -DLUA_USE_BROWSER -DLUA_USE_POSIX" },
+        { "lua_defines", "-DEXTRA -DLUA_USE_BROWSER -D_WASI_EMULATED_PROCESS_CLOCKS" },
     }) do
         it("identifies mismatched record field " .. case[1], function()
             local context, inputs = fake_context({ record = { [case[1]] = case[2] } })
@@ -951,6 +1449,32 @@ assert(file:close())
             contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
         end)
     end
+
+    it("rejects host Lua configurations in browser Lua records and transport", function()
+        local record = fixtures.record()
+        local cases = {}
+        for _, name in ipairs({ "POSIX", "DLOPEN", "LINUX", "MACOSX" }) do
+            cases[#cases + 1] = { {
+                lua_defines = "-DLUA_USE_BROWSER -DLUA_USE_" .. name .. " -D_WASI_EMULATED_PROCESS_CLOCKS",
+                cflags = record.cflags .. " -DLUA_USE_" .. name,
+            }, "LUA_USE_" .. name .. " is unavailable for browser Lua" }
+        end
+        cases[#cases + 1] = { { lua_defines = "-D_WASI_EMULATED_PROCESS_CLOCKS",
+            cflags = (record.cflags:gsub(" %-DLUA_USE_BROWSER", "")) }, "requires LUA_USE_BROWSER" }
+        for _, case in ipairs(cases) do
+            local context, inputs = fake_context({ record = case[1] })
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, 'is malformed: invalid field "lua_defines": ' .. case[2])
+            contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
+            local data = fixtures.descriptor()
+            data.lua.record = fixtures.record(case[1])
+            fixtures.identify(data)
+            descriptor, err = browser.import(data)
+            assert.is_nil(descriptor)
+            contains(err, 'invalid field "lua_defines": ' .. case[2])
+        end
+    end)
 
     it("keeps invalid record features distinct from user compile flags", function()
         local context, inputs = fake_context({ record = { wasm_features = "+sign-ext" } })
@@ -991,30 +1515,25 @@ assert(file:close())
         local descriptor, err = browser.build(context, inputs)
         assert.is_nil(descriptor)
         contains(err, "browser target compiler probe")
-        contains(err, "check the selected Emscripten 6.0.13 installation")
+        contains(err, "check the selected wasi-sdk 34 installation")
         assert.is_nil(err:find("user compile flags", 1, true))
         assert.is_nil(err:find("browser Lua record", 1, true))
         assert.is_nil(err:find("make install-browser", 1, true))
     end)
 
-    for _, case in ipairs({ { "sjlj", "emscripten" }, { "target", "wasm64-unknown-emscripten" },
-            { "emscripten_version", "6.0.12" } }) do
+    for _, case in ipairs({ { "sjlj", "wasm" }, { "target", "wasm32-unknown-emscripten" },
+            { "wasi_sdk_version", "33.0" } }) do
         it("prioritizes fixed field " .. case[1] .. " over conflicting cflags", function()
             local record = fixtures.record()
-            local context, inputs = fake_context({ record = {
-                [case[1]] = case[2],
-                cflags = record.cflags:gsub("SUPPORT_LONGJMP=wasm", "SUPPORT_LONGJMP=emscripten"),
-            } })
+            local conflicting = record.cflags:gsub("legacy%-eh=false", "legacy-eh=true"):gsub("wasip1", "wasip2")
+            local context, inputs = fake_context({ record = { [case[1]] = case[2], cflags = conflicting } })
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor)
             contains(err, "field " .. case[1] .. " mismatch")
             contains(err, 'recorded "' .. case[2] .. '"')
             contains(err, "expected"); contains(err, "fork_revision=" .. record.fork_revision)
             local data = fixtures.descriptor()
-            data.lua.record = fixtures.record({
-                [case[1]] = case[2],
-                cflags = record.cflags:gsub("SUPPORT_LONGJMP=wasm", "SUPPORT_LONGJMP=emscripten"),
-            })
+            data.lua.record = fixtures.record({ [case[1]] = case[2], cflags = conflicting })
             fixtures.identify(data)
             descriptor, err = browser.import(data)
             assert.is_nil(descriptor)
@@ -1033,10 +1552,17 @@ assert(file:close())
 
     it("identifies unsupported effective Lua cflags", function()
         local _, _, _, _, record = fake_context()
-        local context, inputs = fake_context({ record = { cflags = record.cflags .. " -fPIC" } })
-        local descriptor, err = browser.build(context, inputs)
-        assert.is_nil(descriptor); contains(err, 'invalid field "cflags"')
-        contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
+        for _, flag in ipairs({ "-fPIC", "-flto", "-target wasm32-wasip1", "--sysroot=/elsewhere",
+                "-mno-exception-handling", "-fwasm-exceptions", "-mllvm=-wasm-enable-sjlj",
+                "-mexec-model=reactor", "-Xclang -target-feature", "--config=browser.cfg",
+                "--config browser.cfg", "--config-user-dir=/home/user", "@browser.rsp" }) do
+            local context, inputs = fake_context({ record = { cflags = record.cflags .. " " .. flag } })
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, 'invalid field "cflags": browser target does not support cflags flag "' ..
+                flag:match("^%S+") .. '"')
+            contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
+        end
     end)
 
     it("diagnoses host-only flags including ambient LTO without using native defaults", function()
@@ -1045,17 +1571,28 @@ assert(file:close())
                 "-mcpu=native", "-mtune=native", "-m32", "-m64", "-fwasm-exceptions",
                 "-fno-wasm-exceptions", "-mexception-handling", "-mno-exception-handling",
                 "-mlegacy-exception-handling", "-mno-legacy-exception-handling",
-                "-sSUPPORT_LONGJMP=emscripten" }) do
+                "-mllvm", "-mllvm=-wasm-enable-sjlj", "-target", "--target=wasm32-wasip1",
+                "--sysroot", "--sysroot=/usr", "-mexec-model=reactor", "-Xclang", "-Xclang=-mllvm",
+                "--config", "--config=browser.cfg", "--config-system-dir=/etc/clang",
+                "--config-user-dir=/home/user", "@browser.rsp", "@" }) do
             local ok, err = browser.validate_flags({ flag }, "TITAN_EXTRA_CFLAGS")
             assert.is_nil(ok); assert.equal('browser target does not support TITAN_EXTRA_CFLAGS flag "' .. flag .. '"', err)
         end
-        assert(browser.validate_flags({ "-fno-lto", "-sSUPPORT_LONGJMP=wasm",
-            "-sWASM_LEGACY_EXCEPTIONS=1" }, "--cflag"))
+        assert(browser.validate_flags({ "-fno-lto", "-msimd128", "-DUSER=1", "-Wextra", "-Iinclude" }, "--cflag"))
+        assert(browser.validate_flags(nil, "--cflag"))
+        local shaped, shape_error = browser.validate_flags({ "-O2", [3] = "-g" }, "--cflag")
+        assert.is_nil(shaped)
+        assert.equal("invalid browser --cflag flags: expected a dense array of strings", shape_error)
         local subject = fresh_driver()
         subject.EXTRA_CFLAGS = { "-flto" }
         local context = { target = "browser", host_target = "linux" }
         local ok, err = subject._finish_target_initialization(context)
         assert.is_nil(ok); contains(err, 'TITAN_EXTRA_CFLAGS flag "-flto"')
+        subject = fresh_driver()
+        subject.EXTRA_CPPFLAGS = { "--sysroot=/usr" }
+        ok, err = subject._finish_target_initialization({ target = "browser", host_target = "linux" })
+        assert.is_nil(ok)
+        assert.equal('browser target does not support TITAN_EXTRA_CPPFLAGS flag "--sysroot=/usr"', err)
     end)
 
     it("rejects every LTO spelling through CLI and ambient flag origins", function()
@@ -1073,55 +1610,141 @@ assert(file:close())
         }, "--cflag"))
     end)
 
-    it("rejects every conflicting SJLJ and EH setting through every flag origin", function()
+    it("rejects every target-owned SJLJ, EH, target and sysroot setting through every flag origin", function()
         for _, origin in ipairs({ "TITAN_EXTRA_CPPFLAGS", "TITAN_EXTRA_CFLAGS", "TITAN_EXTRA_LDFLAGS",
                 "--cflag", "--ldflag", "compile_flags", "cflags" }) do
-            for _, setting in ipairs({ "SUPPORT_LONGJMP=emscripten", "SUPPORT_LONGJMP=0",
-                    "SUPPORT_LONGJMP=1", "SUPPORT_LONGJMP", "NO_SUPPORT_LONGJMP",
-                    "NO_SUPPORT_LONGJMP=0", "NO_SUPPORT_LONGJMP=1",
-                    "WASM_LEGACY_EXCEPTIONS=0", "NO_WASM_LEGACY_EXCEPTIONS",
-                    "NO_WASM_LEGACY_EXCEPTIONS=1" }) do
-                for _, flags in ipairs({ { "-s" .. setting }, { "-s", setting } }) do
-                    local ok, err = browser.validate_flags(flags, origin)
-                    assert.is_nil(ok)
-                    assert.equal("browser target does not support " .. origin ..
-                        " flag " .. string.format("%q", table.concat(flags, " ")), err)
-                end
+            for _, flags in ipairs({
+                { "-mllvm", "-wasm-enable-sjlj" }, { "-mllvm", "-wasm-enable-sjlj=false" },
+                { "-mllvm", "-wasm-use-legacy-eh=false" }, { "-mllvm", "-wasm-use-legacy-eh=true" },
+                { "-mllvm=-wasm-enable-sjlj" }, { "-mllvm=-wasm-use-legacy-eh=true" },
+                { "-mexception-handling" }, { "-mno-exception-handling" },
+                { "-mlegacy-exception-handling" }, { "-mno-legacy-exception-handling" },
+                { "-fwasm-exceptions" }, { "-fno-wasm-exceptions" },
+                { "--target=wasm32-wasip1" }, { "--target=wasm32-unknown-emscripten" },
+                { "-target", "wasm32-wasip1" }, { "--sysroot=/elsewhere" }, { "--sysroot", "/elsewhere" },
+                { "-mexec-model=command" }, { "-mexec-model=reactor" },
+                { "-Xclang", "-mllvm" }, { "-Xclang", "-target-feature" }, { "-Xclang=-mllvm" },
+                { "--config", "browser.cfg" }, { "--config=browser.cfg" },
+                { "--config-system-dir=/etc/clang" }, { "--config-user-dir=/home/user" },
+                { "@browser.rsp" }, { "@/tmp/flags" },
+            }) do
+                local ok, err = browser.validate_flags(flags, origin)
+                assert.is_nil(ok)
+                assert.equal("browser target does not support " .. origin ..
+                    " flag " .. string.format("%q", flags[1]), err)
             end
+            local ok, err = browser.validate_flags({ "-DUSER=1", "-mllvm", "-wasm-enable-sjlj" }, origin)
+            assert.is_nil(ok)
+            assert.equal("browser target does not support " .. origin .. ' flag "-mllvm"', err)
+            -- Even the profile's own setjmp/longjmp selection is target-owned.
+            ok, err = browser.validate_flags(fixtures.sjlj_flags, origin)
+            assert.is_nil(ok)
+            assert.equal("browser target does not support " .. origin .. ' flag "-mexception-handling"', err)
         end
-        assert(browser.validate_flags({ "-sSUPPORT_LONGJMP=wasm", "-s", "SUPPORT_LONGJMP=wasm",
-            "-sWASM_LEGACY_EXCEPTIONS", "-s", "WASM_LEGACY_EXCEPTIONS=1",
-            "-sNO_WASM_LEGACY_EXCEPTIONS=0", "-s", "NO_WASM_LEGACY_EXCEPTIONS=0" }, "--cflag"))
     end)
 
-    it("rejects missing or wrong effective record EH encoding in builds and transport", function()
+    it("rejects missing or wrong effective record SJLJ lowering in builds and transport", function()
         local record = fixtures.record()
-        local without = record.cflags:gsub(" %-sWASM_LEGACY_EXCEPTIONS=1", "")
-        for _, cflags in ipairs({ without, record.cflags .. " -sWASM_LEGACY_EXCEPTIONS=0",
-                record.cflags .. " -s NO_WASM_LEGACY_EXCEPTIONS",
-                record.cflags .. " -s NO_WASM_LEGACY_EXCEPTIONS=1" }) do
+        local expected = 'field sjlj mismatch: recorded "wasm-exnref", expected "<missing in cflags>"'
+        for _, cflags in ipairs({
+            (record.cflags:gsub(" %-mexception%-handling", "")),
+            (record.cflags:gsub(" %-mllvm %-wasm%-enable%-sjlj", "")),
+            (record.cflags:gsub(" %-mllvm %-wasm%-use%-legacy%-eh=false", "")),
+            (record.cflags:gsub("legacy%-eh=false", "legacy-eh=true")),
+            (record.cflags:gsub("enable%-sjlj", "enable-eh")),
+            record.cflags .. " -mllvm -wasm-enable-sjlj",
+            record.cflags .. " -mllvm -wasm-enable-eh",
+            record.cflags .. " -mllvm",
+        }) do
             local context, inputs = fake_context({ record = { cflags = cflags } })
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor)
-            contains(err, "required -sWASM_LEGACY_EXCEPTIONS=1")
+            contains(err, expected)
             contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
             local data = fixtures.descriptor()
             data.lua.record.cflags = cflags
             fixtures.identify(data)
             descriptor, err = browser.import(data)
             assert.is_nil(descriptor)
-            contains(err, "required -sWASM_LEGACY_EXCEPTIONS=1")
+            contains(err, expected)
         end
     end)
 
-    it("accepts the explicit equivalent legacy EH record spellings", function()
+    it("rejects a missing or different effective record target in builds and transport", function()
         local record = fixtures.record()
-        for _, setting in ipairs({ "-sWASM_LEGACY_EXCEPTIONS", "-s WASM_LEGACY_EXCEPTIONS=1",
-                "-sNO_WASM_LEGACY_EXCEPTIONS=0", "-s NO_WASM_LEGACY_EXCEPTIONS=0" }) do
-            local cflags = record.cflags:gsub("%-sWASM_LEGACY_EXCEPTIONS=1", setting)
-            local context, inputs = fake_context({ record = { cflags = cflags } })
-            assert(browser.build(context, inputs))
+        for _, case in ipairs({
+            { (record.cflags:gsub("%-%-target=wasm32%-wasip1 ", "")), "<missing in cflags>" },
+            { (record.cflags:gsub("wasm32%-wasip1", "wasm32-wasip2")), "wasm32-wasip2" },
+            { (record.cflags:gsub("wasm32%-wasip1", "wasm32-unknown-emscripten")), "wasm32-unknown-emscripten" },
+            { record.cflags .. " --target=wasm32-wasip2", "wasm32-wasip2" },
+        }) do
+            local expected = 'field target mismatch: recorded "wasm32-wasip1", expected "' .. case[2] .. '"'
+            local context, inputs = fake_context({ record = { cflags = case[1] } })
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, expected)
+            contains(err, LUA_REMEDY .. " PREFIX=" .. inputs.paths.root)
+            local data = fixtures.descriptor()
+            data.lua.record.cflags = case[1]
+            fixtures.identify(data)
+            descriptor, err = browser.import(data)
+            assert.is_nil(descriptor)
+            contains(err, expected)
         end
+    end)
+
+    it("accepts equivalent orderings of the record's target and SJLJ cflags", function()
+        local record = fixtures.record()
+        local sjlj = " %-mexception%-handling %-mllvm %-wasm%-enable%-sjlj %-mllvm %-wasm%-use%-legacy%-eh=false"
+        local unselected = record.cflags:gsub("^%-%-target=wasm32%-wasip1 ", ""):gsub(sjlj, "")
+        for _, cflags in ipairs({
+            (record.cflags:gsub(sjlj, " -mllvm -wasm-use-legacy-eh=false -mllvm -wasm-enable-sjlj -mexception-handling")),
+            unselected .. " -mllvm -wasm-enable-sjlj --target=wasm32-wasip1 -mexception-handling" ..
+                " -mllvm -wasm-use-legacy-eh=false",
+        }) do
+            assert.not_equal(record.cflags, cflags)
+            local context, inputs = fake_context({ record = { cflags = cflags } })
+            local descriptor = assert(browser.build(context, inputs))
+            assert.equal(cflags, descriptor.lua.record.cflags)
+            local data = fixtures.descriptor()
+            data.lua.record.cflags = cflags
+            fixtures.identify(data)
+            assert(browser.import(data))
+        end
+    end)
+
+    it("validates foreign C flags before discovering only the compiler for analysis", function()
+        local paths = fixtures.paths()
+        for _, case in ipairs({
+            { { "-mllvm", "-wasm-enable-sjlj" },
+                'browser target does not support browser foreign C flags flag "-mllvm"' },
+            { { "--sysroot=/elsewhere" },
+                'browser target does not support browser foreign C flags flag "--sysroot=/elsewhere"' },
+            { { "-O2" }, 'browser production profile owns compile option "-O2"' },
+            { { "-gdwarf-5" }, 'browser production profile owns compile option "-gdwarf-5"' },
+        }) do
+            local context, _, calls = fake_context()
+            local config, err = browser.analysis_toolchain(context,
+                { target = { build_profile = "production" }, paths = paths }, paths.lua_source, case[1])
+            assert.is_nil(config)
+            assert.equal(case[2], err)
+            assert.equal(0, #calls)
+        end
+        -- An analysis context compiles C but never links: it needs no wasm-opt.
+        local context, _, calls, _, record = fake_context({ missing = "wasm-opt" })
+        local config, err = browser.analysis_toolchain(context, { target = { build_profile = "production",
+            lua = { headers_sha256 = record.headers_sha256 } }, paths = paths }, paths.lua_source)
+        assert.is_nil(config)
+        contains(err, "minicoro.h: matching Titan SDK header is required")
+        assert.same({ version_query({ cc = { FAKE_ROOT .. "/wasi-sdk/bin/clang" .. tool_suffix() },
+            sysroot = FAKE_ROOT .. "/wasi-sdk/share/wasi-sysroot" }) }, calls)
+        context, _, calls = fake_context({ missing = "clang" })
+        config, err = browser.analysis_toolchain(context,
+            { target = { build_profile = "production" }, paths = paths }, paths.lua_source)
+        assert.is_nil(config)
+        assert.equal(string.format("browser target requires wasi-sdk 34: %q is not an executable (WASI_SDK_PATH=%q)",
+            FAKE_ROOT .. "/wasi-sdk/bin/clang" .. tool_suffix(), FAKE_ROOT .. "/wasi-sdk") .. SDK_INSTALL, err)
+        assert.equal(0, #calls)
     end)
 
     it("preserves native installed paths and exposes only browser sibling SDK paths", function()
@@ -1223,8 +1846,8 @@ assert(file:close())
         local context = subject.new_resolver_context({ io = template.io, target = "browser" })
         local descriptor = assert(subject.context_target_descriptor(context))
         assert.equal(descriptor, subject.context_target_descriptor(context))
-        assert.equal(2, #calls)
-        assert.equal(FAKE_ROOT .. "/cache-prefix/var/cache/titan-probes/browser-6.0.13/" ..
+        assert.equal(3, #calls)
+        assert.equal(FAKE_ROOT .. "/cache-prefix/var/cache/titan-probes/browser-34/" ..
             cprobe_cache.VERSION, descriptor.probe_cache_directory)
         assert.equal(native_cache, subject.PROBE_CACHE_DIRECTORY)
         assert.equal(cc, subject.CC); assert.equal(flags, subject.CFLAGS)
@@ -1322,7 +1945,7 @@ assert(file:close())
         local context, _, calls, contents = fake_context()
         local source = "int identical_raw_probe_source;"
         local native_path = FAKE_ROOT .. "/probes/" .. cprobe_cache.VERSION
-        local browser_path = FAKE_ROOT .. "/probes/browser-6.0.13/" .. cprobe_cache.VERSION
+        local browser_path = FAKE_ROOT .. "/probes/browser-34/" .. cprobe_cache.VERSION
         local function service(directory)
             return assert(cprobe.new_service({ io = context.io, profile = fixtures.profile(),
                 toolchain = { compiler_argv = { "fake-compiler" }, compile_flags = {},

@@ -58,7 +58,7 @@ describe("retained Titan SDK installation", function()
     end)
 
     it("publishes exact payload files and timestamps while preserving the matching Lua SDK", function()
-        local private = workspace .. "/rocks/titan/0.6.1-1"
+        local private = workspace .. "/rocks/titan/0.6.2-1"
         local prefix = workspace .. "/SDK 'quoted'"
         local payload = private .. "/titan-sdk"
         write(payload .. "/lib/titan/0.6/titan.so", "built provider")
@@ -104,7 +104,7 @@ describe("retained Titan SDK installation", function()
     it("records only the approved SDK link inputs, including the shared Lua archive", function()
         local incremental = require "titan-compiler.incremental"
         local sha256 = require "titan-compiler.sha256"
-        local private = workspace .. "/rocks/titan/0.6.1-1"
+        local private = workspace .. "/rocks/titan/0.6.2-1"
         local prefix = workspace .. "/SDK"
         local payload = private .. "/titan-sdk"
         local lua_archive = package.config:sub(1, 1) == "\\" and "lib/liblua55.a" or "lib/liblua.a"
@@ -154,7 +154,7 @@ describe("retained Titan SDK installation", function()
         end
         local incremental = require "titan-compiler.incremental"
         local sha256 = require "titan-compiler.sha256"
-        local private, lua = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/Lua"
+        local private, lua = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/Lua"
         local separate = workspace .. "/separate tree"
         write(private .. "/titan-sdk/lib/titan/0.6/titan.so", "provider")
         write(private .. "/titan-sdk/lib/liblua.a", "packaged SDK")
@@ -173,7 +173,7 @@ describe("retained Titan SDK installation", function()
     end)
 
     it("removes only a recorded SDK digest manifest and ignores other recorded cleanup paths", function()
-        local private, prefix = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/SDK"
+        local private, prefix = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/SDK"
         local outside = workspace .. "/outside/victim"
         write(private .. "/titan-sdk/include/titan.h", "header")
         directory(prefix)
@@ -217,7 +217,7 @@ describe("retained Titan SDK installation", function()
         end)
         package.config = configuration
         assert.truthy(loaded, windows_installer)
-        local private, prefix = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/SDK"
+        local private, prefix = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/SDK"
         write(private .. "/titan-sdk/include/..\\..\\escape.h", "escape")
         directory(prefix)
 
@@ -230,7 +230,7 @@ describe("retained Titan SDK installation", function()
     end)
 
     it("preserves external files when LuaRocks refuses dependency-breaking removal", function()
-        local private = workspace .. "/rocks/titan/0.6.1-1"
+        local private = workspace .. "/rocks/titan/0.6.2-1"
         local prefix = workspace .. "/SDK"
         write(private .. "/titan-sdk/lib/titan/0.6/titan.so", "provider")
         directory(prefix)
@@ -254,7 +254,7 @@ describe("retained Titan SDK installation", function()
     end)
 
     it("rejects linked destination parents before publishing or removing the rock", function()
-        local private, prefix = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/SDK"
+        local private, prefix = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/SDK"
         local outside = workspace .. "/outside"
         write(private .. "/titan-sdk/include/titan.h", "packaged header")
         write(outside .. "/titan.h", "external owner")
@@ -282,7 +282,7 @@ describe("retained Titan SDK installation", function()
     end)
 
     it("replaces installed files without changing an already open image", function()
-        local private, prefix = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/SDK"
+        local private, prefix = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/SDK"
         write(private .. "/titan-sdk/lib/titan/0.6/titan.so", "replacement")
         write(prefix .. "/lib/titan/0.6/titan.so", "original")
         local image <close> = assert(io.open(prefix .. "/lib/titan/0.6/titan.so", "rb"))
@@ -298,7 +298,7 @@ describe("retained Titan SDK installation", function()
     end)
 
     it("reports recovery when a native image stays locked after LuaRocks removal", function()
-        local private, prefix = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/SDK"
+        local private, prefix = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/SDK"
         local image = prefix .. "/lib/titan/0.6/titan.dll"
         write(private .. "/titan-sdk/lib/titan/0.6/titan.dll", "provider")
         directory(prefix)
@@ -327,7 +327,7 @@ describe("retained Titan SDK installation", function()
             pending("native CMD batch retirement")
             return
         end
-        local private = workspace .. "/rocks/titan/0.6.1-1"
+        local private = workspace .. "/rocks/titan/0.6.2-1"
         local prefix = workspace .. "/SDK with spaces"
         local launcher = prefix .. "/bin/titan-uninstall.bat"
         local entry = prefix .. "/cleanup.lua"
@@ -369,7 +369,7 @@ assert(os.remove(arg[0]))
             pending("Windows system OpenSSL retains its copied native SDK")
             return
         end
-        local private, prefix = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/SDK"
+        local private, prefix = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/SDK"
         write(private .. "/titan-sdk/include/titan.h", "current header")
         write(private .. "/installer/openssl-mode", "system\n")
         local obsolete = { "include/openssl/ssl.h", "include/titan_longjmp.h",
@@ -390,7 +390,7 @@ assert(os.remove(arg[0]))
             pending("Windows installations keep the Lua SDK and rock tree together")
             return
         end
-        local private, lua = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/Lua"
+        local private, lua = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/Lua"
         local alias, separate = workspace .. "/Lua alias", workspace .. "/separate tree"
         write(private .. "/titan-sdk/lib/liblua.a", "packaged SDK")
         write(private .. "/titan-sdk/src/lua-5.5.1/lua.h", "packaged internal header")
@@ -416,7 +416,7 @@ assert(os.remove(arg[0]))
         end)
         package.config = configuration
         assert.truthy(loaded, windows_installer)
-        local private, lua = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/Lua"
+        local private, lua = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/Lua"
         local separate = workspace .. "/separate tree"
         write(private .. "/titan-sdk/include/titan.h", "Titan header")
         directory(lua)
@@ -437,7 +437,7 @@ assert(os.remove(arg[0]))
         end)
         package.config = configuration
         assert.truthy(loaded, windows_installer)
-        local private, prefix = workspace .. "/rocks/titan/0.6.1-1", workspace .. "/SDK"
+        local private, prefix = workspace .. "/rocks/titan/0.6.2-1", workspace .. "/SDK"
         write(private .. "/titan-sdk/include/titan.h", "Titan header")
         write(prefix .. "/bin/titanc.exe", "native titanc")
         -- LuaRocks' Windows copy_binary writes these two text-mode lines
@@ -462,7 +462,7 @@ assert(os.remove(arg[0]))
         local lua = package.config:sub(1, 1) == "\\" and prefix or workspace .. "/Lua"
         directory(prefix)
         directory(lua)
-        local current = versions .. "/0.6.1-1"
+        local current = versions .. "/0.6.2-1"
         local old = versions .. "/0.5.0-1"
         local preserved = {
             "lib/liblua.a", "src/lua-5.5.1/lua.h", "lib/libbacktrace.a",
@@ -503,7 +503,7 @@ assert(os.remove(arg[0]))
         os.execute = function(command)
             assert.truthy(command:find("--tree", 1, true))
             assert.truthy(command:find("remove", 1, true))
-            assert.falsy(command:find("0.6.1-1", 1, true))
+            assert.falsy(command:find("0.6.2-1", 1, true))
             remove_tree(versions)
             return true, "exit", 0
         end
@@ -552,7 +552,7 @@ describe("Titan module publication preflight", function()
         assert(lfs.chdir(previous))
         prefix = workspace .. "/SDK"
         rocks = prefix .. "/lib/luarocks/rocks-5.5"
-        sdk = rocks .. "/titan/0.6.1-1"
+        sdk = rocks .. "/titan/0.6.2-1"
         write(sdk .. "/installer/location.lua", string.format(
             "return { tree = %q, lua_dir = %q, luarocks = %q }\n", prefix, prefix, "unused"))
         installer = assert(loadfile("scripts/titan_install.lua"))()

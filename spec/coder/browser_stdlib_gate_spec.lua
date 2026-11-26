@@ -23,7 +23,7 @@ end
 
 local function build_command(info, module, options)
     local setup = string.format("package.path=%q..package.path; " ..
-        "require('titan-compiler.driver').browser_link_options={purpose='test',assertions=2};",
+        "require('titan-compiler.driver').browser_link_options={purpose='test'};",
         repository .. "/?.lua;" .. repository .. "/?/init.lua;")
     local name = options and options.name or module
     local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",

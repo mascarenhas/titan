@@ -122,7 +122,7 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ${{ steps.toolchain.outputs.identity }}-rocks-layout-v1-${{ steps.toolchain.outputs.lua-build }}-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile', 'titan-0.6.1-1.rockspec') }}
+          key: ${{ steps.toolchain.outputs.identity }}-rocks-layout-v1-${{ steps.toolchain.outputs.lua-build }}-abi-${{ env.TITAN_ABI_VERSION }}-3.13.0-${{ hashFiles('Makefile', 'titan-0.6.2-1.rockspec') }}
 
       # Bump layout-v1 only when the cache path list changes.
       - name: Restore bundled libuv source and static build

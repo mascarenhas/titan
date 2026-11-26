@@ -4,7 +4,7 @@ export async function run(context) {
   const [path] = context.args;
   context.assert(path, 'pass a fidelity.mjs image');
   const image = await context.image(path);
-  const instance = image.create({locateFile: image.locateFile});
+  const instance = image.create({locateFile: image.locateFile, imports: context.imports});
   let caught;
   try { await instance.run(['abort_wait']); }
   catch (error) { caught = error; }

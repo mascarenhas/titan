@@ -15,6 +15,15 @@ env:
   TITAN_ABI_VERSION: "2"
   # Keep canonical and sanitizer providers bundled; the canary tests system OpenSSL.
   OPENSSL_MODE: bundled
+  # The browser jobs' pinned wasi-sdk and Binaryen release archives. Each step
+  # that builds browser images activates them itself, so they never reach the
+  # native builds. The digests come from the GitHub release metadata.
+  TITAN_WASI_SDK_VERSION: "34.0"
+  TITAN_WASI_SDK_SHA256: "b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4"
+  TITAN_WASI_SDK_ROOT: ${{ github.workspace }}/.wasi-sdk
+  TITAN_BINARYEN_VERSION: "133"
+  TITAN_BINARYEN_SHA256: "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489"
+  TITAN_BINARYEN_ROOT: ${{ github.workspace }}/.binaryen
 
 jobs:
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
@@ -53,7 +62,7 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.1-1.rockspec') }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.2-1.rockspec') }}
           restore-keys: |
             ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
@@ -265,7 +274,7 @@ jobs:
   # loader/runner/trace suites; SDK and stdlib integrations run in parallel.
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   browser-toolchain:
-    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 26)
+    name: browser target real toolchain (ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -278,10 +287,6 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       MAKEFLAGS: "-j4"
       TITAN_JOBS: "4"
-      # emsdk_env.sh unsets every EMSDK_* input it does not set itself, so the
-      # pin and the installation root must not use that prefix.
-      TITAN_EMSDK_VERSION: "6.0.13"
-      TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
       TITAN_NODE_VERSION: "26.13.0"
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
@@ -325,35 +330,50 @@ jobs:
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           .lua/bin/lua -v
 
-      - name: Restore the pinned Emscripten SDK
+      - &restore-browser-toolchain
+        name: Restore the pinned wasi-sdk and Binaryen
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/.emsdk
-          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1
-          restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
+          path: |
+            ${{ env.TITAN_WASI_SDK_ROOT }}
+            ${{ env.TITAN_BINARYEN_ROOT }}
+          # The digests are part of the identity: re-pinning a release to
+          # different archives must never restore the previous tools.
+          key: ubuntu-24.04-${{ runner.arch }}-wasi-sdk-${{ env.TITAN_WASI_SDK_VERSION }}-${{ env.TITAN_WASI_SDK_SHA256 }}-binaryen-${{ env.TITAN_BINARYEN_VERSION }}-${{ env.TITAN_BINARYEN_SHA256 }}-v1
 
-      - name: Install Emscripten ${{ env.TITAN_EMSDK_VERSION }}
+      - &install-browser-toolchain
+        name: Install wasi-sdk and Binaryen
         run: |
-          if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
-            # The clone is the installer, not the pin: the pin is the release
-            # tag that install activates and the record names.
-            rm -rf "$TITAN_EMSDK_ROOT"
-            git clone --depth 1 https://github.com/emscripten-core/emsdk.git \
-              "$TITAN_EMSDK_ROOT"
+          set -euo pipefail
+          if [ ! -x "$TITAN_WASI_SDK_ROOT/bin/clang" ]; then
+            # Release tags name only the major version.
+            archive="$RUNNER_TEMP/wasi-sdk-$TITAN_WASI_SDK_VERSION.tar.gz"
+            curl -fsSL -o "$archive" \
+              "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${TITAN_WASI_SDK_VERSION%%.*}/wasi-sdk-$TITAN_WASI_SDK_VERSION-x86_64-linux.tar.gz"
+            echo "$TITAN_WASI_SDK_SHA256  $archive" | sha256sum -c --strict -
+            rm -rf "$TITAN_WASI_SDK_ROOT"
+            mkdir -p "$TITAN_WASI_SDK_ROOT"
+            tar -xzf "$archive" -C "$TITAN_WASI_SDK_ROOT" --strip-components=1
+            rm -f "$archive"
           fi
-          # Both commands are idempotent, so a restored installation only
-          # verifies the pinned version instead of downloading it again.
-          "$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"
-          "$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          emcc --version | head -n 1
-          installed=$(emcc --version |
-            sed -n 's/.*) \([0-9][0-9.]*\).*/\1/p' | head -n 1)
-          test "$installed" = "$TITAN_EMSDK_VERSION"
+          if [ ! -x "$TITAN_BINARYEN_ROOT/bin/wasm-opt" ]; then
+            archive="$RUNNER_TEMP/binaryen-version_$TITAN_BINARYEN_VERSION.tar.gz"
+            curl -fsSL -o "$archive" \
+              "https://github.com/WebAssembly/binaryen/releases/download/version_$TITAN_BINARYEN_VERSION/binaryen-version_$TITAN_BINARYEN_VERSION-x86_64-linux.tar.gz"
+            echo "$TITAN_BINARYEN_SHA256  $archive" | sha256sum -c --strict -
+            rm -rf "$TITAN_BINARYEN_ROOT"
+            mkdir -p "$TITAN_BINARYEN_ROOT"
+            # Titan runs only the statically linked wasm-opt.
+            tar -xzf "$archive" -C "$TITAN_BINARYEN_ROOT" --strip-components=1 \
+              "binaryen-version_$TITAN_BINARYEN_VERSION/bin/wasm-opt"
+            rm -f "$archive"
+          fi
+          test "$(head -n 1 "$TITAN_WASI_SDK_ROOT/VERSION")" = "$TITAN_WASI_SDK_VERSION"
+          "$TITAN_WASI_SDK_ROOT/bin/clang" --version | head -n 1
+          test "$("$TITAN_BINARYEN_ROOT/bin/wasm-opt" --version)" = \
+            "wasm-opt version $TITAN_BINARYEN_VERSION (version_$TITAN_BINARYEN_VERSION)"
 
-      # The Emscripten SDK still bundles Node 24 for its own tools. Browser
-      # images use the separately pinned, unflagged JSPI runtime.
+      # Browser images need the pinned, unflagged JSPI runtime.
       - name: Install the pinned Node 26 runtime
         uses: actions/setup-node@v6
         with:
@@ -460,20 +480,22 @@ jobs:
 
       - name: Install the fork's browser Lua into the validation prefix
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           make lua-browser PREFIX="$PREFIX"
           for installed in liblua.a liblua-config.txt \
               include/lua.h include/luaconf.h include/lstate.h; do
             test -f "$PREFIX/lib/browser/$installed"
           done
 
-      # The rockspec builds the native runtime and stdlib. Emscripten must not
-      # be visible here, so this step proves the browser toolchain stays out of
+      # The rockspec builds the native runtime and stdlib. The browser
+      # toolchain must not be visible here, so this step proves it stays out of
       # the ordinary native build.
-      - name: Install the native runtime and compiler with LuaRocks (no Emscripten)
+      - name: Install the native runtime and compiler with LuaRocks (no browser toolchain)
         run: |
-          test -z "${EMSDK:-}"
-          ! command -v emcc >/dev/null 2>&1
+          test -z "${WASI_SDK_PATH:-}"
+          test -z "${BINARYEN_ROOT:-}"
+          test -z "${WASM_OPT:-}"
+          if command -v wasm-opt >/dev/null 2>&1; then exit 1; fi
           # The prepared tree keeps unregistered compiler copies. LuaRocks would
           # move them aside as "~" backups instead of installing this commit, so
           # remove only those three preparation paths, exactly as the
@@ -485,13 +507,12 @@ jobs:
 
       - name: Build and install the browser SDK
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           test -z "$(ls -A "$PREFIX/lib/titan-browser" 2>/dev/null || true)"
           make browser-sdk PREFIX="$PREFIX"
-          for installed in libtitan.a titan.a titan-browser.mjs \
-              titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
+          for installed in libtitan.a titan.a titan-browser.mjs titan-wasm-factory.mjs \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs titan-browser-module-check.mjs \
+              titan-browser-node-worker.mjs titan-browser-page.mjs \
               titan-protobuf.mjs build-profile absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
@@ -504,7 +525,7 @@ jobs:
           TITAN_PROBE_CACHE_DISABLE: "1"
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           gate_specs=(
             spec/wasm_toolchain_spec.lua
             spec/coder/browser_toolchain_spec.lua
@@ -522,7 +543,7 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/browser-gate.log"
 
       # Each browser job contributes the compiler paths exercised by its specs,
-      # independently of the emsdk-free compiler shards.
+      # independently of the compiler shards, which have no browser toolchain.
       - name: Generate browser coverage report
         run: |
           set -euo pipefail
@@ -543,7 +564,7 @@ jobs:
 
       - name: Build the browser runner images
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           output="$GITHUB_WORKSPACE/out/browser/runner"
           mkdir -p "$output"
           "$PREFIX/bin/titanc" -q --target browser --test \
@@ -566,59 +587,44 @@ jobs:
 
       # The loader suite takes image paths relative to --root, so every fixture
       # is built into one isolated root: loader_app and fidelity as programs,
-      # loader_names as a test image, each at both assertion profiles.
-      - name: Build the portable loader images for both assertion profiles
+      # loader_names as a test image, and both programs again as optimized
+      # measurement images, a second link of the same sources.
+      - name: Build the portable loader images
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           root="$GITHUB_WORKSPACE/out/browser/loader"
-          for assertions in 2 0; do
-            output="$root/assertions-$assertions"
-            mkdir -p "$output"
-            preamble="package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='program',assertions=$assertions}"
-            # A --test build is a test image and must link with the test
-            # profile, never the program profile.
-            test_preamble="package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='test',assertions=$assertions}"
-            for module in loader_app fidelity; do
-              TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e "$preamble" \
-                "$GITHUB_WORKSPACE/titanc" -q --target browser --no-uv-bootstrap \
-                --tree spec/fixtures/browser_loader -o "$output" \
-                --exe "$output/$module.mjs" \
-                --c-source spec/fixtures/browser_loader/loader.c "$module"
-            done
-            TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e "$test_preamble" \
-              "$GITHUB_WORKSPACE/titanc" -q --target browser --test --no-uv-bootstrap \
-              --tree spec/fixtures/browser_loader -o "$output" \
-              --exe "$output/loader_names.mjs" loader_names
-            for image in loader_app fidelity loader_names; do
-              test -f "$output/$image.mjs"
-              test -f "$output/$image.wasm"
-              test -f "$output/$image.wasm.map"
-              test -f "$output/$image.wasm.trace"
-            done
-          done
-          # Exercise the guard in an optimized, assertions-off measurement
-          # image; correctness must not depend on debug assertions.
+          output="$root/program"
           optimized="$root/optimized"
-          mkdir -p "$optimized"
-          # Emscripten 6.0.13 excludes JSPI from import/export minification.
-          # Keep the shrink control, but assert stable exported names rather
-          # than claiming this JSPI image exercised minified names.
-          TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e \
-            "package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='baseline',optimization='O2',assertions=0}" \
-            "$GITHUB_WORKSPACE/titanc" -q --target browser --incremental --no-uv-bootstrap \
-            --ldflag=-Os \
-            --tree spec/fixtures/browser_loader -o "$optimized" \
-            --exe "$optimized/fidelity.mjs" \
-            --c-source spec/fixtures/browser_loader/loader.c fidelity
-          test -f "$optimized/fidelity.mjs"
-          test -f "$optimized/fidelity.wasm"
-          test -f "$optimized/fidelity.wasm.map"
-          test -f "$optimized/fidelity.wasm.trace"
+          mkdir -p "$output" "$optimized"
+          # Exercise the guard in an optimized measurement image too;
+          # correctness must not depend on the program profile.
+          preamble="package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='baseline',optimization='O2'}"
+          for module in loader_app fidelity; do
+            "$PREFIX/bin/titanc" -q --target browser --no-uv-bootstrap \
+              --tree spec/fixtures/browser_loader -o "$output" \
+              --exe "$output/$module.mjs" \
+              --c-source spec/fixtures/browser_loader/loader.c "$module"
+            TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e "$preamble" \
+              "$GITHUB_WORKSPACE/titanc" -q --target browser --incremental --no-uv-bootstrap \
+              --tree spec/fixtures/browser_loader -o "$optimized" \
+              --exe "$optimized/$module.mjs" \
+              --c-source spec/fixtures/browser_loader/loader.c "$module"
+          done
+          "$PREFIX/bin/titanc" -q --target browser --test --no-uv-bootstrap \
+            --tree spec/fixtures/browser_loader -o "$output" \
+            --exe "$output/loader_names.mjs" loader_names
+          for image in program/loader_app program/fidelity program/loader_names \
+              optimized/loader_app optimized/fidelity; do
+            test -f "$root/$image.mjs"
+            test -f "$root/$image.wasm"
+            test -f "$root/$image.wasm.map"
+            test -f "$root/$image.wasm.trace"
+          done
           "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry \
-            "$root"/assertions-*/loader_names.wasm
+            "$output/loader_names.wasm"
           "$PREFIX/bin/lua" -E scripts/check_browser_stdlib.lua imports entry,fixture:loader,fixture:controls \
-            "$root"/assertions-*/loader_app.wasm "$root"/assertions-*/fidelity.wasm \
-            "$optimized/fidelity.wasm"
+            "$output/loader_app.wasm" "$output/fidelity.wasm" \
+            "$optimized/loader_app.wasm" "$optimized/fidelity.wasm"
 
       - name: Run the portable loader suite under Node and Chromium
         run: |
@@ -627,19 +633,17 @@ jobs:
           # Image paths are slash-separated relative paths beneath --root, so the
           # suite is rooted at the workspace and never sees host absolute paths.
           images=(
-            out/browser/loader/assertions-2/loader_app.mjs
-            out/browser/loader/assertions-0/loader_app.mjs
+            out/browser/loader/program/loader_app.mjs
+            out/browser/loader/optimized/loader_app.mjs
             --fidelity
-            out/browser/loader/assertions-2/fidelity.mjs
-            out/browser/loader/assertions-0/fidelity.mjs
+            out/browser/loader/program/fidelity.mjs
             --names
-            out/browser/loader/assertions-2/loader_names.mjs
-            out/browser/loader/assertions-0/loader_names.mjs
+            out/browser/loader/program/loader_names.mjs
           )
           for engine in node chromium; do
             echo "loader suite: $engine"
             "$runner" --engine "$engine" --timeout 300000 --grace 2000 \
-              --root "$GITHUB_WORKSPACE" \
+              --root "$GITHUB_WORKSPACE" --imports spec/fixtures/browser_runtime/fixture-imports.mjs \
               --js-test spec/browser/loader.test.mjs -- "${images[@]}" \
               2>&1 | tee -a "$RUNNER_TEMP/browser-loader.log"
           done
@@ -651,7 +655,7 @@ jobs:
           for engine in node chromium; do
             echo "optimized guard: $engine"
             "$runner" --engine "$engine" --timeout 300000 --grace 2000 \
-              --root "$GITHUB_WORKSPACE" \
+              --root "$GITHUB_WORKSPACE" --imports spec/fixtures/browser_runtime/fixture-imports.mjs \
               --js-test spec/fixtures/browser_loader/optimized-guard.mjs -- \
               out/browser/loader/optimized/fidelity.mjs \
               2>&1 | tee -a "$RUNNER_TEMP/browser-guard.log"
@@ -662,7 +666,7 @@ jobs:
           TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
           # The supervisor's containment case reuses the loader suite's fidelity
           # image instead of building a second copy.
-          TITAN_BROWSER_LOADER_IMAGE: ${{ github.workspace }}/out/browser/loader/assertions-2/fidelity.mjs
+          TITAN_BROWSER_LOADER_IMAGE: ${{ github.workspace }}/out/browser/loader/program/fidelity.mjs
         run: |
           set -euo pipefail
           "$TITAN_NODE" --test spec/browser/runner.test.mjs \
@@ -671,52 +675,55 @@ jobs:
       - name: Run the browser trace adapter and supervisor units
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT"
+          # D11: clang's ambient inputs never reach these direct compiles, as
+          # on every Titan and fork browser compiler route.
+          unset CCC_OVERRIDE_OPTIONS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH
           output="$GITHUB_WORKSPACE/out/browser/trace-adapter"
           mkdir -p "$output"
-          trace_flags=(-std=c99 -O1 -fno-inline -fno-optimize-sibling-calls
-            -gsource-map -g2 -sMODULARIZE=1 -sEXPORT_ES6=1
-            -sENVIRONMENT=web,node -sALLOW_MEMORY_GROWTH=1 --no-entry
-            --js-library titan-runtime/browser/titan-browser-trace.js)
+          # Plain reactor modules: the units instantiate them with the factory's
+          # own trace and WASI imports, with no Titan link involved.
+          compile=(--target=wasm32-wasip1 -mexec-model=reactor -std=c99 -O1
+            -fno-inline -fno-optimize-sibling-calls -gdwarf-4 -gline-tables-only
+            -mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false
+            -D_WASI_EMULATED_PROCESS_CLOCKS)
+          link=(-Wl,--export=titan_browser_trace_identity -Wl,--export=malloc
+            -Wl,--export=free -lsetjmp -lwasi-emulated-process-clocks)
           # The filter image compiles against the installed Lua archive, so its
           # macros are the installed record's, never a local list: the fork
           # changes them (LUAI_MAXCCALLS) and a mismatch is a different
           # configuration than the archive.
           lua_defines="$(sed -n 's/^lua_defines=//p' "$PREFIX/lib/browser/liblua-config.txt")"
           test -n "$lua_defines"
-          for assertions in 2 0; do
-            emcc "${trace_flags[@]}" -sASSERTIONS="$assertions" \
-              -sEXPORTED_FUNCTIONS='["_trace_capture_once","_titan_browser_trace_identity"]' \
-              -Ititan-runtime/browser spec/fixtures/browser_trace_adapter/lifecycle.c \
-              -o "$output/lifecycle-$assertions.mjs"
-            emcc "${trace_flags[@]}" -sASSERTIONS="$assertions" \
-              -Wall -Wno-unused-function -DTITAN_TARGET_BROWSER=1 \
-              -DTITAN_COROUTINE_STACK_SIZE=262144 \
-              $lua_defines -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1 \
-              -sEXPORTED_FUNCTIONS='["_trace_filter_case","_trace_filter_status","_titan_browser_trace_identity"]' \
-              -sEXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
-              -I"$PREFIX/lib/browser/include" -Ititan-runtime -I"$PREFIX/include" \
-              spec/fixtures/browser_trace_adapter/filter.c titan-runtime/titan.c \
-              "$PREFIX/lib/browser/liblua.a" -o "$output/filter-$assertions.mjs"
-            TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE="$output/lifecycle-$assertions.mjs" \
-              TITAN_BROWSER_TRACE_FILTER_IMAGE="$output/filter-$assertions.mjs" \
-              "$TITAN_NODE" --test spec/browser/trace-adapter.test.mjs \
-              spec/browser/playwright-runner.test.mjs \
-              2>&1 | tee -a "$RUNNER_TEMP/browser-trace-units.log"
-          done
+          "$WASI_SDK_PATH/bin/clang" "${compile[@]}" \
+            -Ititan-runtime/browser spec/fixtures/browser_trace_adapter/lifecycle.c \
+            -Wl,--export=trace_capture_once "${link[@]}" -o "$output/lifecycle.wasm"
+          "$WASI_SDK_PATH/bin/clang" "${compile[@]}" \
+            -Wall -Wno-unused-function -DTITAN_TARGET_BROWSER=1 \
+            -DTITAN_COROUTINE_STACK_SIZE=262144 $lua_defines \
+            -I"$PREFIX/lib/browser/include" -Ititan-runtime -I"$PREFIX/include" \
+            spec/fixtures/browser_trace_adapter/filter.c titan-runtime/titan.c \
+            "$PREFIX/lib/browser/liblua.a" \
+            -Wl,--export=trace_filter_case -Wl,--export=trace_filter_status \
+            "${link[@]}" -o "$output/filter.wasm"
+          TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE="$output/lifecycle.wasm" \
+            TITAN_BROWSER_TRACE_FILTER_IMAGE="$output/filter.wasm" \
+            "$TITAN_NODE" --test spec/browser/trace-adapter.test.mjs \
+            spec/browser/playwright-runner.test.mjs \
+            2>&1 | tee "$RUNNER_TEMP/browser-trace-units.log"
 
       - name: Build and run the browser trace gate under Node
         env:
           TITAN_ROOT: ${{ github.workspace }}/.lua
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           output="$GITHUB_WORKSPACE/out/browser/trace-node"
           runner="$PREFIX/lib/titan-browser/0.6/titan-browser-run"
           lua -E spec/browser/build-trace.lua "$output" \
             2>&1 | tee "$RUNNER_TEMP/browser-trace-build.log"
           "$runner" --engine node --timeout 300000 --grace 2000 \
-            --root "$output" --js-test "$output/trace.test.mjs" \
+            --root "$output" --imports "$output/fixture-imports.mjs" --js-test "$output/trace.test.mjs" \
             2>&1 | tee "$RUNNER_TEMP/browser-trace-node.log"
           TITAN_TRACE_OUTPUT="$output" TITAN_TRACE_RUNNER="$runner" \
             "$TITAN_NODE" --input-type=module <<'JS' \
@@ -730,7 +737,8 @@ jobs:
           for (const row of manifest.degradedCases) {
             const result = spawnSync(process.env.TITAN_TRACE_RUNNER,
               ['--engine', 'node', '--timeout', '60000', '--root', root,
-               resolve(root, row.image)], {encoding: 'utf8', timeout: 90000});
+               '--imports', resolve(root, manifest.imports), resolve(root, row.image)],
+              {encoding: 'utf8', timeout: 90000});
             process.stdout.write(result.stdout || '');
             process.stderr.write(result.stderr || '');
             if (result.error || result.status !== 1 || result.stdout.length !== 0 ||
@@ -739,7 +747,7 @@ jobs:
           }
           JS
           "$runner" --engine node --timeout 300000 --grace 2000 \
-            --allow-degraded-trace --root "$output" \
+            --allow-degraded-trace --root "$output" --imports "$output/fixture-imports.mjs" \
             --js-test "$output/trace.test.mjs" -- --degraded \
             2>&1 | tee "$RUNNER_TEMP/browser-trace-node-degraded.log"
 
@@ -758,7 +766,7 @@ jobs:
   # lists together with the core suite, which runs only in the sdk shard.
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   browser-stdlib:
-    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, emsdk 6.0.13, Node 26)
+    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -797,10 +805,6 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       MAKEFLAGS: "-j4"
       TITAN_JOBS: "4"
-      # emsdk_env.sh unsets every EMSDK_* input it does not set itself, so the
-      # pin and the installation root must not use that prefix.
-      TITAN_EMSDK_VERSION: "6.0.13"
-      TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
       TITAN_NODE_VERSION: "26.13.0"
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
@@ -833,35 +837,11 @@ jobs:
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           .lua/bin/lua -v
 
-      - name: Restore the pinned Emscripten SDK
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.emsdk
-          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1
-          restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
+      - *restore-browser-toolchain
 
-      - name: Install Emscripten ${{ env.TITAN_EMSDK_VERSION }}
-        run: |
-          if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
-            # The clone is the installer, not the pin: the pin is the release
-            # tag that install activates and the record names.
-            rm -rf "$TITAN_EMSDK_ROOT"
-            git clone --depth 1 https://github.com/emscripten-core/emsdk.git \
-              "$TITAN_EMSDK_ROOT"
-          fi
-          # Both commands are idempotent, so a restored installation only
-          # verifies the pinned version instead of downloading it again.
-          "$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"
-          "$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          emcc --version | head -n 1
-          installed=$(emcc --version |
-            sed -n 's/.*) \([0-9][0-9.]*\).*/\1/p' | head -n 1)
-          test "$installed" = "$TITAN_EMSDK_VERSION"
+      - *install-browser-toolchain
 
-      # The Emscripten SDK still bundles Node 24 for its own tools. Browser
-      # images use the separately pinned, unflagged JSPI runtime.
+      # Browser images need the pinned, unflagged JSPI runtime.
       - name: Install the pinned Node 26 runtime
         uses: actions/setup-node@v6
         with:
@@ -968,20 +948,22 @@ jobs:
 
       - name: Install the fork's browser Lua into the validation prefix
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           make lua-browser PREFIX="$PREFIX"
           for installed in liblua.a liblua-config.txt \
               include/lua.h include/luaconf.h include/lstate.h; do
             test -f "$PREFIX/lib/browser/$installed"
           done
 
-      # The rockspec builds the native runtime and stdlib. Emscripten must not
-      # be visible here, so this step proves the browser toolchain stays out of
+      # The rockspec builds the native runtime and stdlib. The browser
+      # toolchain must not be visible here, so this step proves it stays out of
       # the ordinary native build.
-      - name: Install the native runtime and compiler with LuaRocks (no Emscripten)
+      - name: Install the native runtime and compiler with LuaRocks (no browser toolchain)
         run: |
-          test -z "${EMSDK:-}"
-          ! command -v emcc >/dev/null 2>&1
+          test -z "${WASI_SDK_PATH:-}"
+          test -z "${BINARYEN_ROOT:-}"
+          test -z "${WASM_OPT:-}"
+          if command -v wasm-opt >/dev/null 2>&1; then exit 1; fi
           # The prepared tree keeps unregistered compiler copies. LuaRocks would
           # move them aside as "~" backups instead of installing this commit, so
           # remove only those three preparation paths, exactly as the
@@ -993,13 +975,12 @@ jobs:
 
       - name: Build and install the browser SDK
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           test -z "$(ls -A "$PREFIX/lib/titan-browser" 2>/dev/null || true)"
           make browser-sdk PREFIX="$PREFIX"
-          for installed in libtitan.a titan.a titan-browser.mjs \
-              titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
+          for installed in libtitan.a titan.a titan-browser.mjs titan-wasm-factory.mjs \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs titan-browser-module-check.mjs \
+              titan-browser-node-worker.mjs titan-browser-page.mjs \
               titan-protobuf.mjs build-profile analysis-target absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
@@ -1008,8 +989,9 @@ jobs:
       - name: Verify the offline browser semantic release pack
         if: matrix.shard == 'scheduler'
         run: |
-          test -z "${EMSDK:-}"
-          ! command -v emcc >/dev/null 2>&1
+          test -z "${WASI_SDK_PATH:-}"
+          test -z "${BINARYEN_ROOT:-}"
+          test -z "${WASM_OPT:-}"
           TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover \
             -s spec -p browser_semantic_pack_test.py -v
 
@@ -1017,7 +999,7 @@ jobs:
         if: matrix.stdlib-suite
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           make titan-stdlib-browser-test PREFIX="$PREFIX" \
             2>&1 | tee "$RUNNER_TEMP/browser-stdlib.log"
 
@@ -1029,7 +1011,7 @@ jobs:
           TITAN_BROWSER_GATE_SPECS: ${{ matrix.gate-specs }}
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           read -r -a gate_specs <<< "$TITAN_BROWSER_GATE_SPECS"
           for gate_spec in "${gate_specs[@]}"; do
             if [[ ! -f $gate_spec ]]; then
@@ -1108,8 +1090,6 @@ jobs:
       TITAN_BUILD_PROFILE: ${{ matrix.profile }}
       CC: gcc-14
       LUA_CC: gcc-14
-      TITAN_EMSDK_VERSION: "6.0.13"
-      TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
       TITAN_NODE_VERSION: "26.13.0"
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
@@ -1170,33 +1150,18 @@ jobs:
 
       - name: Install the selected native compiler and SDK profile
         run: |
-          test -z "${EMSDK:-}"
-          ! command -v emcc >/dev/null 2>&1
+          test -z "${WASI_SDK_PATH:-}"
+          test -z "${BINARYEN_ROOT:-}"
+          test -z "${WASM_OPT:-}"
+          if command -v wasm-opt >/dev/null 2>&1; then exit 1; fi
           rm -f "$PREFIX/bin/titanc"
           rm -rf "$PREFIX/share/lua/5.5/titan-compiler"
           rm -rf "$PREFIX/share/lua/5.5/c-parser"
           "$PREFIX/bin/luarocks" make
 
-      - name: Restore the pinned Emscripten SDK
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.emsdk
-          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1
-          restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
+      - *restore-browser-toolchain
 
-      - name: Install Emscripten
-        run: |
-          set -euo pipefail
-          if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
-            git -C "$GITHUB_WORKSPACE" clone --depth 1 \
-              https://github.com/emscripten-core/emsdk.git "$TITAN_EMSDK_ROOT"
-          fi
-          "$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"
-          "$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          emcc --version
-          emcc --version | grep -q " $TITAN_EMSDK_VERSION "
+      - *install-browser-toolchain
 
       - name: Install the pinned Node 26 runtime
         uses: actions/setup-node@v6
@@ -1214,11 +1179,10 @@ jobs:
 
       - name: Install browser Lua and SDK
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           make lua-browser PREFIX="$PREFIX"
           make browser-sdk PREFIX="$PREFIX"
-          test -f "$PREFIX/lib/titan-browser/0.6/titan-browser-trace.js"
-          test -f "$PREFIX/lib/titan-browser/0.6/titan-browser-bridge.js"
+          test -f "$PREFIX/lib/titan-browser/0.6/titan-wasm-factory.mjs"
           test "$(cat "$PREFIX/lib/titan-browser/0.6/build-profile")" = "$TITAN_BUILD_PROFILE"
 
       - name: Restore Playwright-managed browsers
@@ -1244,10 +1208,10 @@ jobs:
             "$TITAN_NODE" --test spec/browser/playwright-runner.test.mjs \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-supervisor.log"
 
-      - name: Build the portable trace gate for both assertion modes
+      - name: Build the portable trace gate
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           lua -E spec/browser/build-trace.lua "$TITAN_TRACE_OUTPUT" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-build.log"
 
@@ -1259,6 +1223,7 @@ jobs:
             "$TITAN_NODE" spec/browser/playwright-run.mjs \
               --engine "$engine" --timeout 300000 --grace 2000 \
               --sdk "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT" \
+              --imports "$TITAN_TRACE_OUTPUT/fixture-imports.mjs" \
               "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
               2>&1 | tee "$RUNNER_TEMP/browser-playwright-trace-$engine.log"
           done
@@ -1280,7 +1245,8 @@ jobs:
             const result = spawnSync(process.execPath,
               ['spec/browser/playwright-run.mjs', '--engine', process.env.TITAN_TRACE_ENGINE,
                '--timeout', '60000', '--sdk', resolve(process.env.PREFIX, 'lib/titan-browser/0.6'),
-               '--root', root, '--image', resolve(root, row.image)],
+               '--root', root, '--imports', resolve(root, manifest.imports),
+               '--image', resolve(root, row.image)],
               {encoding: 'utf8', timeout: 90000});
             process.stdout.write(result.stdout || '');
             process.stderr.write(result.stderr || '');
@@ -1292,22 +1258,22 @@ jobs:
             "$TITAN_NODE" spec/browser/playwright-run.mjs \
               --engine "$engine" --timeout 300000 --grace 2000 \
               --allow-degraded-trace --sdk "$PREFIX/lib/titan-browser/0.6" \
-              --root "$TITAN_TRACE_OUTPUT" \
+              --root "$TITAN_TRACE_OUTPUT" --imports "$TITAN_TRACE_OUTPUT/fixture-imports.mjs" \
               "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
               2>&1 | tee "$RUNNER_TEMP/browser-playwright-degraded-$engine.log"
           done
 
-      - name: Build the portable bridge gate for both assertion modes
+      - name: Build the portable bridge gate
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           lua -E spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-bridge-build.log"
 
       - name: Build the live browser HTTP and WebSocket client fixtures
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           lua -E spec/browser/build-net.lua "$TITAN_NET_OUTPUT" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-net-build.log"
 
@@ -1341,42 +1307,40 @@ jobs:
           if (process.env.TITAN_BUILD_PROFILE === 'production' && engines[0] === 'chromium')
             engines.push('node');
           for (const engine of engines) {
-            const common = ['--engine', engine, '--timeout', '300000', '--grace', '2000', '--root', root];
+            const common = ['--engine', engine, '--timeout', '300000', '--grace', '2000', '--root', root,
+              '--imports', resolve(root, 'fixture-imports.mjs')];
             const runner = engine === 'node'
               ? [resolve(sdk, 'titan-browser-run.mjs'), ...common, '--js-test']
               : [resolve('spec/browser/playwright-run.mjs'), ...common, '--sdk', sdk];
-            for (const assertions of [2, 0]) {
-              // integration.mjs takes all three images; the negative scripts
-              // take only the legacy bridge image.
-              const images = [`assertions-${assertions}/bridge.mjs`,
-                `assertions-${assertions}/initializer-failure.mjs`,
-                `assertions-${assertions}/public-states.mjs`];
-              // Page tests run their own image and need a page's DOM: the html5
-              // click counter's synchronous C callbacks and the driver's
-              // responsiveness while Tasks wait and yield.
-              const pages = engine === 'node' ? [] : [
-                ['counter.mjs', 0, 'COUNTER {"verdict":"PASS"'],
-                ['responsive.mjs', 0, 'RESPONSIVE {"verdict":"PASS"']];
-              for (const [script, status, marker] of [
-                ['integration.mjs', 0, '"verdict":"PASS"'],
-                ['unhandled.mjs', 74, 'bridge unhandled opaque promise'],
-                ['unhandled-result.mjs', 74, 'bridge unhandled reverse result'],
-                ['poison-retirement.mjs', 70, 'poison-retirement-complete'],
-                ...pages]) {
-                console.log(`BRIDGE-RUN engine=${engine} assertions=${assertions} script=${script}`);
-                const args = pages.some(([page]) => page === script) ? [`assertions-${assertions}/${script}`]
-                  : status === 0 ? images : images.slice(0, 1);
-                const result = spawnSync(process.execPath,
-                  [...runner, resolve(root, script), '--', ...args],
-                  {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 320000});
-                process.stdout.write(result.stdout ?? '');
-                process.stderr.write(result.stderr ?? '');
-                const receipt = script === 'poison-retirement.mjs'
-                  ? result.stdout ?? '' : (result.stdout ?? '') + (result.stderr ?? '');
-                if (result.error || result.status !== status || !receipt.includes(marker))
-                  throw new Error(`${engine}/${assertions}/${script}: expected ${status} and ${marker}, got ${result.status}`,
-                    {cause: result.error});
-              }
+            // integration.mjs takes all three images; the negative scripts
+            // take only the legacy bridge image.
+            const images = ['images/bridge.mjs', 'images/initializer-failure.mjs',
+              'images/public-states.mjs'];
+            // Page tests run their own image and need a page's DOM: the click
+            // counter's synchronous C callbacks and the driver's
+            // responsiveness while Tasks wait and yield.
+            const pages = engine === 'node' ? [] : [
+              ['counter.mjs', 0, 'COUNTER {"verdict":"PASS"'],
+              ['responsive.mjs', 0, 'RESPONSIVE {"verdict":"PASS"']];
+            for (const [script, status, marker] of [
+              ['integration.mjs', 0, '"verdict":"PASS"'],
+              ['unhandled.mjs', 74, 'bridge unhandled opaque promise'],
+              ['unhandled-result.mjs', 74, 'bridge unhandled reverse result'],
+              ['poison-retirement.mjs', 70, 'poison-retirement-complete'],
+              ...pages]) {
+              console.log(`BRIDGE-RUN engine=${engine} script=${script}`);
+              const args = pages.some(([page]) => page === script) ? [`images/${script}`]
+                : status === 0 ? images : images.slice(0, 1);
+              const result = spawnSync(process.execPath,
+                [...runner, resolve(root, script), '--', ...args],
+                {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 320000});
+              process.stdout.write(result.stdout ?? '');
+              process.stderr.write(result.stderr ?? '');
+              const receipt = script === 'poison-retirement.mjs'
+                ? result.stdout ?? '' : (result.stdout ?? '') + (result.stderr ?? '');
+              if (result.error || result.status !== status || !receipt.includes(marker))
+                throw new Error(`${engine}/${script}: expected ${status} and ${marker}, got ${result.status}`,
+                  {cause: result.error});
             }
           }
           JS
@@ -1387,7 +1351,7 @@ jobs:
       - name: Build the browser chapter's complete application and its server
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           lua -E spec/browser/build-delivery.lua "$TITAN_DELIVERY_OUTPUT" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery-build.log"
 
@@ -1428,15 +1392,15 @@ jobs:
           TITAN_PROBE_CACHE_DISABLE: "1"
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_docs_spec.lua \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-docs.log"
 
       # A validation install cannot stand in for a production one: the
       # descriptor and SDK identity would disagree. This cell already owns a
       # production prefix, so the profile-dependent pins run here and nowhere
-      # else, and are `pending` in every validation run by design. The module
-      # check case runs in both installations, so each profile links a real
+      # else, and are `pending` in every validation run by design. The linked
+      # image case runs in both installations, so each profile links a real
       # image through it.
       - name: Run the production-only browser pins
         if: matrix.profile == 'production' && matrix.engine == 'chromium'
@@ -1445,9 +1409,9 @@ jobs:
           TITAN_PROBE_CACHE_DISABLE: "1"
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua \
-            --filter="keeps frame flags on test owners" --filter="checks the linked module" \
+            --filter="keeps frame flags on test owners" --filter="checks the linked image" \
             2>&1 | tee "$RUNNER_TEMP/browser-production-pins.log"
 
       # Node is the binding engine for the C-call limit, and the other Node
@@ -1458,7 +1422,8 @@ jobs:
           set -euo pipefail
           runner="$PREFIX/lib/titan-browser/0.6/titan-browser-run"
           "$runner" --engine node --timeout 300000 --grace 2000 \
-            --root "$TITAN_TRACE_OUTPUT" --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
+            --root "$TITAN_TRACE_OUTPUT" --imports "$TITAN_TRACE_OUTPUT/fixture-imports.mjs" \
+            --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-trace.log"
           TITAN_TRACE_OUTPUT="$TITAN_TRACE_OUTPUT" TITAN_TRACE_RUNNER="$runner" \
             "$TITAN_NODE" --input-type=module <<'JS' \
@@ -1472,7 +1437,8 @@ jobs:
           for (const row of manifest.degradedCases) {
             const result = spawnSync(process.env.TITAN_TRACE_RUNNER,
               ['--engine', 'node', '--timeout', '60000', '--root', root,
-               resolve(root, row.image)], {encoding: 'utf8', timeout: 90000});
+               '--imports', resolve(root, manifest.imports), resolve(root, row.image)],
+              {encoding: 'utf8', timeout: 90000});
             process.stdout.write(result.stdout || '');
             process.stderr.write(result.stderr || '');
             if (result.error || result.status !== 1 || result.stdout.length !== 0 ||
@@ -1482,6 +1448,7 @@ jobs:
           JS
           "$runner" --engine node --timeout 300000 --grace 2000 \
             --allow-degraded-trace --root "$TITAN_TRACE_OUTPUT" \
+            --imports "$TITAN_TRACE_OUTPUT/fixture-imports.mjs" \
             --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-degraded.log"
 
@@ -1494,7 +1461,7 @@ jobs:
           TITAN_TRACE_ENGINE: ${{ matrix.engine }}
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           lua -E spec/browser/build-records.lua "$RUNNER_TEMP/browser-records" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-records-build.log"
           "$TITAN_NODE" spec/fixtures/browser_records/collect.mjs --sdk "$PREFIX/lib/titan-browser/0.6" \
@@ -1508,7 +1475,7 @@ jobs:
         if: matrix.profile == 'validation'
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           make titan-stdlib-browser-test PREFIX="$PREFIX" TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINES" \
             TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs --image --sdk \"$PREFIX/lib/titan-browser/0.6\"" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-stdlib.log"
@@ -1547,7 +1514,7 @@ jobs:
   # clone moved away before the browser chapter. Then the complete application
   # under Node and in Chromium, and the release-profile records.
   browser-packaging:
-    name: browser packaging, clean checkout and records (ubuntu-24.04, emsdk 6.0.13, Node 26, Playwright 1.64.1 Chromium)
+    name: browser packaging, clean checkout and records (ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26, Playwright 1.64.1 Chromium)
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -1557,8 +1524,6 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       MAKEFLAGS: "-j4"
       TITAN_JOBS: "4"
-      TITAN_EMSDK_VERSION: "6.0.13"
-      TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
       TITAN_NODE_VERSION: "26.13.0"
       TITAN_PLAYWRIGHT_VERSION: "1.64.1"
       TITAN_PLAYWRIGHT_ROOT: ${{ github.workspace }}/out/playwright-tools
@@ -1578,25 +1543,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake curl git libreadline-dev libssl-dev pkg-config lua5.4
 
-      - name: Restore the pinned Emscripten SDK
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.emsdk
-          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1
-          restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
+      - *restore-browser-toolchain
 
-      - name: Install Emscripten
-        run: |
-          set -euo pipefail
-          if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
-            git -C "$GITHUB_WORKSPACE" clone --depth 1 \
-              https://github.com/emscripten-core/emsdk.git "$TITAN_EMSDK_ROOT"
-          fi
-          "$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"
-          "$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          emcc --version | grep -q " $TITAN_EMSDK_VERSION "
+      - *install-browser-toolchain
 
       - name: Install the pinned Node 26 runtime
         uses: actions/setup-node@v6
@@ -1629,12 +1578,12 @@ jobs:
           PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT" --no-save \
             --package-lock=false --no-audit --no-fund "vite@$TITAN_VITE_VERSION"
 
-      # The browser chapter assumes Emscripten active and Node 26 on PATH,
-      # ahead of emsdk's bundled Node.
+      # The browser chapter assumes the browser toolchain selected through
+      # WASI_SDK_PATH and BINARYEN_ROOT, and Node 26 on PATH.
       - name: Install from a fresh clone and build exactly as the manuals document
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           export PATH="${TITAN_NODE%/*}:$PATH"
           lua5.4 scripts/doc_check.lua --clean-checkout --workspace "$RUNNER_TEMP/clean-checkout" \
             --checkout "$GITHUB_WORKSPACE" --vite-root "$TITAN_VITE_ROOT" \
@@ -1662,7 +1611,7 @@ jobs:
       - name: Record sizes, startup, memory, Task scaling and recursion depth
         run: |
           set -euo pipefail
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
           workspace="$RUNNER_TEMP/clean-checkout"
           export PATH="$workspace/prefix/bin:$PATH"
           PREFIX="$workspace/prefix" lua -E spec/browser/build-records.lua "$RUNNER_TEMP/browser-records" \

@@ -1,7 +1,7 @@
 -- Build the browser records programs (spec/fixtures/browser_records) for
 -- collect.mjs with the installation's titanc, under the profile its browser
 -- SDK recorded, whatever TITAN_BUILD_PROFILE the caller's environment holds.
--- Run it with Emscripten active and the installation's PREFIX.
+-- Run it with the browser toolchain selected and the installation's PREFIX.
 local lfs = require "lfs"
 local process = require "titan-compiler.process"
 local path = require "titan-compiler.path"
@@ -18,11 +18,18 @@ local profile = assert(record:read("a")):match("^(%a+)%s*$")
 record:close()
 assert(profile == "production" or profile == "validation", "the SDK records no build profile")
 
--- One program per build: each has its own main.
+-- One program per build: each has its own main. The records program counts
+-- its C allocations through wrappers around the allocator.
 for _, program in ipairs({ "records", "stack" }) do
-  local build = process.capture({ path.join(prefix, "bin/titanc"), "-q", "--target", "browser",
-    "--tree", path.join(repository, "spec/fixtures/browser_records"), "--output", output, program },
-    { cwd = repository, env = {
+  local argv = { path.join(prefix, "bin/titanc"), "-q", "--target", "browser",
+    "--tree", path.join(repository, "spec/fixtures/browser_records"), "--output", output }
+  if program == "records" then
+    argv[#argv + 1] = "--c-source"
+    argv[#argv + 1] = path.join(repository, "spec/fixtures/browser_records/records_heap.c")
+    argv[#argv + 1] = "--ldflag=-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
+  end
+  argv[#argv + 1] = program
+  local build = process.capture(argv, { cwd = repository, env = {
       TITAN_ROOT = prefix, TITAN_BUILD_PROFILE = profile, TITAN_TARGET = "", TITAN_EXTRA_CPPFLAGS = "",
       TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "",
     } })

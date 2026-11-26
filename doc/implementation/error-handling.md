@@ -219,15 +219,16 @@ every backend; only the frames differ.
 #### Browser trace backend
 
 The browser backend (`titan-runtime/titan.c`, private header
-`titan-runtime/browser/titan-browser-trace.h`, and Emscripten library
-`titan-runtime/browser/titan-browser-trace.js`) gives browser builds the same
+`titan-runtime/browser/titan-browser-trace.h`, and the trace subsystem inside
+`titan-runtime/browser/titan-wasm-factory.mjs`) gives browser builds the same
 unified trace merge as `libbacktrace` while keeping the native preprocessor
 branches and call depths unchanged.
 
 **Fixed C/JS adapter interface.** The runtime communicates with
-`titan-browser-trace.js` (pinned to Emscripten 6.0.13) through two synchronous
-imports and a fixed Wasm32 memory layout (`titan-browser-trace.h`, private to
-`titan-runtime/` and not an installed FFI header):
+`titan-wasm-factory.mjs` (`createTrace`) through two synchronous `env` imports
+declared with `TITAN_WASM_IMPORT` and a fixed Wasm32 memory layout
+(`titan-browser-trace.h`, private to `titan-runtime/` and not an installed FFI
+header):
 
 ```c
 #define TITAN_BROWSER_TRACE_CAPACITY 512u
@@ -278,11 +279,8 @@ int titan_browser_trace_symbolize(const TitanBrowserTraceRecord *record,
   instruction inside a known Titan function). It never calls `malloc` in Wasm
   memory and never replaces the active Lua error.
 
-The adapter parses `Error.stack` directly; it does not use Emscripten's
-internal `emscripten_stack_snapshot`, `emscripten_stack_unwind_buffer`,
-`emscripten_pc_get_file` (which `malloc`s per call), `EM_LOG_C_STACK`, the
-instance-global `UNWIND_CACHE`, or the sanitizer-only `LOAD_SOURCE_MAP`
-support.
+The adapter parses `Error.stack` directly without allocating in Wasm memory or
+relying on any toolchain-specific stack helper or source-map loader.
 
 **Off-stack storage, reentrancy guard, and protected merge.** Each Wasm
 instance is single-threaded and owns one static `TitanBrowserTraceBuffer`
@@ -308,7 +306,8 @@ allocator, C capture and per-frame symbolization write into preallocated scratch
 storage and never call `malloc`.
 
 **Synchronous capture transaction and descriptor preservation.** Capture
-executes as one synchronous JavaScript transaction in `titan-browser-trace.js`:
+executes as one synchronous JavaScript transaction in `titan-wasm-factory.mjs`
+(`createTrace`):
 
 1. Read the own property descriptors of `Error.stackTraceLimit` and
    `Error.prepareStackTrace` with `Object.getOwnPropertyDescriptor`, recording
@@ -386,24 +385,23 @@ When the C merge falls back to Lua-only `CallInfo` enumeration (`st.status !=
 `CallInfo` frames and sets `st.truncated = 1` if cut short.
 
 **Eager trace loader and lookup validation.** During module startup,
-`titan-browser-trace.js` (`$TitanBrowserTrace`) constructs its line-parser
-`RegExp` table inside `install()` (because Emscripten serializes compile-time
-library object properties as JSON, which would turn `RegExp` literals into `{}`)
-and registers an `addOnPreRun` hook that adds the run dependency
-`titan-trace-table`. It loads `locateFile('{{{ WASM_BINARY_FILE }}}.trace')`
-(`fetch(path, {credentials: 'same-origin'})` in browsers, `readBinary(path)` in
-Node), the [trace table](browser-target.md#the-trace-table) that the compiler
-derived from the validated final map. The runtime never reads the map.
-`readTable` checks the header, compares the table's identity against the
-instantiated Wasm export
-`UTF8ToString(wasmExports['titan_browser_trace_identity']())`, bounds every
-count, body, row offset, basename index, and string offset, requires rows to
-ascend and every `.titan` row to name a line, publishes
-`Module['titanBrowserTrace']`, and removes `titan-trace-table` whether
-initialization succeeded (`state: 'ready'`) or degraded (`state:
+`titan-wasm-factory.mjs` (`instantiate`) fetches `<stem>.wasm` and
+`<stem>.wasm.trace` concurrently through `owner.options.locateFile(name,
+owner.image.directory)` (`fetch(path, {credentials: 'same-origin'})` in
+browsers, or `fs.promises.readFile` via `process.getBuiltinModule('node:fs')`
+for local paths and `file:` URLs in Node; if `locateFile` throws while
+resolving the trace file, the error degrades the trace rather than failing
+initialization). The runtime reads the
+[trace table](browser-target.md#the-trace-table) that the compiler derived from
+the post-`wasm-opt` DWARF `.debug_line` section and never reads `.wasm.map`.
+`createTrace(views).load(bytesPromise, identity)` calls `readTable` to check
+the header, compares the table's identity against the instantiated Wasm export
+`readCString(exports.titan_browser_trace_identity())`, bounds every count,
+body, row offset, basename index, and string offset, requires rows to ascend
+and every `.titan` row to name a line, publishes `context.trace`, and resolves
+whether initialization succeeded (`state: 'ready'`) or degraded (`state:
 'degraded'`). On a degraded load it logs one console warning prefixed with
 `Titan browser trace: ` and never fetches or rereads on the error path.
-
 The in-memory index keeps the table's bytes and its arrays in place: the
 rows' `sources` (`Int16Array`, `-1` for a gap) and each defined body's
 declaring basename index `first` (`Int16Array`), which is the body's first
@@ -422,15 +420,15 @@ it. A line lookup (`lookup`) succeeds (`RESOLVED`, `line > 0`) only when:
 3. the greatest row with `offset <= pc` lies inside `[start, end)` and names a
    `.titan` source rather than a gap.
 
-Unlike Emscripten's stock `WasmSourceMap.normalizeOffset`, which extends the
-preceding segment across function boundaries and unmapped gaps, this check
-never attributes an unmapped `dynCall_*` wrapper or a no-debug Lua C function to
-an adjacent Titan function's lines, and never invents a line from a function
-index alone. If PC validation fails, symbolization still retains a verified
-function name and declaring basename with `line = 0` (`UNKNOWN`). A PC in C
-that was inlined into a Titan function fails condition 3, so its frame has the
-declaring basename and no line, and no frame names a C file (titan#382). Titan
-code inlined from another `.titan` file keeps its own file and line.
+Unlike naive source-map offset lookup that extends a preceding segment across
+function boundaries and unmapped gaps, this check never attributes an unmapped
+wrapper or a no-debug Lua C function to an adjacent Titan function's lines, and
+never invents a line from a function index alone. If PC validation fails,
+symbolization still retains a verified function name and declaring basename
+with `line = 0` (`UNKNOWN`). A PC in C that was inlined into a Titan function
+fails condition 3, so its frame has the declaring basename and no line, and no
+frame names a C file (titan#382). Titan code inlined from another `.titan` file
+keeps its own file and line.
 
 **Per-frame classification, entry registration (`TITAN_ENTRIES_KEY`), and
 rendering.** After `titan_browser_trace_capture` returns, `titan_trace_capture`
@@ -995,8 +993,8 @@ from silently loading stale build artifacts.
   stack parsers, `Error` descriptor preservation, trace-table reading and lookup validation, and
   compiled `lifecycle.c`/`filter.c` C-merge boundaries, and the end-to-end
   browser trace gate (46 native cases in `trace_cases` plus the
-  `trace_uncaught` and `trace_async` programs, staged as 98 positive and 10
-  `degradedCases` manifest rows across `assertions-2` and `assertions-0`:
+  `trace_uncaught` and `trace_async` programs, staged as 49 positive and 5
+  `degradedCases` manifest rows:
   direct and `.browser.titan` contributor locations, mixed Lua/Titan merge
   order, catchable `C stack overflow` past the browser C-call limit,
   pin/rethrow/clear, coroutine append across yield/resume, post-suspension

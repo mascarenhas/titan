@@ -425,7 +425,7 @@ extern "C" {
     #endif
   #elif defined(__CYGWIN__) /* MSYS */
     #define MCO_USE_UCONTEXT
-  #elif defined(__EMSCRIPTEN__)
+  #elif defined(__wasm__)
     #define MCO_USE_FIBERS
   #else
     #if __GNUC__ >= 3 /* Assembly extension supported. */
@@ -535,7 +535,7 @@ extern "C" {
       _MCO_UNUSED(res);
       MCO_ASSERT(res != 0);
     }
-  #elif defined(MCO_USE_VMEM_ALLOCATOR) /* POSIX virtual memory allocator */
+  #elif defined(MCO_USE_VMEM_ALLOCATOR) && !defined(__wasm__) /* POSIX virtual memory allocator; Wasm uses the C allocator */
     #include <sys/mman.h>
     #if !defined(MAP_ANONYMOUS)
       #if defined(MAP_ANON)
@@ -1679,20 +1679,23 @@ static MCO_FORCE_INLINE void _mco_init_desc_sizes(mco_desc* desc, size_t stack_s
   desc->stack_size = stack_size;
 }
 
-#elif defined(__EMSCRIPTEN__)
+#elif defined(__wasm__)
 
-#include <emscripten.h>
 #include <stdint.h>
 
 /* The JSPI driver owns engine continuations, while this allocation owns the
  * disjoint linear C stack. Retirement is suspending: mco_uninit must not let
- * its caller reuse the allocation until the engine invocation has returned. */
+ * its caller reuse the allocation until the engine invocation has returned.
+ * The driver's host imports and its export are named in the Wasm module. */
+__attribute__((import_module("env"), import_name("titan_mco_create")))
 void titan_mco_create(uintptr_t co, uintptr_t low, uintptr_t high);
+__attribute__((import_module("env"), import_name("titan_mco_transfer")))
 void titan_mco_transfer(uintptr_t from, int from_back, uintptr_t to, int to_back,
                         int terminal);
+__attribute__((import_module("env"), import_name("titan_mco_destroy")))
 void titan_mco_destroy(uintptr_t co);
 
-EMSCRIPTEN_KEEPALIVE void titan_mco_entry(uintptr_t co) {
+__attribute__((export_name("titan_mco_entry"))) void titan_mco_entry(uintptr_t co) {
   _mco_main((mco_coro*)co);
 }
 

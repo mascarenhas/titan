@@ -17,6 +17,39 @@ local modules = { "bundle.first", "bundle.second" }
 local fixture, native_root, browser_root, provider_images
 local semantic_driver, semantic_contexts, saved_registry
 
+-- Hook code: `after_optimizer(action)` calls `action(output)` after the
+-- image's successful wasm-opt command (`<stem>.wasm.linked -o <stem>.wasm`),
+-- whichever process transport the driver selects for it.
+local AFTER_OPTIMIZER = [[
+local function after_optimizer(action)
+    local cdriver = require "c-parser.cdriver"
+    local process = require "titan-compiler.process"
+    local function optimized(command)
+        local argv = type(command) == "string" and cdriver.split_shell_words(command) or command
+        if type(argv) == "table" and (argv[1] == "/bin/sh" or argv[1] == "sh") and argv[2] == "-c" then
+            argv = cdriver.split_shell_words(argv[3])
+        end
+        local count = type(argv) == "table" and #argv or 0
+        if count >= 4 and argv[1]:match("wasm%-opt[^/\\]*$") and argv[count - 1] == "-o" and
+                argv[count - 2]:match("[.]wasm[.]linked$") and argv[count]:match("[.]wasm$") then
+            return argv[count]
+        end
+    end
+    for _, transport in ipairs({ { os, "execute" }, { process, "run" }, { process, "capture" } }) do
+        local owner, field = transport[1], transport[2]
+        local original = owner[field]
+        owner[field] = function(command, ...)
+            local results = table.pack(original(command, ...))
+            local ok = results[1]
+            if type(ok) == "table" then ok = ok.ok end
+            local output = ok and optimized(command)
+            if output then action(output) end
+            return table.unpack(results, 1, results.n)
+        end
+    end
+end
+]]
+
 local function new_fixture()
     local fixture = fixtures.new()
     local run = fixture.run
@@ -142,17 +175,15 @@ function test_case(_: test.Context) test.assert(true) end
             local predecessor = {}
             for _, path in ipairs(outputs) do predecessor[path] = fixtures.read(path) end
             local record = record_path(fixture.output)
-            local candidate, map = browser_fixtures.oversized_body(
+            local candidate_path = fixture.root .. "/candidate.wasm"
+            fixtures.write(candidate_path, browser_fixtures.oversized_body(
                 kind == "program" and "oversized_guard_case" or nil,
-                kind == "program" and "actual.browser.titan" or nil)
-            local candidate_path, map_path = fixture.root .. "/candidate.wasm", fixture.root .. "/candidate.map"
-            fixtures.write(candidate_path, candidate); fixtures.write(map_path, map)
+                kind == "program" and "actual.browser.titan" or nil))
             fixtures.write(source, (contents:gsub("return 0", "return 7")))
             local hook, observed = fixture.root .. "/limit-hook.lua", fixture.root .. "/before-commit"
-            fixtures.write(hook, string.format([[
+            fixtures.write(hook, AFTER_OPTIMIZER .. string.format([[
 local driver = require "titan-compiler.driver"
-local io_module = require "titan-compiler.io"
-local new_sync, image = io_module.new_sync, driver.compile_browser_image
+local image = driver.compile_browser_image
 function driver.compile_browser_image(contents, entrypoint, executable, objects, archives, extra, verbose, options)
     if executable == %q then
         local before = options.before_commit
@@ -164,27 +195,14 @@ function driver.compile_browser_image(contents, entrypoint, executable, objects,
     end
     return image(contents, entrypoint, executable, objects, archives, extra, verbose, options)
 end
-function io_module.new_sync(...)
-    local strategy = new_sync(...)
-    local run = strategy.run
-    function strategy:run(argv, options)
-        local result = run(self, argv, options)
-        if result.ok then
-            for index, flag in ipairs(argv) do
-                local output = flag == "-o" and argv[index + 1] or
-                    (flag:match("^@.+[.]mjs[.]rsp$") and flag:sub(2, -5))
-                if output and output:match("[.]mjs$") then
-                    local wasm = output:gsub("[.]mjs$", ".wasm")
-                    assert(self:write_file(wasm, assert(self:read_file(%q))))
-                    assert(self:write_file(wasm .. ".map", assert(self:read_file(%q))))
-                end
-            end
-        end
-        return result
-    end
-    return strategy
-end
-]], mjs, observed, candidate_path, map_path))
+-- The candidate replaces only the optimizer's staged output; the map and
+-- trace table derive from its own line table.
+after_optimizer(function(output)
+    local source = assert(io.open(%q, "rb"))
+    local bytes = assert(source:read("a")); assert(source:close())
+    local file = assert(io.open(output, "wb")); assert(file:write(bytes)); assert(file:close())
+end)
+]], mjs, observed, candidate_path))
             local function hooked(setup, collect)
                 local child_coverage = collect ~= false and fixture.collector:init_code() or ""
                 local argv = { info.lua, "-E", "-e",
@@ -249,31 +267,28 @@ end
         end)
     end
 
-    it("links emcc system libraries with an identity but without certifying reuse", function()
+    -- wasm-ld finds every library clang can name; a sysroot archive resolved
+    -- only through the compiler's own search path is a certified input.
+    it("certifies a wasi-sdk sysroot library that only the compiler search path resolves", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         fixture = new_fixture()
         fixtures.write(fixture.source .. "/system_main.titan",
             "function main(args: {string}): integer return 0 end\n")
         local arguments = { "--target", "browser", "--incremental", "-v",
-            "--ldflag=-lidbfs.js", "system_main" }
+            "--ldflag=-lwasi-emulated-signal", "system_main" }
         local image, map = fixture.output .. "/system_main.mjs", fixture.output .. "/system_main.wasm.map"
-        local identity
-        for _ = 1, 2 do
-            local result = fixture:compile(arguments)
-            assert.is_true(result.ok, result.output)
-            assert.matches("Titan link miss", result.output, 1, true)
-            assert.is_nil(result.output:find("Titan link hit", 1, true))
-            local current = assert(fixtures.read(map):match('"x_titan_image":"([0-9a-f]+)"'))
-            assert.equal(64, #current)
-            if identity then assert.equal(identity, current) end
-            identity = current
-            for directory in lfs.dir(fixture.output .. "/.titan-links") do
-                if directory ~= "." and directory ~= ".." then
-                    assert.is_nil(lfs.attributes(fixture.output .. "/.titan-links/" .. directory .. "/record"))
-                end
-            end
-        end
-        local result = fixture:run(toolchain.runner(info, "--engine", "node", "--grace", "0", image))
+        local result = fixture:compile(arguments)
+        assert.is_true(result.ok, result.output)
+        assert.matches("Titan link miss", result.output, 1, true)
+        local identity = assert(fixtures.read(map):match('"x_titan_image":"([0-9a-f]+)"'))
+        assert.equal(64, #identity)
+        local record = fixtures.read(record_path(fixture.output))
+        result = fixture:compile(arguments)
+        assert.is_true(result.ok, result.output)
+        assert.matches("Titan link hit", result.output, 1, true)
+        assert.equal(identity, fixtures.read(map):match('"x_titan_image":"([0-9a-f]+)"'))
+        assert.equal(record, fixtures.read(record_path(fixture.output)))
+        result = fixture:run(toolchain.runner(info, "--engine", "node", "--grace", "0", image))
         assert.is_true(result.ok, result.output)
     end)
 
@@ -336,7 +351,7 @@ end
     end)
 
     for _, failure in ipairs({ "trace", "record", "rename-1", "rename-2", "rename-3",
-            "rename-4", "rename-5", "rename-6", "rename-7", "rename-8", "map-missing", "map-malformed",
+            "rename-4", "rename-5", "rename-6", "rename-7", "rename-8", "image-missing", "dwarf-malformed",
             "before-commit" }) do
         it("restores all four predecessor image files after a " .. failure .. " certificate failure", function()
             local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
@@ -355,11 +370,11 @@ end
             local record = record_path(fixture.output)
             fixtures.write(source, "function main(args: {string}): integer return 7 end\n")
             local hook, log = fixture.root .. "/certificate-case.lua", fixture.root .. "/certificate-observation"
-            fixtures.write(hook, string.format([[
+            fixtures.write(hook, AFTER_OPTIMIZER .. string.format([[
 local certificate = require "titan-compiler.linkcertificate"
 local driver = require "titan-compiler.driver"
 local util = require "titan-compiler.util"
-driver.browser_link_options = { purpose = "program", assertions = 0 }
+driver.browser_link_options = { purpose = "program" }
 local commit = certificate.commit
 function certificate.commit(context, ticket)
     assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new mjs was not published")
@@ -402,29 +417,17 @@ if boundary then
     end
 end
 local map_case = %q
-if map_case == "map-missing" or map_case == "map-malformed" then
-    local io_module = require "titan-compiler.io"
-    local new_sync = io_module.new_sync
-    function io_module.new_sync(...)
-        local strategy = new_sync(...)
-        local run = strategy.run
-        function strategy:run(argv, options)
-            local result = run(self, argv, options)
-            if result.ok then
-                for index, flag in ipairs(argv) do
-                    local output = flag == "-o" and argv[index + 1] or
-                        (flag:match("^@.+[.]mjs[.]rsp$") and flag:sub(2, -5))
-                    if output and output:match("[.]mjs$") then
-                        local map = output:gsub("[.]mjs$", ".wasm.map")
-                        if map_case == "map-missing" then assert(os.remove(map))
-                        else assert(self:write_file(map, "malformed source map")) end
-                    end
-                end
-            end
-            return result
+if map_case == "image-missing" or map_case == "dwarf-malformed" then
+    after_optimizer(function(output)
+        if map_case == "image-missing" then
+            assert(os.remove(output))
+        else
+            -- A second, empty `.debug_line` custom section: the image's line
+            -- table, the map's only source, no longer has one owner.
+            local file = assert(io.open(output, "ab"))
+            assert(file:write("\0\12\11.debug_line")); assert(file:close())
         end
-        return strategy
-    end
+    end)
 elseif map_case == "before-commit" then
     local invalidate, count = certificate.invalidate, 0
     function certificate.invalidate(...)
@@ -446,8 +449,8 @@ end
             assert.is_false(result.ok)
             assert.matches(failure == "trace" and "invalid Wasm linker input trace" or
                 failure == "record" and "injected browser certificate write failure" or
-                failure == "map-missing" and "is not a regular file" or
-                failure == "map-malformed" and "invalid JSON value" or
+                failure == "image-missing" and "is not a regular file" or
+                failure == "dwarf-malformed" and "duplicate .debug_line section" or
                 failure == "before-commit" and "injected browser precommit failure" or
                 "injected browser artifact rename failure", result.output, 1, true)
             if failure == "trace" or failure == "record" then
@@ -505,8 +508,7 @@ end
         toolchain.stage_runner(info, root)
         local assets = browserlink.sdk_assets(driver.installed_paths(root, "browser"))
         local installed = browserlink.sdk_assets(driver.installed_paths(info.prefix, "browser"))
-        local keys = { "runtime", "js_library", "bridge_library", "trace_library",
-            "loader", "runner", "runner_module", "node_worker", "page", "module_check" }
+        local keys = { "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page" }
         for _, key in ipairs(keys) do fixtures.copy(installed[key], assets[key]) end
         -- The profile record is not a shared input: links check it, not certify it.
         fixtures.copy(installed.build_profile, assets.build_profile)
@@ -546,6 +548,9 @@ end
             if key == "runtime" then
                 -- A valid ar timestamp edit changes bytes without breaking objects.
                 bytes = bytes:sub(1, 24) .. "2" .. bytes:sub(26)
+            elseif key == "factory" then
+                -- The factory's default export must stay last.
+                bytes = "// image asset invalidation\n" .. bytes
             else
                 bytes = bytes .. (key == "runner" and "\n# image asset invalidation\n" or "\n// image asset invalidation\n")
             end
@@ -805,7 +810,8 @@ end
         assert.equal(provider, load(native_loader, "warm.provider"))
         local browser = context("browser")
         assert.is_string(browser.target_descriptor.identity)
-        assert.equal("6.0.13", browser.target_descriptor.tools.version)
+        assert.equal("34", browser.target_descriptor.tools.version)
+        assert.equal("133", browser.target_descriptor.tools.optimizer.version)
         local native_path = subject.TITAN_BIN_PATH
         subject.TITAN_BIN_PATH = fixture.source
         local browser_loader = subject.defaultloader({}, { context = browser, source_roots = { sequence = true } })

@@ -832,21 +832,21 @@ if not args.compile_only and not args.print_ast then
             browser_profile, err = driver.browser_link_plan(resolver_context, kind)
         else
             browser_profile, err = driver.browserlink.profile(resolver_context.target_descriptor,
-                { purpose = "protocol", assertions = 2 })
+                { purpose = "protocol" })
             local ready
             ready, err, browser_probe = driver.browser_node_ready(resolver_context, browser_assets)
             if not ready then exit(err) end
         end
         if not browser_profile then exit(err) end
-        for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
+        for _, key in ipairs({ "runtime", "factory", "loader", "runner", "runner_module",
+                "node_worker", "page" }) do
             runtime[#runtime + 1] = browser_assets[key]
         end
         runtime[#runtime + 1] = resolver_context.target_descriptor.paths.liblua
         runtime[#runtime + 1] = resolver_context.target_descriptor.paths.lua_record
         local libraries
         libraries, browser_library_error = linkcertificate.browser_trace_libraries(
-            resolver_context, resolver_context.target_descriptor.tools.cc, driver.link_extra_flags())
+            resolver_context, resolver_context.target_descriptor.tools, driver.link_extra_flags())
         for _, filename in ipairs(libraries or {}) do runtime[#runtime + 1] = filename end
     else
         for _, input in ipairs(driver.INSTALLED and

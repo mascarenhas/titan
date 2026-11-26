@@ -40,11 +40,11 @@ async function bounded(promise, milliseconds) {
 }
 const usage = "usage: titan-browser-run [--engine node|chromium] [--timeout MS] [--grace MS]\n" +
     "                         [--chrome PATH] [--cdp pipe|port] [--root DIR]\n" +
-    "                         [--allow-degraded-trace] [--js-test] FILE [-- ARG...]\n";
+    "                         [--allow-degraded-trace] [--imports FILE] [--js-test] FILE [-- ARG...]\n";
 
 function parse(argv) {
     const options = { engine: "node", timeout: 30000, grace: 1500, cdp: "pipe", args: [], jsTest: false };
-    const values = new Set(["engine", "timeout", "grace", "chrome", "cdp", "root"]);
+    const values = new Set(["engine", "timeout", "grace", "chrome", "cdp", "root", "imports"]);
     for (let index = 0; index < argv.length; index++) {
         const arg = argv[index];
         if (arg === "--") { options.args = argv.slice(index + 1); break; }
@@ -70,7 +70,7 @@ function parse(argv) {
         options[key] = Number(options[key]);
     }
     if (!options.help && !options.version && !options.probe && !options.file) throw new Error("FILE is required");
-    if (options.probe && (options.file || options.args.length || options.jsTest)) throw new Error("--probe does not accept FILE or arguments");
+    if (options.probe && (options.file || options.args.length || options.jsTest || options.imports)) throw new Error("--probe does not accept FILE, --imports or arguments");
     return options;
 }
 
@@ -148,25 +148,35 @@ export class Monitor {
         }
         this.finish();
     }
+    // An observed engine failure (onEngineFailure) survives a harness's catch
+    // and decides the result once execute settles.
+    failEngine() {
+        const { category, reason } = this.engine;
+        this.fail(category, reason, category === "trap");
+    }
     control(message) {
         if (!message || typeof message !== "object" || Array.isArray(message)) return this.fail("harness", "malformed control message");
-        if (message.type === "abort") {
-            if (typeof message.reason !== "string") return this.fail("harness", "malformed abort observation");
-            this.abortReason ??= message.reason;
-            if (this.completion) this.fail("abort", this.abortReason);
+        if (message.type === "abort" || message.type === "trap") {
+            if (typeof message.reason !== "string") return this.fail("harness", `malformed ${message.type} observation`);
+            // Only tagged original trap identity can overrule observed onAbort.
+            if (!this.engine || (message.type === "trap" && this.engine.category === "abort")) {
+                this.engine = { category: message.type, reason: message.reason };
+            }
+            if (this.completion) this.failEngine();
         } else if (message.type === "failure") {
             if (!["abort", "trap", "unhandled", "sink", "harness"].includes(message.category) || typeof message.reason !== "string") {
                 return this.fail("harness", "malformed failure control");
             }
             const originalTrap = message.category === "trap" && message.knownTrap === true;
-            if (this.abortReason !== undefined && !this.completion && !originalTrap &&
+            const engine = this.completion ? undefined : this.engine;
+            if (engine && !(originalTrap && engine.category === "abort") &&
                 ["abort", "trap", "harness"].includes(message.category)) {
-                // An onAbort callback can be followed by a raw RuntimeError before
+                // A harness may catch the engine failure and finish its own checks,
+                // and the observation can be followed by a raw RuntimeError before
                 // the loader's rejection/dispose continuation gets its microtask.
                 // Observation is not cleanup completion: wait for execute's terminal
                 // failure, retaining the ordinary deadline if disposal is broken.
-                if (message.terminal !== true) return;
-                this.fail("abort", this.abortReason);
+                if (message.terminal === true) this.failEngine();
             } else this.fail(message.category, message.reason, originalTrap);
         } else if (message.type === "complete") {
             if (this.completion) return this.fail("harness", "duplicate completion");
@@ -175,7 +185,7 @@ export class Monitor {
                 (message.kind === "host-test" && ![0, 1].includes(message.status))) {
                 return this.fail("harness", "malformed completion control");
             }
-            if (this.abortReason !== undefined) return this.fail("abort", this.abortReason);
+            if (this.engine) return this.failEngine();
             this.completion = message;
             this.deadline();
             this.grace = later(() => this.finish(), this.options.grace);
@@ -613,7 +623,7 @@ async function main() {
     try { options = parse(process.argv.slice(2)); }
     catch (error) { diagnostic(error.message); process.stderr.write(usage); return 2; }
     if (options.help) { process.stderr.write(usage); return 0; }
-    if (options.version) { diagnostic("Titan 0.6.1 browser runner (Node 26+)"); return 0; }
+    if (options.version) { diagnostic("Titan 0.6.2 browser runner (Node 26+)"); return 0; }
     const chrome = options.probe || options.engine === "chromium" ? await chromeInfo(options.chrome) : null;
     const nodeOK = Number(process.versions.node.split(".")[0]) >= 26 &&
         typeof WebAssembly.promising === "function" && typeof WebAssembly.Suspending === "function";
@@ -628,8 +638,17 @@ async function main() {
     const root = await realpath(resolve(options.root ?? dirname(file)));
     if (!(await stat(root)).isDirectory() || !(await stat(file)).isFile() || !within(root, file)) throw new Error("FILE must be a regular file beneath --root");
     if (!file.endsWith(".mjs")) throw new Error("FILE must end in .mjs");
+    // The imports module, like FILE, is an asset the engine loads beneath --root.
+    let imports;
+    if (options.imports !== undefined) {
+        const module = await realpath(resolve(options.imports));
+        if (!(await stat(module)).isFile() || !within(root, module) || !module.endsWith(".mjs")) {
+            throw new Error("--imports must name a regular .mjs file beneath --root");
+        }
+        imports = relative(root, module).split(sep).join("/");
+    }
     const config = { engine: options.engine, root, file: relative(root, file).split(sep).join("/"), args: options.args,
-        jsTest: options.jsTest, allowDegradedTrace: !!options.allowDegradedTrace };
+        jsTest: options.jsTest, allowDegradedTrace: !!options.allowDegradedTrace, imports };
     const monitor = new Monitor(options);
     const engine = options.engine === "node" ? new NodeEngine(monitor) : new ChromiumEngine(monitor, options, chrome);
     const interrupted = signal => monitor.fail("harness", `interrupted by ${signal}`);

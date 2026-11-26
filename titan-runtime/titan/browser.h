@@ -168,7 +168,7 @@ typedef struct titan_browser_state_record {
   uint32_t callback_depth;
 } titan_browser_state_record;
 
-#if defined(__EMSCRIPTEN__)
+#if defined(__wasm__) || defined(TITAN_TARGET_BROWSER)
 _Static_assert(sizeof(void *) == 4, "browser bridge requires wasm32");
 _Static_assert(sizeof(titan_browser_scalar) == 8, "browser scalar layout");
 _Static_assert(sizeof(titan_browser_value) == 32, "browser value layout");
@@ -239,39 +239,64 @@ TValue titan_entry_error_message(lua_State *L, int index);
  * and fill response; C/Titan raises only after their normal return. Trusted
  * state/metadata/release imports are nonthrowing and never enter Lua or sinks.
  * Every JS slot unit is charged to state, including allocations during close. */
+TITAN_WASM_IMPORT("titan_browser_entry_allowed")
 int titan_browser_entry_allowed(uint64_t operation_id, uint32_t operation);
+TITAN_WASM_IMPORT("titan_browser_complete")
 void titan_browser_complete(const titan_browser_completion *completion);
-/* Copy one nonempty libc iovec before returning; never enter a host sink. */
-void titan_browser_host_output(uint32_t stream, const unsigned char *bytes, uint32_t length);
+TITAN_WASM_IMPORT("titan_browser_host_state_open")
 uint32_t titan_browser_host_state_open(titan_browser_state_record *record);
+TITAN_WASM_IMPORT("titan_browser_host_state_record")
 titan_browser_state_record *titan_browser_host_state_record(uint32_t state);
+TITAN_WASM_IMPORT("titan_browser_host_state_closing")
 void titan_browser_host_state_closing(uint32_t state);
+TITAN_WASM_IMPORT("titan_browser_host_state_closed")
 void titan_browser_host_state_closed(uint32_t state);
+TITAN_WASM_IMPORT("titan_browser_host_callable")
 int titan_browser_host_callable(uint32_t state, uint32_t slot,
     uint32_t generation);
+TITAN_WASM_IMPORT("titan_browser_host_callable_closed")
 int titan_browser_host_callable_closed(uint32_t state, uint32_t slot,
     uint32_t generation);
+TITAN_WASM_IMPORT("titan_browser_host_release")
 void titan_browser_host_release(uint32_t state, uint32_t slot, uint32_t generation);
 /* Transfer a marshaling temporary to its fully constructed Titan owner. */
+TITAN_WASM_IMPORT("titan_browser_host_adopt")
 void titan_browser_host_adopt(uint32_t state, uint32_t slot, uint32_t generation);
 /* One more unit of a live value slot, for a Titan owner of a borrowed slot (a
  * call_sync HANDLE argument): its close releases only its own unit. */
+TITAN_WASM_IMPORT("titan_browser_host_retain")
 void titan_browser_host_retain(uint32_t state, uint32_t slot, uint32_t generation);
 /* Pure logical liveness: ordinary stale data returns false, never poisons.
  * No Lua, user callback or sink can run between final validation and copying. */
+TITAN_WASM_IMPORT("titan_browser_host_identity_live")
 int titan_browser_host_identity_live(uint32_t state, uint32_t slot,
     uint32_t generation, uint32_t kind);
+TITAN_WASM_IMPORT("titan_browser_host_binding")
 void titan_browser_host_binding(uint32_t state, const unsigned char *name,
     uint32_t length, titan_browser_response *response);
+TITAN_WASM_IMPORT("titan_browser_host_call")
 void titan_browser_host_call(uint32_t state, uint32_t slot, uint32_t generation,
     uint32_t argc, const titan_browser_value *args,
     titan_browser_response *response);
+TITAN_WASM_IMPORT("titan_browser_host_start")
 void titan_browser_host_start(uint32_t state, uint32_t slot, uint32_t generation,
     uint32_t argc, const titan_browser_value *args, uint32_t completion_slot,
     uint32_t completion_generation, uint32_t failure_slot,
     uint32_t failure_generation, uint32_t mode, titan_browser_response *response);
+TITAN_WASM_IMPORT("titan_browser_host_cancel")
 void titan_browser_host_cancel(uint32_t state, uint32_t slot, uint32_t generation,
     titan_browser_response *response);
+
+/* Host calendar for the launcher's localtime_r, localtime and mktime, which
+ * replace wasi-libc's UTC-only ones. localtime fills tm_sec..tm_isdst and
+ * __tm_gmtoff for the host's local time zone, returning 0 when the time is
+ * outside the host calendar. mktime normalizes tm the same way, including
+ * tm_wday, tm_yday and a nonnegative tm_isdst, and returns -1 on failure. */
+struct tm;
+TITAN_WASM_IMPORT("titan_browser_localtime")
+int titan_browser_localtime(int64_t seconds, struct tm *out);
+TITAN_WASM_IMPORT("titan_browser_mktime")
+int64_t titan_browser_mktime(struct tm *tm);
 
 /* Driver imports. titan_browser_relinquish is the bridge's only suspending
  * import: it returns a titan_browser_relinquish_status after one turn-source
@@ -283,19 +308,29 @@ void titan_browser_host_cancel(uint32_t state, uint32_t slot, uint32_t generatio
  * identity and no arguments, settlement or item_done. Other unmarshallable
  * items are reported and skipped. It returns 0 once the batch is exhausted.
  * host_settle receives the delivered item's completion. */
+TITAN_WASM_IMPORT("titan_browser_relinquish")
 uint32_t titan_browser_relinquish(uint32_t state, uint32_t mode);
+TITAN_WASM_IMPORT("titan_browser_host_owner")
 void titan_browser_host_owner(uint32_t state);
+TITAN_WASM_IMPORT("titan_browser_host_drive_begin")
 void titan_browser_host_drive_begin(uint32_t state);
+TITAN_WASM_IMPORT("titan_browser_host_drive_end")
 void titan_browser_host_drive_end(uint32_t state, int32_t exit_status, uint32_t exited);
 /* The async bootstrap's main Task failed: run() resolves failed, status 1,
  * with this message and raw trace, unless the entry failed or a drive latched
  * an exit. The loader copies the bytes; it marks only a pending run entry. */
+TITAN_WASM_IMPORT("titan_browser_host_main_failed")
 void titan_browser_host_main_failed(uint32_t state, const char *message, size_t message_len,
     const char *trace, size_t trace_len);
+TITAN_WASM_IMPORT("titan_browser_host_wake")
 void titan_browser_host_wake(uint32_t state);
+TITAN_WASM_IMPORT("titan_browser_host_batch")
 uint32_t titan_browser_host_batch(uint32_t state);
+TITAN_WASM_IMPORT("titan_browser_host_item")
 int titan_browser_host_item(uint32_t state, titan_browser_delivery *out);
+TITAN_WASM_IMPORT("titan_browser_host_item_done")
 void titan_browser_host_item_done(uint32_t state, uint64_t id);
+TITAN_WASM_IMPORT("titan_browser_host_settle")
 void titan_browser_host_settle(const titan_browser_completion *record);
 
 /* Synchronous entries. titan_browser_release_callable is an export, not an
@@ -307,6 +342,7 @@ void titan_browser_host_settle(const titan_browser_completion *record);
  * entry unless the instance is closing, exited or poisoned, returning 0 when
  * it refuses; host_callback(state, -1) ends the entry. */
 int titan_browser_release_callable(uint32_t state, uint32_t slot, uint32_t generation);
+TITAN_WASM_IMPORT("titan_browser_host_callback")
 int titan_browser_host_callback(uint32_t state, int32_t delta);
 
 /* Generated forwards to titan.browser's public foreign functions, for C in the

@@ -386,6 +386,14 @@ export async function run(context) {
         context.assert(await host.task('calendar', [format]) === expected, 'calendar differs from host Date');
       });
     }
+    // %z and %Z name the host's local UTC offset at the same instant as
+    // +hhmm/-hhmm, through Titan and stock Lua alike. The spec runs Node in
+    // a zone with a nonzero offset.
+    const minutes = -date.getTimezoneOffset(), magnitude = Math.abs(minutes);
+    const offset = (minutes < 0 ? '-' : '+') + String(Math.trunc(magnitude / 60)).padStart(2, '0') +
+      String(magnitude % 60).padStart(2, '0');
+    if (context.engine === 'node') context.assert(minutes !== 0, 'the Node run has no local UTC offset');
+    await check('calendar-zone-titan-and-stock', {}, host => task(host, 'calendar_zone', [`${offset} ${offset}`]));
     await check('environment-c-getenv-sees-titan-mutations', {env: {FOO: 'bar', TZ: 'Asia/Tokyo'}},
       host => task(host, 'environment'));
     await check('environment-tz-does-not-change-host-calendar', {env: {FOO: 'bar', TZ: 'Asia/Tokyo'}},
@@ -432,7 +440,7 @@ export async function run(context) {
         context.assert(latched.status === status, 'stock Lua exit changed its latched status');
       });
     }
-    context.assert(cases.length === 77 && dialogs === 0, 'embedding acceptance matrix is incomplete');
+    context.assert(cases.length === 78 && dialogs === 0, 'embedding acceptance matrix is incomplete');
     context.assert(failures.length === 0, failures.join('\n'));
     context.stdout(encode('OS-STREAMS ' + JSON.stringify({verdict: 'PASS', cases: cases.length,
       dialogs, names: cases}) + '\n'));

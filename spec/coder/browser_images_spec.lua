@@ -75,7 +75,7 @@ local output, name, worker = %q, %q, %q
 local context = driver.new_resolver_context({ target = "browser", output_root = output })
 local ok, why, code = driver.compile_browser_image(driver.browser_c_image_contents(worker),
     output .. "/" .. name .. ".c", output .. "/" .. name .. ".mjs", {}, {}, {}, false,
-    { context = context, profile = { purpose = "protocol", assertions = 2 }, final_link_flags = { %s } })
+    { context = context, profile = { purpose = "protocol" }, final_link_flags = { %s } })
 assert(ok, tostring(why) .. (code and (", exit " .. code) or ""))
 assert(driver.close_resolver_context(context))
 ]], workspace .. "/src", output, name, worker, table.concat(quoted_flags, ","))
@@ -188,190 +188,130 @@ end)
 
 describe("browser image profile and SDK readiness", function()
     local IDENTITY = string.rep("0123456789abcdef", 4)
-    it("embeds one private factory and exposes only the persistent image creator", function()
-        local image = "async function Module(options) { return options; }\n" ..
-            "const wasm = new URL('app.wasm', import.meta.url);\nexport default Module;\n"
-        local loader = "export function create(factory, options) { return {factory, options}; }\n"
-        local embedded = assert(browserlink.embed(image, loader, "app.wasm", IDENTITY))
-        assert.truthy(embedded:find("async function Module(options)", 1, true))
-        assert.truthy(embedded:find("new URL('app.wasm', import.meta.url)", 1, true))
-        assert.truthy(embedded:find('new URL("app.wasm.trace", import.meta.url)', 1, true))
-        assert.truthy(embedded:find("options.locateFile ??", 1, true))
-        assert.truthy(embedded:find("export default function create(options = {})", 1, true))
-        assert.is_nil(embedded:find("export default Module", 1, true))
-        assert.is_nil(embedded:find("export function create", 1, true))
-        local _, exports = embedded:gsub("export default", "")
+    -- The SDK factory's module surface: named test seams, then one trailing
+    -- default export naming the instantiate function the loader receives.
+    local FACTORY = "export function createTrace(views) { return views; }\n" ..
+        "export function createWasiImports(bridge) { return bridge; }\n" ..
+        "const here = import.meta.url;\n" ..
+        "async function instantiate(owner) { return owner; }\n" ..
+        "export default instantiate;\n"
+    local LOADER = "export function create(factory, options, image) { return {factory, options, image}; }\n"
+    local PURPOSES = { "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }
+    -- The pinned link and post-link contract, hand-written so the spec pins it
+    -- instead of borrowing the implementation.
+    local function link_flags(budgets, gate)
+        budgets = budgets or {}
+        local flags = { "-mexec-model=reactor", "-Wl,--stack-first",
+            "-Wl,-z,stack-size=" .. (budgets.stack_size or 1048576),
+            "-Wl,--initial-heap=" .. (budgets.initial_heap or 15728640),
+            "-Wl,--max-memory=" .. (budgets.maximum_memory or 2147483648),
+            "-Wl,--gc-sections", "-Wl,--export-table",
+            "-Wl,--export=__stack_pointer", "-Wl,--export=__stack_low", "-Wl,--export=__stack_high" }
+        if gate then
+            flags[#flags + 1] = "-Wl,--export=titan_browser_gate_guarded"
+            flags[#flags + 1] = "-Wl,--export=titan_browser_gate_observe"
+        end
+        for _, library in ipairs({ "-lc-printscan-long-double", "-lsetjmp", "-lwasi-emulated-process-clocks" }) do
+            flags[#flags + 1] = library
+        end
+        return flags
+    end
+    local function optimizer_flags(level, skip)
+        local flags = { level, "--debuginfo", "--stack-check" }
+        if skip then
+            flags[#flags + 1] = "--skip-pass=inlining-optimizing"
+            flags[#flags + 1] = "--skip-pass=duplicate-function-elimination"
+        end
+        for _, feature in ipairs({ "--enable-exception-handling", "--enable-multivalue", "--enable-bulk-memory",
+                "--enable-mutable-globals", "--enable-sign-ext", "--enable-nontrapping-float-to-int",
+                "--enable-reference-types" }) do
+            flags[#flags + 1] = feature
+        end
+        return flags
+    end
+    local function count(list, value)
+        local found = 0
+        for _, item in ipairs(list) do
+            if item == value then found = found + 1 end
+        end
+        return found
+    end
+
+    it("embeds the SDK factory and loader and exposes only the persistent image creator", function()
+        local embedded = assert(browserlink.embed(FACTORY, LOADER, "app.wasm", IDENTITY))
+        -- The named seams stay private declarations; only `create` is exported.
+        assert.truthy(embedded:find("^function createTrace%(views%)"), embedded)
+        assert.truthy(embedded:find("\nfunction createWasiImports(bridge)", 1, true), embedded)
+        assert.truthy(embedded:find("\nconst here = import.meta.url;\n", 1, true), embedded)
+        assert.truthy(embedded:find("\nasync function instantiate(owner)", 1, true), embedded)
+        assert.is_nil(embedded:find("export function", 1, true))
+        assert.is_nil(embedded:find("export default instantiate", 1, true))
+        assert.truthy(embedded:find("\nconst titanCreate = (() => {\nfunction create(factory, options, image)",
+            1, true), embedded)
+        assert.truthy(embedded:find("\nreturn create;\n})();\n", 1, true), embedded)
+        assert.truthy(embedded:find("\nexport default function create(options = {}) {\n", 1, true), embedded)
+        assert.truthy(embedded:find("options.locateFile ?? (name => name.endsWith('.wasm.trace') ?", 1, true),
+            embedded)
+        -- Both resources stay visible to bundlers as `new URL` literals.
+        assert.truthy(embedded:find('new URL("app.wasm.trace", import.meta.url).href', 1, true), embedded)
+        assert.truthy(embedded:find('new URL("app.wasm", import.meta.url).href', 1, true), embedded)
+        assert.truthy(embedded:find('return titanCreate(instantiate, {...options, locateFile}, {identity: "' ..
+            IDENTITY .. '", wasm: "app.wasm", directory: new URL(\'.\', import.meta.url).href});', 1, true),
+            embedded)
+        local _, exports = embedded:gsub("export ", "")
         assert.equal(1, exports)
     end)
 
     it("rejects unsupported factory and loader surfaces before image publication", function()
-        local loader = "export function create(factory, options) { return options; }\n"
-        for _, image in ipairs({
-            "const Module = {};\n",
-            "export default Module;\n",
-            "\nexport default First;\nexport default Module;\n",
-            "\nexport default function Module() {}\n",
+        for _, factory in ipairs({
+            "async function instantiate(owner) { return owner; }\n",
+            "export default instantiate;\nconst late = 1;\n",
+            "export default first;\nexport default instantiate;\n",
+            "export default function instantiate() {}\n",
+            "export const seam = 1;\nexport default instantiate;\n",
+            "export { instantiate as other };\nexport default instantiate;\n",
+            "import runtime from './runtime.mjs';\nexport default instantiate;\n",
+            "const a = 1;\n  import './side.mjs';\nexport default instantiate;\n",
         }) do
-            local embedded, err = browserlink.embed(image, loader, "app.wasm", IDENTITY)
-            assert.is_nil(embedded)
-            assert.equal("browser image has no unique default factory export", err)
+            local embedded, err = browserlink.embed(factory, LOADER, "app.wasm", IDENTITY)
+            assert.is_nil(embedded, factory)
+            assert.equal("browser factory has an unsupported module surface", err)
         end
-        for _, source in ipairs({
+        for _, loader in ipairs({
             "function create() {}\n",
             "export function create() {}\nexport const module = {};\n",
+            "export const first = 1;\nexport function create() {}\n",
             "import runtime from './runtime.mjs';\nexport function create() {}\n",
+            "export function create() {}\nimport './late.mjs';\n",
         }) do
-            local embedded, err = browserlink.embed("\nexport default Module;\n", source, "app.wasm", IDENTITY)
-            assert.is_nil(embedded)
+            local embedded, err = browserlink.embed(FACTORY, loader, "app.wasm", IDENTITY)
+            assert.is_nil(embedded, loader)
             assert.equal("browser loader has an unsupported module surface", err)
         end
-        for _, identity in ipairs({ IDENTITY:upper(), IDENTITY:sub(2), IDENTITY .. "0", "" }) do
-            local embedded, err = browserlink.embed("\nexport default Module;\n", loader, "app.wasm", identity)
+        for _, identity in ipairs({ IDENTITY:upper(), IDENTITY:sub(2), IDENTITY .. "0", "", 42 }) do
+            local embedded, err = browserlink.embed(FACTORY, LOADER, "app.wasm", identity)
             assert.is_nil(embedded)
             assert.equal("browser image identity must be 64 lowercase hexadecimal digits", err)
         end
-        local embedded = assert(browserlink.embed("\nexport default Module;\n", loader, 'a"b\n.wasm', IDENTITY))
-        assert.truthy(embedded:find('a\\u0022b\\u000a.wasm', 1, true))
-    end)
-
-    it("rewrites the pinned Node shell to process.getBuiltinModule in every printed form", function()
-        local loader = "export function create(factory, options) { return options; }\n"
-        for _, shell in ipairs({
-            -- As Emscripten 6.0.13 prints it unoptimized, at -O2, at -Os or -O3,
-            -- and without -g2.
-            "if (ENVIRONMENT_IS_NODE) {\n" ..
-            "  // We need to use `createRequire()` to construct the require()` function.\n" ..
-            "  const { createRequire } = await import('node:module');\n" ..
-            "  /** @suppress{duplicate} */\n" ..
-            "  var require = createRequire(import.meta.url);\n}\n" ..
-            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require('node:fs');\n" ..
-            "  scriptDirectory = require('node:path').dirname(require('node:url').fileURLToPath(_scriptName)) + '/';\n}\n",
-            "if (ENVIRONMENT_IS_NODE) {\n" ..
-            "  const {createRequire} = await (import(\"node:module\"));\n" ..
-            "  /** @suppress{duplicate} */ var require = createRequire(import.meta.url);\n}\n" ..
-            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require(\"node:fs\");\n" ..
-            "  scriptDirectory = require(\"node:path\").dirname(require(\"node:url\").fileURLToPath(_scriptName)) + \"/\";\n}\n",
-            "if (ENVIRONMENT_IS_NODE) {\n" ..
-            "  const {createRequire} = await ((import(\"node:module\")));\n" ..
-            "  /** @suppress{duplicate} */ var require = createRequire(import.meta.url);\n}\n" ..
-            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require(\"node:fs\");\n" ..
-            "  scriptDirectory = require(\"node:path\").dirname(require(\"node:url\").fileURLToPath(_scriptName)) + \"/\";\n}\n",
-            "if(ENVIRONMENT_IS_NODE){const{createRequire}=await(import(\"node:module\"));" ..
-            "var require=createRequire(import.meta.url)}if(ENVIRONMENT_IS_NODE){var fs=require(\"node:fs\");" ..
-            "if(_scriptName.startsWith(\"file:\"))scriptDirectory=require(\"node:path\")" ..
-            ".dirname(require(\"node:url\").fileURLToPath(_scriptName))+\"/\"}\n",
-        }) do
-            local embedded = assert(browserlink.embed(shell .. "\nexport default Module;\n", loader,
-                "app.wasm", IDENTITY))
-            assert.is_nil(embedded:find("= createRequire(", 1, true))
-            assert.is_nil(embedded:find("import(", 1, true))
-            assert.is_nil(embedded:find("node:", 1, true))
-            local quote = shell:find('"node:fs"', 1, true) and '"' or "'"
-            assert.truthy(embedded:find("var fs = process.getBuiltinModule(" .. quote .. "fs" .. quote .. ");",
-                1, true))
-            assert.truthy(embedded:find("process.getBuiltinModule(" .. quote .. "path" .. quote ..
-                ").dirname(process.getBuiltinModule(" .. quote .. "url" .. quote ..
-                ").fileURLToPath(_scriptName))", 1, true))
-        end
-    end)
-
-    it("refuses a Node shell that it recognizes only in part", function()
-        local loader = "export function create(factory, options) { return options; }\n"
-        -- An unrecognized printing of one statement would leave its `require`.
-        local shell = "if (ENVIRONMENT_IS_NODE) {\n" ..
-            "  const { createRequire } = await import('node:module');\n" ..
-            "  var require = createRequire((import.meta.url));\n}\n" ..
-            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require('node:fs');\n" ..
-            "  scriptDirectory = require('node:path').dirname(require('node:url').fileURLToPath(_scriptName)) + '/';\n}\n"
-        local embedded, err = browserlink.embed(shell .. "\nexport default Module;\n", loader, "app.wasm", IDENTITY)
-        assert.is_nil(embedded)
-        assert.equal("browser image has an unrecognized Emscripten Node shell", err)
-    end)
-
-    it("refuses every way a module loads another and accepts look-alike prose", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
-        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
-        local context = { io = compiler_io.new_sync() }
-        local tools = { location = require("titan-compiler.path").dirname(info.tools.cc[1]) }
-        local checker = repository .. "/titan-runtime/browser/titan-browser-module-check.mjs"
-        local module = workspace .. "/module.mjs"
-        local function check(body)
-            files.write(module, "async function Module(options) { return options; }\n" .. body ..
-                "\nexport default function create() {}\n")
-            return browserlink.check_module(context, tools, checker, module)
-        end
-        local bridge = "pass page JavaScript to Titan as create({bindings}) values through titan.browser"
-        local self_contained = "the image module is self-contained; " .. bridge
-        local no_node = "browser images load no Node module; " .. bridge
-        local builtin = 'uses getBuiltinModule beyond the shell\'s "fs", "path" and "url" calls'
-        for _, case in ipairs({
-            -- A postfix operator, a statement header and a block before `/`
-            -- decide between division and a regular expression.
-            { "let a = 1, b = 2, x = a++ / b; require('fs'); let q = a / b;", "uses require at line 2 (require)", no_node },
-            { "if (a) /'/.test(b); import('node:fs'); if (b) /'/.test(a);",
-                "uses dynamic import() at line 2 (import('node:fs'))", self_contained },
-            { "if (a) { b() }\n/'/.test(a); require('fs');", "uses require at line 3 (require)", no_node },
-            { "const s = 'a\\\r\nb'; require('fs');", "uses require at line 3 (require)", no_node },
-            -- Escaped specifiers name the same module.
-            { 'import("\\x6eode:fs");', 'uses dynamic import() at line 2 (import("\\x6eode:fs"))', self_contained },
-            { 'import("\\u{6e}ode:fs");', 'uses dynamic import() at line 2 (import("\\u{6e}ode:fs"))', self_contained },
-            { 'import("node\\:fs");', 'uses dynamic import() at line 2 (import("node\\:fs"))', self_contained },
-            { "import(`\\x6eode:${name}`);", "uses dynamic import() at line 2 (import(`\\x6eode:${name}`))", self_contained },
-            { "import('./page.mjs');", "uses dynamic import() at line 2 (import('./page.mjs'))", self_contained },
-            -- Every spelling of a call through `require`, and an alias.
-            { "(require)('fs');", "uses require at line 2 (require)", no_node },
-            { "(0, require)('fs');", "uses require at line 2 (require)", no_node },
-            { "require?.('fs');", "uses require at line 2 (require)", no_node },
-            { "require`fs`;", "uses require at line 2 (require)", no_node },
-            { "const load = require; load('fs');", "uses require at line 2 (require)", no_node },
-            { "(module.require)('node:fs');", "reads require at line 2 (module.require)", no_node },
-            { "module['require']('fs');", "reads require at line 2 (module['require'])", no_node },
-            { "const { require: load } = module;", "reads require at line 2 (require: load)", no_node },
-            { "process.getBuiltinModule('os');", builtin .. " at line 2 (process.getBuiltinModule('os'))", no_node },
-            { "process.getBuiltinModule('node:fs');",
-                builtin .. " at line 2 (process.getBuiltinModule('node:fs'))", no_node },
-            { "process.getBuiltinModule(name);", builtin .. " at line 2 (process.getBuiltinModule(name))", no_node },
-            { "const get = process.getBuiltinModule; get('fs');",
-                builtin .. " at line 2 (process.getBuiltinModule)", no_node },
-            { "const { getBuiltinModule } = process;", builtin .. " at line 2 (getBuiltinModule)", no_node },
-            { "import fs from 'node:fs';", "imports \"node:fs\" at line 2 (import fs from 'node:fs';)", self_contained },
-            { "import './page.mjs';", "imports \"./page.mjs\" at line 2 (import './page.mjs';)", self_contained },
-            { "export * from './page.mjs';", "re-exports from \"./page.mjs\" at line 2 (export * from './page.mjs';)",
-                self_contained },
-            { "export { value } from './page.mjs';",
-                "re-exports from \"./page.mjs\" at line 2 (export { value } from './page.mjs';)", self_contained },
-        }) do
-            local ok, err = check(case[1])
-            assert.is_nil(ok, case[1])
-            assert.equal("browser image module " .. case[2] .. "; " .. case[3], err)
-        end
-        local ok, err = check("const broken = 'node")
-        assert.is_nil(ok)
-        assert.equal("browser image module does not parse as an ES module: Unterminated string constant (2:15)", err)
-        assert.is_true(check(table.concat({
-            "// We need `createRequire()` to construct the require() function; import('node:fs').",
-            "/* const fs = await import('node:fs'); require('fs'); */",
-            "const help = 'pass require(\"node:fs\") nothing', ratio = total / 2 / count;",
-            "const options = { require: false, requireTrace: true }, more = options.requires;",
-            "const quote = /['\"`]/g, text = `a ${ {b: '}'}.b } c`;",
-            "here: for (;;) break here;",
-            "const url = new URL('app.wasm', import.meta.url);",
-            "var fs = process.getBuiltinModule('fs');",
-            "var directory = process.getBuiltinModule(\"path\").dirname(process.getBuiltinModule(\"url\").fileURLToPath(url));",
-        }, "\n")))
+        local embedded = assert(browserlink.embed(FACTORY, LOADER, 'a"b\n.wasm', IDENTITY))
+        assert.truthy(embedded:find('new URL("a\\u0022b\\u000a.wasm", import.meta.url)', 1, true), embedded)
+        assert.truthy(embedded:find('new URL("a\\u0022b\\u000a.wasm.trace", import.meta.url)', 1, true), embedded)
+        assert.truthy(embedded:find('wasm: "a\\u0022b\\u000a.wasm", directory', 1, true), embedded)
     end)
 
     it("derives the closed SDK asset set without extending BrowserPaths", function()
         local paths = fixtures.paths()
         local assets = browserlink.sdk_assets(paths)
+        local join = require("titan-compiler.path").join
         assert.equal(paths.libtitan, assets.runtime)
         assert.equal(paths.sdk_digests, assets.sdk_digests)
+        assert.equal(join(paths.titan_bin, "titan-wasm-factory.mjs"), assets.factory)
+        assert.equal(join(paths.titan_bin, "titan-browser.mjs"), assets.loader)
         local keys = {}
         for key in pairs(assets) do keys[#keys + 1] = key end
         table.sort(keys)
-        assert.same({ "bridge_library", "build_profile", "js_library", "loader", "lpeglabel", "module_check",
-            "node_worker", "page", "provider", "runner", "runner_module", "runtime", "sdk_digests", "trace_library" },
-            keys)
+        assert.same({ "build_profile", "factory", "loader", "lpeglabel", "node_worker", "page", "provider",
+            "runner", "runner_module", "runtime", "sdk_digests" }, keys)
     end)
 
     it("requires only readable runtime and JS assets, in bootstrap order", function()
@@ -385,8 +325,8 @@ describe("browser image profile and SDK readiness", function()
                 return present[filename] and (filename == assets.build_profile and descriptor.build_profile .. "\n" or "bytes")
             end,
         } }
-        for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
+        for _, key in ipairs({ "runtime", "factory", "loader", "runner", "runner_module", "node_worker",
+                "page", "build_profile" }) do
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
@@ -405,201 +345,220 @@ describe("browser image profile and SDK readiness", function()
         assert.truthy(err:find("run '" .. make .. " PREFIX=/prefix'", 1, true))
     end)
 
-    it("renders native stdio and unavailable file syscalls in every launcher", function()
+    it("renders the host calendar and the named entry exports in every launcher", function()
         local source = driver.browser_c_image_contents(
             "static int titan_browser_worker(lua_State *L) { return 0; }")
-        for _, header in ipairs({ "errno.h", "wasi/api.h", "emscripten/syscalls.h" }) do
+        for _, header in ipairs({ "errno.h", "time.h" }) do
             assert.truthy(source:find("#include <" .. header .. ">", 1, true), header)
         end
-        for _, name in ipairs({ "__wasi_fd_write", "__wasi_fd_read", "__wasi_fd_close", "__wasi_fd_seek",
-            "__syscall_openat", "__syscall_unlinkat", "__syscall_renameat", "__syscall_rmdir",
-            "__syscall_stat64", "__syscall_lstat64", "__syscall_fstat64", "__syscall_newfstatat",
-            "__syscall_getcwd", "__syscall_readlinkat", "__syscall_ioctl", "__syscall_fcntl64",
-            "__syscall_dup3", "_emscripten_system" }) do
-            assert.truthy(source:find(name .. "(", 1, true), name)
+        -- wasi-libc's calendar is UTC-only: local time comes from the host.
+        for _, text in ipairs({
+            "struct tm *localtime_r(const time_t *restrict t, struct tm *restrict tm) {",
+            "if (!titan_browser_localtime((int64_t)*t, tm)) {",
+            "struct tm *localtime(const time_t *t) {",
+            "time_t mktime(struct tm *tm) {",
+            "t = titan_browser_mktime(tm);",
+            "errno = EOVERFLOW;",
+            "tm->__tm_zone = zone;",
+        }) do
+            assert.truthy(source:find(text, 1, true), text)
         end
-        assert.truthy(source:find("titan_browser_host_output(fd, iovs[i].buf, iovs[i].buf_len)", 1, true))
-        assert.truthy(source:find("*nwritten = total;", 1, true))
+        -- Each entry names its own export; the link exports nothing else by name.
+        for _, name in ipairs({ "titan_browser_initialize", "titan_browser_entry", "titan_browser_invoke",
+                "titan_browser_release_callable", "titan_browser_close" }) do
+            assert.truthy(source:find('TITAN_WASM_EXPORT("' .. name .. '")\nint ' .. name .. "(", 1, true), name)
+        end
+        -- The factory's allocator exports call the program's malloc and free,
+        -- so -Wl,--wrap=malloc,--wrap=free wrappers see the host's blocks too.
+        for _, text in ipairs({
+            'TITAN_WASM_EXPORT("malloc")\nvoid *titan_browser_export_malloc(size_t size) {\n    return malloc(size);\n}',
+            'TITAN_WASM_EXPORT("free")\nvoid titan_browser_export_free(void *block) {\n    free(block);\n}',
+        }) do
+            assert.truthy(source:find(text, 1, true), text)
+        end
+        -- Output reaches the host through WASI fd_write, not a launcher shim.
+        for _, name in ipairs({ "emscripten", "__wasi_fd_write", "__syscall_", "titan_browser_host_output" }) do
+            assert.is_nil(source:find(name, 1, true), name)
+        end
     end)
 
-    it("exports private current HEAPU8 and exact production marshalling exports", function()
+    it("links a validation program as a stack-checked reactor exporting the factory's interface", function()
         local descriptor = fixtures.descriptor()
-        local profile = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
+        local profile = assert(browserlink.profile(descriptor, { purpose = "program" }))
         assert.same({}, profile.compile_flags)
-        assert.same({
-            "-O1", "-fno-inline", "-fno-optimize-sibling-calls", "-gsource-map", "-g2",
-            "-sJSPI=1",
-            '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"]',
-            '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
-                '"titan_browser_close","titan_mco_entry"]',
-            "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
-            "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
-            "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
-            "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sMIN_NODE_VERSION=260000", "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
-            '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
-                '"_titan_browser_release_callable","_titan_browser_close",' ..
-                '"_malloc","_free","_titan_browser_trace_identity"]',
-            '-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]',
-            '-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]',
-            "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
-            "--js-library", browserlink.sdk_assets(descriptor.paths).bridge_library,
-            "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
-            "-sASSERTIONS=2", "-sSTACK_OVERFLOW_CHECK=2",
-        }, profile.link_flags)
-        assert.equal(descriptor.identity, profile.identity_inputs.target_identity)
-        assert.equal("-O1", profile.identity_inputs.optimization)
-        assert.equal("validation", profile.identity_inputs.profile)
+        assert.same(link_flags(), profile.link_flags)
+        assert.same(optimizer_flags("-O1"), profile.optimizer_flags)
+        assert.same({ target_identity = descriptor.identity, profile = "validation", purpose = "program",
+            optimization = "-O1", backend = "jspi",
+            budgets = { stack_size = 1048576, initial_heap = 15728640, maximum_memory = 2147483648 },
+            link_flags = profile.link_flags, optimizer_flags = profile.optimizer_flags,
+            compile_flags = profile.compile_flags }, profile.identity_inputs)
     end)
 
-    it("gives production programs the descriptor level and no frame flags", function()
+    it("gives production programs the descriptor level and the same link", function()
         local descriptor = fixtures.descriptor(nil, { build_profile = "production" })
-        local profile = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
+        local profile = assert(browserlink.profile(descriptor, { purpose = "program" }))
         assert.same({}, profile.compile_flags)
-        assert.same({
-            "-O3", "-gsource-map", "-g2",
-            "-sJSPI=1",
-            '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"]',
-            '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
-                '"titan_browser_close","titan_mco_entry"]',
-            "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
-            "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
-            "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
-            "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sMIN_NODE_VERSION=260000", "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
-            '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
-                '"_titan_browser_release_callable","_titan_browser_close",' ..
-                '"_malloc","_free","_titan_browser_trace_identity"]',
-            '-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]',
-            '-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]',
-            "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
-            "--js-library", browserlink.sdk_assets(descriptor.paths).bridge_library,
-            "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
-            "-sASSERTIONS=2", "-sSTACK_OVERFLOW_CHECK=2",
-        }, profile.link_flags)
+        assert.same(link_flags(), profile.link_flags)
+        assert.same(optimizer_flags("-O3"), profile.optimizer_flags)
+        assert.equal(descriptor.identity, profile.identity_inputs.target_identity)
         assert.equal("-O3", profile.identity_inputs.optimization)
         assert.equal("production", profile.identity_inputs.profile)
     end)
 
-    it("keeps frames and skips Binaryen inlining in a production test image", function()
-        local descriptor = fixtures.descriptor(nil, { build_profile = "production" })
-        local profile = assert(browserlink.profile(descriptor, { purpose = "test", assertions = 2 }))
-        local flags = table.concat(profile.link_flags, " ")
-        assert.truthy(flags:find("-O3 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2 ", 1, true), flags)
-        assert.truthy(flags:find(
-            "-sBINARYEN_EXTRA_PASSES=--skip-pass=inlining-optimizing," ..
-            "--skip-pass=duplicate-function-elimination", 1, true), flags)
-        -- The validation profile never runs the level optimizer, so its test
-        -- images keep #330's frozen link flags exactly.
-        local frozen = assert(browserlink.profile(fixtures.descriptor(), { purpose = "test", assertions = 2 }))
-        local program = assert(browserlink.profile(fixtures.descriptor(), { purpose = "program", assertions = 2 }))
+    it("skips Binaryen inlining and function folding only in a production test image", function()
+        local production = fixtures.descriptor(nil, { build_profile = "production" })
+        local profile = assert(browserlink.profile(production, { purpose = "test" }))
+        assert.same(link_flags(), profile.link_flags)
+        assert.same(optimizer_flags("-O3", true), profile.optimizer_flags)
+        -- The validation profile's test images keep #330's frozen program profile.
+        local frozen = assert(browserlink.profile(fixtures.descriptor(), { purpose = "test" }))
+        local program = assert(browserlink.profile(fixtures.descriptor(), { purpose = "program" }))
         assert.same(program.link_flags, frozen.link_flags)
-        -- Harness purposes keep their frame-preserving link settings even when
-        -- the installation optimizes.
+        assert.same(program.optimizer_flags, frozen.optimizer_flags)
+        -- Harness purposes are not test images, even when the installation optimizes.
         for _, purpose in ipairs({ "protocol", "gate", "minicoro", "budget", "baseline" }) do
-            local harness = assert(browserlink.profile(descriptor, { purpose = purpose, assertions = 2 }))
-            local text = table.concat(harness.link_flags, " ")
-            assert.truthy(text:find("-fno-inline -fno-optimize-sibling-calls", 1, true), purpose)
-            assert.is_nil(text:find("--skip-pass", 1, true), purpose)
+            local harness = assert(browserlink.profile(production, { purpose = purpose }))
+            assert.same(optimizer_flags("-O3"), harness.optimizer_flags, purpose)
+            assert.same(link_flags(nil, purpose == "gate"), harness.link_flags, purpose)
         end
     end)
 
     it("keeps internal gate, budget and baseline variants constrained", function()
         local descriptor = fixtures.descriptor()
-        local gate = assert(browserlink.profile(descriptor, { purpose = "gate", assertions = 0 }))
-        assert.truthy(table.concat(gate.link_flags, " "):find('"_titan_browser_gate_guarded","_titan_browser_gate_observe"', 1, true))
-        for _, options in ipairs({
-            { purpose = "protocol", assertions = 2, optimization = "O2" },
-            { purpose = "program", assertions = 2, budgets = {} },
-            { purpose = "gate", assertions = 1 }, { purpose = "program", assertions = 2, unknown = true },
-            { purpose = "gate", assertions = 2, entry = "lua-main" },
-            { purpose = "budget", assertions = 2, budgets = { stack_size = 17 } },
-            { purpose = "budget", assertions = 2, budgets = { initial_memory = 16777216 } },
-            { purpose = "budget", assertions = 2, budgets = { initial_heap = 32768 } },
-            { purpose = "budget", assertions = 2, budgets = { initial_heap = 2146500608 } },
+        local gate = assert(browserlink.profile(descriptor, { purpose = "gate" }))
+        assert.same(link_flags(nil, true), gate.link_flags)
+        for _, case in ipairs({
+            { nil, "browser link profile options are required" },
+            { "program", "browser link profile options are required" },
+            { {}, "invalid browser link profile purpose" },
+            { { purpose = "image" }, "invalid browser link profile purpose" },
+            -- Emscripten's assertion level and interpreter entry are gone, not ignored.
+            { { purpose = "program", assertions = 2 }, "unknown browser link profile option assertions" },
+            { { purpose = "baseline", entry = "lua-main" }, "unknown browser link profile option entry" },
+            { { purpose = "program", unknown = true }, "unknown browser link profile option unknown" },
+            { { purpose = "protocol", optimization = "O2" }, "invalid browser link optimization override" },
+            { { purpose = "baseline", optimization = "O3" }, "invalid browser link optimization override" },
+            { { purpose = "budget", optimization = "Os" }, "invalid browser link optimization override" },
+            { { purpose = "program", budgets = {} }, "browser budget overrides require the budget profile" },
+            { { purpose = "budget", budgets = 65536 }, "browser budget overrides require the budget profile" },
+            { { purpose = "budget", budgets = { stack_size = 17 } }, "invalid browser budget override stack_size" },
+            { { purpose = "budget", budgets = { stack_size = 0 } }, "invalid browser budget override stack_size" },
+            { { purpose = "budget", budgets = { stack_size = 65536.0 } },
+                "invalid browser budget override stack_size" },
+            { { purpose = "budget", budgets = { initial_memory = 16777216 } },
+                "invalid browser budget override initial_memory" },
+            { { purpose = "budget", budgets = { initial_heap = 32768 } },
+                "invalid browser budget override initial_heap" },
+            { { purpose = "budget", budgets = { maximum_memory = 65552 } },
+                "invalid browser budget override maximum_memory" },
+            { { purpose = "budget", budgets = { initial_heap = 2146500608 } }, "invalid browser memory budgets" },
             -- Aligned values whose sum with the other budget would wrap.
-            { purpose = "budget", assertions = 2, budgets = { initial_heap = 0x7fffffffffff0000 } },
-            { purpose = "budget", assertions = 2, budgets = { stack_size = 0x7ffffffffffffff0 } },
-            { purpose = "budget", assertions = 2, budgets = { stack_size = 2147483648 } } }) do
-            assert.is_nil(browserlink.profile(descriptor, options))
+            { { purpose = "budget", budgets = { initial_heap = 0x7fffffffffff0000 } },
+                "invalid browser memory budgets" },
+            { { purpose = "budget", budgets = { stack_size = 0x7ffffffffffffff0 } },
+                "invalid browser memory budgets" },
+            { { purpose = "budget", budgets = { stack_size = 2147483648 } }, "invalid browser memory budgets" },
+            { { purpose = "budget", budgets = { maximum_memory = 2147549184 } }, "invalid browser memory budgets" },
+        }) do
+            local plan, err = browserlink.profile(descriptor, case[1])
+            assert.is_nil(plan)
+            assert.equal(case[2], err)
         end
-        local budget = assert(browserlink.profile(descriptor, { purpose = "budget", assertions = 2,
-            optimization = "O1", budgets = { stack_size = 65536, initial_heap = 65536 } }))
-        assert.truthy(table.concat(budget.link_flags, " "):find("-sSTACK_SIZE=65536 -sINITIAL_HEAP=65536 ", 1, true))
+        local budgets = { stack_size = 65536, initial_heap = 65536, maximum_memory = 1048576 }
+        local budget = assert(browserlink.profile(descriptor, { purpose = "budget",
+            optimization = "O1", budgets = budgets }))
+        assert.same(link_flags(budgets), budget.link_flags)
         assert.same({ "-O1" }, budget.compile_flags)
-        local baseline = assert(browserlink.profile(descriptor, { purpose = "baseline", assertions = 2,
-            entry = "lua-main", optimization = "O2" }))
-        local flags = table.concat(baseline.link_flags, " ")
-        assert.is_nil(flags:find("--no-entry", 1, true))
-        assert.is_nil(flags:find("--js-library", 1, true))
-        assert.truthy(flags:find('-sEXPORTED_FUNCTIONS=["_main","_malloc","_free"]', 1, true))
+        assert.same(optimizer_flags("-O1"), budget.optimizer_flags)
+        assert.same(budgets, budget.identity_inputs.budgets)
+        local baseline = assert(browserlink.profile(descriptor, { purpose = "baseline", optimization = "O2" }))
+        assert.same(link_flags(), baseline.link_flags)
+        assert.same({ "-O2" }, baseline.compile_flags)
+        assert.same(optimizer_flags("-O2"), baseline.optimizer_flags)
+        assert.equal("-O2", baseline.identity_inputs.optimization)
+        local minicoro = assert(browserlink.profile(fixtures.descriptor(nil, { build_profile = "production" }),
+            { purpose = "minicoro", optimization = "O1" }))
+        assert.same(optimizer_flags("-O1"), minicoro.optimizer_flags)
+        local plan, err = browserlink.profile(fixtures.descriptor(nil, { build_profile = "debug" }),
+            { purpose = "program" })
+        assert.is_nil(plan)
+        assert.equal("invalid browser build profile", err)
     end)
 
-    it("owns one JSPI backend and records explicit import/export identity for every purpose", function()
-        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
-            for _, assertions in ipairs({ 0, 2 }) do
-                local plan = assert(browserlink.profile(fixtures.descriptor(),
-                    { purpose = purpose, assertions = assertions }))
-                local flags = table.concat(plan.link_flags, " ")
-                assert.truthy(flags:find("-sJSPI=1", 1, true))
-                assert.truthy(flags:find("-sJSPI_IMPORTS=", 1, true))
-                assert.truthy(flags:find("-sJSPI_EXPORTS=", 1, true))
-                assert.is_nil(flags:find("ASYNCIFY", 1, true))
-                assert.is_nil(flags:find("simplify-locals", 1, true))
+    it("links every purpose as a reactor whose JSPI belongs to the factory, and records its identity", function()
+        for _, build_profile in ipairs({ "production", "validation" }) do
+            for _, purpose in ipairs(PURPOSES) do
+                local plan = assert(browserlink.profile(fixtures.descriptor(nil, { build_profile = build_profile }),
+                    { purpose = purpose }))
+                assert.equal("-mexec-model=reactor", plan.link_flags[1])
                 assert.equal("jspi", plan.identity_inputs.backend)
+                assert.equal(purpose, plan.identity_inputs.purpose)
                 assert.same(plan.link_flags, plan.identity_inputs.link_flags)
-            end
-        end
-    end)
-
-    it("disables the launcher filesystem while preserving the interpreter baseline", function()
-        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
-            for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
-                local plan = assert(browserlink.profile(fixtures.descriptor(),
-                    { purpose = purpose, assertions = 2, entry = entry }))
-                local flags = table.concat(plan.link_flags, " ")
-                assert.truthy(flags:find(entry == "titan" and "-sFILESYSTEM=0" or "-sFORCE_FILESYSTEM=1", 1, true))
-                assert.is_nil(flags:find(entry == "titan" and "-sFORCE_FILESYSTEM=" or "-sFILESYSTEM=", 1, true))
-                assert.truthy(flags:find(entry == "titan" and
-                    '-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]' or
-                    '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]', 1, true))
-                assert.same(plan.link_flags, plan.identity_inputs.link_flags)
-            end
-        end
-    end)
-
-    it("preserves long-double printf precision in every profile, purpose and entry", function()
-        for _, build_profile in ipairs({ "production", "validation" }) do
-            for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
-                for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
-                    local plan = assert(browserlink.profile(fixtures.descriptor(nil, {build_profile = build_profile}),
-                        {purpose = purpose, assertions = 2, entry = entry}))
-                    local count = 0
-                    for _, flag in ipairs(plan.link_flags) do
-                        if flag == "-sPRINTF_LONG_DOUBLE=1" then count = count + 1 end
-                    end
-                    assert.equal(1, count)
-                    assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+                assert.same(plan.optimizer_flags, plan.identity_inputs.optimizer_flags)
+                assert.same(plan.compile_flags, plan.identity_inputs.compile_flags)
+                for _, flag in ipairs(plan.link_flags) do
+                    -- No Emscripten setting, link-time JSPI list or relaxed symbol policy.
+                    assert.is_nil(flag:match("^%-s"), flag)
+                    assert.is_nil(flag:find("JSPI", 1, true), flag)
+                    assert.is_nil(flag:find("undefined", 1, true), flag)
+                    assert.is_nil(flag:find("entry", 1, true), flag)
+                end
+                for _, flag in ipairs(plan.optimizer_flags) do
+                    assert.is_nil(flag:find("asyncify", 1, true), flag)
+                    assert.is_nil(flag:find("jspi", 1, true), flag)
+                    -- wasm-opt 133's --all-features writes imports that V8 refuses.
+                    assert.not_equal("--all-features", flag)
                 end
             end
         end
     end)
 
-    it("pins legacy Wasm EH in every profile, purpose and entry", function()
+    -- The launcher exports the allocator itself (see the launcher case), so a
+    -- wrapped malloc or free never loses the factory's export name.
+    it("exports only the factory's memory, table and stack bounds by name, plus the gate entries", function()
+        for _, purpose in ipairs(PURPOSES) do
+            local plan = assert(browserlink.profile(fixtures.descriptor(), { purpose = purpose }))
+            local exports = {}
+            for _, flag in ipairs(plan.link_flags) do
+                local name = flag:match("^%-Wl,%-%-export=(.+)$")
+                if name then exports[#exports + 1] = name end
+            end
+            local expected = { "__stack_pointer", "__stack_low", "__stack_high" }
+            if purpose == "gate" then
+                expected[#expected + 1] = "titan_browser_gate_guarded"
+                expected[#expected + 1] = "titan_browser_gate_observe"
+            end
+            assert.same(expected, exports, purpose)
+            assert.equal(1, count(plan.link_flags, "-Wl,--export-table"), purpose)
+            assert.equal(1, count(plan.link_flags, "-Wl,--stack-first"), purpose)
+            assert.equal(1, count(plan.optimizer_flags, "--stack-check"), purpose)
+            assert.equal(1, count(plan.optimizer_flags, "--debuginfo"), purpose)
+        end
+    end)
+
+    it("preserves long-double printf precision in every profile and purpose", function()
         for _, build_profile in ipairs({ "production", "validation" }) do
-            for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
-                for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
-                    local plan = assert(browserlink.profile(fixtures.descriptor(nil, { build_profile = build_profile }),
-                        { purpose = purpose, assertions = 2, entry = entry }))
-                    local sjlj, legacy = 0, 0
-                    for _, flag in ipairs(plan.link_flags) do
-                        if flag == "-sSUPPORT_LONGJMP=wasm" then sjlj = sjlj + 1 end
-                        if flag == "-sWASM_LEGACY_EXCEPTIONS=1" then legacy = legacy + 1 end
-                    end
-                    assert.equal(1, sjlj)
-                    assert.equal(1, legacy)
-                    assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+            for _, purpose in ipairs(PURPOSES) do
+                local plan = assert(browserlink.profile(fixtures.descriptor(nil, { build_profile = build_profile }),
+                    { purpose = purpose }))
+                assert.equal(1, count(plan.link_flags, "-lc-printscan-long-double"))
+                assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+            end
+        end
+    end)
+
+    it("pins exnref setjmp/longjmp in every profile and purpose", function()
+        for _, build_profile in ipairs({ "production", "validation" }) do
+            for _, purpose in ipairs(PURPOSES) do
+                local plan = assert(browserlink.profile(fixtures.descriptor(nil, { build_profile = build_profile }),
+                    { purpose = purpose }))
+                assert.equal(1, count(plan.link_flags, "-lsetjmp"))
+                assert.equal(1, count(plan.optimizer_flags, "--enable-exception-handling"))
+                for _, flags in ipairs({ plan.link_flags, plan.optimizer_flags }) do
+                    for _, flag in ipairs(flags) do assert.is_nil(flag:find("legacy", 1, true), flag) end
                 end
+                assert.same(plan.optimizer_flags, plan.identity_inputs.optimizer_flags)
             end
         end
     end)
@@ -617,17 +576,12 @@ describe("browser image profile and SDK readiness", function()
         -- identity_inputs is what titanc records as policy.browser_profile.
         assert.equal("test", test_plan.identity_inputs.purpose)
         assert.equal("production", test_plan.identity_inputs.profile)
-        local test_flags = table.concat(test_plan.link_flags, " ")
-        assert.truthy(test_flags:find("-O3 -fno-inline -fno-optimize-sibling-calls", 1, true), test_flags)
-        assert.truthy(test_flags:find("--skip-pass=inlining-optimizing", 1, true), test_flags)
-        assert.truthy(test_flags:find("--skip-pass=duplicate-function-elimination", 1, true), test_flags)
+        assert.same(optimizer_flags("-O3", true), test_plan.optimizer_flags)
         local program_plan = assert(driver.browser_link_plan({ target = "browser", link_kind = "program" }))
         assert.equal("program", program_plan.identity_inputs.purpose)
-        local program_flags = table.concat(program_plan.link_flags, " ")
-        assert.is_nil(program_flags:find("-fno-inline", 1, true), program_flags)
-        assert.is_nil(program_flags:find("--skip-pass", 1, true), program_flags)
+        assert.same(optimizer_flags("-O3"), program_plan.optimizer_flags)
         -- A harness purpose is not an image kind and stays usable on either kind.
-        driver.browser_link_options = { purpose = "budget", assertions = 2 }
+        driver.browser_link_options = { purpose = "budget" }
         assert.equal("budget", assert(driver.browser_link_plan(test_context)).identity_inputs.purpose)
         assert.equal("budget", assert(driver.browser_link_plan(
             { target = "browser", link_kind = "program" })).identity_inputs.purpose)
@@ -636,25 +590,25 @@ describe("browser image profile and SDK readiness", function()
         -- and compile_browser_image's shape) or lets it be derived.
         local program_context = { target = "browser", link_kind = "program" }
         for _, call in ipairs({ { test_context }, { test_context, "test" } }) do
-            driver.browser_link_options = { purpose = "program", assertions = 2 }
+            driver.browser_link_options = { purpose = "program" }
             local refused, err = driver.browser_link_plan(call[1], call[2])
             assert.is_nil(refused)
             assert.equal('browser link purpose "program" does not match this test image', err)
         end
         for _, call in ipairs({ { program_context }, { program_context, "program" } }) do
-            driver.browser_link_options = { purpose = "test", assertions = 2 }
+            driver.browser_link_options = { purpose = "test" }
             local refused, err = driver.browser_link_plan(call[1], call[2])
             assert.is_nil(refused)
             assert.equal('browser link purpose "test" does not match this program image', err)
         end
         -- An agreeing preset still certifies and links, through both shapes.
         for _, call in ipairs({ { test_context }, { test_context, "test" } }) do
-            driver.browser_link_options = { purpose = "test", assertions = 2 }
+            driver.browser_link_options = { purpose = "test" }
             assert.equal("test", assert(driver.browser_link_plan(call[1], call[2])).identity_inputs.purpose)
         end
         -- A preset harness table must name its profile; inheriting the kind
         -- would silently give a measurement build an image's flags.
-        driver.browser_link_options = { assertions = 2 }
+        driver.browser_link_options = { optimization = "O2" }
         local unnamed, unnamed_error = driver.browser_link_plan(test_context)
         assert.is_nil(unnamed)
         assert.equal("browser link profile options require a purpose", unnamed_error)
@@ -734,7 +688,8 @@ describe("browser image profile and SDK readiness", function()
         files.write(workspace .. "/src/plain.titan",
             "function answer(): integer\n    return 1\nend\n")
         local result = cli({ prefix = info.prefix, lua = info.lua,
-            compiler_setup = "require('titan-compiler.driver').browser_link_options={assertions=2};" },
+            compiler_setup = "require('titan-compiler.driver').browser_link_options=" ..
+                "{budgets={stack_size=65536}};" },
             "-c", "plain")
         assert.is_false(result.ok, "a purposeless preset was accepted")
         local log = result.output or result.diagnostic or ""
@@ -754,14 +709,16 @@ describe("browser image profile and SDK readiness", function()
             { arguments = { "-c", "plain", "--cflag=-O2" }, expected = compile .. '"-O2"' },
             { arguments = { "-c", "plain", "--cflag=-fno-inline" }, expected = compile .. '"-fno-inline"' },
             { arguments = { "-c", "plain" }, extra_cflags = "-g2", expected = compile .. '"-g2"' },
-            { arguments = { "-c", "plain" }, extra_cflags = "-sBINARYEN_EXTRA_PASSES=--coalesce-locals",
-                expected = compile .. '"-sBINARYEN_EXTRA_PASSES=--coalesce-locals"' },
+            { arguments = { "-c", "plain" }, extra_cflags = "-D_WASI_EMULATED_PROCESS_CLOCKS",
+                expected = compile .. '"-D_WASI_EMULATED_PROCESS_CLOCKS"' },
             -- --ldflag is a link-phase option, which -c rejects, so the link
             -- cases run the ordinary build and stop at the ownership check.
             { arguments = { "plain", "--ldflag=-O3" }, expected = link .. "-O3" },
             { arguments = { "plain", "--ldflag=-fno-optimize-sibling-calls" }, expected = link .. "-fno-optimize-sibling-calls" },
+            { arguments = { "plain", "--ldflag=-Wl,--export=main" }, expected = link .. "-Wl,--export=main" },
             { arguments = { "plain", "--ldflag=--pre-js=pre.js" }, expected = "browser " .. profile ..
-                " link profile does not accept --pre-js; add JavaScript with EM_JS or EM_ASM in a --c-source helper" },
+                " link profile does not accept --pre-js; add JavaScript through titan.browser bindings or " ..
+                "create({ imports })" },
         }) do
             local result = cli({ prefix = info.prefix, lua = info.lua, extra_cflags = case.extra_cflags },
                 table.unpack(case.arguments))
@@ -773,92 +730,132 @@ describe("browser image profile and SDK readiness", function()
         end
     end)
 
-    it("refuses link options whose files the image identity does not record", function()
-        local javascript = "add JavaScript with EM_JS or EM_ASM in a --c-source helper"
+    it("refuses link options that put JavaScript or files into the image", function()
+        local javascript = "add JavaScript through titan.browser bindings or create({ imports })"
         for _, case in ipairs({
             { { "--pre-js", "pre.js" }, "--pre-js; " .. javascript },
             { { "--post-js=post.js" }, "--post-js; " .. javascript },
             { { "-lm", "--extern-pre-js", "pre.js" }, "--extern-pre-js; " .. javascript },
             { { "--extern-post-js=post.js" }, "--extern-post-js; " .. javascript },
-            { { "--js-transform", "cat" }, "--js-transform; the generated module is Titan's" },
+            { { "--js-library", "library.js" }, "--js-library; " .. javascript },
+            { { "--js-library=library.js" }, "--js-library; " .. javascript },
             { { "--embed-file", "data" }, "--embed-file; browser images have no filesystem" },
             { { "--preload-file=data" }, "--preload-file; browser images have no filesystem" },
-            { { "--exclude-file", "*.tmp" }, "--exclude-file; browser images have no filesystem" },
         }) do
             local ok, err = browserlink.validate_extras(case[1], nil, "production")
             assert.is_nil(ok)
             assert.equal("browser production link profile does not accept " .. case[2], err)
+            ok, err = browserlink.validate_extras(case[1], { purpose = "baseline" }, "validation", "compile")
+            assert.is_nil(ok)
+            assert.equal("browser validation profile does not accept " .. case[2], err)
+            ok, err = browserlink.validate_extras(case[1])
+            assert.is_nil(ok)
+            assert.equal("browser link profile does not accept " .. case[2], err)
         end
     end)
 
     it("rejects trailing attempts to override profile-owned settings", function()
-        for _, flags in ipairs({ { "-sASYNCIFY=0" }, { "-s", "ASYNCIFY_IGNORE_INDIRECT=1" },
-            { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "-UTITAN_TARGET_BROWSER" }, { "-sNO_ASYNCIFY=1" },
-            { "-sJSPI=0" }, { "-s", "JSPI_EXPORTS=[]" }, { "-sNO_JSPI=1" },
-            { "-sJSPI_IMPORTS=[]" }, { "-DJSPI=0" }, { "-U", "JSPI_EXPORTS" },
-            { "-sFORCE_FILESYSTEM=0" }, { "-sFILESYSTEM=0" }, { "-sMINIMAL_RUNTIME=1" },
-            { "-sINITIAL_MEMORY=33554432" }, { "-sINITIAL_HEAP=33554432" },
-            { "-sMIN_NODE_VERSION=180300" }, { "-s", "MIN_NODE_VERSION=220000" },
-            { "--js-library=x.js" }, { "--no-entry" } }) do
-            assert.is_nil(browserlink.validate_extras(flags))
+        local function owned(flags, options, expected)
+            local ok, why = browserlink.validate_extras(flags, options)
+            assert.is_nil(ok, table.concat(flags, " "))
+            assert.equal("browser link profile owns option " .. expected, why)
         end
-        assert.is_true(browserlink.validate_extras({ "-lm", "-sWASM_BIGINT=1" }))
-        for _, flag in ipairs({ "-O3", "-g0", "-finline-functions", "-foptimize-sibling-calls" }) do
-            assert.is_nil(browserlink.validate_extras({ flag }))
-        end
-        for _, purpose in ipairs({ "baseline", "minicoro", "budget" }) do
-            assert.is_true(browserlink.validate_extras({ "-g2", "-Os" }, { purpose = purpose }))
-        end
-        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "baseline", "minicoro", "budget" }) do
-            for _, flags in ipairs({
-                { "-sBINARYEN_EXTRA_PASSES=" },
-                { "-s", "BINARYEN_EXTRA_PASSES=coalesce-locals" },
-                { "-sNO_BINARYEN_EXTRA_PASSES=1" },
-                { "-DBINARYEN_EXTRA_PASSES=0" },
-                { "-U", "BINARYEN_EXTRA_PASSES" },
-                { "-sPRINTF_LONG_DOUBLE=0" },
-                { "-s", "PRINTF_LONG_DOUBLE=0" },
-                { "-sNO_PRINTF_LONG_DOUBLE=1" },
-                { "-sWASM_LEGACY_EXCEPTIONS=0" },
-                { "-s", "WASM_LEGACY_EXCEPTIONS=0" },
-                { "-sNO_WASM_LEGACY_EXCEPTIONS=1" },
-                { "-s", "NO_WASM_LEGACY_EXCEPTIONS" },
-                { "-DPRINTF_LONG_DOUBLE=0" },
-                { "-U", "PRINTF_LONG_DOUBLE" },
-                { "-DTITAN_CODEC_DEPTH_LIMIT=1000" },
-                { "-D", "TITAN_CODEC_DEPTH_LIMIT=1000" },
-                { "-UTITAN_CODEC_DEPTH_LIMIT" },
-                { "-U", "TITAN_CODEC_DEPTH_LIMIT" },
-            }) do
-                local ok, why = browserlink.validate_extras(flags, { purpose = purpose })
-                assert.is_nil(ok)
-                assert.equal("browser link profile owns option " .. flags[1], why)
+        -- Optimization, inlining, sibling-call, frame-pointer and debug choices
+        -- belong to the build profile, except in the measurement purposes.
+        for _, flag in ipairs({ "-O3", "-Os", "-g0", "-gdwarf-5", "-finline-functions", "-fno-inline",
+                "-foptimize-sibling-calls", "-fno-optimize-sibling-calls", "-fomit-frame-pointer",
+                "-fno-omit-frame-pointer" }) do
+            owned({ flag }, nil, flag)
+            for _, purpose in ipairs({ "program", "test", "protocol", "gate" }) do
+                owned({ flag }, { purpose = purpose }, flag)
+            end
+            for _, purpose in ipairs({ "baseline", "minicoro", "budget" }) do
+                assert.is_true(browserlink.validate_extras({ flag }, { purpose = purpose }))
             end
         end
+        -- The target's defines, joined and split, in every purpose.
+        for _, name in ipairs({ "TITAN_TARGET_BROWSER", "TITAN_COROUTINE_STACK_SIZE", "TITAN_CODEC_DEPTH_LIMIT",
+                "_WASI_EMULATED_PROCESS_CLOCKS" }) do
+            for _, purpose in ipairs(PURPOSES) do
+                local options = { purpose = purpose }
+                owned({ "-D" .. name .. "=1" }, options, "-D" .. name .. "=1")
+                owned({ "-D" .. name }, options, "-D" .. name)
+                owned({ "-U" .. name }, options, "-U" .. name)
+                owned({ "-D", name .. "=1" }, options, "-D")
+                owned({ "-U", name }, options, "-U")
+            end
+        end
+        -- Driver options that drop the libraries, start files or symbols the
+        -- image needs, set its stack or entry, or select another linker than
+        -- the SDK's certified wasm-ld.
+        for _, flags in ipairs({ { "-s" }, { "-nostartfiles" }, { "-nostdlib" }, { "-nodefaultlibs" },
+                { "-z", "stack-size=65536" }, { "-e", "main" }, { "-fuse-ld=lld" }, { "--ld-path=/usr/bin/ld" },
+                { "-B/opt/bin" }, { "--prefix=/opt/bin" }, { "--prefix", "/opt/bin" } }) do
+            owned(flags, nil, flags[1])
+            owned(flags, { purpose = "baseline" }, flags[1])
+        end
+        -- Linker options, through -Wl lists and -Xlinker, that place the stack,
+        -- size and grow memory, choose the exports, imports and entry, or drop
+        -- the names and line tables traces need.
+        for _, argument in ipairs({ "--stack-first", "-z", "--stack-size=65536", "--initial-heap=65536",
+                "--initial-memory=65536", "--max-memory=65536", "--no-growable-memory", "--export=main",
+                "--export-all", "--export-dynamic", "--export-if-defined=main", "--export-memory",
+                "--export-table", "--import-memory", "--import-table", "--import-undefined",
+                "--allow-undefined", "--allow-undefined-file=imports.txt", "--unresolved-symbols=ignore-all",
+                "-e", "--entry=main", "--no-entry", "--shared-memory", "--gc-sections", "--no-gc-sections",
+                "-s", "-S", "--strip-all", "--strip-debug", "--global-base=1024", "--table-base=1",
+                "--growable-table", "--experimental-pic" }) do
+            owned({ "-Wl," .. argument }, nil, "-Wl," .. argument)
+            owned({ "-Xlinker", argument }, nil, argument)
+            owned({ "-Wl,--wrap=malloc," .. argument }, { purpose = "baseline" }, "-Wl,--wrap=malloc," .. argument)
+            -- An option's `--no-` spelling is the same option.
+            local name = argument:match("^%-%-([%w-]+)")
+            if name and not name:match("^no%-") then
+                owned({ "-Wl,--no-" .. name }, nil, "-Wl,--no-" .. name)
+                owned({ "-Xlinker", "--no-" .. name }, { purpose = "minicoro" }, "--no-" .. name)
+            end
+        end
+        owned({ "-Wl,-z,stack-size=65536" }, nil, "-Wl,-z,stack-size=65536")
+        owned({ "-Wl,-e,main" }, nil, "-Wl,-e,main")
+        -- A linker response file could carry any owned option.
+        for _, case in ipairs({ { { "-Wl,@link.rsp" }, "-Wl,@link.rsp" }, { { "-Xlinker", "@link.rsp" }, "@link.rsp" },
+                { { "-Wl,--wrap=malloc,@link.rsp" }, "-Wl,--wrap=malloc,@link.rsp" } }) do
+            local ok, why = browserlink.validate_extras(case[1], { purpose = "budget" })
+            assert.is_nil(ok)
+            assert.equal("browser link profile does not accept linker response file " .. case[2], why)
+            ok, why = browserlink.validate_extras(case[1], { purpose = "program" }, "production", "compile")
+            assert.is_nil(ok)
+            assert.equal("browser production profile does not accept linker response file " .. case[2], why)
+        end
+        -- A longer define name is not the owned one; unrelated linker and
+        -- library options pass through.
+        assert.is_true(browserlink.validate_extras({ "-DTITAN_TARGET_BROWSER_EXTRA=1", "-D", "TITAN_CODEC_DEPTH",
+            "-DUSER_DEFINE=1", "-U", "USER_DEFINE", "-lm", "-L/opt/lib", "-Wl,--wrap=malloc",
+            "-Xlinker", "--wrap=free", "-Wl,--no-demangle", "-Wl,--trace" }, { purpose = "program" }))
         -- Compile extras are reported by the compile diagnostic, link extras by
         -- the link one (OG-L4): the same option, one owner, one message.
         for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-DTITAN_TARGET_BROWSER=1",
-            "-DTITAN_CODEC_DEPTH_LIMIT=1000", "-UTITAN_CODEC_DEPTH_LIMIT" }) do
+                "-D_WASI_EMULATED_PROCESS_CLOCKS", "-UTITAN_CODEC_DEPTH_LIMIT", "-nostdlib", "-Wl,--export=main" }) do
             local ok, why = browserlink.validate_extras({ flag }, { purpose = "gate" }, "production", "compile")
             assert.is_nil(ok)
             assert.equal('browser production profile owns compile option "' .. flag .. '"', why)
+            ok, why = browserlink.validate_extras({ flag }, { purpose = "gate" }, "production")
+            assert.is_nil(ok)
+            assert.equal("browser production link profile owns option " .. flag, why)
         end
-        assert.is_nil(browserlink.validate_extras({ "-O2" }, { purpose = "gate" }, "production"))
+        local ok, why = browserlink.validate_extras({ "-O2" }, nil, nil, "compile")
+        assert.is_nil(ok)
+        assert.equal('browser profile owns compile option "-O2"', why)
         -- The real call path names the installation profile it protects.
         for _, purpose in ipairs({ "program", "test", "gate" }) do
             for _, profile in ipairs({ "production", "validation" }) do
-                for _, flag in ipairs({ "-O2", "-g2", "-fno-inline",
-                    "-fno-optimize-sibling-calls" }) do
-                    local ok, why = browserlink.validate_extras({ flag }, { purpose = purpose }, profile)
+                for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-fno-optimize-sibling-calls" }) do
+                    ok, why = browserlink.validate_extras({ flag }, { purpose = purpose }, profile)
                     assert.is_nil(ok)
                     assert.equal("browser " .. profile .. " link profile owns option " .. flag, why)
                 end
-                local ok = browserlink.validate_extras({ "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" },
-                    { purpose = purpose }, profile)
-                assert.is_nil(ok)
             end
-            -- Unrelated Emscripten settings still pass through.
-            assert.is_true(browserlink.validate_extras({ "-sWASM_BIGINT=1", "-lm" },
+            assert.is_true(browserlink.validate_extras({ "-Wl,--wrap=malloc", "-lm" },
                 { purpose = purpose }, "production"))
         end
         assert.same({ "out/app.mjs", "out/app.wasm" }, { driver.browser_program_path("out/app") })
@@ -927,23 +924,21 @@ describe("real browser test image", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         local runtime = require "spec.fixtures.browser_runtime.support"
         workspace = runtime.workspace()
-        for _, assertions in ipairs({ 0, 2 }) do
-            local root = workspace .. "/assertions-" .. assertions
-            local ok, log = runtime.cli(info, root, { purpose = "test", assertions = assertions }, {
-                "--test", "--exe", root .. "/public.mjs",
-                "--c-source", runtime.fixture .. "/close.c", "coroutine.tests", "gc.tests" })
-            assert.is_true(ok, log)
-            local maximum = maximum_declared_locals(read(root .. "/public.wasm"))
-            assert.is_true(maximum > 0 and maximum < 10000,
-                "coroutine image declares too many function locals: " .. maximum)
-            image_identity(info, root .. "/public.mjs", "unwind_common.titan")
-            io.stdout:write(string.format("\nCOROUTINE-LOCALS assertions=%d max-declared=%d\n", assertions, maximum))
-            io.stdout:flush()
-        end
+        local root = workspace .. "/coroutine"
+        local ok, log = runtime.cli(info, root, { purpose = "test" }, {
+            "--test", "--exe", root .. "/public.mjs",
+            "--c-source", runtime.fixture .. "/close.c", "coroutine.tests", "gc.tests" })
+        assert.is_true(ok, log)
+        local maximum = maximum_declared_locals(read(root .. "/public.wasm"))
+        assert.is_true(maximum > 0 and maximum < 10000,
+            "coroutine image declares too many function locals: " .. maximum)
+        image_identity(info, root .. "/public.mjs", "unwind_common.titan")
+        io.stdout:write(string.format("\nCOROUTINE-LOCALS profile=%s max-declared=%d\n", driver.BUILD_PROFILE, maximum))
+        io.stdout:flush()
     end)
 
     -- Production-only by construction: it asserts the production object and
-    -- link profile from a real production installation. CI runs it in the
+    -- post-link profile from a real production installation. CI runs it in the
     -- production `browser-playwright` cell, never in a validation install.
     it("keeps frame flags on test owners only and links a production test image as a test image", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
@@ -958,7 +953,7 @@ describe("real browser test image", function()
             repository .. "/?.lua;" .. repository .. "/?/init.lua;")
         local function build(name, purpose, test)
             local options = purpose and ("require('titan-compiler.driver').browser_link_options=" ..
-                string.format("{purpose=%q,assertions=2};", purpose)) or ""
+                string.format("{purpose=%q};", purpose)) or ""
             local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=", "TITAN_PATH_0_6=",
                 "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
                 "TITAN_PROBE_CACHE_DISABLE=1", "CCACHE_DISABLE=1",
@@ -989,47 +984,68 @@ describe("real browser test image", function()
         assert.truthy(owner:find("'-fno-optimize-sibling-calls'", 1, true), owner)
         local helper = command(test_log, "/trace_uncaught.c'", "'-c'")
         assert.is_nil(helper:find("'-fno-inline'", 1, true), helper)
-        local test_link = command(test_log, "test_image.mjs'", "'--no-entry'")
-        assert.truthy(test_link:find("'-fno-inline'", 1, true), test_link)
-        assert.truthy(test_link:find("--skip-pass=inlining-optimizing", 1, true), test_link)
-        assert.truthy(test_link:find("--skip-pass=duplicate-function-elimination", 1, true), test_link)
+        -- The frames are object flags; the link is the same reactor link, and
+        -- only wasm-opt's passes tell a test image from a program image.
+        local test_link = command(test_log, "test_image.wasm.linked'", "'-mexec-model=reactor'")
+        assert.is_nil(test_link:find("'--stack-check'", 1, true), test_link)
+        local test_optimize = command(test_log, "test_image.wasm.linked'", "'--stack-check'")
+        assert.truthy(test_optimize:find("'-O3'", 1, true), test_optimize)
+        assert.truthy(test_optimize:find("'--skip-pass=inlining-optimizing'", 1, true), test_optimize)
+        assert.truthy(test_optimize:find("'--skip-pass=duplicate-function-elimination'", 1, true), test_optimize)
         local program_log = build("program_image", nil, false)
         local plain = command(program_log, "/trace_uncaught.c'", "'-c'")
         assert.is_nil(plain:find("'-fno-inline'", 1, true), plain)
-        local program_link = command(program_log, "program_image.mjs'", "'--no-entry'")
+        local program_link = command(program_log, "program_image.wasm.linked'", "'-mexec-model=reactor'")
         assert.is_nil(program_link:find("'-fno-inline'", 1, true), program_link)
-        assert.is_nil(program_link:find("--skip-pass", 1, true), program_link)
+        local program_optimize = command(program_log, "program_image.wasm.linked'", "'--stack-check'")
+        assert.truthy(program_optimize:find("'-O3'", 1, true), program_optimize)
+        assert.is_nil(program_optimize:find("--skip-pass", 1, true), program_optimize)
     end)
 
     -- Runs in both installations (CI's production cell selects it by name), so
-    -- each profile links a real image through the module check.
-    it("checks the linked module: accepts a real image and refuses an EM_JS import", function()
+    -- each profile links a real image through the strict reactor link.
+    it("checks the linked image: publishes a declared host import and refuses an undeclared one", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
         files.write(workspace .. "/src/checked.titan", "function main(args: {string}): integer\n    return #args\nend\n")
         local helper = workspace .. "/helper.c"
-        local function link(body)
-            files.write(helper, "#include <emscripten.h>\nEM_JS(int, page_value, (void), {\n" .. body ..
-                "\n});\n__attribute__((constructor)) static void load(void) { page_value(); }\n")
+        -- A C constructor that calls a declared host import still links: the
+        -- compiler's protocol probe runs it against inert stubs (D15).
+        local function link(declaration)
+            files.write(helper, declaration .. "int page_value(void);\n" ..
+                "__attribute__((constructor)) static void load(void) { page_value(); }\n")
             return cli(info, "--c-source", helper, "checked")
         end
-        local result = link("  import('./page.mjs');\n  return 1;")
-        assert.is_false(result.ok, "an EM_JS dynamic import was published")
+        -- The link allows no undefined symbol: a host function needs an import name.
+        local result = link("")
+        assert.is_false(result.ok, "an undeclared host function was published")
         local log = result.output or result.diagnostic or ""
-        assert.truthy(log:find("browser image module uses dynamic import() at line ", 1, true), log)
-        -- The diagnostic quotes the final module, whose string quotes the
-        -- profile's minifier may rewrite.
-        assert.truthy(log:find("%(import%((['\"])%./page%.mjs%1%)%); the image module is self%-contained; " ..
-            "pass page JavaScript to Titan as create%({bindings}%) values through titan%.browser"), log)
+        assert.truthy(log:find("undefined symbol: page_value", 1, true), log)
         for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.trace", ".wasm.map" }) do
             assert.is_nil(lfs.attributes(workspace .. "/out/checked" .. suffix), suffix)
         end
-        result = link("  return globalThis.pageValue ?? 1;")
+        result = link('__attribute__((import_module("env"), import_name("page_value")))\n')
         assert.is_true(result.ok, result.output or result.diagnostic)
         for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.trace", ".wasm.map" }) do
             assert.equal("file", lfs.attributes(workspace .. "/out/checked" .. suffix, "mode"), suffix)
         end
+        local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/checked.wasm")))
+        local imported = false
+        for _, item in ipairs(inventory.imports) do
+            if item.module == "env" and item.name == "page_value" then imported = true end
+        end
+        assert.is_true(imported, "the declared host import is missing from the image")
+        -- The module is the SDK's static factory, the loader and `create`: it
+        -- loads no other module and exports only the creator.
+        local module = read(workspace .. "/out/checked.mjs")
+        assert.is_nil(module:find("import(", 1, true))
+        assert.is_nil(module:find("require(", 1, true))
+        assert.is_nil(module:find("\n%s*import%s"))
+        assert.is_nil(module:find("^%s*import%s"))
+        local _, exports = module:gsub("\n%s*export%s", "")
+        assert.equal(1, exports)
+        assert.truthy(module:find("\nexport default function create(options = {}) {\n", 1, true))
     end)
 
     it("raises the five dynamic-provider guard diagnostics without native loader imports", function()
@@ -1067,18 +1083,22 @@ describe("real browser test image", function()
         assert.is_true(driver.validate_browser_provider(runtime))
         -- Only objects and archives carry the compiler's metadata payloads.
         local objdump = require("titan-compiler.path").join(
-            require("titan-compiler.path").dirname(info.tools.clang[1]), "llvm-objdump" .. (platform.windows and ".exe" or ""))
+            require("titan-compiler.path").dirname(info.tools.cc[1]), "llvm-objdump" .. (platform.windows and ".exe" or ""))
         for _, image in ipairs({ "image_main", "explicit-program" }) do
             assert.equal("file", lfs.attributes(workspace .. "/out/" .. image .. ".mjs", "mode"))
             local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/" .. image .. ".wasm")))
             local exports = {}
             for _, item in ipairs(inventory.exports) do exports[item.name] = true end
+            -- The entries name themselves; the link exports what the factory needs.
             for _, name in ipairs({ "titan_browser_initialize", "titan_browser_entry", "titan_browser_invoke",
-                    "titan_browser_release_callable", "titan_browser_close", "malloc", "free" }) do
+                    "titan_browser_release_callable", "titan_browser_close", "titan_browser_trace_identity",
+                    "malloc", "free", "memory", "__indirect_function_table", "_initialize", "__stack_pointer",
+                    "__stack_low", "__stack_high", "__set_stack_limits" }) do
                 assert.is_true(exports[name], "missing browser gateway " .. name)
             end
             assert.is_nil(exports.titan_browser_gate_guarded)
             assert.is_nil(exports.main)
+            assert.is_nil(exports._start)
             local segments = run({ objdump, "-t", workspace .. "/out/" .. image .. ".wasm" })
             assert.is_true(segments.ok, segments.output)
             assert.truthy(segments.output:find(" DATA", 1, true), segments.output)
@@ -1143,13 +1163,17 @@ end
             { "entry-bootstrap-oom", { "-Wl,--wrap=luaL_openselectedlibs", "-Wl,--wrap=lua_pcallk" } },
         }) do
             names[#names + 1] = case[1]
-            c_image(info, case[1], read(repository .. "/spec/fixtures/browser_images/" .. case[1] .. ".c"), case[2])
+            local image = c_image(info, case[1],
+                read(repository .. "/spec/fixtures/browser_images/" .. case[1] .. ".c"), case[2])
+            toolchain.check_imports(image, case[1] == "entry-close" and { "entry", "fixture:images" } or { "entry" })
         end
         local fixture = workspace .. "/out/entry-results.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/entry-results.mjs"))
+        local imports = workspace .. "/out/fixture-imports.mjs"
+        files.write(imports, read(repository .. "/spec/fixtures/browser_runtime/fixture-imports.mjs"))
         for _, engine in ipairs({ "node", "chromium" }) do
             local argv = toolchain.runner(info, "--engine", engine,
-                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--")
+                "--chrome", info.chrome.path, "--grace", "0", "--imports", imports, "--js-test", fixture, "--")
             for _, name in ipairs(names) do argv[#argv + 1] = name end
             local result = run(argv)
             assert.is_true(result.ok, result.output or result.diagnostic)
@@ -1160,14 +1184,16 @@ end
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
-        c_image(info, "stdio-image", read(repository .. "/spec/fixtures/browser_images/stdio-only.c"))
+        local image = c_image(info, "stdio-image", read(repository .. "/spec/fixtures/browser_images/stdio-only.c"))
+        -- No host shell or file system: the image imports only the entry's
+        -- reviewed WASI and Titan functions.
+        toolchain.check_imports(image, { "entry" })
         local fixture = workspace .. "/out/stdio-only.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/stdio-only.mjs"))
         for _, engine in ipairs({ "node", "chromium" }) do
             local result = run(toolchain.runner(info, "--engine", engine,
                 "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--", "stdio-image.mjs"))
             assert.is_true(result.ok, result.output or result.diagnostic)
-            assert.is_nil(result.output:find("TITAN_UNEXPECTED_HOST_SHELL", 1, true), result.output)
         end
     end)
 
@@ -1205,7 +1231,7 @@ end
 local driver = require "titan-compiler.driver"
 local context = driver.new_resolver_context({ target = "browser", output_root = %q })
 local ok, why = driver.compile_browser_image("unused entrypoint", %q, %q, { %q }, {}, {}, false,
-    { context = context, profile = { purpose = "protocol", assertions = 2 } })
+    { context = context, profile = { purpose = "protocol" } })
 assert(not ok and why:find("aliases input", 1, true), tostring(why))
 assert(driver.close_resolver_context(context))
 ]], workspace, entrypoint, executable, map)
@@ -1279,7 +1305,7 @@ local previous
 for iteration = 1, 2 do
     local ok, why, code = driver.compile_browser_image(contents,
         output .. "/repeated.c", output .. "/repeated.mjs", {}, {}, {}, false,
-        { context = context, profile = { purpose = "protocol", assertions = 2 },
+        { context = context, profile = { purpose = "protocol" },
           final_link_flags = flags, dependency_output = output .. "/dependencies" })
     assert(ok, tostring(why) .. (code and (", exit " .. code) or ""))
     assert(driver.NATIVE_LINK_FLAGS == extras and #extras == 1 and extras[1] == "-Wl,--no-demangle",
@@ -1301,7 +1327,7 @@ assert(driver.close_resolver_context(context))
         assert.match("^[0-9a-f]+$", image_identity(info, workspace .. "/out/repeated.mjs"))
     end)
 
-    it("publishes a matching extended map and callable identity for an optimized JSPI measurement control", function()
+    it("publishes a matching extended map and callable identity for an optimized measurement control", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
@@ -1316,17 +1342,25 @@ end
         local library_flag = "-L" .. workspace .. "/src"
         local variant = { prefix = info.prefix, lua = info.lua, compiler_setup = string.format([[
 local driver = require "titan-compiler.driver"
-driver.browser_link_options = {purpose='baseline',assertions=0,optimization='O2'}
+driver.browser_link_options = {purpose='baseline',optimization='O2'}
+-- Observe the static-provider protocol image's link, not the measurement image's.
+local image, protocol = driver.compile_browser_image, false
+driver.compile_browser_image = function(...)
+    local options = select(8, ...)
+    protocol = options and options.profile and options.profile.purpose == "protocol"
+    local results = table.pack(image(...))
+    protocol = false
+    return table.unpack(results, 1, results.n)
+end
 local run_link = driver.run_link_command
 driver.run_link_command = function(argv, ...)
-    local protocol, library, demangle = false, nil, nil
-    for index, flag in ipairs(argv) do
-        if flag == "-sASSERTIONS=2" then protocol = true end
-        if flag == %q then library = index end
-        if flag == "-Wl,--no-demangle" then demangle = index end
-    end
     if protocol then
-        for _, flag in ipairs(argv) do assert(flag ~= "-Os", "measurement override reached protocol link") end
+        local library, demangle
+        for index, flag in ipairs(argv) do
+            assert(flag ~= "-Os", "measurement override reached protocol link")
+            if flag == %q then library = index end
+            if flag == "-Wl,--no-demangle" then demangle = index end
+        end
         assert(library and demangle and library < demangle, "protocol lost ordered nontrace link flags")
         io.stdout:write("control protocol link\n")
     end
@@ -1349,13 +1383,13 @@ end
             "measurement control did not execute the real static-provider protocol link")
         local image = workspace .. "/out/image_control.mjs"
         local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/image_control.wasm")))
-        -- The pinned JSPI path explicitly disables import/export minification
-        -- (Emscripten tools/link.py); do not claim an unsupported minified cell.
+        -- The identity export keeps its declared name through wasm-ld and
+        -- wasm-opt; no export is minified.
         local stable_identity = false
         for _, item in ipairs(inventory.exports) do
             if item.name == "titan_browser_trace_identity" then stable_identity = true end
         end
-        assert.is_true(stable_identity, "JSPI identity export did not follow the pinned naming contract")
+        assert.is_true(stable_identity, "the identity export did not keep its declared name")
         assert.match("^[0-9a-f]+$", image_identity(info, image, "image_control.titan"))
     end)
 
@@ -1386,7 +1420,7 @@ end
         for _, optimization in ipairs({ "O1", "O2" }) do
             local variant = { prefix = info.prefix, lua = info.lua, output = workspace .. "/" .. optimization,
                 compiler_setup = "require('titan-compiler.driver').browser_link_options=" ..
-                    "{purpose='baseline',assertions=2,optimization='" .. optimization .. "'};" }
+                    "{purpose='baseline',optimization='" .. optimization .. "'};" }
             local result = cli(variant, "-c", "--incremental", "--jobs", "2", "--c-source",
                 workspace .. "/src/helper.c", "opt_left", "opt_right")
             assert.is_true(result.ok, result.output or result.diagnostic)

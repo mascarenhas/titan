@@ -6,18 +6,14 @@
 -- instantiate/run times, the per-suspension cost, import lists and whether the
 -- linker kept the Titan metadata sections.
 --
--- Lua cells: the fork interpreter built through the shared `baseline` profile
--- with entry `lua-main`, at the same two configurations, executed in both
--- engines with an explicit argv marshalled into the Wasm heap.
---
--- Native rows and the fork's own `lua.js` interpreter provide scale.
--- Published aggregates are medians of the raw repeats; the raw repeats stay in
--- the receipt.
+-- Native rows provide scale. Published aggregates are medians of the raw
+-- repeats; the raw repeats stay in the receipt.
 --
 -- Required environment (the slice's validation environment):
 --   PREFIX=<prefix>           installed compiler, runtime and browser SDK
 --   TITAN_ROOT=<prefix>       the same installed tree
---   EMSDK=<emsdk root>         Emscripten 6.0.13
+--   WASI_SDK_PATH=<root>       wasi-sdk 34
+--   BINARYEN_ROOT=<root>       Binaryen version_133 (or WASM_OPT=<wasm-opt>)
 --   TITAN_NODE=<node>          Node 26 or newer for the runner and reports
 --   TITAN_CHROME=<chrome>      headless Chromium for the Chromium cells
 --
@@ -41,9 +37,7 @@ local strategy = compiler_io.new_sync()
 local fixtures = repository .. "/spec/fixtures/browser_baseline"
 local prefix = assert(os.getenv("PREFIX") and os.getenv("PREFIX") ~= "" and
     os.getenv("PREFIX"), "PREFIX must name the validation prefix")
-local emsdk = assert(os.getenv("EMSDK") and os.getenv("EMSDK") ~= "" and
-    os.getenv("EMSDK"), "EMSDK must name the Emscripten SDK root")
-local emcc = emsdk .. "/upstream/emscripten/emcc"
+local tools = assert(browser_target.discover_tools({ io = strategy }))
 local node = os.getenv("TITAN_NODE")
 if not node or node == "" then node = "node" end
 local chrome = os.getenv("TITAN_CHROME")
@@ -145,20 +139,19 @@ end
 -- One description of a cell's link configuration: the plan, the certificate
 -- and the child build must all use it, or the recorded identity describes a
 -- different configuration than the image it claims.
-local function cell_options(cell, entry)
-    return { purpose = "baseline", assertions = 2,
-        optimization = cell.optimization, entry = entry }
+local function cell_options(cell)
+    return { purpose = "baseline", optimization = cell.optimization }
 end
 
 -- Build selects the cell through the internal measurement seam, exactly as the
 -- link-profile contract requires; the harness never duplicates flag lists.
 -- The preset is installed while the descriptor is built so its recorded
 -- `trace_control` and measurement level are the ones the build certifies.
-local function plan_for(cell, out, entry)
+local function plan_for(cell, out)
     local driver = require "titan-compiler.driver"
     local browserlink = require "titan-compiler.browserlink"
     mkdirp(out)
-    local preset = cell_options(cell, entry)
+    local preset = cell_options(cell)
     local saved = driver.browser_link_options
     driver.browser_link_options = preset
     local function finish(value, failure)
@@ -182,62 +175,20 @@ local function plan_for(cell, out, entry)
     return finish(plan, plan_error)
 end
 
-local function preamble(cell, entry)
-    local options = cell_options(cell, entry)
+local function preamble(cell)
+    local options = cell_options(cell)
     return string.format(
         "package.path=%q..package.path; require('titan-compiler.driver')" ..
-        ".browser_link_options={purpose=%q,assertions=%d," ..
-        "optimization=%q,entry=%q}",
+        ".browser_link_options={purpose=%q,optimization=%q}",
         repository .. "/?.lua;" .. repository .. "/?/init.lua;",
-        options.purpose, options.assertions, options.optimization, options.entry)
+        options.purpose, options.optimization)
 end
 
-local function build_titan_cell(cell, out, plan)
-    return must({ prefix .. "/bin/lua", "-E", "-e", preamble(cell, "titan"),
+local function build_titan_cell(cell, out)
+    return must({ prefix .. "/bin/lua", "-E", "-e", preamble(cell),
         repository .. "/titanc", "-q", "--target", "browser",
         "--tree", fixtures, "-o", out, "--exe", out .. "/baseline.mjs",
         "--c-source", fixtures .. "/baseline.c", "baseline" })
-end
-
--- The interpreter cell's macros are the installed record's, once, so the
--- receipt can show exactly what the fork's own sources were built with.
-local lua_defines = {}
-for define in ((record_fields.lua_defines or ""):gmatch("%S+")) do
-    lua_defines[#lua_defines + 1] = define
-end
-
-local lua_sources
-local function sources_for_interpreter()
-    if lua_sources then return lua_sources end
-    local directory = repository .. "/lua-5.5.1/src"
-    local names = {}
-    for name in lfs.dir(directory) do
-        if name:match("%.c$") and name ~= "luac.c" and name ~= "onelua.c" then
-            names[#names + 1] = directory .. "/" .. name
-        end
-    end
-    table.sort(names)
-    lua_sources = names
-    return names
-end
-
-local function build_lua_cell(cell, out, plan)
-    mkdirp(out)
-    -- The interpreter cell compiles the fork's own sources, so its macros are
-    -- the installed record's: the fork changes them and a local list would
-    -- build a different configuration than the one the record describes.
-    assert(#lua_defines > 0,
-        "browser Lua record lacks lua_defines; reinstall the browser Lua fork")
-    local argv = browser_target.compiler_argv({ emcc, "-I", repository .. "/lua-5.5.1/src" })
-    for _, define in ipairs(lua_defines) do argv[#argv + 1] = define end
-    for _, source in ipairs(sources_for_interpreter()) do
-        argv[#argv + 1] = source
-    end
-    for _, flag in ipairs(plan.compile_flags) do argv[#argv + 1] = flag end
-    for _, flag in ipairs(plan.link_flags) do argv[#argv + 1] = flag end
-    argv[#argv + 1] = "-o"
-    argv[#argv + 1] = out .. "/lua.mjs"
-    return must(argv)
 end
 
 local metadata_script = [[
@@ -362,21 +313,18 @@ local function copy(from, to)
 end
 
 local function engine_run(engine, out, module, image)
-    -- The runner imports --js-test from beneath --root, so the host module is
-    -- copied into the cell's root before every run.
+    -- The runner imports --js-test and --imports from beneath --root, so the
+    -- host modules are copied into the cell's root before every run. The
+    -- fixtures' shared imports supply the C helper's suspending sleep.
     copy(fixtures .. "/" .. module, out .. "/" .. module)
-    if module == "lua-bench.mjs" then copy(fixtures .. "/bench.lua", out .. "/bench.lua") end
+    copy(repository .. "/spec/fixtures/browser_runtime/fixture-imports.mjs", out .. "/fixture-imports.mjs")
     local argv = { runner, "--engine", engine, "--timeout", "180000",
         "--grace", "200", "--root", out, "--js-test", out .. "/" .. module,
-        "--", image }
+        "--imports", out .. "/fixture-imports.mjs", "--", image }
     local output, failure = run(argv)
     if not output then return { error = failure } end
     local values = rows(output)
-    if module == "lua-bench.mjs" then
-        if values["lua.status"] ~= 0 then
-            return { error = "unexpected interpreter status: " .. tostring(output) }
-        end
-    elseif values["browser.kind"] ~= "returned" or values["browser.status"] ~= 0 then
+    if values["browser.kind"] ~= "returned" or values["browser.status"] ~= 0 then
         return { error = "unexpected completion: " .. tostring(output) }
     end
     return values
@@ -398,9 +346,6 @@ local metric_fields = {
     "browser.instantiate_ms", "browser.run_ms", "browser.total_ms",
     "bench.calls", "bench.closures", "bench.arrays", "bench.strings",
     "bench.coroutine_switch", "bench.suspend_average", "bench.suspend_total",
-    "lua.instantiate_ms", "lua.run_ms", "lua.total_ms",
-    "lua.calls", "lua.closures", "lua.arrays", "lua.strings",
-    "lua.coroutine_switch",
 }
 
 local function metrics(results)
@@ -416,14 +361,17 @@ local function metrics(results)
 end
 
 local receipt = {
-    format = "titan-browser-baseline-2",
+    format = "titan-browser-baseline-3",
     date = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     statistic = "median",
     toolchain = {
         host = version_line({ "uname", "-srm" }),
         commit = version_line({ "git", "-C", repository, "rev-parse", "HEAD" }),
-        emcc = version_line(browser_target.compiler_argv({ emcc, "--version" })),
-        emcc_path = emcc,
+        clang = trimmed(tools.version_output),
+        clang_path = tools.cc[1],
+        wasi_sdk = tools.version,
+        wasm_opt = trimmed(tools.optimizer.version_output),
+        wasm_opt_path = tools.optimizer.argv[1],
         node = version_line({ node, "--version" }),
         node_path = node,
         chrome = chrome and version_line({ chrome, "--version" }) or nil,
@@ -433,9 +381,7 @@ local receipt = {
         library_version = version.TITAN_LIBRARY_VERSION,
     },
     cells = {},
-    lua_cells = {},
     native = {},
-    fork_interpreter = {},
     failures = {},
 }
 
@@ -455,11 +401,11 @@ end
 
 for _, cell in ipairs(cells) do
     local out = out_root .. "/titan/" .. cell.name
-    local plan, plan_error = plan_for(cell, out, "titan")
+    local plan, plan_error = plan_for(cell, out)
     if not plan then
         fail(cell.name .. ": link profile refused: " .. tostring(plan_error))
     else
-        local ok, build_failure = pcall(build_titan_cell, cell, out, plan)
+        local ok, build_failure = pcall(build_titan_cell, cell, out)
         if not ok then
             fail(cell.name .. ": build failed: " .. tostring(build_failure))
         else
@@ -469,6 +415,7 @@ for _, cell in ipairs(cells) do
                 backend = "jspi",
                 compile_flags = plan.compile_flags,
                 link_flags = plan.link_flags,
+                optimizer_flags = plan.optimizer_flags,
                 identity = plan.identity_inputs,
                 image = image_report(out, "baseline"),
                 engine = {},
@@ -491,46 +438,6 @@ for _, cell in ipairs(cells) do
     end
 end
 
-for _, cell in ipairs(cells) do
-    local out = out_root .. "/lua/" .. cell.name
-    local plan, plan_error = plan_for(cell, out, "lua-main")
-    if not plan then
-        fail("lua " .. cell.name .. ": link profile refused: " .. tostring(plan_error))
-    else
-        local ok, build_failure = pcall(build_lua_cell, cell, out, plan)
-        if not ok then
-            fail("lua " .. cell.name .. ": build failed: " .. tostring(build_failure))
-        else
-            local report = {
-                name = cell.name,
-                optimization = cell.optimization,
-                backend = "jspi",
-                entry = "lua-main",
-                defines = lua_defines,
-                compile_flags = plan.compile_flags,
-                link_flags = plan.link_flags,
-                identity = plan.identity_inputs,
-                image = image_report(out, "lua"),
-                engine = {},
-            }
-            for _, engine in ipairs({ "node", "chromium" }) do
-                local results = repeat_runs(options.repeats, function()
-                    local values = engine_run(engine, out, "lua-bench.mjs", "lua.mjs")
-                    if values.error then
-                        fail("lua " .. cell.name .. "/" .. engine .. ": " .. values.error)
-                        return nil
-                    end
-                    return values
-                end)
-                report.engine[engine] = results and {
-                    repeats = results, metrics = metrics(results),
-                } or { error = "run failed; see failures" }
-            end
-            receipt.lua_cells[#receipt.lua_cells + 1] = report
-        end
-    end
-end
-
 do
     local out = out_root .. "/native"
     mkdirp(out)
@@ -549,36 +456,6 @@ do
             return rows(output)
         end)
         receipt.native = { repeats = results or {}, metrics = results and metrics(results) or {} }
-    end
-end
-
-do
-    local script = repository .. "/lua-5.5.1/src/browser/lua.js"
-    if lfs.attributes(script, "mode") ~= "file" then
-        local path = emsdk .. "/upstream/emscripten:" .. (os.getenv("PATH") or "")
-        local built, failure = run({ "env", "PATH=" .. path, "make",
-            "-C", repository .. "/lua-5.5.1/src", "browser-js" })
-        if not built then fail("lua.js: browser-js build failed: " .. tostring(failure)) end
-    end
-    if lfs.attributes(script, "mode") == "file" then
-        local source = assert(io.open(fixtures .. "/bench.lua", "rb"))
-        local code = assert(source:read("a")); assert(source:close())
-        local results = repeat_runs(options.repeats, function()
-            -- The standalone interpreter parses any argument that starts with
-            -- "-" as another option, so a leading newline keeps a comment-first
-            -- benchmark chunk out of its option scan.
-            local output, run_error = run({ node, script, "-e", "\n" .. code })
-            if not output then
-                fail("lua.js: " .. tostring(run_error))
-                return nil
-            end
-            return rows(output)
-        end)
-        receipt.fork_interpreter = {
-            interpreter = "lua-5.5.1/src/browser/lua.js",
-            repeats = results or {},
-            metrics = results and metrics(results) or {},
-        }
     end
 end
 

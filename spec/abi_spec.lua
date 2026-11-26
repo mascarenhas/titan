@@ -101,7 +101,7 @@ describe("compiled-module ABI version", function()
         assert.equal("_" .. driver.TITAN_LIBRARY_VERSION:gsub("%.", "_"),
             driver.TITAN_LIBRARY_VERSION_SUFFIX)
         assert.equal("2", driver.TITAN_ABI_VERSION)
-        assert.equal("0.6.1", driver.TITAN_VERSION)
+        assert.equal("0.6.2", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
         assert.match("LUA_VERSION%s*:?=%s*5%.5%.1", makefile)

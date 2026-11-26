@@ -7,7 +7,7 @@ export async function run(context) {
     allocationCleanup: 0, earlySinks: 0};
   const peers = [0, 1].map(id => {
     const peer = {id, phase: 0, controls: undefined, callbacks: new Map(), deliveries: 0, lifetimes: undefined};
-    peer.instance = image.create({locateFile: image.locateFile,
+    peer.instance = image.create({locateFile: image.locateFile, imports: context.imports,
       bindings: {
         __titanTest(controls) { peer.controls = controls; },
         publish(name, callback) { peer.callbacks.set(name, callback); },

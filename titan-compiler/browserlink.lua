@@ -8,15 +8,12 @@ function M.sdk_assets(paths)
     local root = paths.titan_bin
     return {
         runtime = paths.libtitan,
-        js_library = path.join(root, "titan-browser-library.js"),
-        bridge_library = path.join(root, "titan-browser-bridge.js"),
-        trace_library = path.join(root, "titan-browser-trace.js"),
+        factory = path.join(root, "titan-wasm-factory.mjs"),
         loader = path.join(root, "titan-browser.mjs"),
         runner = path.join(root, "titan-browser-run"),
         runner_module = path.join(root, "titan-browser-run.mjs"),
         node_worker = path.join(root, "titan-browser-node-worker.mjs"),
         page = path.join(root, "titan-browser-page.mjs"),
-        module_check = path.join(root, "titan-browser-module-check.mjs"),
         build_profile = path.join(root, "build-profile"),
         lpeglabel = path.join(root, "libtitan-lpeglabel.a"),
         provider = path.join(root, "titan.a"),
@@ -59,8 +56,8 @@ function M.require_sdk(context, descriptor, install)
     local function command()
         return M.install_command("sdk", install.prefix, install.rocks_tree)
     end
-    for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-            "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
+    for _, key in ipairs({ "runtime", "factory", "loader", "runner", "runner_module", "node_worker",
+            "page", "build_profile" }) do
         local filename = assets[key]
         local stat = context.io:stat(filename)
         local readable = stat and stat.kind == "file" and context.io:read_file(filename, 0)
@@ -99,13 +96,21 @@ end
 
 local purposes = { program = true, test = true, protocol = true, gate = true,
     minicoro = true, budget = true, baseline = true }
-local option_keys = { purpose = true, assertions = true, optimization = true,
-    budgets = true, entry = true }
+local option_keys = { purpose = true, optimization = true, budgets = true }
 -- Initial memory is the image's static data and stack plus `initial_heap`;
 -- 15 MiB is the heap a data-free image had under a fixed 16 MiB.
 local defaults = { stack_size = 1048576,
     initial_heap = 15728640, maximum_memory = 2147483648 }
+-- The post-link optimizer reads exactly the features the objects use; it
+-- would otherwise encode instructions the engines refuse.
+local OPTIMIZER_FEATURES = { "--enable-exception-handling", "--enable-multivalue", "--enable-bulk-memory",
+    "--enable-mutable-globals", "--enable-sign-ext", "--enable-nontrapping-float-to-int",
+    "--enable-reference-types" }
 
+-- The image's link (`link_flags`, to clang as the reactor driver) and post-link
+-- (`optimizer_flags`, to wasm-opt) of one purpose. Every image exports its
+-- memory, function table and stack bounds to the factory; the entrypoint
+-- carries the entry points' and the allocator's own export names.
 function M.profile(descriptor, options)
     if type(options) ~= "table" then return nil, "browser link profile options are required" end
     for key in pairs(options) do
@@ -113,16 +118,10 @@ function M.profile(descriptor, options)
     end
     local purpose = options.purpose
     if not purposes[purpose] then return nil, "invalid browser link profile purpose" end
-    local assertions = options.assertions
-    if assertions ~= 0 and assertions ~= 2 then return nil, "browser assertions must be 0 or 2" end
     local optimization = options.optimization
     if optimization ~= nil and (optimization ~= "O1" and optimization ~= "O2" or
             purpose ~= "minicoro" and purpose ~= "budget" and purpose ~= "baseline") then
         return nil, "invalid browser link optimization override"
-    end
-    local entry = options.entry or "titan"
-    if entry ~= "titan" and (entry ~= "lua-main" or purpose ~= "baseline") then
-        return nil, "invalid browser link entry"
     end
     local budgets = {}
     for key, value in pairs(defaults) do budgets[key] = value end
@@ -144,7 +143,7 @@ function M.profile(descriptor, options)
             return nil, "invalid browser memory budgets"
         end
     end
-    local flags, compile = {}, {}
+    local compile = {}
     local effective_opt
     if optimization then
         effective_opt = "-" .. optimization
@@ -158,116 +157,64 @@ function M.profile(descriptor, options)
     if not require("titan-compiler.browsertarget").valid_profile(profile) then
         return nil, "invalid browser build profile"
     end
-    -- A production program link optimizes like its objects and accepts the
-    -- frames that costs. Test images, the validation profile and the fixed
-    -- harness purposes keep the frame flags.
-    local frames = profile ~= "production" or purpose ~= "program"
-    local function add(flag) flags[#flags + 1] = flag end
-    add(effective_opt or "-O1")
-    if frames then
-        add("-fno-inline")
-        add("-fno-optimize-sibling-calls")
+    local flags = { "-mexec-model=reactor", "-Wl,--stack-first",
+        "-Wl,-z,stack-size=" .. budgets.stack_size, "-Wl,--initial-heap=" .. budgets.initial_heap,
+        "-Wl,--max-memory=" .. budgets.maximum_memory, "-Wl,--gc-sections", "-Wl,--export-table",
+        "-Wl,--export=__stack_pointer", "-Wl,--export=__stack_low", "-Wl,--export=__stack_high" }
+    if purpose == "gate" then
+        flags[#flags + 1] = "-Wl,--export=titan_browser_gate_guarded"
+        flags[#flags + 1] = "-Wl,--export=titan_browser_gate_observe"
     end
-    add("-gsource-map")
-    add("-g2")
-    -- Preserve distinct function identities in production test traces.
-    -- Object-level -fno-inline alone does not prevent Binaryen folding.
-    local passes = ""
+    for _, library in ipairs({ "-lc-printscan-long-double", "-lsetjmp", "-lwasi-emulated-process-clocks" }) do
+        flags[#flags + 1] = library
+    end
+    -- `--stack-check` traps a function whose frame would cross the active
+    -- stack's low bound (the factory programs it through
+    -- `__set_stack_limits`). A production program optimizes like its
+    -- objects; production test images keep distinct function identities for
+    -- their exact traces, which object-level -fno-inline alone does not do.
+    local optimizer = { effective_opt or "-O1", "--debuginfo", "--stack-check" }
     if profile == "production" and purpose == "test" then
-        passes = "--skip-pass=inlining-optimizing" ..
-            ",--skip-pass=duplicate-function-elimination"
+        optimizer[#optimizer + 1] = "--skip-pass=inlining-optimizing"
+        optimizer[#optimizer + 1] = "--skip-pass=duplicate-function-elimination"
     end
-    if entry == "titan" and passes ~= "" then
-        add("-sBINARYEN_EXTRA_PASSES=" .. passes)
-    end
-    add("-sJSPI=1")
-    -- The bridge library's driver relinquish is the only other suspending
-    -- import; images without the bridge library keep the coroutine pair.
-    local imports = entry == "titan" and
-        '"titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"' or
-        '"titan_mco_transfer","titan_mco_destroy"'
-    local promised = entry == "titan" and
-        '"titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
-        '"titan_browser_close","titan_mco_entry"' or '"main"'
-    if purpose == "gate" then
-        imports = imports .. ',"emscripten_sleep"'
-        promised = promised .. ',"titan_browser_gate_guarded"'
-    end
-    add("-sJSPI_IMPORTS=[" .. imports .. "]")
-    add("-sJSPI_EXPORTS=[" .. promised .. "]")
-    add("-sSUPPORT_LONGJMP=" .. descriptor.lua.record.sjlj)
-    add("-sWASM_LEGACY_EXCEPTIONS=1")
-    add("-sSTACK_SIZE=" .. budgets.stack_size)
-    add("-sINITIAL_HEAP=" .. budgets.initial_heap)
-    add("-sALLOW_MEMORY_GROWTH=1")
-    add("-sMAXIMUM_MEMORY=" .. budgets.maximum_memory)
-    add("-sABORTING_MALLOC=0")
-    add("-sEXIT_RUNTIME=0")
-    add("-sINVOKE_RUN=0")
-    if entry == "titan" then add("--no-entry") end
-    add("-sMODULARIZE=1")
-    add("-sEXPORT_ES6=1")
-    add("-sENVIRONMENT=web,node")
-    -- Node 26 is the only supported Node; below 19, Emscripten's WASI
-    -- `random_get` would `require('node:crypto')`.
-    add("-sMIN_NODE_VERSION=260000")
-    add(entry == "titan" and "-sFILESYSTEM=0" or "-sFORCE_FILESYSTEM=1")
-    add("-sPRINTF_LONG_DOUBLE=1")
-    local exports = entry == "titan" and
-        '"_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
-        '"_titan_browser_release_callable","_titan_browser_close",' ..
-        '"_malloc","_free","_titan_browser_trace_identity"' or
-        '"_main","_malloc","_free"'
-    if purpose == "gate" then
-        exports = exports .. ',"_titan_browser_gate_guarded","_titan_browser_gate_observe"'
-    end
-    add("-sEXPORTED_FUNCTIONS=[" .. exports .. "]")
-    add('-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]')
-    add(entry == "titan" and '-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]' or
-        '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]')
-    if entry == "titan" then
-        add("--js-library")
-        add(M.sdk_assets(descriptor.paths).js_library)
-        add("--js-library")
-        add(M.sdk_assets(descriptor.paths).bridge_library)
-        add("--js-library")
-        add(M.sdk_assets(descriptor.paths).trace_library)
-    end
-    add("-sASSERTIONS=" .. assertions)
-    add("-sSTACK_OVERFLOW_CHECK=2")
-    return { link_flags = flags, compile_flags = compile,
+    for _, feature in ipairs(OPTIMIZER_FEATURES) do optimizer[#optimizer + 1] = feature end
+    return { link_flags = flags, optimizer_flags = optimizer, compile_flags = compile,
         identity_inputs = { target_identity = descriptor.identity, profile = profile,
-            purpose = purpose, entry = entry, assertions = assertions,
-            optimization = effective_opt, backend = "jspi", budgets = budgets,
-            link_flags = flags, compile_flags = compile } }
+            purpose = purpose, optimization = effective_opt, backend = "jspi", budgets = budgets,
+            link_flags = flags, optimizer_flags = optimizer, compile_flags = compile } }
 end
 
--- Target-owned settings cannot be weakened by trailing user flags. Accept
--- unrelated Emscripten settings, but reject every spelling of an owned one.
-local owned = { SUPPORT_LONGJMP = true, WASM_LEGACY_EXCEPTIONS = true,
-    JSPI = true, STACK_SIZE = true,
-    INITIAL_MEMORY = true, INITIAL_HEAP = true, ALLOW_MEMORY_GROWTH = true, MAXIMUM_MEMORY = true,
-    ABORTING_MALLOC = true, EXIT_RUNTIME = true, INVOKE_RUN = true,
-    MODULARIZE = true, EXPORT_ES6 = true, ENVIRONMENT = true, MIN_NODE_VERSION = true,
-    FORCE_FILESYSTEM = true, FILESYSTEM = true, MINIMAL_RUNTIME = true, PRINTF_LONG_DOUBLE = true,
-    EXPORTED_FUNCTIONS = true, EXPORTED_RUNTIME_METHODS = true,
-    INCOMING_MODULE_JS_API = true, ASSERTIONS = true, STACK_OVERFLOW_CHECK = true,
-    TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
-    TITAN_CODEC_DEPTH_LIMIT = true,
-    BINARYEN_EXTRA_PASSES = true }
--- Options that put a file's contents into the generated module or its data.
--- The image identity and the warm-link certificate record only owned inputs,
--- so a module built with one would match no recorded input; each names the
--- supported route instead.
+-- Target-owned settings cannot be weakened by trailing user flags: the
+-- linker options that place the stack, size and grow memory, choose the
+-- exports, imports and entry, or drop the names and line tables traces need.
+-- An option's `--no-` spelling is the same option; a linker response file
+-- could carry any of them.
+local OWNED_LINKER = { ["stack-first"] = true, z = true, ["stack-size"] = true, ["initial-heap"] = true,
+    ["initial-memory"] = true, ["max-memory"] = true, ["growable-memory"] = true, export = true,
+    ["export-all"] = true, ["export-dynamic"] = true, ["export-if-defined"] = true, ["export-memory"] = true,
+    ["export-table"] = true, ["import-memory"] = true, ["import-table"] = true, ["import-undefined"] = true,
+    ["allow-undefined"] = true, ["allow-undefined-file"] = true, ["unresolved-symbols"] = true,
+    e = true, entry = true, ["shared-memory"] = true, ["gc-sections"] = true,
+    s = true, S = true, ["strip-all"] = true, ["strip-debug"] = true,
+    ["global-base"] = true, ["table-base"] = true, ["growable-table"] = true, ["experimental-pic"] = true }
+local OWNED_DRIVER = { ["-s"] = true, ["-z"] = true, ["-e"] = true, ["-nostartfiles"] = true,
+    ["-nostdlib"] = true, ["-nodefaultlibs"] = true }
+-- Driver options that select another linker than the SDK's certified wasm-ld.
+local function selects_linker(flag)
+    return flag:match("^%-fuse%-ld=") or flag:match("^%-%-ld%-path=") or flag:match("^%-B") or
+        flag:match("^%-%-prefix")
+end
+local OWNED_DEFINES = { TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
+    TITAN_CODEC_DEPTH_LIMIT = true, _WASI_EMULATED_PROCESS_CLOCKS = true }
+-- Emscripten options that put JavaScript or files into the generated module
+-- have no wasi-sdk spelling; each names the supported route instead.
+local JAVASCRIPT = "add JavaScript through titan.browser bindings or create({ imports })"
 local CONTENT_OPTIONS = {
-    ["--pre-js"] = "add JavaScript with EM_JS or EM_ASM in a --c-source helper",
-    ["--post-js"] = "add JavaScript with EM_JS or EM_ASM in a --c-source helper",
-    ["--extern-pre-js"] = "add JavaScript with EM_JS or EM_ASM in a --c-source helper",
-    ["--extern-post-js"] = "add JavaScript with EM_JS or EM_ASM in a --c-source helper",
-    ["--js-transform"] = "the generated module is Titan's",
+    ["--pre-js"] = JAVASCRIPT, ["--post-js"] = JAVASCRIPT, ["--extern-pre-js"] = JAVASCRIPT,
+    ["--extern-post-js"] = JAVASCRIPT, ["--js-library"] = JAVASCRIPT,
     ["--embed-file"] = "browser images have no filesystem",
     ["--preload-file"] = "browser images have no filesystem",
-    ["--exclude-file"] = "browser images have no filesystem",
 }
 -- `origin` is "compile" for a caller's compile extras and "link" otherwise, so
 -- one owned option is reported by the diagnostic that owns it: the compile
@@ -278,6 +225,12 @@ function M.validate_extras(flags, options, build_profile, origin)
         "browser link profile"
     local compile_label = "browser profile"
     if build_profile then compile_label = "browser " .. build_profile .. " profile" end
+    local function owns(flag)
+        if origin == "compile" then
+            return nil, compile_label .. " owns compile option " .. string.format("%q", flag)
+        end
+        return nil, label .. " owns option " .. flag
+    end
     for index, flag in ipairs(flags or {}) do
         local content = flag:match("^(%-%-[%w-]+)=") or flag
         if CONTENT_OPTIONS[content] then
@@ -287,22 +240,20 @@ function M.validate_extras(flags, options, build_profile, origin)
         local purpose = options and options.purpose
         if purpose ~= "baseline" and purpose ~= "minicoro" and purpose ~= "budget" and
             require("titan-compiler.browsertarget").trace_option(flag) then
-            if origin == "compile" then
-                return nil, compile_label .. " owns compile option " .. string.format("%q", flag)
-            end
-            return nil, label .. " owns option " .. flag
+            return owns(flag)
         end
-        local setting = flag:match("^%-[sDU](.+)") or
-            (flag == "-s" or flag == "-D" or flag == "-U") and flags[index + 1]
-        local key = setting and setting:match("^([%w_]+)")
-        local positive = key and key:gsub("^NO_", "")
-        if key and (owned[positive] or positive == "ASYNCIFY" or
-                positive:match("^ASYNCIFY_") or positive:match("^JSPI_")) or
-            flag == "--no-entry" or flag == "--js-library" or flag:match("^%-%-js%-library=") then
-            if origin == "compile" then
-                return nil, compile_label .. " owns compile option " .. string.format("%q", flag)
+        local define = flag:match("^%-[DU](.+)") or (flag == "-D" or flag == "-U") and flags[index + 1]
+        if OWNED_DRIVER[flag] or selects_linker(flag) or define and OWNED_DEFINES[define:match("^([%w_]+)")] then
+            return owns(flag)
+        end
+        local linker = flag:match("^%-Wl,(.*)$") or flags[index - 1] == "-Xlinker" and flag
+        for argument in ((linker or "") .. ","):gmatch("([^,]*),") do
+            if argument:sub(1, 1) == "@" then
+                return nil, (origin == "compile" and compile_label or label) ..
+                    " does not accept linker response file " .. flag
             end
-            return nil, label .. " owns option " .. flag
+            local name = argument:match("^%-%-?([%w-]+)") or ""
+            if OWNED_LINKER[name] or OWNED_LINKER[(name:gsub("^no%-", ""))] then return owns(flag) end
         end
     end
     return true
@@ -316,129 +267,81 @@ function M.check_image_size(size)
     return true
 end
 
--- Emscripten's `ENVIRONMENT=web,node` shell reaches Node's built-ins inside
--- `if (ENVIRONMENT_IS_NODE)` through `createRequire` and three `require`
--- calls; an optimizing link prints them again with either quote style, extra
--- parentheses and less whitespace. Node 26 provides the same modules
--- through `process.getBuiltinModule`, which needs no import, so one image
--- serves pages, bundlers and Node. Only these pinned statements change, all
--- of them or none; the module check refuses anything else.
-local NODE_SHELL = {
-    { "const%s*{%s*createRequire%s*}%s*=%s*await%s*%(*%s*import%(%s*(['\"])node:module%1%s*%)%s*%)*%s*;?", "" },
-    { "var%s+require%s*=%s*createRequire%(%s*import%.meta%.url%s*%)%s*;?", "" },
-    { "var%s+fs%s*=%s*require%(%s*(['\"])node:fs%1%s*%)%s*;?", "var fs = process.getBuiltinModule(%1fs%1);" },
-    { "require%(%s*(['\"])node:path%1%s*%)%s*%.%s*dirname%s*%(%s*require%(%s*(['\"])node:url%2%s*%)%s*" ..
-        "%.%s*fileURLToPath%s*%(%s*_scriptName%s*%)%s*%)",
-        "process.getBuiltinModule(%1path%1).dirname(process.getBuiltinModule(%2url%2).fileURLToPath(_scriptName))" },
-}
+local function js_string(value)
+    return '"' .. value:gsub('[%z\1-\31\\"]', function(char)
+        return string.format("\\u%04x", char:byte())
+    end) .. '"'
+end
 
--- Emscripten's pinned ES-module output has one trailing default factory export.
--- Keep the factory lexical and its bundler-visible new URL expressions intact;
--- only the embedded owner is an application entrypoint. The owner receives the
--- image identity that the linked Wasm exports, so it refuses a `.wasm` from
--- another link before any entry. The Node shell is rewritten here; the module
--- check then refuses any module the embedded module would load.
-function M.embed(image, loader, wasm_name, identity)
+-- One image module: the SDK's static factory, the loader, then the image's
+-- `create`. The factory's named seams become plain declarations, so an image
+-- exports only `create`, and its trailing default export is the instantiate
+-- function the loader receives. The image binding names the `.wasm`, the
+-- identity the linked Wasm exports, so the loader refuses a `.wasm` from
+-- another link before any entry, and the module's own directory. The default
+-- `locateFile` keeps both `new URL` literals visible to bundlers.
+function M.embed(factory, loader, wasm_name, identity)
     if type(identity) ~= "string" or not identity:match("^" .. string.rep("[0-9a-f]", 64) .. "$") then
         return nil, "browser image identity must be 64 lowercase hexadecimal digits"
     end
-    local factory
-    local _, count = image:gsub("\n%s*export%s+default%s", "")
-    if count ~= 1 then return nil, "browser image has no unique default factory export" end
-    image, count = image:gsub("\nexport default ([%a_$][%w_$]*);%s*$", function(name)
-        factory = name
+    local instantiate, count
+    factory, count = ("\n" .. factory):gsub("\nexport default ([%a_$][%w_$]*);%s*$", function(name)
+        instantiate = name
         return "\n"
     end)
-    if count ~= 1 then return nil, "browser image has no unique default factory export" end
+    factory = factory:gsub("\nexport function ", "\nfunction ")
+    if count ~= 1 or factory:match("\n%s*export%s") or factory:match("\n%s*import%s") then
+        return nil, "browser factory has an unsupported module surface"
+    end
     loader, count = loader:gsub("export function create%(", "function create(", 1)
     if count ~= 1 or loader:match("\n%s*export%s") or loader:match("^%s*export%s") or
             loader:match("\n%s*import%s") or loader:match("^%s*import%s") then
         return nil, "browser loader has an unsupported module surface"
     end
-    local function quote(name)
-        return '"' .. name:gsub('[%z\1-\31\\"]', function(char)
-            return string.format("\\u%04x", char:byte())
-        end) .. '"'
-    end
-    local wasm, trace = quote(wasm_name), quote(wasm_name .. ".trace")
-    local rewritten = 0
-    for _, rule in ipairs(NODE_SHELL) do
-        image, count = image:gsub(rule[1], rule[2], 1)
-        rewritten = rewritten + count
-    end
-    -- A shell printed in another form would keep part of its `require`.
-    if rewritten ~= 0 and rewritten ~= #NODE_SHELL then
-        return nil, "browser image has an unrecognized Emscripten Node shell"
-    end
-    return image .. "\nconst titanCreate = (() => {\n" .. loader ..
+    local wasm, trace = js_string(wasm_name), js_string(wasm_name .. ".trace")
+    return factory:sub(2) .. "\nconst titanCreate = (() => {\n" .. loader ..
         "\nreturn create;\n})();\n" ..
         "export default function create(options = {}) {\n" ..
-        "  const locateFile = options.locateFile ?? ((name, prefix) => {\n" ..
-        "    if (name.endsWith('.wasm.trace')) return new URL(" .. trace .. ", import.meta.url).href;\n" ..
-        "    if (name.endsWith('.wasm')) return new URL(" .. wasm .. ", import.meta.url).href;\n" ..
-        "    return prefix + name;\n  });\n" ..
-        "  return titanCreate(" .. factory .. ", {...options, locateFile}, {identity: \"" .. identity ..
-        "\", wasm: " .. wasm .. "});\n}\n"
+        "  const locateFile = options.locateFile ?? (name => name.endsWith('.wasm.trace') ?\n" ..
+        "    new URL(" .. trace .. ", import.meta.url).href : new URL(" .. wasm .. ", import.meta.url).href);\n" ..
+        "  return titanCreate(" .. instantiate .. ", {...options, locateFile}, {identity: \"" .. identity ..
+        "\", wasm: " .. wasm .. ", directory: new URL('.', import.meta.url).href});\n}\n"
 end
 
--- emcc's configured Node, as `em-config NODE_JS` prints it: a Python list of
--- the executable and its arguments, each quoted with either quote style.
-local function node_argv(listing)
-    local body = listing:match("^%s*%[(.*)%]%s*$")
-    if not body then return nil end
-    local argv, pos = {}, 1
-    while true do
-        local quote, index = body:match("^%s*(['\"])()", pos)
-        if not quote then break end
-        local value = {}
-        while body:sub(index, index) ~= quote do
-            local char = body:sub(index, index)
-            if char == "\\" then
-                index = index + 1
-                char = body:sub(index, index)
-                if not char:match("^[\\'\"]$") then return nil end
-            elseif char == "" then
-                return nil
+-- The protocol probe image links the program's own C, so it may import host
+-- functions that only the program's `create({ imports })` supplies. The
+-- probe runs no provider code, only its metadata functions, so a stand-in
+-- that returns zero values lets the image instantiate even when a C
+-- constructor calls one. Imports the runtime owns are left to it, and any
+-- other kind of import still fails instantiation. `imports` are
+-- `image_inventory`'s. Returns nil when there is nothing to add.
+local ZERO = { i64 = "0n", funcref = "null", externref = "null", exnref = "null" }
+function M.protocol_imports(imports)
+    local modules, order = {}, {}
+    for _, import in ipairs(imports) do
+        local module, name = import.module, import.name
+        if import.kind == 0 and module ~= "wasi_snapshot_preview1" and not (module == "env" and
+                (name:sub(1, 14) == "titan_browser_" or name:sub(1, 10) == "titan_mco_")) then
+            if not modules[module] then
+                modules[module] = {}
+                order[#order + 1] = module
             end
-            value[#value + 1] = char
-            index = index + 1
+            local values = {}
+            for value in import.signature:match("%->%((.*)%)$"):gmatch("[^,]+") do
+                values[#values + 1] = ZERO[value] or "0"
+            end
+            local result = #values == 0 and "undefined" or #values == 1 and values[1] or
+                "[" .. table.concat(values, ", ") .. "]"
+            -- Computed keys, so that even a `__proto__` name is an own property.
+            table.insert(modules[module], "[" .. js_string(name) .. "]: () => " .. result)
         end
-        argv[#argv + 1] = table.concat(value)
-        pos = select(2, body:find("^%s*,?", index + 1)) + 1
     end
-    if #argv == 0 or body:find("%S", pos) then return nil end
-    return argv
-end
-
--- Runs the SDK's module check over a module file under emcc's configured
--- Node, with the acorn parser of emcc's installation, once per link.
--- Implementation notes: doc/implementation/browser-target.md#the-module-check
-function M.check_module(context, tools, checker, module)
-    local function setting(name)
-        local em_config = platform.windows and "em-config.exe" or "em-config"
-        local result = context.io:run({ path.join(tools.location, em_config), name },
-            { stderr_to_stdout = true })
-        local output = type(result) == "table" and (result.output or result.diagnostic) or tostring(result)
-        -- Python prints the value last, after any configuration warning.
-        local value = type(result) == "table" and result.ok and output:match("([^\r\n]*)\r?\n?$")
-        if value and value ~= "" then return value end
-        return nil, "cannot read emcc's " .. name .. " setting: " .. output
+    if #order == 0 then return nil end
+    local entries = {}
+    for index, module in ipairs(order) do
+        entries[index] = "  [" .. js_string(module) .. "]: {" .. table.concat(modules[module], ", ") .. "}"
     end
-    local listing, err = setting("NODE_JS")
-    if not listing then return nil, err end
-    local root
-    root, err = setting("EMSCRIPTEN_ROOT")
-    if not root then return nil, err end
-    local argv = node_argv(listing)
-    if not argv then return nil, "cannot read emcc's NODE_JS setting: " .. listing end
-    argv[#argv + 1] = checker
-    argv[#argv + 1] = path.join(root, "node_modules/acorn/dist/acorn.mjs")
-    argv[#argv + 1] = module
-    local result = context.io:run(argv, { stderr_to_stdout = true })
-    if type(result) == "table" and result.ok then return true end
-    local output = type(result) == "table" and (result.output or result.diagnostic) or tostring(result)
-    if type(result) == "table" and result.status == 2 then return nil, (output:gsub("%s+$", "")) end
-    return nil, "browser image module check did not run: " .. output
+    return "export default {\n" .. table.concat(entries, ",\n") .. "\n};\n"
 end
 
 -- Inventory shares the bounded final-image walk with the map rewriter.

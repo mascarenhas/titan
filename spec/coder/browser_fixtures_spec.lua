@@ -11,7 +11,7 @@ describe("browser coroutine GC and trace fixtures", function()
     it("runs all five 301 categories in their native owners without an adapter", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = support.workspace()
-        local ok, log = support.cli(info, workspace, { purpose = "test", assertions = 2 }, {
+        local ok, log = support.cli(info, workspace, { purpose = "test" }, {
             "--test", "--exe", workspace .. "/public.mjs",
             "--c-source", support.fixture .. "/close.c", "coroutine.tests", "gc.tests" })
         assert.is_true(ok, log)
@@ -39,7 +39,7 @@ describe("browser coroutine GC and trace fixtures", function()
     it("preserves trace shape pin clear bare rethrow fresh raise and coroutine append", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = support.workspace()
-        local ok, log = support.cli(info, workspace, { purpose = "test", assertions = 2 }, {
+        local ok, log = support.cli(info, workspace, { purpose = "test" }, {
             "--test", "--exe", workspace .. "/trace.mjs",
             "--c-source", support.fixture .. "/trace.c", "runtime_trace" })
         assert.is_true(ok, log)

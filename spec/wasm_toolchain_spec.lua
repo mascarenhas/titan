@@ -14,6 +14,9 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local version = require "titan-compiler.version"
+local browser_target = require "titan-compiler.browsertarget"
+local platform = require "titan-compiler.platform"
+local SJLJ = { "-mexception-handling", "-mllvm", "-wasm-enable-sjlj", "-mllvm", "-wasm-use-legacy-eh=false" }
 
 local function run_tool(strategy, base_argv, extra_args)
     local argv = {}
@@ -96,9 +99,10 @@ describe("Wasm real-toolchain object and archive metadata", function()
         return path
     end
 
-    it("reads untouched generated .titan.meta, .titan.source and .titan.cprobe from emcc 6.0.13 and upstream clang", function()
+    it("reads untouched generated .titan.meta, .titan.source and .titan.cprobe from wasi-sdk 34 clang", function()
         local info, why = toolchain.require()
         if not info then pending(why) return end
+        local cc = browser_target.compiler_argv(info.tools)
 
         local root = temp_workspace()
         local alpha_source = [[
@@ -161,23 +165,17 @@ static const unsigned char wasm_probe_bytes[] = {
         local include_root = "-I" .. root
         local include_runtime = "-I" .. info.prefix .. "/include"
         local include_lua = "-I" .. info.prefix .. "/lib/browser/include"
-        local emcc_obj = track_file(root .. "/wasm_alpha.emcc.o")
+        local profile_obj = track_file(root .. "/wasm_alpha.profile.o")
         local clang_obj = track_file(root .. "/wasm_alpha.clang.o")
 
-        local emcc_flags = toolchain.with_lua_defines(info,
-            { "--std=c99", "-O2" },
-            { "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1",
-              include_root, include_runtime, include_lua,
-              "-c", c_path, "-o", emcc_obj })
-        run_tool(strategy, info.tools.cc, emcc_flags)
-        run_tool(strategy, info.tools.clang, {
-            "--target=wasm32-unknown-emscripten", "--std=c99", "-O2", "-mexception-handling",
-            "-c", clang_c_path, "-o", clang_obj,
-        })
+        local after = { include_root, include_runtime, include_lua, "-c", c_path, "-o", profile_obj }
+        for index, flag in ipairs(SJLJ) do table.insert(after, index, flag) end
+        run_tool(strategy, cc, toolchain.with_lua_defines(info, { "--std=c99", "-O2" }, after))
+        run_tool(strategy, cc, { "--std=c99", "-O2", "-mexception-handling", "-c", clang_c_path, "-o", clang_obj })
 
         local expected_fp = fixtures.fingerprint()
 
-        for _, object_path in ipairs({ emcc_obj, clang_obj }) do
+        for _, object_path in ipairs({ profile_obj, clang_obj }) do
             local bytes = assert(util.get_file_contents(object_path, "rb"))
             local object = assert(staticmetadata.classify_object(
                 bytes, object_path, expected_fp, {
@@ -209,7 +207,7 @@ static const unsigned char wasm_probe_bytes[] = {
                 }, 12))
             assert.equal("TITENUM\0\1\12\1\6", probe)
 
-            if object_path == emcc_obj then
+            if object_path == profile_obj then
                 local defined_funcs = {}
                 for _, sym in ipairs(object.symbols) do
                     if sym.kind == "function" and sym.defined and
@@ -243,10 +241,7 @@ x:
         local asm_path = track_file(root .. "/reloc64.s")
         local asm_obj = track_file(root .. "/reloc64.o")
         assert(util.set_file_contents(asm_path, asm_source, "wb"))
-        run_tool(strategy, info.tools.clang, {
-            "--target=wasm32-unknown-emscripten", "-x", "assembler",
-            "-c", asm_path, "-o", asm_obj,
-        })
+        run_tool(strategy, cc, { "-x", "assembler", "-c", asm_path, "-o", asm_obj })
         local asm_bytes = assert(util.get_file_contents(asm_obj, "rb"))
         local parsed_asm = assert(staticmetadata.classify_object(
             asm_bytes, asm_obj))
@@ -266,10 +261,7 @@ x:
 extern int foo __asm__("foo bar");
 int *p = &foo;
 ]], "wb"))
-        run_tool(strategy, info.tools.clang, {
-            "--target=wasm32-unknown-emscripten", "-mexception-handling", "-x", "c",
-            "-c", spaced_c, "-o", spaced_obj,
-        })
+        run_tool(strategy, cc, { "-mexception-handling", "-x", "c", "-c", spaced_c, "-o", spaced_obj })
         local spaced_bytes = assert(util.get_file_contents(spaced_obj, "rb"))
         local parsed_spaced = assert(staticmetadata.classify_object(
             spaced_bytes, spaced_obj, expected_fp))
@@ -283,18 +275,18 @@ int *p = &foo;
         assert.is_true(saw_foo_bar)
     end)
 
-    it("scans emar archives, verifies manifests, and rejects bitcode and mixed archives", function()
+    it("scans llvm-ar archives, verifies manifests, and rejects bitcode and mixed archives", function()
         local info, why = toolchain.require()
         if not info then pending(why) return end
+        local cc = browser_target.compiler_argv(info.tools)
 
         local root = temp_workspace()
         local include_root = "-I" .. root
         local include_runtime = "-I" .. info.prefix .. "/include"
         local include_lua = "-I" .. info.prefix .. "/lib/browser/include"
-        local common_flags = toolchain.with_lua_defines(info,
-            { "--std=c99", "-O2" },
-            { "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1",
-              include_root, include_runtime, include_lua })
+        local after = { include_root, include_runtime, include_lua }
+        for index, flag in ipairs(SJLJ) do table.insert(after, index, flag) end
+        local common_flags = toolchain.with_lua_defines(info, { "--std=c99", "-O2" }, after)
 
         local alpha_c = track_file(root .. "/wasm_alpha.c")
         local beta_c = track_file(root .. "/wasm_beta.c")
@@ -326,7 +318,7 @@ int *p = &foo;
             args[#args + 1] = pair[1]
             args[#args + 1] = "-o"
             args[#args + 1] = pair[2]
-            run_tool(strategy, info.tools.cc, args)
+            run_tool(strategy, cc, args)
         end
 
         local provider_a = track_file(root .. "/libprovider.a")
@@ -363,7 +355,7 @@ int *p = &foo;
         assert.same(expected_fp, assert(incremental.part_fingerprint(ctx, helper_o)))
 
         local lto_o = track_file(root .. "/lto.o")
-        run_tool(strategy, info.tools.cc, {
+        run_tool(strategy, cc, {
             "--std=c99", "-O2", "-flto", "-c", helper_c, "-o", lto_o,
         })
         local lto_bytes = assert(util.get_file_contents(lto_o, "rb"))
@@ -384,7 +376,7 @@ int *p = &foo;
         assert.matches('archive member #%d+ .* name "lto.o": LLVM bitcode %(LTO%) object is not supported', scanned_lto_err)
 
         local simd_o = track_file(root .. "/simd.o")
-        run_tool(strategy, info.tools.cc, {
+        run_tool(strategy, cc, {
             "--std=c99", "-O2", "-msimd128", "-c", helper_c, "-o", simd_o,
         })
         local mixed_feat_a = track_file(root .. "/libmixed_feat.a")
@@ -408,6 +400,28 @@ int *p = &foo;
         assert.matches('archive member #%d+ .* name "native_helper.o": target mismatch: object format %w+ does not match target format wasm', scanned_fmt_err)
     end)
 
+    it("resolves the SDK's link libraries through the browser compiler envelope under a hostile environment", function()
+        local info, why = toolchain.require()
+        if not info then pending(why) return end
+        -- The envelope's clang output must stay parseable: an emptied
+        -- override would print a `###` banner into it.
+        local certificate = require "titan-compiler.linkcertificate"
+        local libraries = assert(certificate.browser_trace_libraries({ io = strategy }, info.tools,
+            { "-lsetjmp", "-lc-printscan-long-double", "-lwasi-emulated-process-clocks" }))
+        assert.equal(3, #libraries)
+        for index, name in ipairs({ "libsetjmp.a", "libc-printscan-long-double.a", "libwasi-emulated-process-clocks.a" }) do
+            assert.equal(name, libraries[index]:match("[^/\\]+$"))
+        end
+        -- An outer env stands for the hostile caller; the envelope inside it unsets both.
+        local probe = { "env", "CCC_OVERRIDE_OPTIONS=# +-DTITAN_AMBIENT=1", "C_INCLUDE_PATH=/nonexistent-include" }
+        for _, argument in ipairs(browser_target.compiler_argv(info.tools)) do probe[#probe + 1] = argument end
+        local macros = run_tool(strategy, probe, { "-v", "-dM", "-E", "-x", "c",
+            platform.windows and "NUL" or "/dev/null" }).output
+        assert.is_nil(macros:find("TITAN_AMBIENT", 1, true))
+        assert.is_nil(macros:find("###", 1, true))
+        assert.is_nil(macros:find("nonexistent-include", 1, true))
+    end)
+
     it("extracts wasm32 enum-carrier answers through cprobe without target execution", function()
         local info, why = toolchain.require()
         if not info then pending(why) return end
@@ -422,10 +436,13 @@ enum wasm_u64_enum { WASM_U64 = 18446744073709551615ULL };
 
         local all_ids = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }
         for _, short_enums in ipairs({ false, true }) do
-            local cflags = { "--std=c99", "-O2", "-Wall", "-Werror" }
+            -- The probe preamble includes the browser Lua and Titan headers:
+            -- they need the record's defines (`l_signalT`) and setjmp's
+            -- exception handling, like every browser compile.
+            local cflags = toolchain.with_lua_defines(info, { "--std=c99", "-O2", "-Wall", "-Werror" }, SJLJ)
             if short_enums then cflags[#cflags + 1] = "-fshort-enums" end
             local service = assert(cprobe.new_service({
-                compiler_argv = info.tools.cc,
+                compiler_argv = browser_target.compiler_argv(info.tools),
                 include_dirs = {
                     info.prefix .. "/include",
                     info.prefix .. "/lib/browser/include",

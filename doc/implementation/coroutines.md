@@ -12,8 +12,8 @@ The `coroutine` standard module is split deliberately:
   [`foreign function`](foreign-functions.md) `coro_entry_trampoline`.
 * `titan-runtime/minicoro.c` owns only what genuinely needs one C translation
   unit or a raw Lua-internal operation: it `#define`s `MCO_NO_DEBUG`,
-  `MCO_USE_VMEM_ALLOCATOR`, `MCO_TAG_COMPARATOR minicoro_tag_equal`, and
-  `MINICORO_IMPL` before including the implementation, and supplies the tag
+  `MCO_USE_VMEM_ALLOCATOR` (natively), `MCO_TAG_COMPARATOR minicoro_tag_equal`,
+  and `MINICORO_IMPL` before including the implementation, and supplies the tag
   comparator `minicoro_tag_equal`.
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
@@ -338,21 +338,22 @@ described above.
   error handler uses libbacktrace, and a poison return address made the native
   unwinder chase invalid memory when an error was raised on a minicoro stack.
 * `create` passes `ffi.TITAN_COROUTINE_STACK_SIZE` to `mco_desc_init`, with
-  `MCO_USE_VMEM_ALLOCATOR`. `titan.h` defines that macro as
+  `MCO_USE_VMEM_ALLOCATOR` natively. `titan.h` defines that macro as
   `(2 * 1024 * 1024)` (2 MiB) unless the target already defines it; the
   [browser target](browser-target.md#compile-prefix-and-target-defines)
   defines it as 262144 (256 KiB) in its compile prefix. Natively, 2 MiB leaves
   room for the error handler, whose libbacktrace scratch state exceeds
   minicoro's default 56 KiB stack, while physical memory stays lazy on
-  platforms with virtual memory. The browser's allocator commits each stack
-  eagerly and reclaims it (`munmap`) for reuse when the coroutine is destroyed,
-  while the grown WebAssembly linear memory never shrinks back to the host, and
-  the browser has no libbacktrace, so the smaller size bounds memory per
-  coroutine instead. minicoro's own default
-  and minimum stack sizes are not redefined.
+  platforms with virtual memory. On WebAssembly, `minicoro.c` does not define
+  `MCO_USE_VMEM_ALLOCATOR`, and `minicoro.h` ignores it under `__wasm__`, so
+  coroutine stacks come from `calloc`/`free`, committing each stack eagerly and
+  returning freed blocks for reuse when the coroutine is destroyed, while the
+  grown WebAssembly linear memory never shrinks back to the host, and the
+  browser has no libbacktrace, so the smaller size bounds memory per coroutine
+  instead. minicoro's own default and minimum stack sizes are not redefined.
 * The native ASM, UCONTEXT and Windows Fiber backends are unchanged. The
-  Emscripten branch uses JSPI engine continuations and disjoint linear C
-  stacks, not an instrumented stack-copying backend. Each context saves SP
+  WebAssembly (`__wasm__`) branch uses JSPI engine continuations and disjoint
+  linear C stacks, not an instrumented stack-copying backend. Each context saves SP
   and stack-limit metadata, one parked gate, one engine-entry lifetime and a
   BACK identity. A dead coroutine's promised engine invocation retires before
   its resumer can free the allocation. Titan's abandoned-coroutine floor and

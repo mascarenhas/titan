@@ -52,40 +52,49 @@ local template = [[
 #include "titan.h"
 #include "titan/browser.h"
 #include <errno.h>
-#include <wasi/api.h>
-#include <emscripten/syscalls.h>
+#include <time.h>
 
-/* libc requires these exact symbols even in images without Titan modules.
- * The launcher owns the filesystem-free image; only output crosses to JS. */
-__wasi_errno_t __wasi_fd_write(__wasi_fd_t fd, const __wasi_ciovec_t *iovs,
-        size_t iovs_len, __wasi_size_t *nwritten) {
-    if (fd != 1 && fd != 2) return __WASI_ERRNO_BADF;
-    __wasi_size_t total = 0;
-    for (size_t i = 0; i < iovs_len; i++) {
-        if (iovs[i].buf_len)
-            titan_browser_host_output(fd, iovs[i].buf, iovs[i].buf_len);
-        total += iovs[i].buf_len;
-    }
-    *nwritten = total;
-    return __WASI_ERRNO_SUCCESS;
+/* wasi-libc's calendar is UTC-only: local time comes from the host, which
+ * fills tm_sec..tm_isdst and __tm_gmtoff on success and leaves the tm alone
+ * on failure. %Z names the UTC offset as +hhmm/-hhmm, one stable name per
+ * tm_isdst like musl's two zone names. */
+static char titan_browser_zones[2][8];
+
+static struct tm *titan_browser_zone(struct tm *tm) {
+    char *zone = titan_browser_zones[tm->tm_isdst > 0];
+    long offset = tm->__tm_gmtoff, magnitude = offset < 0 ? -offset : offset;
+    snprintf(zone, sizeof titan_browser_zones[0], "%c%02ld%02ld", offset < 0 ? '-' : '+',
+        magnitude / 3600 % 100, magnitude / 60 % 60);
+    tm->__tm_zone = zone;
+    return tm;
 }
-__wasi_errno_t __wasi_fd_read(__wasi_fd_t fd, const __wasi_iovec_t *iovs, size_t iovs_len, __wasi_size_t *nread) { return __WASI_ERRNO_NOSYS; }
-__wasi_errno_t __wasi_fd_close(__wasi_fd_t fd) { return fd <= 2 ? __WASI_ERRNO_SUCCESS : __WASI_ERRNO_BADF; }
-__wasi_errno_t __wasi_fd_seek(__wasi_fd_t fd, __wasi_filedelta_t offset, __wasi_whence_t whence, __wasi_filesize_t *newoffset) { return __WASI_ERRNO_SPIPE; }
-int __syscall_openat(int dirfd, const char *path, int flags, ...) { return -ENOSYS; }
-int __syscall_unlinkat(int dirfd, const char *path, int flags) { return -ENOSYS; }
-int __syscall_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) { return -ENOSYS; }
-int __syscall_rmdir(const char *path) { return -ENOSYS; }
-int __syscall_stat64(const char *path, struct stat *buf) { return -ENOSYS; }
-int __syscall_lstat64(const char *path, struct stat *buf) { return -ENOSYS; }
-int __syscall_fstat64(int fd, struct stat *buf) { return -ENOSYS; }
-int __syscall_newfstatat(int dirfd, const char *path, struct stat *buf, int flags) { return -ENOSYS; }
-int __syscall_getcwd(char *buf, size_t size) { return -ENOSYS; }
-int __syscall_readlinkat(int dirfd, const char *path, char *buf, size_t bufsize) { return -ENOSYS; }
-int __syscall_ioctl(int fd, int request, ...) { return -ENOSYS; }
-int __syscall_fcntl64(int fd, int cmd, ...) { return -ENOSYS; }
-int __syscall_dup3(int oldfd, int newfd, int flags) { return -ENOSYS; }
-int _emscripten_system(const char *command) { return command ? -ENOSYS : 0; }
+
+struct tm *localtime_r(const time_t *restrict t, struct tm *restrict tm) {
+    if (!titan_browser_localtime((int64_t)*t, tm)) {
+        errno = EOVERFLOW;
+        return NULL;
+    }
+    return titan_browser_zone(tm);
+}
+
+struct tm *localtime(const time_t *t) {
+    static struct tm result;
+    return localtime_r(t, &result);
+}
+
+/* -1 is also a valid time. mktime ignores the input tm_wday, and a
+ * successful conversion always sets it. */
+time_t mktime(struct tm *tm) {
+    int64_t t;
+    tm->tm_wday = -1;
+    t = titan_browser_mktime(tm);
+    if (t == -1 && tm->tm_wday == -1) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    titan_browser_zone(tm);
+    return (time_t)t;
+}
 
 struct titan_browser_arguments {
     int argc;
@@ -235,6 +244,7 @@ static int titan_browser_initialize_entry(lua_State *L) {
     return 0;
 }
 
+TITAN_WASM_EXPORT("titan_browser_initialize")
 int titan_browser_initialize(uint64_t operation_id) {
     if (!titan_browser_entry_allowed(operation_id, TITAN_BROWSER_INITIALIZE))
         return -1;
@@ -257,6 +267,7 @@ int titan_browser_initialize(uint64_t operation_id) {
         titan_browser_owner, titan_browser_initialize_entry, NULL, 0);
 }
 
+TITAN_WASM_EXPORT("titan_browser_entry")
 int titan_browser_entry(uint64_t operation_id, int argc,
         const unsigned char *const *argv, const size_t *lengths) {
     struct titan_browser_arguments arguments = {argc, argv, lengths};
@@ -269,6 +280,7 @@ int titan_browser_entry(uint64_t operation_id, int argc,
         titan_browser_owner, titan_browser_worker, &arguments, 1);
 }
 
+TITAN_WASM_EXPORT("titan_browser_invoke")
 int titan_browser_invoke(uint64_t operation_id, uint32_t state, uint32_t slot,
         uint32_t generation, uint32_t argc, const titan_browser_value *args) {
     return $INVOKE_FN
@@ -278,6 +290,7 @@ int titan_browser_invoke(uint64_t operation_id, uint32_t state, uint32_t slot,
                   "browser state is closed, closing or uninitialized"));
 }
 
+TITAN_WASM_EXPORT("titan_browser_release_callable")
 int titan_browser_release_callable(uint32_t state, uint32_t slot, uint32_t generation) {
     return $RELEASE_FN ? $RELEASE_FN(state, slot, generation) : TITAN_BROWSER_STATE;
 }
@@ -298,6 +311,7 @@ void titan_browser_callback_leave(titan_browser_callback_frame *frame) {
     if ($CALLBACK_LEAVE_FN) $CALLBACK_LEAVE_FN(frame);
 }
 
+TITAN_WASM_EXPORT("titan_browser_close")
 int titan_browser_close(uint64_t operation_id) {
     titan_browser_completion completion = {0};
     if (!titan_browser_entry_allowed(operation_id, TITAN_BROWSER_CLOSE))
@@ -317,6 +331,20 @@ int titan_browser_close(uint64_t operation_id) {
     fflush(stderr);
     titan_browser_complete(&completion);
     return 0;
+}
+
+/* The factory allocates in linear memory through these exports. They call
+   the program's own malloc and free, so a program linked with
+   -Wl,--wrap=malloc,--wrap=free sees the host's blocks through its wrappers
+   too (wasm-ld would export a wrapped symbol under its wrapper's name). */
+TITAN_WASM_EXPORT("malloc")
+void *titan_browser_export_malloc(size_t size) {
+    return malloc(size);
+}
+
+TITAN_WASM_EXPORT("free")
+void titan_browser_export_free(void *block) {
+    free(block);
 }
 ]]
 

@@ -48,7 +48,7 @@ function observe() {
 function host(context, image, env) {
   const state = {stdout: [], stderr: [], errors: [], notes: [], armed: new Map(), pending: [],
     entry: undefined, controls: undefined, observer: observe()};
-  state.instance = image.create({locateFile: image.locateFile, env,
+  state.instance = image.create({locateFile: image.locateFile, imports: context.imports, env,
     bindings: {__titanTest(controls) { state.controls = controls; },
       ws_publish(entry) { state.entry = entry; }, ws_note(note) { state.notes.push(note); },
       ws_arm(source, id, action) { state.armed.set(source, {id, action, sent: 0}); },

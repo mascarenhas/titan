@@ -100,7 +100,7 @@ local function context(files)
 end
 
 describe("browser generated C preprocessing", function()
-    it("preserves C mode and retires the .s reservation and its products on Windows", function()
+    it("preprocesses a .s reservation as C through clang's -x c and retires it and its products on Windows", function()
         local windows = platform.windows
         local ok, failure = xpcall(function()
             platform.windows = true
@@ -109,16 +109,16 @@ describe("browser generated C preprocessing", function()
             local output = "C:/temporary.i"
             local names = { reservation, output }
             ctx.target = "browser"
-            ctx.incremental_options = { compile_prefix = { "C:/tool/emcc.exe" } }
+            ctx.incremental_options = { compile_prefix = { "C:/tool/clang.exe", "--target=wasm32-wasip1" } }
             function ctx.io:tmpname()
                 local name = assert(table.remove(names, 1))
                 storage[name] = ""
                 return name
             end
             function ctx.io:run(argv)
-                assert.same({ "-E", "-P", "-x", "c", reservation .. ".c", "-o", output },
+                assert.same({ "-E", "-P", "-x", "c", reservation, "-o", output },
                     { table.unpack(argv, #argv - 6) })
-                assert.equal("int input;", storage[reservation .. ".c"])
+                assert.equal("int input;", storage[reservation])
                 storage[output] = "int input;\n"
                 return { ok = true }
             end

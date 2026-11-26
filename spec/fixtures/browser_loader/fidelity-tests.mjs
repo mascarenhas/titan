@@ -17,7 +17,7 @@ export async function fidelity(context, paths) {
     const image = await context.image(path);
     async function execute(mode) {
       const stdout = [], stderr = [];
-      const instance = image.create({locateFile: image.locateFile,
+      const instance = image.create({locateFile: image.locateFile, imports: context.imports,
         stdout: bytes => { stdout.push(bytes); }, stderr: bytes => { stderr.push(bytes); }});
       try {
         const result = await instance.run([mode]);
@@ -54,7 +54,7 @@ export async function fidelity(context, paths) {
 
     for (const mode of ['duplicate', 'invalid']) {
       const stdout = [], stderr = [], failures = [];
-      const instance = image.create({locateFile: image.locateFile,
+      const instance = image.create({locateFile: image.locateFile, imports: context.imports,
         onEngineFailure: event => { failures.push(event); },
         stdout: bytes => { stdout.push(bytes); }, stderr: bytes => { stderr.push(bytes); }});
       try {
@@ -77,7 +77,7 @@ export async function fidelity(context, paths) {
         const healthy = stream === 'stdout' ? 'stderr' : 'stdout';
         const chunks = [], admissions = [];
         let calls = 0, safe = true, controls, instance, closing = false;
-        instance = image.create({locateFile: image.locateFile,
+        instance = image.create({locateFile: image.locateFile, imports: context.imports,
           bindings: {__titanTest(value) { controls = value; }},
           [healthy]: bytes => { chunks.push(bytes); },
           [stream]: () => {
@@ -112,7 +112,7 @@ export async function fidelity(context, paths) {
 
     const first = [];
     const causes = {stdout: new Error('first stdout'), stderr: new Error('first stderr')};
-    const both = image.create({locateFile: image.locateFile,
+    const both = image.create({locateFile: image.locateFile, imports: context.imports,
       stdout: () => { first.push('stdout'); throw causes.stdout; },
       stderr: () => { first.push('stderr'); throw causes.stderr; }});
     try {
@@ -128,7 +128,7 @@ export async function fidelity(context, paths) {
     const pending = new Promise(resolve => { release = resolve; });
     const interruptionCause = new Error('stdout failed before stderr interruption');
     const cleanup = [];
-    const interrupted = image.create({locateFile: image.locateFile,
+    const interrupted = image.create({locateFile: image.locateFile, imports: context.imports,
       stdout() { if (++stdoutCalls === 1) throw interruptionCause; },
       stderr() { stderrCalls++; entered(); return pending; },
       onNotificationError(event) { cleanup.push(event); }});
@@ -156,7 +156,7 @@ export async function fidelity(context, paths) {
 
     let controls;
     const copies = {stdout: [], stderr: []}, retained = {stdout: [], stderr: []};
-    const mutable = image.create({locateFile: image.locateFile,
+    const mutable = image.create({locateFile: image.locateFile, imports: context.imports,
       bindings: {__titanTest(value) { controls = value; }},
       ...Object.fromEntries(['stdout', 'stderr'].map(stream => [stream, bytes => {
         context.assert(bytes.buffer !== controls.weakTargets()[1].deref(), 'sink received a borrowed Wasm view');
@@ -189,7 +189,7 @@ export async function names(context, paths) {
   for (const path of paths) {
     const image = await context.image(path);
     const stdout = [], stderr = [];
-    const instance = image.create({locateFile: image.locateFile,
+    const instance = image.create({locateFile: image.locateFile, imports: context.imports,
       stdout: bytes => { stdout.push(bytes); }, stderr: bytes => { stderr.push(bytes); }});
     try {
       const result = await instance.run();

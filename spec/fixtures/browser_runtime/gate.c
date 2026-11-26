@@ -1,10 +1,10 @@
+#define _POSIX_C_SOURCE 200809L /* clock_gettime under --std=c99 */
 #include "gate.h"
 #include <lauxlib.h>
-#include <emscripten.h>
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include "fixture_controls.h"
+#include <time.h>
 
 /* Authored C frames deliberately remain live across Titan coroutine switches.
  * Volatile canaries and the post-call check prevent tail-call elimination. */
@@ -12,9 +12,9 @@ static unsigned int active_frames, peak_frames, waits, close_mask, bad_close;
 static unsigned int close_counts[6];
 static unsigned int lua_depth, callinfo_c_depth;
 
-EM_ASYNC_JS(void, gate_timeout, (int milliseconds), {
-  await new Promise(resolve => setTimeout(resolve, milliseconds));
-});
+/* The two real outer waits: fixture_sleep, a JSPI import that returns the
+ * host Promise, and an async host function (fixture-imports.mjs). */
+TITAN_WASM_IMPORT("gate_timeout") void gate_timeout(int milliseconds);
 
 static int bridge_frames(lua_State *L, int depth) {
   volatile uint32_t canary[16];
@@ -55,16 +55,20 @@ int gate_callinfo_c_depth(void) { return (int)callinfo_c_depth; }
 void gate_wait(int form, int milliseconds) {
   volatile uint32_t canary = 0x329abcdeU;
   ++waits;
-  if (form == 0) emscripten_sleep(milliseconds);
+  if (form == 0) fixture_sleep(milliseconds);
   else gate_timeout(milliseconds);
   if (canary != 0x329abcdeU) abort();
 }
 
-double gate_now(void) { return emscripten_get_now(); }
+double gate_now(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (double)now.tv_sec * 1e3 + (double)now.tv_nsec / 1e6;
+}
 
 void gate_busy(int milliseconds) {
-  double until = emscripten_get_now() + milliseconds;
-  while (emscripten_get_now() < until) { /* Deliberate negative control. */ }
+  double until = gate_now() + milliseconds;
+  while (gate_now() < until) { /* Deliberate negative control. */ }
 }
 
 void gate_close_event(int id) {

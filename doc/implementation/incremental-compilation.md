@@ -581,14 +581,14 @@ reports the exact component:
    context by description argv; the complete identity is memoized by command,
    flags, target profile, and executable path.
 
-   For the [browser target](browser-target.md) the described compiler is
-   the descriptor's `emcc` launcher, whose `-E -v` banner carries the
-   Emscripten and Clang versions, and the toolchain descriptor carries
-   `target_identity`, the descriptor identity. `toolchain_identity` adds it
-   to the hashed details as `target_identity`, not only to its memo key, so
-   every browser object certificate depends on the complete descriptor
-   (tools, record, flags, include roots, profile, and policies). A host
-   toolchain descriptor omits `target_identity` from the hashed details.
+  For the [browser target](browser-target.md) the described compiler is
+  the descriptor's `wasi-sdk` `clang --target=wasm32-wasip1` command, whose
+  `-E -v` banner carries the Clang version, and the toolchain descriptor carries
+  `target_identity`, the descriptor identity. `toolchain_identity` adds it
+  to the hashed details as `target_identity`, not only to its memo key, so
+  every browser object certificate depends on the complete descriptor
+  (tools, record, flags, include roots, profile, and policies). A host
+  toolchain descriptor omits `target_identity` from the hashed details.
 
    Executable admission follows the operating system's own choice. On POSIX,
    a name containing `/` is an explicit path and is checked directly, while
@@ -746,7 +746,7 @@ runtime search paths, and external paths keep their exact bytes. Bare absolute
 argv elements are not inferred to be file operands; native source and link
 input/output files have separate typed inventories. Browser certification
 derives a root-relative view of the frozen descriptor's SDK paths without
-changing its operational identity or external Emscripten tool selection, and
+changing its operational identity or external `wasi-sdk`/Binaryen tool selection, and
 native and browser probes keep separate cache directories. Browser final-link
 profiles carry their operational target identity and SDK-dependent flag lists,
 so a moved browser SDK may miss its link certificate; browser final-link reuse
@@ -1303,7 +1303,7 @@ repacking preserve the member bytes, so the final compiler-driver link can
 optimize across source objects or selected archive members. LTO does not
 change the public provider protocol or dynamic binding boundaries. Do not replace
 these objects with bitcode-only containers or disable native metadata gates to
-accommodate an incompatible toolchain. Emscripten has no fat Wasm objects, so
+accommodate an incompatible toolchain. `wasm32` has no fat Wasm objects, so
 the [browser target](browser-target.md#unsupported-flags) never adds LTO,
 rejects user LTO flags, and rejects bitcode objects and archive members.
 

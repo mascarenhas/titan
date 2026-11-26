@@ -768,7 +768,7 @@ int main(void) {
     end)
 end)
 
-describe("minicoro Emscripten JSPI backend", function()
+describe("minicoro browser JSPI backend", function()
     local workspace
     after_each(function()
         if workspace then browser_support.files.remove(workspace); workspace = nil end
@@ -790,7 +790,7 @@ describe("minicoro Emscripten JSPI backend", function()
                         defines[#defines + 1] = "#define TEST_FIXED_TAG_COMPARATOR"
                     end
                     local ok, log = browser_support.c_image(info, workspace, name,
-                        minicoro_suite(defines), { purpose = "minicoro", assertions = 2 })
+                        minicoro_suite(defines), { purpose = "minicoro" })
                     assert.truthy(ok, log)
                     browser_toolchain.check_imports(workspace .. "/" .. name .. ".mjs", { "entry" })
                     for _, engine in ipairs({ "node", "chromium" }) do
@@ -808,7 +808,7 @@ describe("minicoro Emscripten JSPI backend", function()
         workspace = browser_support.workspace()
         local ok, log = browser_support.c_image(info, workspace, "unwind-floor",
             browser_support.files.read(browser_support.fixture .. "/minicoro_floor.c"),
-            { purpose = "minicoro", assertions = 2 })
+            { purpose = "minicoro" })
         assert.truthy(ok, log)
         browser_toolchain.check_imports(workspace .. "/unwind-floor.mjs", { "entry" })
         for _, engine in ipairs({ "node", "chromium" }) do
@@ -872,7 +872,7 @@ int main(void) {
 }
 ]]
         local ok, log = browser_support.c_image(info, workspace, "retirement",
-            control, { purpose = "minicoro", assertions = 2 })
+            control, { purpose = "minicoro" })
         assert.truthy(ok, log)
         browser_toolchain.check_imports(workspace .. "/retirement.mjs", { "entry" })
         for _, engine in ipairs({ "node", "chromium" }) do

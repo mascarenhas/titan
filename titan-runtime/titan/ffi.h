@@ -272,12 +272,23 @@ static inline void lmacro_set_gcstp(lua_State *L, int stop) { G(L)->gcstp = cast
 static inline ptrdiff_t lmacro_savestack_top(lua_State *L) { return savestack(L, L->top.p - 1); }
 static inline void *lmacro_unconst(const void *p) { return (void *)p; }
 
+/* A browser image imports host functions from the Wasm module "env" and
+** exports entry points by name; wasm-ld refuses any other undefined
+** function. */
+#if defined(__wasm__)
+#define TITAN_WASM_IMPORT(name) __attribute__((import_module("env"), import_name(name)))
+#define TITAN_WASM_EXPORT(name) __attribute__((export_name(name)))
+#else
+#define TITAN_WASM_IMPORT(name)
+#define TITAN_WASM_EXPORT(name)
+#endif
+
 /* A synchronous C callback on the browser target runs below a JavaScript frame
 ** that cannot suspend, so coroutine and async code must not switch stacks
 ** there. The browser bridge library's import reports whether any callback of
 ** the instance is running; native builds fold the check to 0. */
 #if defined(__wasm__)
-int titan_browser_in_callback(void);
+TITAN_WASM_IMPORT("titan_browser_in_callback") int titan_browser_in_callback(void);
 static inline int titan_no_switch(lua_State *L) {
   (void)L;
   return titan_browser_in_callback() != 0;

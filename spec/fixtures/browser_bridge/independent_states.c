@@ -1,4 +1,4 @@
-#include <emscripten/heap.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <limits.h>
 #include <string.h>
@@ -18,18 +18,19 @@ void __wrap_titan_browser_host_state_closed(uint32_t token) {
   __real_titan_browser_host_state_closed(token);
 }
 
-/* The dedicated bridge test image overrides Emscripten's weak malloc to fail
- * one later call: the C-heap copies a synchronous callback makes for its
+/* The dedicated bridge test image links with -Wl,--wrap=malloc to fail one
+ * later C call: the C-heap copies a synchronous callback makes for its
  * result, message, trace and refusal message. Lua allocates through realloc,
- * which stays Emscripten's own. Disarmed, it is emscripten_builtin_malloc. */
+ * which stays libc's own. Disarmed, it is libc's malloc. */
 static int malloc_failure_after = -1;
-void *malloc(size_t size) {
+extern void *__real_malloc(size_t size);
+void *__wrap_malloc(size_t size) {
   if (malloc_failure_after == 0) {
     malloc_failure_after = -1;
     return NULL;
   }
   if (malloc_failure_after > 0) malloc_failure_after--;
-  return emscripten_builtin_malloc(size);
+  return __real_malloc(size);
 }
 void titan_bridge_test_fail_malloc(int after) {
   malloc_failure_after = after;
@@ -136,7 +137,7 @@ void titan_bridge_test_prepare_response_failure(lua_State *L) {
   response_failure.installed = 1;
   lua_setallocf(L, response_failure_allocate, NULL);
 }
-__attribute__((used, visibility("default")))
+TITAN_WASM_EXPORT("titan_bridge_test_arm_response_owner_failure")
 void titan_bridge_test_arm_response_owner_failure(void) {
   assert(response_failure.installed);
   response_failure.armed = 1; /* pure C setter called by the owned message getter */
@@ -201,7 +202,7 @@ static void titan_bridge_test_arm_inner_catch_oom(lua_State *L) {
   alloc_failure.saved_stack_last = main_L->stack_last.p;
   main_L->stack_last.p = main_L->top.p + 2;
 }
-__attribute__((used, visibility("default")))
+TITAN_WASM_EXPORT("titan_bridge_test_enter_with_free_stack")
 void titan_bridge_test_enter_with_free_stack(int free_slots, int max_failures, uint32_t token) {
   titan_browser_state_record *state = token ? titan_browser_host_state_record(token) : NULL;
   lua_State *L = token ? (state ? state->callback_next : NULL) : alloc_failure.L;
@@ -218,7 +219,7 @@ void titan_bridge_test_enter_with_free_stack(int free_slots, int max_failures, u
   alloc_failure.L = L;
   alloc_failure.saved_ci_top = saved_ci_top;
 }
-__attribute__((used, visibility("default")))
+TITAN_WASM_EXPORT("titan_bridge_test_reset_entry_stack")
 void titan_bridge_test_reset_entry_stack(void) {
   lua_State *L = alloc_failure.L;
   restore_alloc_failure();

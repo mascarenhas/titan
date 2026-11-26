@@ -377,11 +377,21 @@ describe("browser providers", function()
         assert.is_nil(context.embedded_interface_provider)
         assert.is_nil(context.used_embedded_target_profile_identity)
         local calls = {}
+        local tools = context.target_descriptor.tools
+        -- The frozen clang with its target and sysroot, behind an envelope
+        -- that unsets every ambient clang input (D11).
+        local envelope = { "env" }
+        for _, variable in ipairs({ "CCC_OVERRIDE_OPTIONS", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+                "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH" }) do
+            envelope[#envelope + 1] = "-u"
+            envelope[#envelope + 1] = variable
+        end
+        for _, argument in ipairs({ tools.cc[1], "--target=wasm32-wasip1", "--sysroot=" .. tools.sysroot }) do
+            envelope[#envelope + 1] = argument
+        end
         context.io.run = function(_, argv)
             calls[#calls + 1] = argv
-            assert.equal("env", argv[1])
-            assert.equal("EMCC_CFLAGS=", argv[2])
-            assert.equal(context.target_descriptor.tools.cc[1], argv[3])
+            assert.same(envelope, { table.unpack(argv, 1, #envelope) })
             return { started = true, ok = true, output = "", status = 0, why = "exit" }
         end
         local service = assert(driver.get_probe_service(context))
@@ -536,12 +546,16 @@ describe("browser providers", function()
     for _, transport in ipairs({ "execute", "popen", "sync", "start", "run", "capture",
             "start_job", "batch", "jobs", "worker", "uv" }) do
         it("rejects image execution through " .. transport, function()
-            local tools = { cc = { "/audit/emcc" }, ar = { "/audit/emar" }, ranlib = { "/audit/emranlib" } }
+            local tools = fixtures.descriptor(root).tools
             local attempts = {}
             audit_guard = process_audit.install({
                 tools = tools, record = function(_, operation) attempts[#attempts + 1] = operation end,
             })
-            local argv = { tools.cc[1], root .. "/probe.c", "-o", root .. "/probe.js" }
+            -- Linking a runnable command image is never a browser compiler operation.
+            local argv = require("titan-compiler.browsertarget").compiler_argv(tools)
+            for _, argument in ipairs({ root .. "/probe.c", "-o", root .. "/probe.wasm" }) do
+                argv[#argv + 1] = argument
+            end
             local process = require("titan-compiler.process")
             local batch = transport == "batch" and process.new_batch() or nil
             local action
@@ -570,15 +584,56 @@ describe("browser providers", function()
             assert.same({ "rejected" }, attempts)
         end)
     end
-    it("rejects another executable with the emcc basename", function()
-        audit_guard = process_audit.install({ tools = fixtures.descriptor(root).tools })
-        assert.has_error(function() os.execute("/another/emcc -c probe.c -o probe.o") end)
+    it("rejects another executable with the clang basename, and clang without its target envelope", function()
+        local tools = fixtures.descriptor(root).tools
+        audit_guard = process_audit.install({ tools = tools })
+        local envelope = " --target=wasm32-wasip1 --sysroot=" .. tools.sysroot
+        assert.has_error(function() os.execute("/another/clang" .. envelope .. " -c probe.c -o probe.o") end)
+        assert.has_error(function() os.execute(tools.cc[1] .. " -c probe.c -o probe.o") end)
+        assert.has_error(function() os.execute("/another/wasm-opt -O1 probe.wasm.linked -o probe.wasm") end)
     end)
     it("rejects shell execution outside the compiler command", function()
-        audit_guard = process_audit.install({
-            tools = { cc = { "/audit/emcc" }, ar = { "/audit/emar" }, ranlib = { "/audit/emranlib" } },
-        })
-        assert.has_error(function() io.popen("/audit/emcc -c probe.c; node probe.js") end)
+        local tools = fixtures.descriptor(root).tools
+        audit_guard = process_audit.install({ tools = tools })
+        assert.has_error(function()
+            io.popen(tools.cc[1] .. " --target=wasm32-wasip1 --sysroot=" .. tools.sysroot ..
+                " -c probe.c; node probe.mjs")
+        end)
+    end)
+    it("accepts an image link and its post-link optimization only for image builds", function()
+        local tools = fixtures.descriptor(root).tools
+        local envelope = require("titan-compiler.browsertarget").compiler_argv(tools)
+        local arguments = { "-mexec-model=reactor", "-o", root .. "/app.wasm.linked", root .. "/app.o" }
+        local link = { table.unpack(envelope) }
+        for _, argument in ipairs(arguments) do link[#link + 1] = argument end
+        -- The audit reads the command behind the environment envelope.
+        local linked = { tools.cc[1], "--target=wasm32-wasip1", "--sysroot=" .. tools.sysroot }
+        for _, argument in ipairs(arguments) do linked[#linked + 1] = argument end
+        local optimize = { tools.optimizer.argv[1], "-O1", "--stack-check", root .. "/app.wasm.linked",
+            "-o", root .. "/app.wasm" }
+        local recorded = {}
+        local function record(tool, operation) recorded[#recorded + 1] = tool .. " " .. operation end
+        audit_guard = process_audit.install({ tools = tools, images = true, record = record })
+        assert.same({ linked, "clang", "link" }, { audit_guard.check(link) })
+        assert.same({ optimize, "wasm-opt", "optimize" }, { audit_guard.check(optimize) })
+        assert.same({ tools.optimizer.argv[1], "--version" },
+            (audit_guard.check({ tools.optimizer.argv[1], "--version" })))
+        -- wasm-opt writes only the staged image from the linked one.
+        for _, argv in ipairs({
+            { tools.optimizer.argv[1], "-O1", root .. "/app.wasm", "-o", root .. "/app.wasm" },
+            { tools.optimizer.argv[1], "-O1", root .. "/app.wasm.linked", "-o", root .. "/app.mjs" },
+            { tools.optimizer.argv[1], root .. "/app.wasm.linked" },
+        }) do
+            assert.has_error(function() audit_guard.check(argv) end)
+        end
+        assert.same({ "clang link", "wasm-opt optimize", "wasm-opt query", "wasm-opt rejected",
+            "wasm-opt rejected", "wasm-opt rejected" }, recorded)
+        audit_guard.restore()
+        recorded = {}
+        audit_guard = process_audit.install({ tools = tools, record = record })
+        assert.has_error(function() audit_guard.check(link) end)
+        assert.has_error(function() audit_guard.check(optimize) end)
+        assert.same({ "clang rejected", "wasm-opt rejected" }, recorded)
     end)
 
     it("diagnoses an incomplete SDK before linking and leaves an empty metadata probe independent", function()
@@ -619,7 +674,7 @@ function require(name)
         end
         local corrupted = {}
         local function after_tool(argv, tool)
-            if tool ~= "emranlib" or os.getenv("BROWSER_CORRUPTION") ~= "corrupt-member" then return end
+            if tool ~= "llvm-ranlib" or os.getenv("BROWSER_CORRUPTION") ~= "corrupt-member" then return end
             local filename = argv[#argv]
             if not filename:match("[/\\]output[.]a$") or corrupted[filename] then return end
             corrupted[filename] = true
@@ -633,11 +688,11 @@ function require(name)
             active = function() return browser_active end,
             images = true,
             runner = module.browserlink.sdk_assets(module.installed_paths(assert(os.getenv("TITAN_ROOT")), "browser")).runner,
-            module_check = module.browserlink.sdk_assets(
-                module.installed_paths(assert(os.getenv("TITAN_ROOT")), "browser")).module_check,
             tools = { cc = { assert(os.getenv("BROWSER_CC")) },
                 ar = { assert(os.getenv("BROWSER_AR")) },
-                ranlib = { assert(os.getenv("BROWSER_RANLIB")) } },
+                ranlib = { assert(os.getenv("BROWSER_RANLIB")) },
+                sysroot = assert(os.getenv("BROWSER_SYSROOT")),
+                optimizer = { argv = { assert(os.getenv("BROWSER_OPTIMIZER")) } } },
             record = function(tool, operation)
                 local file = assert(io.open(assert(os.getenv("BROWSER_COMMAND_LOG")), "ab"))
                 file:write(tool, " ", operation, "\n"); file:close()
@@ -700,7 +755,8 @@ describe("browser providers real toolchain", function()
             "TITAN_PATH_0_6=" .. root .. "/providers", "TITAN_PATH=",
             "LUA_INIT=@" .. root .. "/hook.lua", "BROWSER_COMMAND_LOG=" .. log,
             "BROWSER_CC=" .. info.tools.cc[1], "BROWSER_AR=" .. info.tools.ar[1],
-            "BROWSER_RANLIB=" .. info.tools.ranlib[1], "BROWSER_AUDIT_HOOK=" .. root .. "/hook.lua",
+            "BROWSER_RANLIB=" .. info.tools.ranlib[1], "BROWSER_SYSROOT=" .. info.tools.sysroot,
+            "BROWSER_OPTIMIZER=" .. info.tools.optimizer.argv[1], "BROWSER_AUDIT_HOOK=" .. root .. "/hook.lua",
             "BROWSER_CORRUPTION=" .. (corruption or ""),
             info.lua, "-e",
             string.format("package.path=%q..package.path", repo .. "/?.lua;" .. repo .. "/?/init.lua;") }
@@ -733,8 +789,8 @@ describe("browser providers real toolchain", function()
     local function stage_sdk()
         local assets = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(prefix))
         local source = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(info.prefix))
-        for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
+        for _, key in ipairs({ "runtime", "factory", "loader", "runner", "runner_module", "node_worker",
+                "page", "build_profile" }) do
             if platform.windows then
                 files.copy(source[key], assets[key])
             else
@@ -767,15 +823,18 @@ describe("browser providers real toolchain", function()
         assert.same({ "pkg.left", "pkg.right" }, parsed.key_order)
         assert.is_true(driver.validate_browser_provider(parsed))
         local commands = read(log)
-        assert.matches("emcc compile", commands, 1, true)
-        assert.matches("emar archive", commands, 1, true)
-        assert.matches("emranlib archive", commands, 1, true)
-        local allowed = { ["emcc compile"] = true, ["emcc preprocess"] = true, ["emcc query"] = true,
-            ["emar archive"] = true, ["emranlib archive"] = true, ["compiler-worker frontend"] = true }
-        allowed["emcc link"] = true
+        assert.matches("clang compile", commands, 1, true)
+        assert.matches("llvm-ar archive", commands, 1, true)
+        assert.matches("llvm-ranlib archive", commands, 1, true)
+        -- The executing protocol links its image and optimizes it before running it.
+        assert.matches("clang link", commands, 1, true)
+        assert.matches("wasm-opt optimize", commands, 1, true)
+        local allowed = { ["clang compile"] = true, ["clang preprocess"] = true, ["clang query"] = true,
+            ["llvm-ar archive"] = true, ["llvm-ranlib archive"] = true, ["compiler-worker frontend"] = true }
+        allowed["clang link"] = true
+        allowed["wasm-opt optimize"] = true
+        allowed["wasm-opt query"] = true
         allowed["browser-runner execute"] = true
-        allowed["em-config query"] = true
-        allowed["module-check check"] = true
         for operation in commands:gmatch("[^\n]+") do assert.is_true(allowed[operation], operation) end
         write(root .. "/providers/pkg.a", read(output))
         write(root .. "/src/consumer.titan",

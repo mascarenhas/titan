@@ -2,7 +2,7 @@
 
 `titan.browser` connects WebAssembly programs compiled with `--target browser`
 to host JavaScript bindings, `BrowserValue` marshalling, pinned callbacks,
-asynchronous requests and listeners, and synchronous Emscripten C callbacks.
+asynchronous requests and listeners, and synchronous C callbacks.
 See [WebAssembly and the Browser Target](browser-target.md) (and its
 [complete application](browser-target.md#a-complete-application)) for image
 lifecycle, loader options, output sinks, and deployment.
@@ -461,9 +461,10 @@ end
 
 ## Synchronous C callbacks
 
-Emscripten C APIs such as `emscripten/html5.h` invoke C callbacks synchronously
-from JavaScript. Pin a Titan callable with `browser.pin` and invoke it from C
-via `titan_browser_call_sync`:
+Host WebAssembly imports (supplied through `create({ imports })`) can invoke C
+function pointers synchronously from JavaScript via `context.table`. Pin a
+Titan callable with `browser.pin` and invoke it from C via
+`titan_browser_call_sync`:
 
 ```text
 record BrowserPin
@@ -519,13 +520,25 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
   and unwinding out of `titan_browser_call_sync` via a JS/Wasm exception
   poisons the instance ([synchronous callbacks](browser-target.md#synchronous-c-callbacks)).
 
-This complete browser module wires two HTML buttons via `emscripten/html5.h`,
-using a [`foreign function`](foreign-functions.md) callback with a
-[zeroed local](foreign-functions.md#zeroed-locals) result struct:
+This complete browser module wires two HTML buttons through a tiny C import
+header (`click_host.h`), using a [`foreign function`](foreign-functions.md)
+callback with a [zeroed local](foreign-functions.md#zeroed-locals) result
+struct:
+
+```c
+/* click_host.h */
+#include <stdbool.h>
+#include "titan/browser.h"
+
+typedef bool (*click_callback)(void *userdata);
+
+TITAN_WASM_IMPORT("set_click_callback")
+int set_click_callback(const char *selector, void *userdata, click_callback cb);
+```
 
 ```titan
 local browser = import "browser"
-foreign import "emscripten/html5.h"
+foreign import "click_host.h"
 foreign import "stdio.h"
 foreign import "stdlib.h"
 foreign import "titan/browser.h"
@@ -561,8 +574,7 @@ end
 
 local listeners: {Listener} = {}
 
-local foreign function counter_click(kind: int, event: const *EmscriptenMouseEvent,
-                                     identity: *void): bool
+local foreign function counter_click(identity: *void): bool
   local result = foreign titan_browser_sync_result.new()
   local status = ffi.titan_browser_call_sync(
     identity as const *titan_browser_identity, 0, nil, result)
@@ -586,9 +598,7 @@ local function listen(selector: string, handler: function(...: Value): Value)
   identity.generation = generation
   local index = #listeners + 1
   listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
-  if ffi.emscripten_set_click_callback_on_thread(
-      selector, identity, 0, counter_click,
-      ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD) ~= ffi.EMSCRIPTEN_RESULT_SUCCESS then
+  if ffi.set_click_callback(selector, identity, counter_click) ~= 0 then
     listeners[index] = nil
     pin:close()
     raise "cannot listen for clicks on " .. selector
@@ -598,8 +608,7 @@ end
 local function stop(...: Value): Value
   for index = #listeners, 1, -1 do
     local listener = listeners[index]
-    ffi.emscripten_set_click_callback_on_thread(
-      listener.selector, nil, 0, nil, ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD)
+    ffi.set_click_callback(listener.selector, nil, nil)
     listener.pin:close()
     listeners[index] = nil
   end
@@ -618,6 +627,37 @@ catch
   stop()
   raise
 end
+```
+
+On the host page, pass `imports` to `create` to attach DOM click listeners and
+invoke the C function pointer through `context.table`:
+
+```javascript
+const registered = new Map();
+const instance = create({
+  bindings: { show, ready },
+  imports: (context) => ({
+    env: {
+      set_click_callback(selectorPtr, userdata, fnPtr) {
+        const selector = context.readCString(selectorPtr);
+        const element = document.querySelector(selector);
+        if (!element) return -1;
+        const prev = registered.get(selector);
+        if (prev) {
+          element.removeEventListener("click", prev);
+          registered.delete(selector);
+        }
+        if (fnPtr !== 0) {
+          const fn = context.table.get(fnPtr);
+          const onClick = () => fn(userdata);
+          element.addEventListener("click", onClick);
+          registered.set(selector, onClick);
+        }
+        return 0;
+      },
+    },
+  }),
+});
 ```
 
 Host page wiring:
@@ -681,7 +721,7 @@ foreign function callback_leave(raw_frame: *void)
 ```
 
 - `call_sync` backs `titan_browser_call_sync` for synchronous C callbacks from
-  user or Emscripten C code.
+  authored C code and host WebAssembly imports.
 - `invoke` is the loader's entry for invoking a pinned callable from JavaScript
   (`instance.call` / `wrapper.call` / notification delivery).
 - `release_callable` is the loader's synchronous trampoline for

@@ -115,10 +115,9 @@ local function json(bytes)
     return root, close
 end
 
+local BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 local base64 = {}
-for index = 1, 64 do
-    base64[("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"):byte(index)] = index - 1
-end
+for index = 1, 64 do base64[BASE64:byte(index)] = index - 1 end
 -- Validates every segment; `visit(generated, source, line)` sees each one in
 -- order, with a nil source for an unmapped segment (0-based indexes).
 local function mappings(map, range, visit)
@@ -351,6 +350,313 @@ local function quote(value)
     end) .. '"'
 end
 
+-- The final image's `.debug_line` (DWARF v4, from `-gdwarf-4
+-- -gline-tables-only` objects that `wasm-opt --debuginfo` kept in step with
+-- its code) becomes the standard map; every `.debug_*` section is then cut
+-- out byte for byte, so the code keeps the offsets its rows name. A row's
+-- address is an offset in the code section's payload. Sequences outside the
+-- function bodies are dead functions the linker tombstoned and are dropped.
+-- A line 0 row has no source, and a sequence ends just past its last
+-- instruction; both become unmapped segments, so neither the map nor the
+-- trace table carries the previous line past them.
+local WASM_HEADER = "\0asm\1\0\0\0"
+
+local function leb(bytes, pos, limit, signed)
+    local value, shift, digit = 0, 0, nil
+    repeat
+        require_value(pos <= limit, "truncated LEB128 value")
+        require_value(shift < 64, "LEB128 value is too long")
+        digit = bytes:byte(pos)
+        value = value | ((digit & 0x7f) << shift)
+        pos, shift = pos + 1, shift + 7
+    until digit < 0x80
+    if signed and shift < 64 and digit & 0x40 ~= 0 then value = value | (-1 << shift) end
+    return value, pos
+end
+
+local function fixed(bytes, pos, size, limit)
+    require_value(pos + size - 1 <= limit, "truncated .debug_line value")
+    return string.unpack("<I" .. size, bytes, pos)
+end
+
+local function c_string(bytes, pos, limit)
+    local stop = bytes:find("\0", pos, true)
+    require_value(stop and stop <= limit, "unterminated .debug_line string")
+    return bytes:sub(pos, stop - 1), stop + 1
+end
+
+-- The live sequences of `bytes[pos, limit]`, each a flat array of
+-- (address, path, line, column) rows, ending in its end address; an unmapped
+-- row's path is false. `live` bounds the body addresses. A sequence whose
+-- addresses go backwards is not a DWARF sequence and describes nothing.
+local function line_sequences(bytes, pos, limit, live)
+    local sequences = {}
+    while pos <= limit do
+        local length, version, header_length
+        length, pos = fixed(bytes, pos, 4, limit)
+        require_value(length < 0xfffffff0, "64-bit DWARF .debug_line is unsupported")
+        local stop = pos + length - 1
+        require_value(stop <= limit, "truncated .debug_line unit")
+        version, pos = fixed(bytes, pos, 2, stop)
+        require_value(version == 4, "expected DWARF v4 .debug_line, found version " .. version)
+        header_length, pos = fixed(bytes, pos, 4, stop)
+        local program = pos + header_length
+        require_value(program - 1 <= stop and pos + 5 < program, "truncated .debug_line header")
+        local min_length, max_ops, _, line_base, line_range, opcode_base =
+            string.unpack("<BBBbBB", bytes, pos)
+        require_value(max_ops == 1 and line_range > 0 and opcode_base > 0 and pos + 5 + opcode_base <= program,
+            "unsupported .debug_line header")
+        local lengths = { bytes:byte(pos + 6, pos + 4 + opcode_base) }
+        pos = pos + 5 + opcode_base
+        local directories, files = { [0] = "" }, {}
+        while true do
+            local directory
+            directory, pos = c_string(bytes, pos, program - 1)
+            if directory == "" then break end
+            directories[#directories + 1] = directory
+        end
+        local function entry(name, at, finish)
+            local index
+            index, at = leb(bytes, at, finish)
+            local directory = directories[index]
+            require_value(directory, "invalid .debug_line directory index")
+            at = select(2, leb(bytes, select(2, leb(bytes, at, finish)), finish))
+            if directory ~= "" and not name:match("^[/\\]") and not name:match("^%a:[/\\]") then
+                name = directory .. "/" .. name
+            end
+            files[#files + 1] = name
+            return at
+        end
+        while true do
+            local name
+            name, pos = c_string(bytes, pos, program - 1)
+            if name == "" then break end
+            pos = entry(name, pos, program - 1)
+        end
+        pos = program
+        local address, file, line, column, rows, backwards = 0, 1, 1, 0, {}, false
+        local function row()
+            local path = line > 0 and files[file]
+            require_value(path or line <= 0, "a .debug_line row names an undefined file")
+            backwards = backwards or #rows > 0 and address < rows[#rows - 3]
+            rows[#rows + 1], rows[#rows + 2], rows[#rows + 3], rows[#rows + 4] = address, path, line, column
+        end
+        while pos <= stop do
+            local op = bytes:byte(pos)
+            pos = pos + 1
+            if op >= opcode_base then
+                local adjusted = op - opcode_base
+                address = address + adjusted // line_range * min_length
+                line = line + line_base + adjusted % line_range
+                row()
+            elseif op == 0 then
+                local size
+                size, pos = leb(bytes, pos, stop)
+                local finish = pos + size - 1
+                require_value(size > 0 and finish <= stop, "truncated .debug_line extended opcode")
+                local sub = bytes:byte(pos)
+                if sub == 1 then
+                    if #rows > 0 and rows[1] >= live[1] and address <= live[2] then
+                        line = 0
+                        row()
+                        if not backwards then sequences[#sequences + 1] = rows end
+                    end
+                    address, file, line, column, rows, backwards = 0, 1, 1, 0, {}, false
+                elseif sub == 2 then
+                    require_value(size <= 9, "invalid .debug_line address size")
+                    address = fixed(bytes, pos + 1, size - 1, finish)
+                elseif sub == 3 then
+                    local name, at = c_string(bytes, pos + 1, finish)
+                    entry(name, at, finish)
+                end
+                pos = finish + 1
+            elseif op == 1 then
+                row()
+            elseif op == 2 then
+                local delta
+                delta, pos = leb(bytes, pos, stop)
+                address = address + delta * min_length
+            elseif op == 3 then
+                local delta
+                delta, pos = leb(bytes, pos, stop, true)
+                line = line + delta
+            elseif op == 4 then
+                file, pos = leb(bytes, pos, stop)
+            elseif op == 5 then
+                column, pos = leb(bytes, pos, stop)
+            elseif op == 8 then
+                address = address + (255 - opcode_base) // line_range * min_length
+            elseif op == 9 then
+                local delta
+                delta, pos = fixed(bytes, pos, 2, stop)
+                address = address + delta
+            else
+                -- Flag opcodes take no operands; others declare their ULEB operands.
+                for _ = 1, lengths[op] do pos = select(2, leb(bytes, pos, stop)) end
+            end
+        end
+        require_value(#rows == 0, "unterminated .debug_line sequence")
+    end
+    return sequences
+end
+
+local function vlq(value)
+    value = value < 0 and (-value << 1 | 1) or value << 1
+    local digits = {}
+    repeat
+        local digit = value & 31
+        value = value >> 5
+        if value > 0 then digit = digit | 32 end
+        digits[#digits + 1] = BASE64:sub(digit + 1, digit + 1)
+    until value == 0
+    return table.concat(digits)
+end
+
+local function uleb(value)
+    local digits = {}
+    repeat
+        local digit = value & 0x7f
+        value = value >> 7
+        digits[#digits + 1] = string.char(value > 0 and digit | 0x80 or digit)
+    until value == 0
+    return table.concat(digits)
+end
+
+-- Sequences in address order, without any two that overlap. wasm-ld's
+-- `--wrap` resolves the wrapped definition's own line-table relocation to
+-- the wrapper, so that sequence lands inside the wrapper's body on top of
+-- the wrapper's own one. A body's own sequence ends exactly at the body's
+-- end; where sequences overlap, only such an owner survives, and only when
+-- it is the one owner of its body. The rest of an overlap cannot be
+-- attributed and stays unmapped. A sequence that overlaps nothing is kept
+-- even when it ends inside its body (optimized images have those).
+local function disjoint(sequences, bodies)
+    local function finish(rows) return rows[#rows - 3] end
+    table.sort(sequences, function(left, right)
+        return left[1] < right[1] or left[1] == right[1] and finish(left) < finish(right)
+    end)
+    local function owned(rows)
+        local first, last = 1, #bodies
+        while first <= last do
+            local middle = (first + last) // 2
+            local body = bodies[middle]
+            if rows[1] < body[1] then last = middle - 1
+            elseif rows[1] >= body[2] then first = middle + 1
+            else return finish(rows) == body[2] and middle or nil end
+        end
+    end
+    local kept, index = {}, 1
+    while index <= #sequences do
+        local stop, reach = index, finish(sequences[index])
+        while sequences[stop + 1] and sequences[stop + 1][1] < reach do
+            stop = stop + 1
+            reach = math.max(reach, finish(sequences[stop]))
+        end
+        if stop == index then
+            kept[#kept + 1] = sequences[index]
+        else
+            local owners, count = {}, {}
+            for at = index, stop do
+                local body = owned(sequences[at])
+                if body then
+                    owners[#owners + 1] = { sequences[at], body }
+                    count[body] = (count[body] or 0) + 1
+                end
+            end
+            for _, owner in ipairs(owners) do
+                if count[owner[2]] == 1 then kept[#kept + 1] = owner[1] end
+            end
+        end
+        index = stop + 1
+    end
+    return kept
+end
+
+-- Returns the image without its `.debug_*` sections, ending in a
+-- `sourceMappingURL` section that names `map_name` (relative to the image),
+-- and the source map of its line table, with offsets in that image.
+function M.dwarf_map(wasm, map_name, origin)
+    local ok, image, map = pcall(function()
+        require_value(type(wasm) == "string" and wasm:sub(1, 8) == WASM_HEADER, "invalid Wasm header")
+        local kept, removed, limit, pos = { WASM_HEADER }, 0, #wasm, 9
+        local code_offset, live, bodies, line_start, line_limit
+        while pos <= limit do
+            local id = wasm:byte(pos)
+            local size, start = leb(wasm, pos + 1, limit)
+            local finish = start + size - 1
+            require_value(finish <= limit, "truncated Wasm section")
+            local name, payload
+            if id == 0 then
+                local length
+                length, payload = leb(wasm, start, finish)
+                require_value(payload + length - 1 <= finish, "truncated Wasm custom section name")
+                name = wasm:sub(payload, payload + length - 1)
+                payload = payload + length
+            end
+            if name and (name:sub(1, 7) == ".debug_" or name == "sourceMappingURL") then
+                if name == ".debug_line" then
+                    require_value(not line_start, "duplicate .debug_line section")
+                    line_start, line_limit = payload, finish
+                end
+                removed = removed + finish - pos + 1
+            else
+                if id == 10 then
+                    -- Body bounds in .debug_line addresses: offsets from the
+                    -- code section's payload.
+                    code_offset = start - 1 - removed
+                    local count, at = leb(wasm, start, finish)
+                    bodies = {}
+                    for index = 1, count do
+                        local length
+                        length, at = leb(wasm, at, finish)
+                        require_value(at + length - 1 <= finish, "truncated Wasm function body")
+                        bodies[index] = { at - start, at - start + length }
+                        at = at + length
+                    end
+                    live = { bodies[1] and bodies[1][1] or size, size }
+                end
+                kept[#kept + 1] = wasm:sub(pos, finish)
+            end
+            pos = finish + 1
+        end
+        require_value(code_offset, "Wasm image has no code section")
+        require_value(line_start, "Wasm image has no .debug_line section")
+        local sequences = disjoint(line_sequences(wasm, line_start, line_limit, live), bodies)
+        local sources, indexes, segments = {}, {}, {}
+        local generated, source, line, column = 0, 0, 0, 0
+        for _, rows in ipairs(sequences) do
+            for index = 1, #rows, 4 do
+                local path = rows[index + 1]
+                local next_generated = code_offset + rows[index]
+                local segment = vlq(next_generated - generated)
+                if path then
+                    local next_source = indexes[path]
+                    if not next_source then
+                        sources[#sources + 1] = quote(path)
+                        next_source = #sources - 1
+                        indexes[path] = next_source
+                    end
+                    local next_line, next_column = rows[index + 2] - 1, math.max(rows[index + 3], 1) - 1
+                    segment = segment .. vlq(next_source - source) .. vlq(next_line - line) ..
+                        vlq(next_column - column)
+                    source, line, column = next_source, next_line, next_column
+                end
+                segments[#segments + 1] = segment
+                generated = next_generated
+            end
+        end
+        local url = uleb(#"sourceMappingURL") .. "sourceMappingURL" .. uleb(#map_name) .. map_name
+        kept[#kept + 1] = "\0" .. uleb(#url) .. url
+        return table.concat(kept), '{"version":3,"sources":[' .. table.concat(sources, ",") ..
+            '],"names":[],"mappings":"' .. table.concat(segments, ",") .. '"}'
+    end)
+    if not ok then
+        return nil, (origin or "browser trace") .. ": " ..
+            (type(image) == "table" and image.browsertrace or tostring(image))
+    end
+    return image, map
+end
+
 -- Error-path attribution uses the same validated mapping walk as publication.
 -- Select only within this body: a preceding function's mapping is not evidence.
 function M.function_source(bytes, range)
@@ -439,6 +745,8 @@ function M.trace_table(bytes)
 end
 
 -- The recipe never contains staging paths or the injected identity itself.
+-- The compiler, linker and optimizer that make the image count by their
+-- bytes, not only by their paths and version banners.
 function M.identity(context, contents, compile_flags, link_flags, groups)
     local inputs = {}
     for _, group in ipairs(groups) do
@@ -449,15 +757,19 @@ function M.identity(context, contents, compile_flags, link_flags, groups)
         end
         inputs[#inputs + 1] = files
     end
+    local tools = require("titan-compiler.browsertarget").export(context.target_descriptor).tools
     return incremental.digest(context, "browser-trace-image", {
-        entrypoint = contents, target = context.target_descriptor.identity,
-        toolchain = require("titan-compiler.browsertarget").export(context.target_descriptor).tools,
+        entrypoint = contents, target = context.target_descriptor.identity, toolchain = tools,
+        executables = { incremental.file_digest(context, tools.cc[1]),
+            incremental.file_digest(context, tools.ld[1]),
+            (incremental.file_digest(context, tools.optimizer.argv[1])) },
         compile_flags = compile_flags, link_flags = link_flags, inputs = inputs,
     })
 end
 
 function M.declaration(identity)
     return '\nstatic const char titan_browser_trace_image_id[] = "' .. identity .. '";\n' ..
+        'TITAN_WASM_EXPORT("titan_browser_trace_identity")\n' ..
         'const char *titan_browser_trace_identity(void) {\n' ..
         '    return titan_browser_trace_image_id;\n}\n'
 end

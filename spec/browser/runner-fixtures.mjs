@@ -110,11 +110,19 @@ export async function run(context) {
         context.assert(head.ok && head.headers.get("content-type").startsWith("text/javascript"));
         return;
     }
+    if (mode === "imports") {
+        // --imports hands its module's default export to the harness.
+        context.assert(typeof context.imports === "function", "--imports did not reach the harness");
+        context.assert(context.imports().env.runner_marker() === 7, "--imports reached the harness altered");
+        context.stdout(new TextEncoder().encode("imports"));
+        return;
+    }
     context.assert(mode === "context", "unknown runner fixture mode");
     context.assert(Object.isFrozen(context), "host-test context is mutable");
     context.assert(Object.isFrozen(context.args), "host-test args are mutable");
     context.equalBytes(new TextEncoder().encode(Object.keys(context).sort().join(",")),
-        new TextEncoder().encode("args,assert,bytes,engine,equalBytes,gc,image,stderr,stdout,tick"));
+        new TextEncoder().encode("args,assert,bytes,engine,equalBytes,gc,image,imports,stderr,stdout,tick"));
+    context.assert(context.imports === undefined, "a harness without --imports received imports");
     context.assert(context.engine === "node" || context.engine === "chromium");
     const first = await context.bytes("spec/browser/runner-fixtures.mjs");
     const original = first[0];

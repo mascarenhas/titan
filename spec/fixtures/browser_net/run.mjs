@@ -78,7 +78,8 @@ try {
     TITAN_TEST_RAW_URL: rawURL, TITAN_TEST_VERIFIED_TLS: verified ? '1' : '0',
     TITAN_TEST_WEBSOCKET_ONLY: process.env.TITAN_TEST_WEBSOCKET_ONLY ?? '0',
     TITAN_TEST_BROWSER: engine === 'node' ? '0' : '1', TITAN_TEST_ENGINE: engine};
-  const args = [runner, '--engine', engine, '--timeout', '300000', '--grace', '2000', '--root', root];
+  const args = [runner, '--engine', engine, '--timeout', '300000', '--grace', '2000', '--root', root,
+    '--imports', join(root, 'images/fixture-imports.mjs')];
   if (engine === 'webkit' && options['--persistent-webkit']) {
     args.push('--persistent-context', join(home, 'webkit-profile'));
   }

@@ -110,8 +110,11 @@ local function exhaust(context: test.Context)
   local released: integer = ffi.budget_heap_size()
   local fresh = coroutine.create(function(_: value): value return 43 end, "fresh")
   test.assert(fresh:resume(nil) == 43)
-  test.assert(cap == 2147483648 and exhausted == cap,
-              "exhaustion did not exercise the delivered actual 2-GiB maximum")
+  -- wasi-libc's allocator grows memory per request, so the failing request
+  -- leaves less than one coroutine allocation below the delivered maximum.
+  local stack: integer = ffi.TITAN_COROUTINE_STACK_SIZE
+  test.assert(cap == 2147483648 and exhausted <= cap and cap - exhausted < stack,
+              "exhaustion did not reach the delivered actual 2-GiB maximum")
   test.assert(initial < exhausted and released == exhausted,
               "Wasm heap did not grow or unexpectedly shrank after release")
   local description = "non-string allocation failure"
@@ -119,11 +122,41 @@ local function exhaust(context: test.Context)
   context:log("BUDGET created=" .. created .. " first_failing_allocator=" .. allocator .. " failure=" .. description .. " initial_heap=" .. initial .. " exhausted_heap=" .. exhausted .. " released_heap=" .. released .. " maximum=" .. cap .. " existing_canary=42 fresh_after_gc=43")
 end
 
+-- The span and leaf free bytes are those of the stack bounds the factory
+-- installed, measured from the live stack pointer.
 local function log_shadow(context: test.Context, label: string, expected_span: integer)
   local span: integer = ffi.budget_last_stack_span()
   local free_bytes: integer = ffi.budget_last_stack_free()
   test.assert(span == expected_span)
   context:log("BUDGET SHADOW context=" .. label .. " stack_span=" .. span .. " leaf_free=" .. free_bytes)
+end
+
+-- D2's cookie boundary: none at the main stack's zero end, and the factory's
+-- cookie intact at a coroutine stack's low end across a switch.
+local function cookie_boundary(context: test.Context)
+  test.assert(ffi.budget_cookie_main() ~= 0, "the main stack has a cookie or a nonzero low bound")
+  local owner = coroutine.create(function(_: value): value
+    test.assert(ffi.budget_cookie_coroutine() ~= 0, "the coroutine stack cookie was not installed")
+    coroutine.yield("switched", "cookie")
+    test.assert(ffi.budget_cookie_coroutine() ~= 0, "the coroutine stack cookie changed across a switch")
+    return 45
+  end, "cookie")
+  test.assert(owner:resume(nil) == "switched")
+  test.assert(ffi.budget_cookie_main() ~= 0, "a switch wrote a cookie at the main stack's zero end")
+  test.assert(owner:resume(nil) == 45)
+  context:log("BUDGET COOKIE main_low=0 main_cookie=absent coroutine_cookie=intact")
+end
+
+-- An overwritten coroutine cookie aborts the next switch with the factory's
+-- diagnostic, although no prologue check ran out of stack.
+local function cookie_overwrite()
+  local owner = coroutine.create(function(_: value): value
+    ffi.budget_overwrite_cookie()
+    coroutine.yield("switched", "cookie-overwrite")
+    return nil
+  end, "cookie-overwrite")
+  owner:resume(nil)
+  raise "an overwritten coroutine stack cookie did not abort the switch"
 end
 
 local function exercise(context: test.Context, mode: string, depth: integer)
@@ -160,6 +193,8 @@ local function exercise(context: test.Context, mode: string, depth: integer)
   elseif mode == "lua-limit" then lua_limit(context)
   elseif mode == "create-failure" then deterministic_create(context)
   elseif mode == "exhaust" then exhaust(context)
+  elseif mode == "cookie-boundary" then cookie_boundary(context)
+  elseif mode == "cookie-overwrite" then cookie_overwrite()
   else raise "unknown budget mode" end
   context:log("BUDGET END mode=" .. mode .. " depth=" .. depth .. " canaries=intact")
 end

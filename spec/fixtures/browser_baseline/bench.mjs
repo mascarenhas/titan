@@ -21,6 +21,7 @@ export async function run(context) {
   const created = now();
   const instance = create({
     locateFile,
+    imports: context.imports,
     stdout: chunk => { chunks.push(chunk); },
     stderr: chunk => { errors.push(chunk); },
   });

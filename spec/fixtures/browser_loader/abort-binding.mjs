@@ -1,5 +1,5 @@
 // Expected-failure supervisor probe over the real fidelity image. Every case
-// invokes its own Emscripten abort from inside a production bridge import.
+// invokes the instance's abort from inside a production bridge import.
 export async function run(context) {
   const [path, mode = 'throw'] = context.args;
   context.assert(path && ['throw', 'return', 'bytes', 'format', 'allocation'].includes(mode), 'pass a fidelity image and abort branch');
@@ -7,7 +7,8 @@ export async function run(context) {
   let controls, probe, atAbort, original, allocationAbort = false, observerCalls = 0;
   const afterPoison = [];
   function abortAndReturn() { try { controls.abort(); } catch {} }
-  const instance = image.create({locateFile: image.locateFile, stdout: context.stdout, stderr: context.stderr,
+  const instance = image.create({locateFile: image.locateFile, imports: context.imports,
+    stdout: context.stdout, stderr: context.stderr,
     bindings: {
       __loaderTest(value) { controls = value; },
       abort_binding() {

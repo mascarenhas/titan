@@ -47,7 +47,7 @@ After checkout and before any cache restore, all four browser jobs,
 On GitHub-hosted runners only, it removes the image's unused Android SDK
 (including its NDKs) at `/usr/local/lib/android/sdk` and logs `df -h` for
 the workspace and runner temp directory before and after. This makes room
-for emsdk, browser downloads, native dependency caches, and large test
+for `wasi-sdk`, Binaryen, browser downloads, native dependency caches, and large test
 and link outputs without removing build tools the jobs need.
 
 Native Make prerequisites and the standard-library and
@@ -216,24 +216,27 @@ shards, so its validation prefix starts as the compiler SDK installed from
 this commit, with no native standard provider and no browser SDK. The checkout
 includes submodules, because the fork's installer reads the gitlinked revision
 to write the record; the workflow hardcodes no fork revision. Pins live in
-`TITAN_`-prefixed variables (`TITAN_EMSDK_VERSION`, `TITAN_EMSDK_ROOT`,
-`TITAN_CHROME_VERSION`, `TITAN_CHROME_SHA256`, `TITAN_CHROME_ROOT`), because
-`emsdk_env.sh` unsets every `EMSDK_*` variable it does not set itself, and each
-job sets `permissions.id-token: write` for its own Codecov upload. All three
-jobs use the same seven setup stages after the disk-space step:
+`TITAN_`-prefixed variables (`TITAN_WASI_SDK_VERSION`, `TITAN_WASI_SDK_SHA256`,
+`TITAN_WASI_SDK_ROOT`, `TITAN_BINARYEN_VERSION`, `TITAN_BINARYEN_SHA256`,
+`TITAN_BINARYEN_ROOT`, `TITAN_CHROME_VERSION`, `TITAN_CHROME_SHA256`,
+`TITAN_CHROME_ROOT`), and each job sets `permissions.id-token: write` for its
+own Codecov upload. All three jobs use the same seven setup stages after the
+disk-space step:
 
-1. **Emscripten.** `actions/cache@v4` restores `.emsdk` under the key
-   `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
-   (the installer, not the pin); `emsdk install 6.0.13` and `emsdk activate
-   6.0.13` are idempotent, so a restored installation only re-verifies. The
-   step sources `emsdk_env.sh` and requires `emcc --version` to report exactly
-   6.0.13.
-2. **Node 26.** `actions/setup-node@v6` installs Node 26.13.0 independently
-   of emsdk's bundled Node. The job checks that exact version and the unflagged
-   `WebAssembly.promising` and `WebAssembly.Suspending` APIs, then exports its
-   executable as `TITAN_NODE`. Browser commands use that path even after
-   `emsdk_env.sh` changes `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
-   only action runtimes, not the runtime that executes Titan images.
+1. **`wasi-sdk` and Binaryen.** `actions/cache@v4` restores `.wasi-sdk` and
+   `.binaryen` under
+   `ubuntu-24.04-<arch>-wasi-sdk-34.0-<sha256>-binaryen-133-<sha256>-v1`. A
+   cache miss downloads the pinned release archives, verifies both SHA-256
+   digests, and unpacks `wasi-sdk` and `bin/wasm-opt`. The step verifies
+   `<sdk>/VERSION` equals `34.0` and `wasm-opt --version` reports
+   `wasm-opt version 133 (version_133)`; browser steps export
+   `WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT"` and
+   `BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"`.
+2. **Node 26.** `actions/setup-node@v6` installs Node 26.13.0. The job checks
+   that exact version and the unflagged `WebAssembly.promising` and
+   `WebAssembly.Suspending` APIs, then exports its executable as `TITAN_NODE`.
+   `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects only action runtimes, not the
+   runtime that executes Titan images.
 3. **Chrome for Testing.** `actions/cache@v4` restores the headless shell
    under `ubuntu-24.04-<arch>-chrome-headless-shell-156.0.8078.80-<sha256>-v1`
    (the ZIP digest is part of the cache key so re-pinning cannot restore an
@@ -265,13 +268,14 @@ jobs use the same seven setup stages after the disk-space step:
 5. **Browser Lua.** `make lua-browser PREFIX="$PREFIX"` installs the archive,
    record, and headers; the step asserts `liblua.a`, `liblua-config.txt`, and
    core headers.
-6. **Native install without Emscripten.** After removing the prepared tree's
+6. **Native install without the browser toolchain.** After removing the prepared tree's
    unregistered `bin/titanc`, `share/lua/5.5/titan-compiler`, and
    `share/lua/5.5/c-parser` copies (as `native-coverage` does),
-   `"$PREFIX/bin/luarocks" make` runs with `EMSDK` unset and no `emcc` on
-   `PATH`, proving that the native build never needs the browser toolchain.
-7. **Browser SDK.** With emsdk sourced, the step asserts that
-   `lib/titan-browser` is absent or empty, runs `make browser-sdk
+   `"$PREFIX/bin/luarocks" make` runs with `WASI_SDK_PATH`, `BINARYEN_ROOT`,
+   and `WASM_OPT` unset and no `wasi-sdk` or Binaryen tools on `PATH`, proving
+   that the native build never needs the browser toolchain.
+7. **Browser SDK.** With `WASI_SDK_PATH` and `BINARYEN_ROOT` set, the step
+   asserts that `lib/titan-browser` is absent or empty, runs `make browser-sdk
    PREFIX="$PREFIX"`, asserts that every file in the [browser SDK file
    list](../language/browser-target.md#installing-the-browser-sdk) except the
    LPegLabel archive is installed, and that `build-profile` holds the job's
@@ -288,62 +292,69 @@ jobs use the same seven setup stages after the disk-space step:
    `spec/coder/browser_budgets_spec.lua` under LuaCov, with output copied to
    `$RUNNER_TEMP/browser-gate.log`. A missing gate file fails with `missing
    browser real-toolchain spec: <path>` before Busted starts. The budget spec
-   builds its own assertion-on and assertion-off images and runs both engines.
-9. **Browser compiler coverage.** `luacov "titan%-compiler/" "titanc$"` and
+   builds its probe images (using `titan-browser-run --imports` for outer-wait
+   suspension fixtures) and runs both engines.
+9. **Browser compiler coverage.** `luacov` and
    `prepare_codecov_report.lua` produce `luacov.report.out` and
    `luacov.codecov.out`, and `codecov/codecov-action@v7` uploads
    `./luacov.codecov.out` with `flags: compiler`, `name: browser`,
    `use_oidc: true`, and `fail_ci_if_error: true`, so the real linking,
-   trace-map, and budget paths that are pending in the emsdk-free shards are
+   trace-map, and budget paths that are pending in the toolchain-free shards are
    measured.
 10. **Runner images.** The installed `titanc` builds `runner_image` (a
     `--test` image) and `runner_status` (a program) from `spec/browser` into
     `out/browser/runner` and asserts `.mjs`, `.wasm`, `.wasm.map`, and `.wasm.trace` for each.
     `scripts/check_browser_stdlib.lua imports entry` then checks both images
     against the [import manifest](browser-target.md#import-manifest).
-11. **Loader images.** For assertions 2 and 0, the job sets
-    `driver.browser_link_options` and builds `loader_app` and `fidelity`
+11. **Loader images.** The job builds `loader_app` and `fidelity`
     (programs with `--c-source spec/fixtures/browser_loader/loader.c`) with the
     `program` purpose and `loader_names` (a `--test` image) with the `test`
     purpose, because a contrary purpose is refused
     ([internal selection](browser-target.md#the-link-profile)), into
-    `out/browser/loader`, asserting `.mjs`, `.wasm`, `.wasm.map`, and `.wasm.trace` for each.
-    It also
-    builds one `fidelity` image with the `baseline` profile at `O2` and
-    assertions off, plus the harness-only `--ldflag=-Os` (the profile itself
-    supplies the debug flags), because Emscripten 6.0.13 minifies export names
-    only at `-O3` or a shrink level. The import check accepts the `entry` class
-    for `loader_names` and `entry,fixture:loader,fixture:controls` for the
-    `loader_app` and both `fidelity` images, which link the loader fixture.
+    `out/browser/loader/program`, asserting `.mjs`, `.wasm`, `.wasm.map`, and
+    `.wasm.trace` for each. It also links both `loader_app` and `fidelity` a
+    second time into `out/browser/loader/optimized` with
+    `browser_link_options={purpose='baseline',optimization='O2'}` using the
+    checkout `titanc` with `TITAN_ROOT="$PREFIX"`, because a driver option sets
+    the profile. The import check accepts the `entry` class for `loader_names`
+    and `entry,fixture:loader,fixture:controls` for all four program images
+    (`loader_app` and `fidelity` in both `program` and `optimized`).
 12. **Loader suite.** The installed `titan-browser-run --timeout 300000
-    --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
-    workspace with relative image paths, runs under Node and then Chromium,
-    with output copied to `$RUNNER_TEMP/browser-loader.log`. The first two
-    image arguments are the two assertion modes' `loader_app`, which the
-    suite also pairs crosswise to check that a module refuses another link's
-    `.wasm`.
+    --grace 2000 --root "$GITHUB_WORKSPACE" --imports
+    spec/fixtures/browser_runtime/fixture-imports.mjs --js-test
+    spec/browser/loader.test.mjs`, given relative paths to `program/loader_app`,
+    `optimized/loader_app` (paired crosswise to verify that a module refuses
+    another link's `.wasm`), `--fidelity program/fidelity`, and `--names
+    program/loader_names`, runs under Node and then Chromium, with output copied
+    to `$RUNNER_TEMP/browser-loader.log`.
 13. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
-    runs against the minified image under both engines with the same timeout
-    and grace and output copied to `$RUNNER_TEMP/browser-guard.log`.
+    runs against `out/browser/loader/optimized/fidelity.mjs` under both engines
+    with the same `--root`, `--imports`, timeout, and grace, with output copied
+    to `$RUNNER_TEMP/browser-guard.log`.
 14. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
     `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
     `TITAN_BROWSER_RUNNER` (the installed launcher), and
-    `TITAN_BROWSER_LOADER_IMAGE` (the assertions-2 `fidelity` image), with
-    output copied to `$RUNNER_TEMP/browser-runner.log`.
-15. **Trace adapter and supervisor units.** For `assertions` in `2` and `0`,
-    `emcc` compiles `spec/fixtures/browser_trace_adapter/lifecycle.c` and
+    `TITAN_BROWSER_LOADER_IMAGE` (the `fidelity` image), with output copied to
+    `$RUNNER_TEMP/browser-runner.log`.
+15. **Trace adapter and supervisor units.** After unsetting the seven D11
+    compiler-environment variables (`CCC_OVERRIDE_OPTIONS`, `CPATH`,
+    `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`,
+    `LIBRARY_PATH`, `COMPILER_PATH`), `$WASI_SDK_PATH/bin/clang
+    --target=wasm32-wasip1 -mexec-model=reactor` compiles
+    `spec/fixtures/browser_trace_adapter/lifecycle.c` and
     `spec/fixtures/browser_trace_adapter/filter.c` (with `titan-runtime/titan.c`
     and `$PREFIX/lib/browser/liblua.a`) into `out/browser/trace-adapter/`. The
     `filter.c` image takes its Lua macros from the installed record's
     `lua_defines` (an empty value fails the step), never from a local list,
     because the fork changes them (`LUAI_MAXCCALLS`). `node --test
     spec/browser/trace-adapter.test.mjs spec/browser/playwright-runner.test.mjs`
-    then runs with both `TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE` and
-    `TITAN_BROWSER_TRACE_FILTER_IMAGE` set (so no adapter prerequisite skips
-    occur), with output copied to `$RUNNER_TEMP/browser-trace-units.log`.
+    then runs (importing `createTrace` and `createWasiImports` directly from
+    `titan-wasm-factory.mjs`) with both `TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE`
+    and `TITAN_BROWSER_TRACE_FILTER_IMAGE` set (so no adapter prerequisite
+    skips occur), with output copied to `$RUNNER_TEMP/browser-trace-units.log`.
 16. **Node trace gate.** `lua -E spec/browser/build-trace.lua
-    "$GITHUB_WORKSPACE/out/browser/trace-node"` stages the trace gate for both
-    assertion modes (`$RUNNER_TEMP/browser-trace-build.log`); the installed
+    "$GITHUB_WORKSPACE/out/browser/trace-node"` stages the trace gate
+    (`$RUNNER_TEMP/browser-trace-build.log`); the installed
     `titan-browser-run --engine node --timeout 300000 --grace 2000 --root
     "$output" --js-test "$output/trace.test.mjs"` runs the positive gate
     (`$RUNNER_TEMP/browser-trace-node.log`); a policy check runs every
@@ -364,9 +375,10 @@ The browser target's spec files (`spec/browser_isolation_spec.lua`,
 `spec/wasm_toolchain_spec.lua`, and the `spec/coder/browser_*_spec.lua`
 files) are also ordinary rows of `spec/support/ci_compiler_test_groups.txt`
 and run in the covered compiler shards against the SDK-only prefix. There,
-without Emscripten, Node, Chrome, or a browser SDK, every real-toolchain case
-is pending and the synthesized cases run (all of `spec/browser_stdlib_spec.lua`
-is emsdk-free); compiler shards never become browser SDK consumers.
+without `wasi-sdk`, Binaryen, Node, Chrome, or a browser SDK, every
+real-toolchain case is pending and the synthesized cases run (all of
+`spec/browser_stdlib_spec.lua` is toolchain-free); compiler shards never become
+browser SDK consumers.
 
 ## `browser-stdlib` job
 
@@ -380,10 +392,10 @@ CI-only memory-limit wrapper or extra renderer-memory feature is applied.
 After step 7, `browser-stdlib` runs:
 
 On the `scheduler` shard, the browser semantic release pack suite runs with
-emsdk absent from the environment. It stages a private copy of the SDK, pairs
-it with a source rock from the exact pinned source tree, and exercises pack
-reproducibility, relocation, and rejection of invalid pairs. Run the same gate
-locally from the matching checkout:
+`wasi-sdk` and Binaryen absent from the environment. It stages a private copy
+of the SDK, pairs it with a source rock from the exact pinned source tree, and
+exercises pack reproducibility, relocation, and rejection of invalid pairs. Run
+the same gate locally from the matching checkout:
 
 ```sh
 TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover \
@@ -392,11 +404,11 @@ TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover \
 Ordinary compiler shards also invoke the Python pack suite through Busted.
 The SDK-free transport cases always run; the full cases need both an
 installed browser SDK and a Git checkout containing the pinned objects.
-
-8. **Complete browser core stdlib suite (`sdk` only).** With emsdk sourced and
-   `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
-   once, unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
-   builds all twenty-three browser-portable owners into one validation-profile
+8. **Complete browser core stdlib suite (`sdk` only).** With `WASI_SDK_PATH`
+   and `BINARYEN_ROOT` set and `set -euo pipefail`,
+   `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs once, unfiltered, its
+   output copied to `$RUNNER_TEMP/browser-stdlib.log`. It builds all
+   twenty-three browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
    checks dependency closure and the image's `entry` imports against the
    [import manifest](browser-target.md#import-manifest), applies the [subset parity
@@ -423,10 +435,9 @@ installed browser SDK and a Git checkout containing the pinned objects.
    The CI-contract spec requires these lists to cover the full gate exactly
    once, without overlap, and the core suite to run only in `sdk`. A missing
    gate file fails with the same message before Busted starts. The
-   entry-gate, bridge and scheduler specs build their own assertion-on and
-   assertion-off images, and the entry, bridge, scheduler, stdlib gate,
-   network, fixture, and minicoro specs run both engines. The network spec
-   runs the [live browser network harness](browser-target.md#the-live-browser-network-harness),
+   entry-gate, bridge, scheduler, stdlib gate, network, fixture, and minicoro
+   specs build their images and run both engines. The network spec runs the
+   [live browser network harness](browser-target.md#the-live-browser-network-harness),
    with verified TLS on both engines. The bridge uses its dedicated
    native Titan test owner with explicit JavaScript bindings, rather than
    adding it to the ordinary core aggregate; the scheduler spec drives the
@@ -440,8 +451,8 @@ installed browser SDK and a Git checkout containing the pinned objects.
     report commands and uploads its own `luacov.codecov.out` with
     `name: browser-stdlib-${{ matrix.shard }}` and `flags: compiler`.
     Codecov merges both with the other compiler uploads, so the real provider,
-    image, SDK, and executing-protocol paths that are pending in the emsdk-free
-    shards are measured.
+    image, SDK, and executing-protocol paths that are pending in the
+    toolchain-free shards are measured.
 11. **Failure logs.** On failure, `actions/upload-artifact` uploads each
     shard's evidence as `browser-stdlib-${{ matrix.shard }}-failure` for seven
     days: the `browser-*.log` files and, when present, the browser core stdlib
@@ -472,12 +483,13 @@ cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
    `luarocks test --prepare`, and `make libbacktrace` with `CC=gcc-14` and
    `TITAN_BUILD_PROFILE=production`).
 2. **Native and browser SDK installation.** Each cell runs `"$PREFIX/bin/luarocks"
-   make` with `EMSDK` unset and no `emcc` on `PATH`, restores the cached
-   `.emsdk` (`ubuntu-24.04-<arch>-emsdk-6.0.13-v1`), activates Emscripten 6.0.13,
-   and separately installs and qualifies Node 26.13.0 as `TITAN_NODE`. It runs
-   `make lua-browser PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`,
-   asserting the installed `titan-browser-trace.js` and `titan-browser-bridge.js`
-   and that `build-profile` holds the cell's profile.
+   make` with `WASI_SDK_PATH`, `BINARYEN_ROOT`, and `WASM_OPT` unset and no
+   browser toolchain on `PATH`, restores the cached `wasi-sdk` 34.0 and
+   Binaryen `version_133` archives, and installs and qualifies Node 26.13.0 as
+   `TITAN_NODE`. It runs `make lua-browser PREFIX="$PREFIX"` and
+   `make browser-sdk PREFIX="$PREFIX"`, asserting the installed
+   `titan-wasm-factory.mjs` and `titan-browser.mjs` and that `build-profile`
+   holds the cell's profile.
 3. **Playwright engine provisioning and supervisor check.** `actions/cache@v4`
    restores `PLAYWRIGHT_BROWSERS_PATH` (`.playwright-browsers`) under
    `ubuntu-24.04-<arch>-playwright-1.64.1-<cell>-v1`; `npm install --prefix
@@ -488,13 +500,13 @@ cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
    `TITAN_PLAYWRIGHT_TEST_ENGINES` passes the same engine list as CSV to
    `"$TITAN_NODE" --test spec/browser/playwright-runner.test.mjs` to verify
    the supervisor on each engine (`$RUNNER_TEMP/browser-playwright-supervisor.log`).
-4. **Staged trace gate (`assertions-2` and `assertions-0`).** `lua -E
+4. **Staged trace gate.** `lua -E
    spec/browser/build-trace.lua "$TITAN_TRACE_OUTPUT"`
    (`out/browser/trace-<profile>-<cell>`, logged to
    `$RUNNER_TEMP/browser-playwright-build.log`) builds the test image and the
-   uncaught and async-bootstrap program images for both assertion modes with
-   the cell's installed `titanc` and stages the degraded-map variants,
-   `trace.test.mjs`, and `manifest.json`. Like `build-bridge.lua`,
+   uncaught and async-bootstrap program images with the cell's installed
+   `titanc` and stages the degraded-map variants, `trace.test.mjs`, and
+   `manifest.json`. Like `build-bridge.lua`,
    `build-net.lua` and `build-delivery.lua` (steps 7 to 9), it checks each
    image it builds against the [import manifest](browser-target.md#import-manifest)
    classes of the fixtures that image links.
@@ -525,12 +537,12 @@ cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
 7. **Persistent bridge gate (all engines).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
    `browser.tests` image with its independent-state C helper, the failed
-   initializer image, the `browser.public_state_tests` image of public
-   `lua.new` lifetimes (same C helper), the html5 click counter of
-   synchronous C callbacks with its C helper, and the async driver's
-   responsiveness program (`responsive.titan`), each with assertions 2 and 0.
-   It stages those images and the portable JavaScript fixtures in
-   `out/browser/bridge-<profile>-<cell>`. `integration.mjs` receives the
+   initializer image, the `browser.public_state_tests` image of public `lua.new`
+   lifetimes (same C helper), the DOM click counter of synchronous C callbacks
+   (`create({ imports })` with `context.table`), and the async driver's
+   responsiveness program (`responsive.titan`). It stages those images and the
+   portable JavaScript fixtures in `out/browser/bridge-<profile>-<cell>`.
+   `integration.mjs` receives the
    first three images, and the negative scripts only the legacy bridge image.
    Each managed engine runs the full lifecycle, typed values, callbacks,
    notification, request, stdio, state-close and collection suite;
@@ -606,13 +618,12 @@ cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` and `TITAN_PROBE_CACHE_DISABLE=1`,
    `"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua
    --filter="keeps frame flags on test owners" --filter="checks the linked
-   module"` runs the pin that observes the production object and link profile
-   from a real production installation, and the [module
-   check](browser-target.md#the-module-check) case on a real production image
+   image"` runs the pin that observes the production object and link profile
+   from a real production installation and verifies a real production image
    (`$RUNNER_TEMP/browser-production-pins.log`). A validation installation
-   cannot stand in for the pin, so it is pending in every validation run,
-   including the `browser-stdlib` job; the module check case runs there too,
-   on a validation image.
+   cannot stand in for the frame-flags pin, so it is pending in every
+   validation run, including the `browser-stdlib` job; the linked-image case
+   runs there too, on a validation image.
 12. **Production trace gate on Node (same cell).** Node is the binding engine
    for the [browser C-call limit](browser-target.md#the-browser-c-call-limit),
    and the `browser-toolchain` job's Node gate runs a validation installation
@@ -628,15 +639,15 @@ cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
    rows (`$RUNNER_TEMP/browser-playwright-node-degraded.log`).
 13. **Engine records (`production` × `firefox` and `webkit`).** Recursion
     depth is engine-specific, so these cells add their engine to the Node and
-    Chromium records of [`browser-packaging`](#browser-packaging-job). With
-    emsdk sourced, `lua -E spec/browser/build-records.lua` builds the records
-    programs with the cell's installation
-    (`$RUNNER_TEMP/browser-playwright-records-build.log`), and `collect.mjs
+   Chromium records of [`browser-packaging`](#browser-packaging-job). With
+   `WASI_SDK_PATH` and `BINARYEN_ROOT` set, `lua -E spec/browser/build-records.lua`
+   builds the records programs with the cell's installation
+   (`$RUNNER_TEMP/browser-playwright-records-build.log`), and `collect.mjs
     --engines "$TITAN_TRACE_ENGINE" --measure memory,recursion` writes
     `out/browser-records/records-<engine>.json`
     (`$RUNNER_TEMP/browser-playwright-records.log`; [records](browser-target.md#records)).
 14. **Complete browser core stdlib suite (`validation` only, last).** With
-    emsdk sourced, `make titan-stdlib-browser-test PREFIX="$PREFIX"
+    `WASI_SDK_PATH` and `BINARYEN_ROOT` set, `make titan-stdlib-browser-test PREFIX="$PREFIX"
     TITAN_BROWSER_TEST_ENGINES="$TITAN_TRACE_ENGINES"
     TITAN_BROWSER_TEST_RUNNER="\"$TITAN_NODE\" spec/browser/playwright-run.mjs
     --image --sdk \"$PREFIX/lib/titan-browser/0.6\""` builds the same single
@@ -657,7 +668,7 @@ cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
 ## `browser-packaging` job
 
 `browser-packaging` (`browser packaging, clean checkout and records
-(ubuntu-24.04, emsdk 6.0.13, Node 26, Playwright 1.64.1 Chromium)`) installs
+(ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26, Playwright 1.64.1 Chromium)`) installs
 Titan as a new user does, from the manuals alone, and records the release
 profile. It has no `needs` and takes nothing from another job: no prepared
 tree and no C-probe or native-dependency cache. The workflow's own
@@ -670,12 +681,12 @@ runner with `MAKEFLAGS=-j4` and `TITAN_JOBS=4`.
    list (`build-essential cmake curl git libreadline-dev libssl-dev
    pkg-config`) and `lua5.4`, which runs `doc_check` before the clone has
    built its own Lua.
-2. **Tools.** The emsdk 6.0.13 cache and activation, Node 26.13.0
-   (`TITAN_NODE`), Playwright 1.64.1 Chromium under the Playwright cells'
-   `chromium` cache key, and `vite@8.3.6` in `TITAN_VITE_ROOT`, provisioned
-   as in `browser-playwright`.
-3. **Clean checkout.** With emsdk sourced and Node 26 ahead of emsdk's own
-   Node on `PATH`, `lua5.4 scripts/doc_check.lua --clean-checkout --workspace
+2. **Tools.** The `wasi-sdk` 34.0 and Binaryen `version_133` caches, Node
+   26.13.0 (`TITAN_NODE`), Playwright 1.64.1 Chromium under the Playwright
+   cells' `chromium` cache key, and `vite@8.3.6` in `TITAN_VITE_ROOT`,
+   provisioned as in `browser-playwright`.
+3. **Clean checkout.** With `WASI_SDK_PATH` and `BINARYEN_ROOT` set and Node
+   26 on `PATH`, `lua5.4 scripts/doc_check.lua --clean-checkout --workspace
    "$RUNNER_TEMP/clean-checkout" --checkout "$GITHUB_WORKSPACE" --vite-root
    "$TITAN_VITE_ROOT" doc/language/installation.md
    doc/language/browser-target.md` runs both chapters' marked blocks in one
@@ -696,8 +707,9 @@ runner with `MAKEFLAGS=-j4` and `TITAN_JOBS=4`.
    (`browser-packaging-hosted.log`), and the installation's
    `titan-browser-run --engine node --js-test` runs `dod.test.mjs`
    (`browser-packaging-node.log`).
-5. **Records.** With emsdk sourced, `spec/browser/build-records.lua` builds
-   the records programs with the installed compiler and checks their imports
+5. **Records.** With `WASI_SDK_PATH` and `BINARYEN_ROOT` set,
+   `spec/browser/build-records.lua` builds the records programs with the
+   installed compiler and checks their imports
    (`browser-packaging-records-build.log`), and `collect.mjs --engines
    node,chromium` writes `out/browser-records/packaging.json` and
    `packaging.md` ([records](browser-target.md#records);

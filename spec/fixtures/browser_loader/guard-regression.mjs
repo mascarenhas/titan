@@ -8,6 +8,7 @@ export async function run(context) {
     const stderr = [];
     const instance = image.create({
       locateFile: image.locateFile,
+      imports: context.imports,
       bindings: {__titanTest(value) { controls = value; }},
       stdout: bytes => { stdout.push(bytes); },
       stderr: bytes => { stderr.push(bytes); },

@@ -190,15 +190,10 @@ end
 
 -- Inspect the image's imports, exports and internal function names, not just
 -- its public exports: dead-stripping must not conceal a linked host dependency.
+-- Which host imports an image may have is scripts/browser_imports.lua's rule.
 function M.check_image(bytes, origin)
     local image, err = staticmetadata.browser_trace_image(bytes, origin)
     if not image then return nil, err end
-    for _, import in ipairs(image.imports) do
-        if import.kind == 0 and (import.name:match("^__syscall_") or
-            import.name:match("^fd_") or import.name == "_emscripten_system") then
-            return nil, origin .. ": forbidden browser filesystem import " .. import.name
-        end
-    end
     for _, inventory in ipairs({ image.imports, image.exports }) do
         for _, symbol in ipairs(inventory) do
             local ok
