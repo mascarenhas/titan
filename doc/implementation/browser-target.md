@@ -2467,9 +2467,10 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    body rejection, and rejects forbidden imports such as `dlopen`, `dlsym`,
    `dlerror`, or `backtrace`);
 7. run `browsertrace.rewrite` on the stripped Wasm and in-memory `map_json` to
-   write `<staged>.wasm`, the extended `<staged>.wasm.map` (with
-   `x_titan_image`, `x_titan_function_imports`, `x_titan_function_ranges`, and
-   `x_titan_function_names`), and the binary [trace table](#the-trace-table)
+   produce the extended source-map bytes (with `x_titan_image`,
+   `x_titan_function_imports`, `x_titan_function_ranges`, and
+   `x_titan_function_names`) and the binary [trace table](#the-trace-table)
+   bytes, then write `<staged>.wasm`, `<staged>.wasm.map`, and
    `<staged>.wasm.trace`;
 8. read the installed `titan-wasm-factory.mjs` and `titan-browser.mjs` and call
    `browserlink.embed(factory, loader, wasm_name, identity)` to emit
@@ -2825,8 +2826,9 @@ LEB128 reader primitives in `staticmetadata.lua`, accepting valid bounded
 padded LEB128 encodings and rejecting duplicate or out-of-order sections,
 duplicate `name` sections/subsections, overrunning lengths, invalid UTF-8, or
 mismatched function/code counts), validates `map_json`, splices Titan's four
-`x_titan_*` extension keys into `<stem>.wasm.map`, and writes the binary
-[trace table](#the-trace-table) `<stem>.wasm.trace`:
+`x_titan_*` extension keys into the source map, and returns the extended map
+bytes and binary [trace table](#the-trace-table) bytes for the driver to write
+to `<stem>.wasm.map` and `<stem>.wasm.trace`:
 
 ```json
 {
