@@ -14826,3 +14826,78 @@ describe("browser link option ownership", function()
             { purpose = "program" }, "production", "link"))
     end)
 end)
+
+describe("browser protocol probe host imports", function()
+    local function wasm_name(value) return string.char(#value) .. value end
+    local function wasm_section(id, payload)
+        local size, digits = #payload, {}
+        repeat
+            local digit = size & 127; size = size >> 7
+            digits[#digits + 1] = string.char(digit | (size > 0 and 128 or 0))
+        until size == 0
+        return string.char(id) .. table.concat(digits) .. payload
+    end
+    local function probe_image(imports)
+        local types = wasm_section(1, "\3" .. "\96\1\127\0" .. "\96\0\1\126" .. "\96\0\2\127\124")
+        local entries = {}
+        for _, import in ipairs(imports) do
+            entries[#entries + 1] = wasm_name(import[1]) .. wasm_name(import[2]) .. import[3]
+        end
+        return "\0asm\1\0\0\0" .. types .. wasm_section(2, string.char(#entries) .. table.concat(entries))
+    end
+
+    local function run_probe(imports)
+        local subject = assert(loadfile("titan-compiler/driver.lua"))()
+        local browserlink = require "titan-compiler.browserlink"
+        subject.require_browser_sdk = function() return { runner = "/sdk/bin/titan-browser-run" } end
+        subject.browser_node_ready = function() return true end
+        subject.link_extra_flags = function() return {} end
+        subject.compile_browser_image = function(_, _, image)
+            assert(util.set_file_contents(image:gsub("%.mjs$", ".wasm"), probe_image(imports), "wb"))
+            return true
+        end
+        local seen = {}
+        local context = { target = "browser", target_descriptor = browser_fixtures.descriptor(),
+            io = compiler_io.new_sync() }
+        function context.io:run(argv)
+            seen.argv = argv
+            local imports_at
+            for index, argument in ipairs(argv) do
+                if argument == "--imports" then imports_at = index + 1 end
+            end
+            seen.stand_ins = imports_at and argv[imports_at]
+            seen.module = seen.stand_ins and assert(util.get_file_contents(seen.stand_ins, "rb"))
+            return { started = true, ok = true, output = "" }
+        end
+        assert.is_true(subject.run_standalone_archive_probe({ ["pkg.mod"] = { abi = "a", types = "t", layouts = "l" } },
+            { "pkg.mod" }, {}, {}, nil, false, nil, { context = context }))
+        return seen, browserlink.runner_argv("/sdk/bin/titan-browser-run", "--engine", "node")
+    end
+
+    it("gives the program's own host function imports zero-valued stand-ins and leaves the runtime's alone", function()
+        local seen, prefix = run_probe({
+            { "env", "host_note", "\0\0" }, { "env", "host_clock", "\0\1" },
+            { "env", "titan_browser_relinquish", "\0\0" }, { "env", "titan_mco_transfer", "\0\0" },
+            { "wasi_snapshot_preview1", "fd_write", "\0\0" }, { "other", "pair", "\0\2" },
+            { "env", "host_memory", "\2\0\1" },
+        })
+        local image = seen.argv[#seen.argv]
+        local expected = { table.unpack(prefix) }
+        for _, argument in ipairs({ "--root", paths.dirname(image), "--imports", image:gsub("%.mjs$", ".imports.mjs"), image }) do
+            expected[#expected + 1] = argument
+        end
+        assert.same(expected, seen.argv)
+        assert.equal('export default {\n  "env": {"host_note": () => undefined, "host_clock": () => 0n},\n' ..
+            '  "other": {"pair": () => [0, 0]}\n};\n', seen.module)
+        assert.is_nil(lfs.attributes(seen.stand_ins))
+    end)
+
+    it("runs an image that imports only what the runtime owns without an imports module", function()
+        local seen, prefix = run_probe({ { "env", "titan_browser_complete", "\0\0" },
+            { "wasi_snapshot_preview1", "proc_exit", "\0\0" } })
+        local expected = { table.unpack(prefix) }
+        expected[#expected + 1] = seen.argv[#seen.argv]
+        assert.same(expected, seen.argv)
+        assert.is_nil(seen.module)
+    end)
+end)

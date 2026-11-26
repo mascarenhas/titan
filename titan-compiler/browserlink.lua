@@ -109,8 +109,8 @@ local OPTIMIZER_FEATURES = { "--enable-exception-handling", "--enable-multivalue
 
 -- The image's link (`link_flags`, to clang as the reactor driver) and post-link
 -- (`optimizer_flags`, to wasm-opt) of one purpose. Every image exports its
--- memory, function table, allocator and stack bounds to the factory; the
--- entry points carry their own export names.
+-- memory, function table and stack bounds to the factory; the entrypoint
+-- carries the entry points' and the allocator's own export names.
 function M.profile(descriptor, options)
     if type(options) ~= "table" then return nil, "browser link profile options are required" end
     for key in pairs(options) do
@@ -160,8 +160,7 @@ function M.profile(descriptor, options)
     local flags = { "-mexec-model=reactor", "-Wl,--stack-first",
         "-Wl,-z,stack-size=" .. budgets.stack_size, "-Wl,--initial-heap=" .. budgets.initial_heap,
         "-Wl,--max-memory=" .. budgets.maximum_memory, "-Wl,--gc-sections", "-Wl,--export-table",
-        "-Wl,--export=malloc", "-Wl,--export=free", "-Wl,--export=__stack_pointer",
-        "-Wl,--export=__stack_low", "-Wl,--export=__stack_high" }
+        "-Wl,--export=__stack_pointer", "-Wl,--export=__stack_low", "-Wl,--export=__stack_high" }
     if purpose == "gate" then
         flags[#flags + 1] = "-Wl,--export=titan_browser_gate_guarded"
         flags[#flags + 1] = "-Wl,--export=titan_browser_gate_observe"
@@ -268,6 +267,12 @@ function M.check_image_size(size)
     return true
 end
 
+local function js_string(value)
+    return '"' .. value:gsub('[%z\1-\31\\"]', function(char)
+        return string.format("\\u%04x", char:byte())
+    end) .. '"'
+end
+
 -- One image module: the SDK's static factory, the loader, then the image's
 -- `create`. The factory's named seams become plain declarations, so an image
 -- exports only `create`, and its trailing default export is the instantiate
@@ -293,12 +298,7 @@ function M.embed(factory, loader, wasm_name, identity)
             loader:match("\n%s*import%s") or loader:match("^%s*import%s") then
         return nil, "browser loader has an unsupported module surface"
     end
-    local function quote(name)
-        return '"' .. name:gsub('[%z\1-\31\\"]', function(char)
-            return string.format("\\u%04x", char:byte())
-        end) .. '"'
-    end
-    local wasm, trace = quote(wasm_name), quote(wasm_name .. ".trace")
+    local wasm, trace = js_string(wasm_name), js_string(wasm_name .. ".trace")
     return factory:sub(2) .. "\nconst titanCreate = (() => {\n" .. loader ..
         "\nreturn create;\n})();\n" ..
         "export default function create(options = {}) {\n" ..
@@ -306,6 +306,41 @@ function M.embed(factory, loader, wasm_name, identity)
         "    new URL(" .. trace .. ", import.meta.url).href : new URL(" .. wasm .. ", import.meta.url).href);\n" ..
         "  return titanCreate(" .. instantiate .. ", {...options, locateFile}, {identity: \"" .. identity ..
         "\", wasm: " .. wasm .. ", directory: new URL('.', import.meta.url).href});\n}\n"
+end
+
+-- The protocol probe image links the program's own C, so it may import host
+-- functions that only the program's `create({ imports })` supplies. The
+-- probe runs no provider code, only its metadata functions, so a stand-in
+-- that returns zero values lets the image instantiate even when a C
+-- constructor calls one. Imports the runtime owns are left to it, and any
+-- other kind of import still fails instantiation. `imports` are
+-- `image_inventory`'s. Returns nil when there is nothing to add.
+local ZERO = { i64 = "0n", funcref = "null", externref = "null", exnref = "null" }
+function M.protocol_imports(imports)
+    local modules, order = {}, {}
+    for _, import in ipairs(imports) do
+        local module, name = import.module, import.name
+        if import.kind == 0 and module ~= "wasi_snapshot_preview1" and not (module == "env" and
+                (name:sub(1, 14) == "titan_browser_" or name:sub(1, 10) == "titan_mco_")) then
+            if not modules[module] then
+                modules[module] = {}
+                order[#order + 1] = module
+            end
+            local values = {}
+            for value in import.signature:match("%->%((.*)%)$"):gmatch("[^,]+") do
+                values[#values + 1] = ZERO[value] or "0"
+            end
+            local result = #values == 0 and "undefined" or #values == 1 and values[1] or
+                "[" .. table.concat(values, ", ") .. "]"
+            table.insert(modules[module], js_string(name) .. ": () => " .. result)
+        end
+    end
+    if #order == 0 then return nil end
+    local entries = {}
+    for index, module in ipairs(order) do
+        entries[index] = "  " .. js_string(module) .. ": {" .. table.concat(modules[module], ", ") .. "}"
+    end
+    return "export default {\n" .. table.concat(entries, ",\n") .. "\n};\n"
 end
 
 -- Inventory shares the bounded final-image walk with the map rewriter.

@@ -15483,11 +15483,11 @@ function driver.run_standalone_archive_probe(
         base, err = create_compile_log()
         if not base then return nil, err end
         os.remove(base)
-        local source, image = base .. ".c", base .. ".mjs"
+        local source, image, stand_ins = base .. ".c", base .. ".mjs", base .. ".imports.mjs"
         local cleanup <close> = setmetatable({}, { __close = function()
             os.remove(source); os.remove(base .. ".o")
             os.remove(image); os.remove(base .. ".wasm"); os.remove(base .. ".wasm.map")
-            os.remove(base .. ".wasm.trace")
+            os.remove(base .. ".wasm.trace"); os.remove(stand_ins)
         end })
         local linked, term, code = driver.compile_browser_image(
             standalone_archive_probe_source(entries, module_names, true),
@@ -15498,8 +15498,20 @@ function driver.run_standalone_archive_probe(
             return nil, "selected static provider failed executable-context protocol linking (" ..
                 tostring(term) .. (code and (", exit " .. tostring(code)) or "") .. ")"
         end
-        local result = context.io:run(driver.browserlink.runner_argv(assets.runner, "--engine", "node", image),
-            { stderr_to_stdout = true })
+        local bytes, inventory
+        bytes, err = context.io:read_file(base .. ".wasm")
+        if not bytes then return nil, err end
+        inventory, err = driver.browserlink.image_inventory(bytes)
+        if not inventory then return nil, err end
+        local argv = driver.browserlink.runner_argv(assets.runner, "--engine", "node")
+        local module = driver.browserlink.protocol_imports(inventory.imports)
+        if module then
+            valid, err = context.io:write_file(stand_ins, module)
+            if not valid then return nil, err end
+            append_argv(argv, { "--root", path.dirname(image), "--imports", stand_ins })
+        end
+        argv[#argv + 1] = image
+        local result = context.io:run(argv, { stderr_to_stdout = true })
         if type(result) ~= "table" or not result.ok then
             local detail = type(result) == "table" and (result.output or result.diagnostic)
             return nil, "selected static provider failed executable-context protocol validation " ..

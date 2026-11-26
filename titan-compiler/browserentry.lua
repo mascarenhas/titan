@@ -332,6 +332,20 @@ int titan_browser_close(uint64_t operation_id) {
     titan_browser_complete(&completion);
     return 0;
 }
+
+/* The factory allocates in linear memory through these exports. They call
+   the program's own malloc and free, so a program linked with
+   -Wl,--wrap=malloc,--wrap=free sees the host's blocks through its wrappers
+   too (wasm-ld would export a wrapped symbol under its wrapper's name). */
+TITAN_WASM_EXPORT("malloc")
+void *titan_browser_export_malloc(size_t size) {
+    return malloc(size);
+}
+
+TITAN_WASM_EXPORT("free")
+void titan_browser_export_free(void *block) {
+    free(block);
+}
 ]]
 
 function M.contents(worker, options)

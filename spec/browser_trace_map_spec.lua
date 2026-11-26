@@ -441,6 +441,40 @@ describe("browser trace table", function()
             assert.same({ "inside.titan", expected }, { locate(result, code + pc) }, "pc " .. pc)
         end
     end)
+
+    it("keeps a body's own DWARF sequence over a --wrap copy and drops what it cannot attribute", function()
+        -- Four bodies of four bytes at .debug_line addresses [2,6), [7,11),
+        -- [12,16) and [17,21).
+        local L = fixtures.line
+        local backwards = L.set_address(19) .. L.advance_line(49) .. L.copy ..
+            L.set_address(17) .. L.advance_line(1) .. L.copy .. L.advance_pc(4) .. L.end_sequence
+        local own_first = L.set_address(2) .. L.advance_line(1) .. L.copy ..
+            L.advance_pc(2) .. L.advance_line(1) .. L.copy .. L.advance_pc(2) .. L.end_sequence
+        -- wasm-ld points the wrapped definition's sequence at the wrapper.
+        local wrapped = L.set_address(7) .. L.set_file(2) .. L.advance_line(19) .. L.copy ..
+            L.advance_pc(2) .. L.end_sequence
+        local wrapper = L.set_address(7) .. L.advance_line(9) .. L.copy ..
+            L.advance_pc(2) .. L.advance_line(1) .. L.copy .. L.advance_pc(2) .. L.end_sequence
+        local twin_a = L.set_address(12) .. L.advance_line(29) .. L.copy .. L.advance_pc(4) .. L.end_sequence
+        local twin_b = L.set_address(12) .. L.advance_line(39) .. L.copy .. L.advance_pc(4) .. L.end_sequence
+        local body = "\4\0\1\1\11"
+        local wasm = HEADER .. section(3, "\4\0\0\0\0") .. section(10, "\4" .. string.rep(body, 4)) ..
+            fixtures.custom_section(".debug_line", fixtures.line_unit({},
+                { { "own.titan", 0 }, { "wrapped.titan", 0 } },
+                backwards .. twin_b .. wrapped .. own_first .. wrapper .. twin_a))
+        local stripped, map = assert(trace.dwarf_map(wasm, "wrap.wasm.map", "wrap.wasm"))
+        assert.falsy(map:find("wrapped.titan", 1, true), map)
+        local _, table_bytes = assert(trace.rewrite(stripped, map, ID, "wrap.wasm.map"))
+        local result = decode(table_bytes)
+        local code = #HEADER + 9
+        for pc, expected in pairs({ [2] = 2, [3] = 2, [4] = 3, [5] = 3, [7] = 10, [8] = 10, [9] = 11, [10] = 11 }) do
+            assert.same({ "own.titan", expected }, { locate(result, code + pc) }, "pc " .. pc)
+        end
+        -- Two owners of one body, and a sequence that goes backwards: unmapped.
+        for _, pc in ipairs({ 12, 15, 17, 20 }) do
+            assert.same({ "?", 0 }, { locate(result, code + pc) }, "pc " .. pc)
+        end
+    end)
 end)
 
 describe("browser image byte limits", function()
@@ -676,6 +710,7 @@ describe("browser DWARF line map", function()
             { HEADER .. section(0, "\5ab"), "truncated Wasm custom section name" },
             { image(custom(".debug_line", "") .. custom(".debug_line", "")), "duplicate .debug_line section" },
             { HEADER .. custom(".debug_line", ""), "Wasm image has no code section" },
+            { HEADER .. section(10, "\1\9\0") .. custom(".debug_line", ""), "truncated Wasm function body" },
             { image(), "Wasm image has no .debug_line section" },
             { with_lines("\1\0"), "truncated .debug_line value" },
             { with_lines("\255\255\255\255"), "64-bit DWARF .debug_line is unsupported" },

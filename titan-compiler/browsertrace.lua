@@ -387,7 +387,8 @@ end
 
 -- The live sequences of `bytes[pos, limit]`, each a flat array of
 -- (address, path, line, column) rows, ending in its end address; an unmapped
--- row's path is false. `live` bounds the body addresses.
+-- row's path is false. `live` bounds the body addresses. A sequence whose
+-- addresses go backwards is not a DWARF sequence and describes nothing.
 local function line_sequences(bytes, pos, limit, live)
     local sequences = {}
     while pos <= limit do
@@ -433,10 +434,11 @@ local function line_sequences(bytes, pos, limit, live)
             pos = entry(name, pos, program - 1)
         end
         pos = program
-        local address, file, line, column, rows = 0, 1, 1, 0, {}
+        local address, file, line, column, rows, backwards = 0, 1, 1, 0, {}, false
         local function row()
             local path = line > 0 and files[file]
             require_value(path or line <= 0, "a .debug_line row names an undefined file")
+            backwards = backwards or #rows > 0 and address < rows[#rows - 3]
             rows[#rows + 1], rows[#rows + 2], rows[#rows + 3], rows[#rows + 4] = address, path, line, column
         end
         while pos <= stop do
@@ -457,9 +459,9 @@ local function line_sequences(bytes, pos, limit, live)
                     if #rows > 0 and rows[1] >= live[1] and address <= live[2] then
                         line = 0
                         row()
-                        sequences[#sequences + 1] = rows
+                        if not backwards then sequences[#sequences + 1] = rows end
                     end
-                    address, file, line, column, rows = 0, 1, 1, 0, {}
+                    address, file, line, column, rows, backwards = 0, 1, 1, 0, {}, false
                 elseif sub == 2 then
                     require_value(size <= 9, "invalid .debug_line address size")
                     address = fixed(bytes, pos + 1, size - 1, finish)
@@ -520,6 +522,56 @@ local function uleb(value)
     return table.concat(digits)
 end
 
+-- Sequences in address order, without any two that overlap. wasm-ld's
+-- `--wrap` resolves the wrapped definition's own line-table relocation to
+-- the wrapper, so that sequence lands inside the wrapper's body on top of
+-- the wrapper's own one. A body's own sequence ends exactly at the body's
+-- end; where sequences overlap, only such an owner survives, and only when
+-- it is the one owner of its body. The rest of an overlap cannot be
+-- attributed and stays unmapped. A sequence that overlaps nothing is kept
+-- even when it ends inside its body (optimized images have those).
+local function disjoint(sequences, bodies)
+    local function finish(rows) return rows[#rows - 3] end
+    table.sort(sequences, function(left, right)
+        return left[1] < right[1] or left[1] == right[1] and finish(left) < finish(right)
+    end)
+    local function owned(rows)
+        local first, last = 1, #bodies
+        while first <= last do
+            local middle = (first + last) // 2
+            local body = bodies[middle]
+            if rows[1] < body[1] then last = middle - 1
+            elseif rows[1] >= body[2] then first = middle + 1
+            else return finish(rows) == body[2] and middle or nil end
+        end
+    end
+    local kept, index = {}, 1
+    while index <= #sequences do
+        local stop, reach = index, finish(sequences[index])
+        while sequences[stop + 1] and sequences[stop + 1][1] < reach do
+            stop = stop + 1
+            reach = math.max(reach, finish(sequences[stop]))
+        end
+        if stop == index then
+            kept[#kept + 1] = sequences[index]
+        else
+            local owners, count = {}, {}
+            for at = index, stop do
+                local body = owned(sequences[at])
+                if body then
+                    owners[#owners + 1] = { sequences[at], body }
+                    count[body] = (count[body] or 0) + 1
+                end
+            end
+            for _, owner in ipairs(owners) do
+                if count[owner[2]] == 1 then kept[#kept + 1] = owner[1] end
+            end
+        end
+        index = stop + 1
+    end
+    return kept
+end
+
 -- Returns the image without its `.debug_*` sections, ending in a
 -- `sourceMappingURL` section that names `map_name` (relative to the image),
 -- and the source map of its line table, with offsets in that image.
@@ -527,7 +579,7 @@ function M.dwarf_map(wasm, map_name, origin)
     local ok, image, map = pcall(function()
         require_value(type(wasm) == "string" and wasm:sub(1, 8) == WASM_HEADER, "invalid Wasm header")
         local kept, removed, limit, pos = { WASM_HEADER }, 0, #wasm, 9
-        local code_offset, live, line_start, line_limit
+        local code_offset, live, bodies, line_start, line_limit
         while pos <= limit do
             local id = wasm:byte(pos)
             local size, start = leb(wasm, pos + 1, limit)
@@ -549,9 +601,19 @@ function M.dwarf_map(wasm, map_name, origin)
                 removed = removed + finish - pos + 1
             else
                 if id == 10 then
+                    -- Body bounds in .debug_line addresses: offsets from the
+                    -- code section's payload.
                     code_offset = start - 1 - removed
-                    local body = select(2, leb(wasm, select(2, leb(wasm, start, finish)), finish))
-                    live = { body - start, size }
+                    local count, at = leb(wasm, start, finish)
+                    bodies = {}
+                    for index = 1, count do
+                        local length
+                        length, at = leb(wasm, at, finish)
+                        require_value(at + length - 1 <= finish, "truncated Wasm function body")
+                        bodies[index] = { at - start, at - start + length }
+                        at = at + length
+                    end
+                    live = { bodies[1] and bodies[1][1] or size, size }
                 end
                 kept[#kept + 1] = wasm:sub(pos, finish)
             end
@@ -559,8 +621,7 @@ function M.dwarf_map(wasm, map_name, origin)
         end
         require_value(code_offset, "Wasm image has no code section")
         require_value(line_start, "Wasm image has no .debug_line section")
-        local sequences = line_sequences(wasm, line_start, line_limit, live)
-        table.sort(sequences, function(left, right) return left[1] < right[1] end)
+        local sequences = disjoint(line_sequences(wasm, line_start, line_limit, live), bodies)
         local sources, indexes, segments = {}, {}, {}
         local generated, source, line, column = 0, 0, 0, 0
         for _, rows in ipairs(sequences) do
