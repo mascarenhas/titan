@@ -36,6 +36,13 @@ local function tool_suffix()
     return platform.windows and ".exe" or ""
 end
 
+-- The `--version` query discovery runs through the compiler argv policy.
+local function version_query(tools)
+    local argv = browser.compiler_argv(tools)
+    argv[#argv + 1] = "--version"
+    return argv
+end
+
 local function fresh_driver()
     local saved = package.loaded["titan-compiler.driver"]
     package.loaded["titan-compiler.driver"] = nil
@@ -108,7 +115,13 @@ local function fake_context(options)
         calls[#calls + 1] = { table.unpack(argv) }
         if argv[1] == "uname" then return { started = true, ok = true, output = options.uname or "Linux\n" } end
         if argv[#argv] == "--version" then
-            local tool = key(argv[1]):match("([^/\\]+)$"):gsub("%.exe$", "")
+            -- The physical tool follows an `env NAME=` launch wrapper.
+            local index = 1
+            if argv[1] == "env" then
+                index = 2
+                while argv[index]:find("=", 1, true) do index = index + 1 end
+            end
+            local tool = key(argv[index]):match("([^/\\]+)$"):gsub("%.exe$", "")
             if options.unstartable == tool then
                 return { started = false, ok = false, diagnostic = "not a Windows executable" }
             end
@@ -198,11 +211,22 @@ describe("browser target descriptor", function()
         assert.equal("34.0", browser.WASI_SDK_VERSION)
         assert.equal("133", browser.BINARYEN_VERSION)
         assert.is_nil(browser.EMSCRIPTEN_VERSION)
-        assert.same({ "/sdk/bin/clang", "--target=wasm32-wasip1", "--sysroot=/sdk/share/wasi-sysroot" },
+        -- One launch envelope empties every variable clang reads to edit its
+        -- command line, search paths or linker (D11), around the physical clang.
+        local envelope = { "env", "CCC_OVERRIDE_OPTIONS=", "CPATH=", "C_INCLUDE_PATH=", "CPLUS_INCLUDE_PATH=",
+            "OBJC_INCLUDE_PATH=", "LIBRARY_PATH=", "COMPILER_PATH=" }
+        assert.same({ "env", "CCC_OVERRIDE_OPTIONS=", "CPATH=", "C_INCLUDE_PATH=", "CPLUS_INCLUDE_PATH=",
+            "OBJC_INCLUDE_PATH=", "LIBRARY_PATH=", "COMPILER_PATH=", "/sdk/bin/clang", "--target=wasm32-wasip1",
+            "--sysroot=/sdk/share/wasi-sysroot" },
             browser.compiler_argv({ cc = { "/sdk/bin/clang" }, sysroot = "/sdk/share/wasi-sysroot" }))
         local descriptor = assert(browser.import(fixtures.descriptor()))
+        local argv = browser.compiler_argv(descriptor.tools)
+        assert.same(envelope, { table.unpack(argv, 1, #envelope) })
         assert.same({ descriptor.tools.cc[1], "--target=wasm32-wasip1", "--sysroot=" .. descriptor.tools.sysroot },
-            browser.compiler_argv(descriptor.tools))
+            { table.unpack(argv, #envelope + 1) })
+        assert.equal(fixtures.descriptor().tools.cc[1], descriptor.tools.cc[1])
+        argv[1] = "changed by a caller"
+        assert.equal("env", browser.compiler_argv(descriptor.tools)[1])
         for build_profile, flags in pairs(fixtures.object_flags) do
             assert.is_true(browser.valid_profile(build_profile))
             assert.same(flags, browser.object_flags(build_profile))
@@ -245,10 +269,12 @@ describe("browser target descriptor", function()
         assert.has_error(function() table.insert(descriptor.compile_flags, "-flto") end,
             "browser target descriptor is immutable")
         assert.equal(3, #calls)
-        assert.same({ clang, "--target=wasm32-wasip1", "--sysroot=" .. sysroot, "--version" }, calls[1])
+        assert.same(version_query(descriptor.tools), calls[1])
+        assert.equal(clang, calls[1][#calls[1] - 3])
         assert.same({ optimizer, "--version" }, calls[2])
         local probe = calls[#calls]
-        assert.same({ clang, "--target=wasm32-wasip1", "--sysroot=" .. sysroot }, { table.unpack(probe, 1, 3) })
+        local compiler = browser.compiler_argv(descriptor.tools)
+        assert.same(compiler, { table.unpack(probe, 1, #compiler) })
         local flags = table.concat(probe, " ")
         contains(flags, "-c")
         contains(flags, "-gdwarf-4 -gline-tables-only " .. table.concat(fixtures.sjlj_flags, " ") ..
@@ -1186,8 +1212,7 @@ assert(file:close())
             assert.same({ installed("bin", "llvm-ranlib.exe") }, tools.ranlib)
             assert.same({ installed("bin", "wasm-ld.exe") }, tools.ld)
             assert.equal(installed("share", "wasi-sysroot"), tools.sysroot)
-            assert.same({ installed("bin", "clang.exe"), "--target=wasm32-wasip1",
-                "--sysroot=" .. installed("share", "wasi-sysroot"), "--version" }, calls[1])
+            assert.same(version_query(tools), calls[1])
             assert.equal("WASM_OPT", tools.optimizer.source)
             assert.same({ optimizer }, tools.optimizer.argv)
         end
@@ -1701,8 +1726,8 @@ assert(file:close())
             lua = { headers_sha256 = record.headers_sha256 } }, paths = paths }, paths.lua_source)
         assert.is_nil(config)
         contains(err, "minicoro.h: matching Titan SDK header is required")
-        assert.same({ { FAKE_ROOT .. "/wasi-sdk/bin/clang" .. tool_suffix(), "--target=wasm32-wasip1",
-            "--sysroot=" .. FAKE_ROOT .. "/wasi-sdk/share/wasi-sysroot", "--version" } }, calls)
+        assert.same({ version_query({ cc = { FAKE_ROOT .. "/wasi-sdk/bin/clang" .. tool_suffix() },
+            sysroot = FAKE_ROOT .. "/wasi-sdk/share/wasi-sysroot" }) }, calls)
         context, _, calls = fake_context({ missing = "clang" })
         config, err = browser.analysis_toolchain(context,
             { target = { build_profile = "production" }, paths = paths }, paths.lua_source)

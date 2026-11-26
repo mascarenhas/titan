@@ -391,9 +391,8 @@ end
         local live = setmetatable({}, { __index = strategy })
         local calls = 0
         function live:run(argv, options)
-            assert.equal(info.tools.cc[1], argv[1])
-            assert.equal("--target=wasm32-wasip1", argv[2])
-            assert.equal("--sysroot=" .. info.tools.sysroot, argv[3])
+            local envelope = browser_target.compiler_argv(info.tools)
+            assert.same(envelope, { table.unpack(argv, 1, #envelope) })
             calls = calls + 1
             return strategy:run(argv, options)
         end

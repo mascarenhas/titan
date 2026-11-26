@@ -13788,8 +13788,9 @@ describe("Windows link response files", function()
         local payload = assert(platform.windows_response_contents(arguments))
         assert.is_true(#payload > 32767)
         process.run = function(argv)
-            assert.same({ tools.cc[1], "--target=wasm32-wasip1", "--sysroot=" .. tools.sysroot,
-                "@" .. response }, argv)
+            local expected = { table.unpack(envelope) }
+            expected[#expected + 1] = "@" .. response
+            assert.same(expected, argv)
             assert.equal(payload, assert(util.get_file_contents(response, "rb")))
             return true, "exit", 0
         end
@@ -13840,13 +13841,15 @@ describe("Windows link response files", function()
             return true
         end }
         function strategy:run(argv, options)
-            assert.same({ descriptor.tools.cc[1], "--target=wasm32-wasip1",
-                "--sysroot=" .. descriptor.tools.sysroot, "@" .. staged .. ".rsp" }, argv)
+            local expected = require("titan-compiler.browsertarget").compiler_argv(descriptor.tools)
+            expected[#expected + 1] = "@" .. staged .. ".rsp"
+            assert.same(expected, argv)
             assert.is_false(options.stderr_to_stdout)
             local payload = assert(outputs[staged .. ".rsp"])
             assert.truthy(payload:find('"-Wl,--trace"\n', 1, true))
             assert.truthy(payload:find('"C:\\\\generated path\\\\app.o"\n', 1, true))
             assert.falsy(payload:find("--target=", 1, true))
+            assert.falsy(payload:find("CCC_OVERRIDE_OPTIONS=", 1, true))
             return { started = true, ok = true, output = "one.o\r\ntwo.o\r\n" }
         end
         local ok, err = subject.compile_browser_image("entrypoint", response .. "/entry.c",

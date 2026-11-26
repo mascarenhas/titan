@@ -91,12 +91,13 @@ function M.install(options)
                 operation, tool = "execute", "browser-runner"
             end
             -- Browser compiles and links run through the target's compiler
-            -- envelope (clang, --target, --sysroot). The image link writes
+            -- envelope (env wrapper, clang, --target, --sysroot), audited
+            -- like every argv without its `env` assignments. The image link writes
             -- `<stem>.wasm.linked`; wasm-opt rewrites it as the staged `<stem>.wasm`.
             for _, entry in ipairs({ { "cc", "clang" }, { "ar", "llvm-ar" }, { "ranlib", "llvm-ranlib" },
                     { "optimizer", "wasm-opt" } }) do
                 local prefix = options.tools[entry[1]]
-                if entry[1] == "cc" then prefix = require("titan-compiler.browsertarget").compiler_argv(options.tools)
+                if entry[1] == "cc" then prefix = normalize(require("titan-compiler.browsertarget").compiler_argv(options.tools))
                 elseif entry[1] == "optimizer" then prefix = prefix and prefix.argv end
                 local matches = prefix and #argv >= #prefix
                 for index, value in ipairs(prefix or {}) do

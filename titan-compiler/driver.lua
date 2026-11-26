@@ -2090,7 +2090,7 @@ function driver.toolchain_descriptor(context)
         if not descriptor then return nil, err end
         return {
             io = context.io, compiler_argv = driver._browser_target.compiler_argv(descriptor.tools),
-            -- clang is the physical tool input; the target and sysroot are arguments.
+            -- `env` is the launch wrapper; clang remains the physical tool input.
             stage_tools = { descriptor.tools.cc[1] },
             compile_flags = { table.unpack(descriptor.compile_flags) },
             language_mode = "c99", language_flag = false, cppflags = {}, cflags = {},

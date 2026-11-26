@@ -68,9 +68,18 @@ end
 
 -- All browser compiler execution goes through this argv policy, including
 -- probes, links and coordinator jobs: the frozen clang, the target and the
--- SDK's sysroot, whatever its configuration file says.
+-- SDK's sysroot, whatever its configuration file says. The `env` launch
+-- wrapper empties the variables clang would otherwise read to edit its own
+-- command line (and so the setjmp/longjmp ABI), add include or library
+-- directories, or find another linker (D11).
+local AMBIENT = { "CCC_OVERRIDE_OPTIONS=", "CPATH=", "C_INCLUDE_PATH=", "CPLUS_INCLUDE_PATH=",
+    "OBJC_INCLUDE_PATH=", "LIBRARY_PATH=", "COMPILER_PATH=" }
 function M.compiler_argv(tools)
-    return { tools.cc[1], "--target=" .. TRIPLE, "--sysroot=" .. tools.sysroot }
+    local argv = { "env", table.unpack(AMBIENT) }
+    argv[#argv + 1] = tools.cc[1]
+    argv[#argv + 1] = "--target=" .. TRIPLE
+    argv[#argv + 1] = "--sysroot=" .. tools.sysroot
+    return argv
 end
 
 local function hex(value, length)
@@ -614,13 +623,14 @@ local function configured_tool(context, filename, variable, value, requirement, 
     return filename
 end
 
-local function version_output(context, command, requirement, install)
+-- `executable` names the physical tool when `command` runs it through a wrapper.
+local function version_output(context, command, executable, requirement, install)
     command[#command + 1] = "--version"
     local result = context.io:run(command, { stderr_to_stdout = true })
     if type(result) ~= "table" or not result.ok then
         local detail = type(result) == "table" and (result.output or result.diagnostic) or tostring(result)
         return nil, "browser target requires " .. requirement .. ": cannot execute " ..
-            string.format("%q", command[1]) .. ": " .. tostring(detail):gsub("%s+$", "") .. install
+            string.format("%q", executable) .. ": " .. tostring(detail):gsub("%s+$", "") .. install
     end
     return result.output
 end
@@ -663,7 +673,7 @@ local function discover_compiler(context)
         return nil, "browser target requires " .. SDK .. ": no sysroot at " ..
             string.format("%q", tools.sysroot) .. SDK_INSTALL
     end
-    tools.version_output, err = version_output(context, M.compiler_argv(tools), SDK, SDK_INSTALL)
+    tools.version_output, err = version_output(context, M.compiler_argv(tools), cc, SDK, SDK_INSTALL)
     if not tools.version_output then return nil, err end
     return tools
 end
@@ -694,7 +704,7 @@ local function discover_optimizer(context)
         source = "PATH"
     end
     local output
-    output, err = version_output(context, { filename }, OPTIMIZER, OPTIMIZER_INSTALL)
+    output, err = version_output(context, { filename }, filename, OPTIMIZER, OPTIMIZER_INSTALL)
     if not output then return nil, err end
     local found = output:match("^wasm%-opt version (%d+)") or "unknown"
     if found ~= M.BINARYEN_VERSION then
