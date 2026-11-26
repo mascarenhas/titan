@@ -345,7 +345,7 @@ described above.
   room for the error handler, whose libbacktrace scratch state exceeds
   minicoro's default 56 KiB stack, while physical memory stays lazy on
   platforms with virtual memory. On WASI/browser, `minicoro.h` guards
-  `MCO_USE_VMEM_ALLOCATOR` with `!defined(__wasi__)` so allocations fall
+  `MCO_USE_VMEM_ALLOCATOR` with `!defined(__wasm__)` so allocations fall
   through to `calloc`/`free`, committing each stack eagerly and returning freed
   blocks for reuse when the coroutine is destroyed, while the grown WebAssembly
   linear memory never shrinks back to the host, and the browser has no
