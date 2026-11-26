@@ -115,11 +115,16 @@ local function fake_context(options)
         calls[#calls + 1] = { table.unpack(argv) }
         if argv[1] == "uname" then return { started = true, ok = true, output = options.uname or "Linux\n" } end
         if argv[#argv] == "--version" then
-            -- The physical tool follows an `env NAME=` launch wrapper.
+            -- The physical tool follows an `env` launch wrapper's
+            -- `NAME=value` and `-u NAME` operands.
             local index = 1
             if argv[1] == "env" then
                 index = 2
-                while argv[index]:find("=", 1, true) do index = index + 1 end
+                while true do
+                    if argv[index] == "-u" then index = index + 2
+                    elseif argv[index]:find("=", 1, true) then index = index + 1
+                    else break end
+                end
             end
             local tool = key(argv[index]):match("([^/\\]+)$"):gsub("%.exe$", "")
             if options.unstartable == tool then
@@ -211,14 +216,15 @@ describe("browser target descriptor", function()
         assert.equal("34.0", browser.WASI_SDK_VERSION)
         assert.equal("133", browser.BINARYEN_VERSION)
         assert.is_nil(browser.EMSCRIPTEN_VERSION)
-        -- One launch envelope empties every variable clang reads to edit its
-        -- command line, search paths or linker (D11), around the physical clang.
-        local envelope = { "env", "CCC_OVERRIDE_OPTIONS=", "CPATH=", "C_INCLUDE_PATH=", "CPLUS_INCLUDE_PATH=",
-            "OBJC_INCLUDE_PATH=", "LIBRARY_PATH=", "COMPILER_PATH=" }
-        assert.same({ "env", "CCC_OVERRIDE_OPTIONS=", "CPATH=", "C_INCLUDE_PATH=", "CPLUS_INCLUDE_PATH=",
-            "OBJC_INCLUDE_PATH=", "LIBRARY_PATH=", "COMPILER_PATH=", "/sdk/bin/clang", "--target=wasm32-wasip1",
-            "--sysroot=/sdk/share/wasi-sysroot" },
-            browser.compiler_argv({ cc = { "/sdk/bin/clang" }, sysroot = "/sdk/share/wasi-sysroot" }))
+        -- One launch envelope unsets every variable clang reads to edit its
+        -- command line, search paths or linker (D11), around the physical
+        -- clang. Unset, not emptied: an empty CCC_OVERRIDE_OPTIONS still
+        -- prints a `###` banner into clang's merged output (CC-7).
+        local pinned = { "env", "-u", "CCC_OVERRIDE_OPTIONS", "-u", "CPATH", "-u", "C_INCLUDE_PATH",
+            "-u", "CPLUS_INCLUDE_PATH", "-u", "OBJC_INCLUDE_PATH", "-u", "LIBRARY_PATH", "-u", "COMPILER_PATH",
+            "/sdk/bin/clang", "--target=wasm32-wasip1", "--sysroot=/sdk/share/wasi-sysroot" }
+        assert.same(pinned, browser.compiler_argv({ cc = { "/sdk/bin/clang" }, sysroot = "/sdk/share/wasi-sysroot" }))
+        local envelope = { table.unpack(pinned, 1, #pinned - 3) }
         local descriptor = assert(browser.import(fixtures.descriptor()))
         local argv = browser.compiler_argv(descriptor.tools)
         assert.same(envelope, { table.unpack(argv, 1, #envelope) })

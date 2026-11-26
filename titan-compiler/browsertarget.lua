@@ -69,13 +69,18 @@ end
 -- All browser compiler execution goes through this argv policy, including
 -- probes, links and coordinator jobs: the frozen clang, the target and the
 -- SDK's sysroot, whatever its configuration file says. The `env` launch
--- wrapper empties the variables clang would otherwise read to edit its own
+-- wrapper unsets the variables clang would otherwise read to edit its own
 -- command line (and so the setjmp/longjmp ABI), add include or library
--- directories, or find another linker (D11).
-local AMBIENT = { "CCC_OVERRIDE_OPTIONS=", "CPATH=", "C_INCLUDE_PATH=", "CPLUS_INCLUDE_PATH=",
-    "OBJC_INCLUDE_PATH=", "LIBRARY_PATH=", "COMPILER_PATH=" }
+-- directories, or find another linker (D11). Unset, not emptied: an empty
+-- CCC_OVERRIDE_OPTIONS still prints a `###` banner into clang's output.
+local AMBIENT = { "CCC_OVERRIDE_OPTIONS", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+    "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH" }
 function M.compiler_argv(tools)
-    local argv = { "env", table.unpack(AMBIENT) }
+    local argv = { "env" }
+    for _, name in ipairs(AMBIENT) do
+        argv[#argv + 1] = "-u"
+        argv[#argv + 1] = name
+    end
     argv[#argv + 1] = tools.cc[1]
     argv[#argv + 1] = "--target=" .. TRIPLE
     argv[#argv + 1] = "--sysroot=" .. tools.sysroot

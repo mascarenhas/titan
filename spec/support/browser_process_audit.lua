@@ -69,7 +69,11 @@ function M.install(options)
         end
         if argv[1] == "env" or argv[1] == "/usr/bin/env" then
             local index = 2
-            while argv[index] and argv[index]:match("^[A-Za-z_][A-Za-z_0-9]*=") do index = index + 1 end
+            while argv[index] do
+                if argv[index] == "-u" and argv[index + 1] then index = index + 2
+                elseif argv[index]:match("^[A-Za-z_][A-Za-z_0-9]*=") then index = index + 1
+                else break end
+            end
             return normalize({ table.unpack(argv, index) })
         end
         return argv

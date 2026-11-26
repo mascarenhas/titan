@@ -15,6 +15,7 @@ local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local version = require "titan-compiler.version"
 local browser_target = require "titan-compiler.browsertarget"
+local platform = require "titan-compiler.platform"
 local SJLJ = { "-mexception-handling", "-mllvm", "-wasm-enable-sjlj", "-mllvm", "-wasm-use-legacy-eh=false" }
 
 local function run_tool(strategy, base_argv, extra_args)
@@ -397,6 +398,28 @@ int *p = &foo;
         })
         assert.is_nil(scanned_fmt)
         assert.matches('archive member #%d+ .* name "native_helper.o": target mismatch: object format %w+ does not match target format wasm', scanned_fmt_err)
+    end)
+
+    it("resolves the SDK's link libraries through the browser compiler envelope under a hostile environment", function()
+        local info, why = toolchain.require()
+        if not info then pending(why) return end
+        -- The envelope's clang output must stay parseable: an emptied
+        -- override would print a `###` banner into it.
+        local certificate = require "titan-compiler.linkcertificate"
+        local libraries = assert(certificate.browser_trace_libraries({ io = strategy }, info.tools,
+            { "-lsetjmp", "-lc-printscan-long-double", "-lwasi-emulated-process-clocks" }))
+        assert.equal(3, #libraries)
+        for index, name in ipairs({ "libsetjmp.a", "libc-printscan-long-double.a", "libwasi-emulated-process-clocks.a" }) do
+            assert.equal(name, libraries[index]:match("[^/\\]+$"))
+        end
+        -- An outer env stands for the hostile caller; the envelope inside it unsets both.
+        local probe = { "env", "CCC_OVERRIDE_OPTIONS=# +-DTITAN_AMBIENT=1", "C_INCLUDE_PATH=/nonexistent-include" }
+        for _, argument in ipairs(browser_target.compiler_argv(info.tools)) do probe[#probe + 1] = argument end
+        local macros = run_tool(strategy, probe, { "-v", "-dM", "-E", "-x", "c",
+            platform.windows and "NUL" or "/dev/null" }).output
+        assert.is_nil(macros:find("TITAN_AMBIENT", 1, true))
+        assert.is_nil(macros:find("###", 1, true))
+        assert.is_nil(macros:find("nonexistent-include", 1, true))
     end)
 
     it("extracts wasm32 enum-carrier answers through cprobe without target execution", function()
