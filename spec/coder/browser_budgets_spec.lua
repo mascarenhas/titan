@@ -8,6 +8,36 @@ local hrtime = require("titan-compiler.process").library().hrtime
 local support = require "spec.fixtures.browser_runtime.support"
 local workspace
 
+-- The flags, minimum and maximum pages of the one memory a Wasm module
+-- defines, read from its memory section rather than from the link arguments.
+local function memory_limits(bytes)
+    assert(bytes:sub(1, 8) == "\0asm\1\0\0\0", "not a Wasm module")
+    local position = 9
+    local function leb()
+        local result, shift = 0, 0
+        while true do
+            local byte = assert(bytes:byte(position), "truncated Wasm module")
+            position = position + 1
+            result = result | ((byte & 0x7f) << shift)
+            if byte < 0x80 then return result end
+            shift = shift + 7
+        end
+    end
+    while position <= #bytes do
+        local id = bytes:byte(position)
+        position = position + 1
+        local size = leb()
+        local after = position + size
+        if id == 5 then
+            assert(leb() == 1, "the image defines more or fewer than one memory")
+            local flags, minimum = leb(), leb()
+            return flags, minimum, flags & 1 == 1 and leb() or nil
+        end
+        position = after
+    end
+    error("the image defines no memory")
+end
+
 local function build(info, root, name, budgets)
     local options = { purpose = "budget", optimization = "O2" }
     if budgets then options.budgets = budgets end
@@ -85,6 +115,11 @@ describe("browser measured delivered budget limits", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = support.workspace()
         build(info, workspace, "budget")
+        -- The delivered maximum is the image's own: one unshared 32-bit memory
+        -- of exactly 32768 pages (2 GiB).
+        local flags, _, maximum = memory_limits(support.files.read(workspace .. "/budget.wasm"))
+        assert.equal(1, flags)
+        assert.equal(32768, maximum)
         local imports = support.fixture_imports(workspace)
         for _, engine in ipairs({ "node", "chromium" }) do
             local started = hrtime()
