@@ -70,13 +70,13 @@ local function copy_sources(names)
         fixture.source .. "/fixture-imports.mjs")
 end
 
-local function execute(info, engine, argv)
+local function execute(info, engine, argv, zone)
     local command = toolchain.runner(info, "--engine", engine,
         "--timeout", "120000", "--grace", "1500", "--root", fixture.root,
         "--imports", fixture.source .. "/fixture-imports.mjs")
     for _, item in ipairs(argv) do command[#command + 1] = item end
     return fixture:run(command, { TITAN_NODE = info.node.path, TITAN_CHROME = info.chrome.path,
-        TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" })
+        TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TZ = zone })
 end
 
 describe("browser drive interface", function()
@@ -189,15 +189,18 @@ describe("browser drive interface", function()
         local image = build_image(info, "program", "os-streams",
             { "--tree", stdlib_tree, "os.browser_tests" })
         for _, engine in ipairs({ "node", "chromium" }) do
+            -- A half-hour offset without daylight saving time: %z and %Z
+            -- must render the host's offset, never UTC.
             local result = execute(info, engine,
-                { "--js-test", fixture.source .. "/os-streams.mjs", "--", image })
+                { "--js-test", fixture.source .. "/os-streams.mjs", "--", image }, "Asia/Kolkata")
             io.stdout:write(string.format("\nOS-STREAMS engine=%s\n%s\n", engine, result.output))
             io.stdout:flush()
             assert.is_true(result.ok, result.output)
             assert(checks.require_evidence(checks.status_inventory, result.output,
                 { ["os.browser_tests"] = true }))
-            assert.truthy(result.output:find('OS-STREAMS {"verdict":"PASS","cases":77,"dialogs":0',
+            assert.truthy(result.output:find('OS-STREAMS {"verdict":"PASS","cases":78,"dialogs":0',
                 1, true), result.output)
+            assert.truthy(result.output:find('"calendar-zone-titan-and-stock"', 1, true), result.output)
         end
     end)
 

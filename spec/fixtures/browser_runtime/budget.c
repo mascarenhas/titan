@@ -9,6 +9,15 @@
 /* wasm-ld's main-stack bounds. */
 extern unsigned char __stack_low, __stack_high;
 
+/* The C stack bounds the factory installed with __set_stack_limits, the live
+ * __stack_pointer and the two words at the installed low bound, read by the
+ * host (fixture-imports.mjs). */
+TITAN_WASM_IMPORT("budget_stack_state") void budget_stack_state(uint32_t state[5]);
+enum { STACK_LOW, STACK_HIGH, STACK_POINTER, STACK_COOKIE, STACK_COOKIE_HIGH };
+/* The cookie the factory keeps at a coroutine stack's low end. */
+#define BUDGET_COOKIE 0x02135467U
+#define BUDGET_COOKIE_HIGH 0x89bacdfeU
+
 static volatile uint32_t seed = 0x329U, sink;
 static int fail_create, failed_allocator;
 static int bridge_depth;
@@ -36,29 +45,56 @@ unsigned int budget_last_stack_span(void) { return last_stack_span; }
 unsigned int budget_last_stack_free(void) { return last_stack_free; }
 void budget_wait(void) { fixture_sleep(1); }
 
-/* The bounds of the C stack that `frame` lives on: the running coroutine's,
- * which the factory installs as the stack limits on each switch, or the main
- * stack's. */
-static void budget_stack_bounds(uintptr_t *low, uintptr_t *high) {
+/* The installed bounds must be the running context's own stack, the
+ * coroutine's minicoro allocation or wasm-ld's main stack, and hold the live
+ * stack pointer. */
+static void budget_installed_stack(uint32_t state[5]) {
   mco_coro *co = mco_running();
-  if (co) {
-    *low = (uintptr_t)co->stack_base;
-    *high = *low + co->stack_size;
-  } else {
-    *low = (uintptr_t)&__stack_low;
-    *high = (uintptr_t)&__stack_high;
-  }
+  uintptr_t low = co ? (uintptr_t)co->stack_base : (uintptr_t)&__stack_low;
+  uintptr_t high = co ? low + co->stack_size : (uintptr_t)&__stack_high;
+  budget_stack_state(state);
+  if (state[STACK_LOW] != low || state[STACK_HIGH] != high ||
+      state[STACK_POINTER] < state[STACK_LOW] || state[STACK_POINTER] >= state[STACK_HIGH]) abort();
 }
-static unsigned int budget_stack_free(const void *frame) {
-  uintptr_t low, high;
-  budget_stack_bounds(&low, &high);
-  return (unsigned int)((uintptr_t)frame - low);
+static unsigned int budget_stack_free(void) {
+  uint32_t state[5];
+  budget_installed_stack(state);
+  return state[STACK_POINTER] - state[STACK_LOW];
 }
+/* `frame` is live on the installed stack, at or above the stack pointer. */
 static void budget_record_stack(const void *frame) {
-  uintptr_t low, high;
-  budget_stack_bounds(&low, &high);
-  last_stack_span = (unsigned int)(high - low);
-  last_stack_free = (unsigned int)((uintptr_t)frame - low);
+  uint32_t state[5];
+  budget_installed_stack(state);
+  if ((uintptr_t)frame < state[STACK_POINTER] || (uintptr_t)frame >= state[STACK_HIGH]) abort();
+  last_stack_span = state[STACK_HIGH] - state[STACK_LOW];
+  last_stack_free = state[STACK_POINTER] - state[STACK_LOW];
+}
+
+/* D2: under --stack-first the main stack ends at address 0, where an overflow
+ * already traps, so the factory neither writes nor checks a cookie there. A
+ * coroutine stack's low end holds the cookie the factory checks whenever the
+ * coroutine switches away or resumes. */
+int budget_cookie_main(void) {
+  uint32_t state[5];
+  if (mco_running()) abort();
+  budget_installed_stack(state);
+  return state[STACK_LOW] == 0 &&
+    !(state[STACK_COOKIE] == BUDGET_COOKIE && state[STACK_COOKIE_HIGH] == BUDGET_COOKIE_HIGH);
+}
+int budget_cookie_coroutine(void) {
+  uint32_t state[5];
+  if (!mco_running()) abort();
+  budget_installed_stack(state);
+  return state[STACK_LOW] != 0 &&
+    state[STACK_COOKIE] == BUDGET_COOKIE && state[STACK_COOKIE_HIGH] == BUDGET_COOKIE_HIGH;
+}
+/* Overwrite the running coroutine's cookie without overflowing: the factory
+ * aborts when the coroutine next switches away. */
+void budget_overwrite_cookie(void) {
+  uint32_t state[5];
+  if (!mco_running()) abort();
+  budget_installed_stack(state);
+  *(volatile uint32_t *)(uintptr_t)state[STACK_LOW] = ~BUDGET_COOKIE;
 }
 
 /* Fixed live C frames exercise wasm-opt's checked function-prologue stack
@@ -113,7 +149,7 @@ __attribute__((noinline)) static int deep(lua_State *L, int depth) {
     ++seed;
     lua_pushvalue(L, 1);
     printf("BUDGET MIXED c_depth=%d shadow_free=%u wasm_register_canaries=32\n",
-        bridge_depth, budget_stack_free(__builtin_frame_address(0)));
+        bridge_depth, budget_stack_free());
     fflush(stdout);
     lua_call(L, 0, 0);
   }

@@ -676,6 +676,9 @@ jobs:
         run: |
           set -euo pipefail
           export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT"
+          # D11: clang's ambient inputs never reach these direct compiles, as
+          # on every Titan and fork browser compiler route.
+          unset CCC_OVERRIDE_OPTIONS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH
           output="$GITHUB_WORKSPACE/out/browser/trace-adapter"
           mkdir -p "$output"
           # Plain reactor modules: the units instantiate them with the factory's

@@ -227,9 +227,10 @@ export default function fixtureImports(context) {
           .filter(item => item.id !== 0).map(item => Object.freeze({id: item.id,
             lifetime: item.lifetime, parked: !!item.gate, finished: !!item.finished}))),
         watchTransfers: callback => {
+          // The backend's methods use their receiver, so the forward keeps it.
           var transfer = backend.transfer;
           backend.transfer = (...args) => {
-            var result = transfer(...args);
+            var result = transfer.apply(backend, args);
             callback(Object.freeze({terminal: !!args[4], owner: !!backend.owner,
               safe: backend.safe(), contexts: backend.contexts.size}));
             return result;
@@ -248,6 +249,14 @@ export default function fixtureImports(context) {
     // and one through an async host function (gate.c's second form).
     fixture_sleep: new WebAssembly.Suspending(sleep),
     gate_timeout: new WebAssembly.Suspending(async milliseconds => { await sleep(milliseconds); }),
+
+    // browser_runtime/budget.c: the C stack bounds the factory installed,
+    // the live stack pointer and the two words at the installed low bound.
+    budget_stack_state(out) {
+      const backend = context.bridge.backend, words = context.HEAPU32, low = backend.low >>> 0;
+      words.set([low, backend.high >>> 0, context.exports.__stack_pointer.value >>> 0,
+        words[low >>> 2], words[(low >>> 2) + 1]], out >>> 2);
+    },
 
     // browser_loader/loader.c
     browser_loader_initialize_hook() {

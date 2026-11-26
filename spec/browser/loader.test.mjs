@@ -1,5 +1,6 @@
 import {disposed, encode, join, ran, reentry, rejection} from '../fixtures/browser_loader/checks.mjs';
 import {fidelity, names} from '../fixtures/browser_loader/fidelity-tests.mjs';
+import {imports} from '../fixtures/browser_loader/import-tests.mjs';
 import {lifecycle} from '../fixtures/browser_loader/lifecycle-tests.mjs';
 
 export async function run(context) {
@@ -91,5 +92,6 @@ export async function run(context) {
   const fidelityRuns = await fidelity(context, fidelityImages);
   const nameRuns = await names(context, nameImages);
   const lifecycleRuns = await lifecycle(context, fidelityImages);
-  context.stdout(encode(`loader suite: ${images.length * 5 + fidelityRuns + nameRuns + lifecycleRuns} completed Titan runs passed\n`));
+  const importRuns = await imports(context, nameImages);
+  context.stdout(encode(`loader suite: ${images.length * 5 + fidelityRuns + nameRuns + lifecycleRuns + importRuns} completed Titan runs passed\n`));
 }

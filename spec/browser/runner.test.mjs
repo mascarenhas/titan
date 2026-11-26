@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, execFile } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1200,6 +1201,93 @@ test("required trace uses the existing lazy initialization and disposal lifecycl
     } finally {
         release();
         await interrupted.instance.dispose().catch(() => {});
+    }
+});
+
+test("initialization waits for one delayed trace lookup and degrades a throwing trace locator", async t => {
+    const image = testImage(t);
+    if (!image) return;
+    const {default: createImage} = await import(pathToFileURL(image).href);
+    const directory = dirname(image);
+    const wasmName = basename(image).replace(/\.mjs$/, ".wasm");
+    const traceName = `${wasmName}.trace`;
+    const table = await readFile(join(directory, traceName));
+    const args = ["--filter=^runner_image[.]test_bytes$"];
+    // An HTTP source holds the table until the test releases it, while the
+    // Wasm itself loads from the image directory.
+    let requests = 0, release;
+    const held = new Promise(resolve => { release = resolve; });
+    const server = createServer(async (request, response) => {
+        requests++;
+        await held;
+        response.writeHead(200, {"Content-Type": "application/octet-stream"});
+        response.end(table);
+    });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const tableUrl = `http://127.0.0.1:${server.address().port}/${traceName}`;
+    const lookups = [];
+    const delayed = createImage({
+        locateFile(name) {
+            lookups.push(name);
+            return name === traceName ? tableUrl : join(directory, name);
+        },
+        stdout() {},
+    });
+    try {
+        let settled = false;
+        const initializing = delayed.initialize();
+        initializing.then(() => { settled = true; }, () => { settled = true; });
+        while (requests === 0) await new Promise(resolve => setTimeout(resolve, 5));
+        // The Wasm compiles while the table is held; the loader runs the C
+        // constructors only after the factory has indexed the table.
+        await new Promise(resolve => setTimeout(resolve, 250));
+        assert.equal(settled, false, "initialization finished before its trace table arrived");
+        assert.notEqual(delayed.trace.state, "ready");
+        release();
+        await initializing;
+        assert.equal(delayed.trace.state, "ready");
+        const result = await delayed.run(args);
+        assert.equal(result.kind, "returned");
+        assert.equal(result.status, 0);
+        assert.deepEqual(lookups.slice().sort(), [wasmName, traceName].sort(),
+            "the image looked a resource up more than once");
+        assert.equal(requests, 1, "the trace table was fetched more than once");
+    } finally {
+        release();
+        await delayed.dispose();
+    }
+
+    // A locator that throws for the optional table degrades the trace like a
+    // missing file; a required table fails initialization with its reason.
+    const decoder = new TextDecoder();
+    for (const requireTrace of [false, true]) {
+        const instance = createImage({
+            requireTrace,
+            locateFile(name) {
+                if (name === traceName) throw new Error("trace locator refused");
+                return join(directory, name);
+            },
+            stdout() {},
+            stderr() {},
+        });
+        try {
+            if (!requireTrace) {
+                await instance.initialize();
+                assert.equal(instance.trace.state, "degraded");
+                assert.match(instance.trace.reason, /trace locator refused/);
+                const result = await instance.run(args);
+                assert.equal(result.kind, "returned");
+                assert.equal(result.status, 0);
+            } else {
+                let error;
+                try { await instance.initialize(); } catch (cause) { error = cause; }
+                assert.equal(error?.code, "TITAN_BROWSER_TITAN");
+                assert.match(decoder.decode(error.bytes), /^degraded browser trace: .*trace locator refused/);
+            }
+        } finally {
+            await instance.dispose();
+        }
     }
 });
 

@@ -10,6 +10,23 @@ local function run_stock(state: stock_lua.Lua?, chunk: string)
   else stock_lua.load(chunk, "=embedded-stock")() end
 end
 
+-- %z and %Z through Titan's static tm and through stock Lua's automatic tm,
+-- in the owner state and in an independent state: each is the host's
+-- numeric local offset that the harness expects.
+local function calendar_zone(...: Value): Value
+  local expected = text_of(...[1])
+  local formatted = system.date("%z %Z", 1700000000)
+  test.assert(formatted is string and formatted as string == expected,
+    "Titan %z %Z differs from the host's local offset")
+  local chunk = "local actual = os.date('%z %Z', 1700000000)\n" ..
+    "assert(actual == '" .. expected .. "', 'stock %z %Z differs from the host: ' .. actual)"
+  run_stock(nil, chunk)
+  local child = stock_lua.new()
+  defer child:close()
+  run_stock(child, chunk)
+  return Value.is_boolean(true)
+end
+
 local function stock_stdin(...: Value): Value
   local state? = stock_state(...[1])
   defer if state ~= nil then state:close() end

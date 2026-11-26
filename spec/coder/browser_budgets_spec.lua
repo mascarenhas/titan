@@ -161,7 +161,22 @@ describe("browser measured delivered budget limits", function()
                     engine, mode, (hrtime() - mode_started) / 1e6))
                 io.stdout:flush()
             end
-            io.stdout:write(string.format("BUDGET VERDICT engine=%s rows=7 probes=%d positive=%d reported_negative=%d wall_s=%.3f PASS\n",
+
+            -- D2's cookie boundary, apart from the prologue checks above: the
+            -- main stack's zero end carries no cookie, a coroutine's cookie
+            -- survives a switch, and overwriting it aborts the next switch
+            -- with the factory's diagnostic instead of a prologue trap.
+            local ok, log = probe("budget", "cookie-boundary", 0)
+            assert.is_true(ok, log)
+            assert.truthy(log:find("BUDGET COOKIE main_low=0 main_cookie=absent coroutine_cookie=intact",
+                1, true), log)
+            local overwritten, status
+            ok, overwritten, status = probe("budget", "cookie-overwrite", 0)
+            assert.is_false(ok, overwritten)
+            assert.equal(70, status, overwritten)
+            assert.truthy(overwritten:find("Stack overflow! Stack cookie has been overwritten at 0x", 1, true),
+                overwritten)
+            io.stdout:write(string.format("BUDGET VERDICT engine=%s rows=7 cookie_checks=2 probes=%d positive=%d reported_negative=%d wall_s=%.3f PASS\n",
                 engine, probes, positive, negative, (hrtime() - started) / 1e9))
             io.stdout:flush()
         end

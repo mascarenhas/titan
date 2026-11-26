@@ -1252,10 +1252,14 @@ end
         local plain_helper_obj = assert(staticmetadata.classify_object(
             assert(strategy:read_file(plain_c_obj)), "plain_helper.o", expected_fp))
 
-        assert.equal(fixtures.features, catcher_obj.fingerprint.features)
-        assert.equal(fixtures.features, plain_mod_obj.fingerprint.features)
-        assert.equal(fixtures.features, sjlj_helper_obj.fingerprint.features)
-        assert.equal(fixtures.features, plain_helper_obj.fingerprint.features)
+        -- Clang marks an object that may use setjmp as unable to share
+        -- memory: every object carries the record's exnref features exactly,
+        -- plus at most that one negative marker, never atomics or shared memory.
+        for _, object in ipairs({ catcher_obj, plain_mod_obj, sjlj_helper_obj, plain_helper_obj }) do
+            local features = object.fingerprint.features
+            assert(staticmetadata.fingerprint_matches(object.fingerprint, expected_fp))
+            assert.equal(fixtures.features, (features:gsub(" %-shared%-mem$", "")))
+        end
 
         local sjlj_archive_path = paths.join(sjlj_out, "sjlj_pkg.a")
         local scanned_untargeted = assert(staticmetadata.scan_archive(sjlj_archive_path))

@@ -6499,6 +6499,10 @@ printf '%s\n' "${schedule[@]}"
             end
             assert.equal(2, count_literal(trace_units,
                 '"$WASI_SDK_PATH/bin/clang" "${compile[@]}"'), trace_units)
+            -- D11: both direct compiles run without clang's ambient inputs.
+            assert_ordered(trace_units, "unset CCC_OVERRIDE_OPTIONS CPATH C_INCLUDE_PATH " ..
+                "CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH\n",
+                '"$WASI_SDK_PATH/bin/clang" "${compile[@]}"')
 
             for _, contract in ipairs({
                 "needs: build-compiler",
