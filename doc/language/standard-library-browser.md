@@ -722,6 +722,7 @@ foreign function callback_leave(raw_frame: *void)
 
 - `call_sync` backs `titan_browser_call_sync` for synchronous C callbacks from
   authored C code and host WebAssembly imports.
+- `invoke` is the loader's entry for invoking a pinned callable from JavaScript
   (`instance.call` / `wrapper.call` / notification delivery).
 - `release_callable` is the loader's synchronous trampoline for
   `wrapper.release()`: it enters a callback thread for `(raw_token, raw_slot, raw_generation)`

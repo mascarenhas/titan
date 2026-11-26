@@ -248,7 +248,7 @@ app.titan:156: in app.main
 export WASI_SDK_PATH=/path/to/wasi-sdk-34.0
 ```
 
-  Titan locates `clang`, `llvm-ar`, and `llvm-ranlib` via `$WASI_SDK_PATH/bin/` when `WASI_SDK_PATH` is set, or via `clang` on `PATH` (resolving its sibling `llvm-ar` and `llvm-ranlib` and `<root>/VERSION`). `CC`, `AR`, and `RANLIB` are ignored for browser builds.
+  Titan locates `clang`, `llvm-ar`, `llvm-ranlib`, and `wasm-ld` via `$WASI_SDK_PATH/bin/` when `WASI_SDK_PATH` is set, or via `clang` on `PATH` (resolving its sibling `llvm-ar`, `llvm-ranlib`, and `wasm-ld`, and `<root>/VERSION`). `CC`, `AR`, and `RANLIB` are ignored for browser builds.
 - **Binaryen `version_133` (exact):** Download and unpack Binaryen `version_133`, then set `BINARYEN_ROOT` (or `WASM_OPT`, or put `wasm-opt` on `PATH`):
 
 ```sh
@@ -329,9 +329,10 @@ titanc --target browser -o out-obj -c app.widgets                # object-only c
 
 Pass `--c-source helper.c` to compile authored C helpers with Titan's `wasi-sdk` (`wasm32-wasip1`) flags and link them into the browser image. To call host JavaScript directly from C, declare the imported function with `TITAN_WASM_IMPORT("name")` (from `titan/browser.h`, expanding to `__attribute__((import_module("env"), import_name("name")))` on `__wasm__`) or an explicit `__attribute__((import_module(...), import_name(...)))`, and supply the JavaScript implementation through `create({ imports })`.
 
-`imports` may be a plain import object or a factory `(context) => importObject` called once before WebAssembly instantiation. `context` exposes `memory`, `table` (the exported `__indirect_function_table` for invoking C function pointers), `exports`, `HEAPU8` / `HEAPU32` getters that survive memory growth, `readCString(ptr)`, `readBytes(ptr, len)`, `writeBytes(ptr, bytes)`, `trace`, and `abort(msg)`. User imports may use `new WebAssembly.Suspending(asyncFn)` for host suspension (outside synchronous C callbacks). Names under `wasi_snapshot_preview1.*`, `env.titan_browser_*`, and `env.titan_mco_*` are reserved for the Titan runtime and rejected with `TypeError`.
+`imports` may be a plain object (ordinary or null-prototype, from any realm) or a factory `(context) => importObject` called once before WebAssembly instantiation; each module map inside it must also be a plain object (arrays, `Map`s, class instances, and promises from an async factory are refused with `TypeError` `"must be a plain object …"`). `context` exposes `memory`, `table` (the exported `__indirect_function_table` for invoking C function pointers), `exports`, `HEAPU8` / `HEAPU32` getters that survive memory growth, `readCString(ptr)`, `readBytes(ptr, len)`, `writeBytes(ptr, bytes)`, `trace`, and `abort(msg)`. User imports may use `new WebAssembly.Suspending(asyncFn)` for host suspension (outside synchronous C callbacks). Names under `wasi_snapshot_preview1.*`, `env.titan_browser_*`, and `env.titan_mco_*` are reserved for the Titan runtime: for the object form, invalid shapes or reserved names throw `TypeError` synchronously in `create()`; for the function form, `initialize()`/`run()` reject with `TITAN_BROWSER_PROTOCOL` whose `cause` is that `TypeError`.
 
 Generated `.mjs` modules are strictly **self-contained** and embed zero external `import` statements. For ordinary application JavaScript and ES modules, prefer `create({ bindings })` and [`import "browser"`](standard-library-browser.md) over custom C imports.
+
 ## The loader API
 
 Every compiled `.mjs` image exports one default `create(options = {})` function that works in browsers, bundlers, and Node 26+:
@@ -377,7 +378,7 @@ All async methods (`initialize`, `run`, `call`, `callTask`, `drain`, `dispose`) 
 | `locateFile(name, directory)` | Custom URL resolver for `<stem>.wasm` and `<stem>.wasm.trace`. |
 | `requireTrace` | If `true` (default `false`), fail initialization if `<stem>.wasm.trace` cannot be loaded or mismatches. |
 | `bindings` | Object of explicit per-instance JS functions/values for `browser.binding(name)` (names starting with `titan:` are reserved). |
-| `imports` | Plain object or `(context) => importObject` supplying user WebAssembly imports declared by `--c-source` or C headers (`wasi_snapshot_preview1.*`, `env.titan_browser_*`, and `env.titan_mco_*` are reserved). |
+| `imports` | Plain object (ordinary or null-prototype, from any realm; module maps must also be plain objects) or `(context) => importObject` supplying user WebAssembly imports declared by `--c-source` or C headers (`wasi_snapshot_preview1.*`, `env.titan_browser_*`, and `env.titan_mco_*` are reserved; invalid/reserved object forms throw `TypeError` synchronously in `create()`, while invalid/reserved function forms reject `initialize()`/`run()` with `TITAN_BROWSER_PROTOCOL` whose `cause` is that `TypeError`). |
 | `env` | Initial instance environment map (string keys/values; default empty; isolated from host and peers). |
 | `onNotificationError({ kind, operation, error })` | Observes errors that cannot return to a caller (notification callback failures, secondary cleanup errors); defaults to `console.error`. |
 | `requestDrain()` | Coalesced hook notified whenever work is queued while idle. |
@@ -451,7 +452,7 @@ Pass program or test-runner arguments after `--`. Key options:
 | `--timeout MS`, `--grace MS` | Wall-clock run timeout (default 30000 ms) and post-completion watch window (default 1500 ms). |
 | `--chrome PATH`, `--cdp pipe\|port` | Headless Chrome/Chromium binary (overrides `TITAN_CHROME`) and DevTools transport. |
 | `--root DIR` | Served directory containing `.mjs`, `.wasm`, and `.wasm.trace` (default: directory of `.mjs`). |
-| `--imports FILE` | ES module under `--root` whose default export is passed as `create({ imports })` on both Node and Chromium. |
+| `--imports FILE` | Regular `.mjs` ES module under `--root` whose default export is passed as `create({ imports })` for direct images (and passed to `--js-test` harnesses as `context.imports` so the harness can forward it to `create`) on both Node and Chromium. |
 | `--allow-degraded-trace` | Allow missing/mismatched `.wasm.trace` (`requireTrace: false`). |
 | `--probe` | Print JSON describing the discovered Node and Chrome binaries without running an image. |
 

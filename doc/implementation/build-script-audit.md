@@ -50,7 +50,8 @@ its own Lua DLL. A stock Lua tree that a checkout compiler links through
 (`lib/browser/liblua.a`, its headers, and its build record) through
 `scripts/lua_browser.sh`, which delegates to the fork's `install-browser` with
 the `wasi-sdk` sibling tools (`clang`, `llvm-ar`, `llvm-ranlib`) and
-`LUA_BROWSER_CC`, `LUA_BROWSER_AR`,
+`LUA_BROWSER_CC`, `LUA_BROWSER_AR`, `LUA_BROWSER_RANLIB`,
+`LUA_BROWSER_MYCFLAGS`, and `LUA_BROWSER_MYLDFLAGS`.
 Unlike `make lua`, it reuses an installation only when the effective browser
 configuration and the installed archive and header digests match the record,
 and otherwise rebuilds in the fork's separate browser object directory
@@ -246,10 +247,10 @@ the three aggregate `--c-source` helpers, and `-X $(STDLIB_EXTRA_OBJECTS)`
 `titan-stdlib-browser-test` is a phony test goal (so it defaults to the
 `validation` profile) needing the installed compiler, native standard provider,
 browser SDK, `wasi-sdk` 34.0, Binaryen `version_133`, Node 26+ with JSPI, and
-a JSPI-capable headless Chromium.
-inventory before build setup. Under `BROWSER_SDK_ENV`, with `TITAN_PATH_0_6`
-pointing at the installed browser SDK, one installed
-`titanc -q --target browser --test --incremental --no-uv-bootstrap`
+a JSPI-capable headless Chromium. Its root check rejects an empty or duplicate
+`TITAN_STDLIB_BROWSER_TEST_ROOTS` inventory before build setup. Under
+`BROWSER_SDK_ENV`, with `TITAN_PATH_0_6` pointing at the installed browser SDK,
+one installed `titanc -q --target browser --test --incremental --no-uv-bootstrap`
 invocation compiles every root with
 `--c-source spec/fixtures/browser_runtime/close.c`; like the native
 aggregate, the owners drive their own `async` Runtimes.

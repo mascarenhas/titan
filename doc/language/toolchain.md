@@ -131,7 +131,7 @@ configuration.
 | `CC`, `AR`, `RANLIB` | Override the C compiler (`cc` on Unix, `clang.exe` on Windows), archiver, and `ranlib`. |
 | `CLANG_FORMAT` | Override the formatter run by `--pretty-print` (default: `clang-format`). |
 | `GCOV`, `GCOVR` | Default `gcov` and `gcovr` commands for `--coverage`. |
-| `WASI_SDK_PATH` | Active `wasi-sdk` 34.0 root (`$WASI_SDK_PATH/bin/clang`, `llvm-ar`, `llvm-ranlib`) for `--target browser`. |
+| `WASI_SDK_PATH` | Active `wasi-sdk` 34.0 root (`$WASI_SDK_PATH/bin/clang`, `llvm-ar`, `llvm-ranlib`, `wasm-ld`) for `--target browser`. |
 | `BINARYEN_ROOT`, `WASM_OPT` | Active Binaryen `version_133` root (`$BINARYEN_ROOT/bin/wasm-opt`) or explicit `wasm-opt` executable for `--target browser`. |
 | `MAKEFLAGS` | Inspected on Linux/macOS to share a GNU Make jobserver and switch terminal progress to plain lines. |
 | `TERM`, `NO_COLOR`, `COLUMNS` | Control terminal progress layout and ANSI color (`NO_COLOR` disables color without disabling live progress). |

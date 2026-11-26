@@ -92,11 +92,11 @@ without fallback paths.
    Titan compiles to C and hands optimization to the system C compiler—and to
    `wasi-sdk` Clang and Binaryen `wasm-opt` when targeting WebAssembly in the
    browser—rather than maintaining a custom code generator or JIT. Generated C
-   targets Lua's
-   typed Lua C API, avoiding redundant stack shuffling and type checks. The
-   trade-off is explicit: each Titan release pairs with a pinned minor version
-   of Lua (Lua 5.5.1), trading version independence for predictable,
-   straight-line native code.
+   targets Lua's pinned internal headers directly instead of going through the
+   dynamically typed Lua C API, avoiding redundant stack shuffling and type
+   checks. The trade-off is explicit: each Titan release pairs with a pinned
+   minor version of Lua (Lua 5.5.1), trading version independence for
+   predictable, straight-line native code.
 
 ## Lineage
 

@@ -570,6 +570,7 @@ Public `Type.Module` metadata does not expose private imports. An object's
 producer-chosen lowering remains in place; when it elects a dynamic provider,
 the [linked provider set](codegen-overview.md#the-linked-provider-set) can
 supply an owner from the same executable without changing that lowering.
+
 ## Generated import paths
 
 The `direct`, `handle`, and `global` bindings and their generated sequences are
@@ -625,9 +626,9 @@ Runtime, backtrace, Lua, `-l`, and final flags are not copied into the archive.
 The configured `AR` creates a regular archive with order-preserving `qDc`
 operations, split into command batches below a 64 KiB command-line ceiling
 (`archive_batches`, `ARCHIVE_SHELL_COMMAND_LIMIT`). The configured `RANLIB`
-`archive_tool_capabilities` probes both tools (for native `AR`/`RANLIB` and
-browser `llvm-ar`/`llvm-ranlib`) and falls back to `qc` and plain
-`ranlib` only when deterministic `D` is unsupported; it never substitutes
+indexes it with `-D`. `archive_tool_capabilities` probes both tools (for native
+`AR`/`RANLIB` and browser `llvm-ar`/`llvm-ranlib`) and falls back to `qc` and
+plain `ranlib` only when deterministic `D` is unsupported; it never substitutes
 another tool. Those four capability probes run through `run_argv`'s
 output-discard mode (`process.capture`), capturing and discarding tool
 stderr/stdout independently of `driver.LIVE_PROGRESS` so expected `qDc` or `-D`

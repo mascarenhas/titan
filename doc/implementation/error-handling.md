@@ -308,6 +308,7 @@ storage and never call `malloc`.
 **Synchronous capture transaction and descriptor preservation.** Capture
 executes as one synchronous JavaScript transaction in `titan-wasm-factory.mjs`
 (`createTrace`):
+
 1. Read the own property descriptors of `Error.stackTraceLimit` and
    `Error.prepareStackTrace` with `Object.getOwnPropertyDescriptor`, recording
    when either property is absent. Never read either property through ordinary
@@ -387,8 +388,10 @@ When the C merge falls back to Lua-only `CallInfo` enumeration (`st.status !=
 `titan-wasm-factory.mjs` (`instantiate`) fetches `<stem>.wasm` and
 `<stem>.wasm.trace` concurrently through `owner.options.locateFile(name,
 owner.image.directory)` (`fetch(path, {credentials: 'same-origin'})` in
-browsers, or `fs.readFileSync` via `process.getBuiltinModule('node:fs')` for
-local paths and `file:` URLs in Node). The runtime reads the
+browsers, or `fs.promises.readFile` via `process.getBuiltinModule('node:fs')`
+for local paths and `file:` URLs in Node; if `locateFile` throws while
+resolving the trace file, the error degrades the trace rather than failing
+initialization). The runtime reads the
 [trace table](browser-target.md#the-trace-table) that the compiler derived from
 the post-`wasm-opt` DWARF `.debug_line` section and never reads `.wasm.map`.
 `createTrace(views).load(bytesPromise, identity)` calls `readTable` to check
@@ -421,10 +424,11 @@ Unlike naive source-map offset lookup that extends a preceding segment across
 function boundaries and unmapped gaps, this check never attributes an unmapped
 wrapper or a no-debug Lua C function to an adjacent Titan function's lines, and
 never invents a line from a function index alone. If PC validation fails,
-symbolization still retains a verified
-that was inlined into a Titan function fails condition 3, so its frame has the
-declaring basename and no line, and no frame names a C file (titan#382). Titan
-code inlined from another `.titan` file keeps its own file and line.
+symbolization still retains a verified function name and declaring basename
+with `line = 0` (`UNKNOWN`). A PC in C that was inlined into a Titan function
+fails condition 3, so its frame has the declaring basename and no line, and no
+frame names a C file (titan#382). Titan code inlined from another `.titan` file
+keeps its own file and line.
 
 **Per-frame classification, entry registration (`TITAN_ENTRIES_KEY`), and
 rendering.** After `titan_browser_trace_capture` returns, `titan_trace_capture`

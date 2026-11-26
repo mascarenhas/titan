@@ -287,11 +287,11 @@ On Windows, run `make -f Makefile.win lua-browser` and
 `make -f Makefile.win browser-sdk` from MSYS2 CLANG64 (see
 [Build for the browser](windows-build.md#build-for-the-browser)).
 
-- `titanc` locates `clang` (along with `llvm-ar`, `llvm-ranlib`, `VERSION`, and
-  `share/wasi-sysroot`) under `$WASI_SDK_PATH` when `WASI_SDK_PATH` is set, or
-  via `PATH`, and requires exact `wasi-sdk` **34.0**. It locates `wasm-opt`
-  from `WASM_OPT`, then `$BINARYEN_ROOT/bin/wasm-opt`, then `PATH`, and
-  requires exact Binaryen **133** (`version_133`).
+- `titanc` locates `clang` (along with `llvm-ar`, `llvm-ranlib`, `wasm-ld`,
+  `VERSION`, and `share/wasi-sysroot`) under `$WASI_SDK_PATH` when
+  `WASI_SDK_PATH` is set, or via `PATH`, and requires exact `wasi-sdk` **34.0**.
+  It locates `wasm-opt` from `WASM_OPT`, then `$BINARYEN_ROOT/bin/wasm-opt`,
+  then `PATH`, and requires exact Binaryen **133** (`version_133`).
 - `make lua-browser` builds the fork's `browser` target into
   `$PREFIX/lib/browser/` using `wasm32-wasip1` and Phase 5 Wasm-EH `exnref`
   SJLJ (`-mexception-handling -mllvm -wasm-enable-sjlj

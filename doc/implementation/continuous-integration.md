@@ -311,20 +311,26 @@ disk-space step:
     `program` purpose and `loader_names` (a `--test` image) with the `test`
     purpose, because a contrary purpose is refused
     ([internal selection](browser-target.md#the-link-profile)), into
-    `out/browser/loader`, asserting `.mjs`, `.wasm`, `.wasm.map`, and
-    `.wasm.trace` for each. It also builds a second `loader_app` variant (under
-    a distinct build configuration) so the loader suite can pair two distinct
-    links crosswise to verify that a module refuses another link's `.wasm`, plus
-    an optimized `fidelity` image. The import check accepts the `entry` class
-    for `loader_names` and `entry,fixture:loader,fixture:controls` for the
-    `loader_app` and `fidelity` images, which link the loader fixture.
+    `out/browser/loader/program`, asserting `.mjs`, `.wasm`, `.wasm.map`, and
+    `.wasm.trace` for each. It also links both `loader_app` and `fidelity` a
+    second time into `out/browser/loader/optimized` with
+    `browser_link_options={purpose='baseline',optimization='O2'}` using the
+    checkout `titanc` with `TITAN_ROOT="$PREFIX"`, because a driver option sets
+    the profile. The import check accepts the `entry` class for `loader_names`
+    and `entry,fixture:loader,fixture:controls` for all four program images
+    (`loader_app` and `fidelity` in both `program` and `optimized`).
 12. **Loader suite.** The installed `titan-browser-run --timeout 300000
-    --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
-    workspace with relative image paths, runs under Node and then Chromium,
-    with output copied to `$RUNNER_TEMP/browser-loader.log`.
+    --grace 2000 --root "$GITHUB_WORKSPACE" --imports
+    spec/fixtures/browser_runtime/fixture-imports.mjs --js-test
+    spec/browser/loader.test.mjs`, given relative paths to `program/loader_app`,
+    `optimized/loader_app` (paired crosswise to verify that a module refuses
+    another link's `.wasm`), `--fidelity program/fidelity`, and `--names
+    program/loader_names`, runs under Node and then Chromium, with output copied
+    to `$RUNNER_TEMP/browser-loader.log`.
 13. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
-    runs against the optimized image under both engines with the same timeout
-    and grace and output copied to `$RUNNER_TEMP/browser-guard.log`.
+    runs against `out/browser/loader/optimized/fidelity.mjs` under both engines
+    with the same `--root`, `--imports`, timeout, and grace, with output copied
+    to `$RUNNER_TEMP/browser-guard.log`.
 14. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
     `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
     `TITAN_BROWSER_RUNNER` (the installed launcher), and
@@ -384,9 +390,9 @@ After step 7, `browser-stdlib` runs:
 
 On the `scheduler` shard, the browser semantic release pack suite runs with
 `wasi-sdk` and Binaryen absent from the environment. It stages a private copy
-of the SDK, pairs
-reproducibility, relocation, and rejection of invalid pairs. Run the same gate
-locally from the matching checkout:
+of the SDK, pairs it with a source rock from the exact pinned source tree, and
+exercises pack reproducibility, relocation, and rejection of invalid pairs. Run
+the same gate locally from the matching checkout:
 
 ```sh
 TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover \
@@ -395,11 +401,11 @@ TITAN_PACK_TEST_PREFIX="$PREFIX" python3 -B -m unittest discover \
 Ordinary compiler shards also invoke the Python pack suite through Busted.
 The SDK-free transport cases always run; the full cases need both an
 installed browser SDK and a Git checkout containing the pinned objects.
-
 8. **Complete browser core stdlib suite (`sdk` only).** With `WASI_SDK_PATH`
    and `BINARYEN_ROOT` set and `set -euo pipefail`,
-   `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
-   builds all twenty-three browser-portable owners into one validation-profile
+   `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs once, unfiltered, its
+   output copied to `$RUNNER_TEMP/browser-stdlib.log`. It builds all
+   twenty-three browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
    checks dependency closure and the image's `entry` imports against the
    [import manifest](browser-target.md#import-manifest), applies the [subset parity
@@ -427,7 +433,8 @@ installed browser SDK and a Git checkout containing the pinned objects.
    once, without overlap, and the core suite to run only in `sdk`. A missing
    gate file fails with the same message before Busted starts. The
    entry-gate, bridge, scheduler, stdlib gate, network, fixture, and minicoro
-   specs build their images and run both engines. The network spec
+   specs build their images and run both engines. The network spec runs the
+   [live browser network harness](browser-target.md#the-live-browser-network-harness),
    with verified TLS on both engines. The bridge uses its dedicated
    native Titan test owner with explicit JavaScript bindings, rather than
    adding it to the ordinary core aggregate; the scheduler spec drives the
@@ -611,8 +618,9 @@ cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
    image"` runs the pin that observes the production object and link profile
    from a real production installation and verifies a real production image
    (`$RUNNER_TEMP/browser-production-pins.log`). A validation installation
-   cannot stand in for the pin, so it is pending in every validation run,
-   including the `browser-stdlib` job.
+   cannot stand in for the frame-flags pin, so it is pending in every
+   validation run, including the `browser-stdlib` job; the linked-image case
+   runs there too, on a validation image.
 12. **Production trace gate on Node (same cell).** Node is the binding engine
    for the [browser C-call limit](browser-target.md#the-browser-c-call-limit),
    and the `browser-toolchain` job's Node gate runs a validation installation

@@ -64,6 +64,7 @@ The loader's parts:
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
 `titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
 host tooling outside the image.
+
 ## Generated launcher and foreign-function trampolines
 
 `browserentry.lua` and `driver.browser_entrypoint_contents` generate the image
@@ -448,8 +449,12 @@ learn about the callback only through `titan_no_switch`.
   callback nested in a binding that Task called, or, from a microtask between
   two internal coroutine hops, possibly a coroutine's stack. Titan keeps no
   C-stack counter of its own and Lua's `LUAI_MAXCCALLS` starts afresh on a
-  callback thread, so Binaryen's `--stack-check` checked stack is the limit;
-  overflowing it aborts and poisons the instance.
+  callback thread, so Binaryen's `--stack-check` checked stack is the limit:
+  overflowing the checked stack in a prologue traps (`RuntimeError:
+  unreachable`, producing `TITAN_BROWSER_TRAP`), while a clobbered coroutine
+  stack cookie detected at a coroutine switch aborts (`TITAN_BROWSER_ABORT`
+  with `Stack overflow! Stack cookie has been overwritten at 0x…`); either
+  poisons the instance.
 
 ## Synchronous wrapper release
 
@@ -857,6 +862,7 @@ callback does.
 `mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
 `admission.mjs` runs the admission matrix of the loader: every application
 method, wrapper release, `malloc`/`free` and the trace view, each from a
+parked wait, a macrotask between turns, a microtask between internal coroutine
 hops, and a binding the drive invoked. Release also runs from a synchronous
 callback's binding, with capture collection checked in each context.
 It also covers owner and other-state request
