@@ -45,16 +45,19 @@ unsigned int budget_last_stack_span(void) { return last_stack_span; }
 unsigned int budget_last_stack_free(void) { return last_stack_free; }
 void budget_wait(void) { fixture_sleep(1); }
 
-/* The installed bounds must be the running context's own stack, the
- * coroutine's minicoro allocation or wasm-ld's main stack, and hold the live
- * stack pointer. */
+/* Titan's coroutines run on per-state minicoro runtimes, which mco_running()
+ * does not report; the installed bounds name the running stack. Main runs on
+ * wasm-ld's stack, and each coroutine on its own allocation above it. */
+static int budget_on_main(const uint32_t state[5]) {
+  return state[STACK_LOW] == (uintptr_t)&__stack_low;
+}
+/* The installed bounds hold the live stack pointer: exactly wasm-ld's stack
+ * on main, an allocation above it in a coroutine. */
 static void budget_installed_stack(uint32_t state[5]) {
-  mco_coro *co = mco_running();
-  uintptr_t low = co ? (uintptr_t)co->stack_base : (uintptr_t)&__stack_low;
-  uintptr_t high = co ? low + co->stack_size : (uintptr_t)&__stack_high;
   budget_stack_state(state);
-  if (state[STACK_LOW] != low || state[STACK_HIGH] != high ||
-      state[STACK_POINTER] < state[STACK_LOW] || state[STACK_POINTER] >= state[STACK_HIGH]) abort();
+  if (state[STACK_POINTER] < state[STACK_LOW] || state[STACK_POINTER] >= state[STACK_HIGH]) abort();
+  if (budget_on_main(state) ? state[STACK_HIGH] != (uintptr_t)&__stack_high :
+      state[STACK_LOW] < (uintptr_t)&__stack_high) abort();
 }
 static unsigned int budget_stack_free(void) {
   uint32_t state[5];
@@ -76,24 +79,22 @@ static void budget_record_stack(const void *frame) {
  * coroutine switches away or resumes. */
 int budget_cookie_main(void) {
   uint32_t state[5];
-  if (mco_running()) abort();
   budget_installed_stack(state);
-  return state[STACK_LOW] == 0 &&
+  return budget_on_main(state) && state[STACK_LOW] == 0 &&
     !(state[STACK_COOKIE] == BUDGET_COOKIE && state[STACK_COOKIE_HIGH] == BUDGET_COOKIE_HIGH);
 }
 int budget_cookie_coroutine(void) {
   uint32_t state[5];
-  if (!mco_running()) abort();
   budget_installed_stack(state);
-  return state[STACK_LOW] != 0 &&
+  return !budget_on_main(state) &&
     state[STACK_COOKIE] == BUDGET_COOKIE && state[STACK_COOKIE_HIGH] == BUDGET_COOKIE_HIGH;
 }
 /* Overwrite the running coroutine's cookie without overflowing: the factory
  * aborts when the coroutine next switches away. */
 void budget_overwrite_cookie(void) {
   uint32_t state[5];
-  if (!mco_running()) abort();
   budget_installed_stack(state);
+  if (budget_on_main(state)) abort();
   *(volatile uint32_t *)(uintptr_t)state[STACK_LOW] = ~BUDGET_COOKIE;
 }
 
