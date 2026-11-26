@@ -226,6 +226,25 @@ describe("C FFI ctype registration", function()
         assert.same({ "int" }, ftypes.ffi_values.type)
     end)
 
+    it("registers thread-local objects and keeps the declarations after them", function()
+        -- wasi-libc's errno.h spells errno this way; an unknown storage class
+        -- used to swallow the following typedefs and drop every declaration
+        -- that depended on them.
+        local ftypes = parse_header([[
+            extern _Thread_local int errno;
+            typedef long long time_t;
+            struct timespec { time_t tv_sec; long tv_nsec; };
+            static _Thread_local unsigned ffi_counter;
+            typedef struct TValue TValue;
+        ]])
+
+        assert.same({ "int" }, ftypes.errno.type)
+        assert.same({ "unsigned" }, ftypes.ffi_counter.type)
+        assert.equal("typedef", ftypes.time_t.type)
+        assert.equal("typedef", ftypes.TValue.type)
+        assert.is_truthy(ftypes["struct@timespec"])
+    end)
+
     it("parses TValue typedefs, functions, and arrays for the Titan FFI layer", function()
         local ftypes = parse_header([[
             typedef struct TValue TValue;

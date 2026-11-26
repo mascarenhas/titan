@@ -653,6 +653,8 @@ local qualifiers = {
     ["restrict"] = true,
     ["inline"] = true,
     ["register"] = true,
+    -- wasi-libc declares `extern _Thread_local int errno;`.
+    ["_Thread_local"] = true,
 }
 
 get_type = function(lst, spec, ret_pointer)

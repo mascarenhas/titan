@@ -500,6 +500,7 @@ storageClassSpecifier <- { "typedef"  } _
                        / { "static"   } _
                        / { "auto"     } _
                        / { "register" } _
+                       / { "_Thread_local" } _
 
 typeSpecifier <- typedefName
                / { "void"        } _

@@ -436,7 +436,10 @@ enum wasm_u64_enum { WASM_U64 = 18446744073709551615ULL };
 
         local all_ids = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }
         for _, short_enums in ipairs({ false, true }) do
-            local cflags = { "--std=c99", "-O2", "-Wall", "-Werror" }
+            -- The probe preamble includes the browser Lua and Titan headers:
+            -- they need the record's defines (`l_signalT`) and setjmp's
+            -- exception handling, like every browser compile.
+            local cflags = toolchain.with_lua_defines(info, { "--std=c99", "-O2", "-Wall", "-Werror" }, SJLJ)
             if short_enums then cflags[#cflags + 1] = "-fshort-enums" end
             local service = assert(cprobe.new_service({
                 compiler_argv = browser_target.compiler_argv(info.tools),
