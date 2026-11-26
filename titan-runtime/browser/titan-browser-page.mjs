@@ -51,9 +51,7 @@ export function observeImage(create, control, allowDegradedTrace = false) {
                 // Abort/trap observations survive a caller's catch. Protocol
                 // poison stays local when explicitly handled; an uncaught
                 // operation rejection still follows the runner's failure path.
-                if (event.kind === "abort") control({ type: "abort", reason: reason(event.cause) });
-                else if (event.kind === "trap") control({ type: "failure", category: "trap",
-                    reason: reason(event.cause), knownTrap: true });
+                if (event.kind === "abort" || event.kind === "trap") control({ type: event.kind, reason: reason(event.cause) });
             }
         },
     });
