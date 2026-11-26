@@ -1215,10 +1215,12 @@ test("initialization waits for one delayed trace lookup and degrades a throwing 
     const args = ["--filter=^runner_image[.]test_bytes$"];
     // An HTTP source holds the table until the test releases it, while the
     // Wasm itself loads from the image directory.
-    let requests = 0, release;
+    let requests = 0, release, requested;
     const held = new Promise(resolve => { release = resolve; });
+    const firstRequest = new Promise(resolve => { requested = resolve; });
     const server = createServer(async (request, response) => {
         requests++;
+        requested();
         await held;
         response.writeHead(200, {"Content-Type": "application/octet-stream"});
         response.end(table);
@@ -1238,7 +1240,20 @@ test("initialization waits for one delayed trace lookup and degrades a throwing 
         let settled = false;
         const initializing = delayed.initialize();
         initializing.then(() => { settled = true; }, () => { settled = true; });
-        while (requests === 0) await new Promise(resolve => setTimeout(resolve, 5));
+        // Wait for the held request, but no longer than initialization lasts
+        // or a bounded time.
+        const early = initializing.then(() => {
+            throw new Error("initialization finished before requesting its trace table");
+        });
+        early.catch(() => {});
+        let timer;
+        await Promise.race([
+            firstRequest,
+            early,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("the image never requested its trace table")), 30000);
+            }),
+        ]).finally(() => clearTimeout(timer));
         // The Wasm compiles while the table is held; the loader runs the C
         // constructors only after the factory has indexed the table.
         await new Promise(resolve => setTimeout(resolve, 250));

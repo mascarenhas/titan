@@ -134,7 +134,7 @@ local function cookie_boundary(context: test.Context)
   test.assert(ffi.budget_cookie_main() ~= 0, "the main stack has a cookie or a nonzero low bound")
   local owner = coroutine.create(function(_: value): value
     test.assert(ffi.budget_cookie_coroutine() ~= 0, "the coroutine stack cookie was not installed")
-    coroutine.yield("switched")
+    coroutine.yield("switched", "cookie")
     test.assert(ffi.budget_cookie_coroutine() ~= 0, "the coroutine stack cookie changed across a switch")
     return 45
   end, "cookie")
@@ -149,7 +149,7 @@ end
 local function cookie_overwrite()
   local owner = coroutine.create(function(_: value): value
     ffi.budget_overwrite_cookie()
-    coroutine.yield("switched")
+    coroutine.yield("switched", "cookie-overwrite")
     return nil
   end, "cookie-overwrite")
   owner:resume(nil)
