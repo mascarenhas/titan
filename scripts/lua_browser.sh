@@ -60,7 +60,7 @@ fi
 clang=clang$tool_suffix
 llvm_ar=llvm-ar$tool_suffix
 llvm_ranlib=llvm-ranlib$tool_suffix
-remedy="install wasi-sdk-34.0 from https://github.com/WebAssembly/wasi-sdk/releases and set WASI_SDK_PATH to its directory"
+remedy="install wasi-sdk-34 from https://github.com/WebAssembly/wasi-sdk/releases and set WASI_SDK_PATH to its directory"
 
 resolved_cc=
 if [ -n "$browser_cc" ]; then
@@ -73,7 +73,7 @@ elif [ -n "$wasi_sdk" ]; then
 	if [ -x "$candidate" ]; then
 		resolved_cc=$candidate
 	else
-		fail "browser target requires wasi-sdk 34.0: clang not found at \"$candidate\" (WASI_SDK_PATH=\"$WASI_SDK_PATH\"); $remedy"
+		fail "browser target requires wasi-sdk 34: clang not found at \"$candidate\" (WASI_SDK_PATH=\"$WASI_SDK_PATH\"); $remedy"
 	fi
 else
 	# A wasi-sdk clang has a sibling ../VERSION; a host clang earlier on PATH
@@ -87,16 +87,16 @@ else
 		fi
 	done
 	IFS=$saved_ifs
-	[ -n "$resolved_cc" ] || fail "browser target requires wasi-sdk 34.0: no wasi-sdk clang on PATH (WASI_SDK_PATH is unset, and a wasi-sdk clang has a sibling ../VERSION); $remedy"
+	[ -n "$resolved_cc" ] || fail "browser target requires wasi-sdk 34: no wasi-sdk clang on PATH (WASI_SDK_PATH is unset, and a wasi-sdk clang has a sibling ../VERSION); $remedy"
 fi
 
 if [ -n "$resolved_cc" ]; then
 	sdk_bin=$(CDPATH= cd "$(dirname "$resolved_cc")" && pwd)
 	if [ -z "$browser_ar" ] && [ ! -x "$sdk_bin/$llvm_ar" ]; then
-		fail "browser target requires wasi-sdk 34.0: llvm-ar not found at \"$sdk_bin/$llvm_ar\" (clang=\"$resolved_cc\"); $remedy"
+		fail "browser target requires wasi-sdk 34: llvm-ar not found at \"$sdk_bin/$llvm_ar\" (clang=\"$resolved_cc\"); $remedy"
 	fi
 	if [ -z "$browser_ranlib" ] && [ ! -x "$sdk_bin/$llvm_ranlib" ]; then
-		fail "browser target requires wasi-sdk 34.0: llvm-ranlib not found at \"$sdk_bin/$llvm_ranlib\" (clang=\"$resolved_cc\"); $remedy"
+		fail "browser target requires wasi-sdk 34: llvm-ranlib not found at \"$sdk_bin/$llvm_ranlib\" (clang=\"$resolved_cc\"); $remedy"
 	fi
 	PATH="$sdk_bin:$PATH"
 	export PATH
@@ -225,8 +225,8 @@ check_reuse() {
 		[ -n "$cfg_sjlj" ] && [ -n "$cfg_cflags" ] || return 1
 
 	cc_path=$(command -v "$cfg_cc" 2>/dev/null) || return 1
-	found_ver=$(sed -n 1p "${cc_path%/*}/../VERSION" 2>/dev/null || true)
-	[ "$found_ver" = "$cfg_wasi_sdk" ] || return 1
+	found_ver=$(sed -n 1p "${cc_path%/*}/../VERSION" 2>/dev/null | tr -d '\r' || true)
+	printf '%s\n' "$found_ver" | grep -Eq "^${cfg_wasi_sdk}(\.[0-9]+)*$" || return 1
 
 	src_abs=$(CDPATH= cd "$lua_dir/src" && pwd)
 	root_abs=$(CDPATH= cd "$lua_dir" && pwd)

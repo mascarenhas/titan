@@ -99,7 +99,7 @@ describe("Wasm real-toolchain object and archive metadata", function()
         return path
     end
 
-    it("reads untouched generated .titan.meta, .titan.source and .titan.cprobe from wasi-sdk 34.0 clang", function()
+    it("reads untouched generated .titan.meta, .titan.source and .titan.cprobe from wasi-sdk 34 clang", function()
         local info, why = toolchain.require()
         if not info then pending(why) return end
         local cc = browser_target.compiler_argv(info.tools)

@@ -668,7 +668,7 @@ cell has four vCPUs and a 60-minute timeout and runs after `build-compiler`:
 ## `browser-packaging` job
 
 `browser-packaging` (`browser packaging, clean checkout and records
-(ubuntu-24.04, wasi-sdk 34.0, Binaryen 133, Node 26, Playwright 1.64.1 Chromium)`) installs
+(ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26, Playwright 1.64.1 Chromium)`) installs
 Titan as a new user does, from the manuals alone, and records the release
 profile. It has no `needs` and takes nothing from another job: no prepared
 tree and no C-probe or native-dependency cache. The workflow's own

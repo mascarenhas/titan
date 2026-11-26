@@ -1,7 +1,7 @@
 -- Shared real-toolchain gate. Pure/synthesized browser specs do not use this.
 --
 -- `detect()`/`require()` keep #328's compile-only contract: a verified
--- wasi-sdk 34.0, Binaryen 133 and the fork's installed browser Lua. An
+-- wasi-sdk 34, Binaryen 133 and the fork's installed browser Lua. An
 -- explicit requirement table adds capabilities on top of it:
 --
 --   { node = true }                                  -- Node 26+ through the runner

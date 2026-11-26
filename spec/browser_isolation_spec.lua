@@ -221,7 +221,7 @@ end
 
         ok, _, diagnostics = loader("foreign_header")
         assert.is_true(ok)
-        assert.truthy(table.concat(diagnostics, "\n"):find("browser foreign C work needs wasi-sdk 34.0", 1, true))
+        assert.truthy(table.concat(diagnostics, "\n"):find("browser foreign C work needs wasi-sdk 34", 1, true))
         assert.equal("browser-foreign-unavailable", subject.browser_foreign_cache_identity({ context = browser }))
         assert.same({ foreign_header = true }, browser.browser_foreign_modules)
         assert.equal(cache_identity, assert(subject.language_server_cache_identity({ context = browser })))

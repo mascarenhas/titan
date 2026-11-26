@@ -93,7 +93,7 @@ function M.record(overrides)
     end
     local record = { fork_revision = string.rep("a", 40),
         archive_sha256 = sha256.hex(archive), headers_sha256 = sha256.hex(table.concat(header_lines)),
-        wasi_sdk_version = "34.0", target = "wasm32-wasip1",
+        wasi_sdk_version = "34", target = "wasm32-wasip1",
         wasm_features = M.features, sjlj = "wasm-exnref",
         lua_defines = "-DLUA_USE_BROWSER -D_WASI_EMULATED_PROCESS_CLOCKS",
         numeric = "integer=long long,float=double",
@@ -144,7 +144,7 @@ function M.descriptor(root, overrides)
         tools = { cc = { sdk .. "/bin/clang" .. suffix }, ar = { sdk .. "/bin/llvm-ar" .. suffix },
             ranlib = { sdk .. "/bin/llvm-ranlib" .. suffix }, ld = { sdk .. "/bin/wasm-ld" .. suffix },
             sysroot = sdk .. "/share/wasi-sysroot",
-            version = "34.0", source = "WASI_SDK_PATH", location = sdk,
+            version = "34", source = "WASI_SDK_PATH", location = sdk,
             version_output = "clang version 23.1.0-wasi-sdk\n",
             optimizer = { argv = { (platform.windows and "C:" or "") .. "/binaryen/bin/wasm-opt" .. suffix },
                 version = "133", source = "BINARYEN_ROOT", version_output = "wasm-opt version 133 (version_133)\n" } },
@@ -152,7 +152,7 @@ function M.descriptor(root, overrides)
         target_defines = { table.unpack(M.target_defines) }, paths = paths,
         lua = { path = paths.lua_record, record = record, record_sha256 = sha256.hex(record_text) },
         profile_data = profile, profile_identity = profile.identity, fingerprint = M.fingerprint(),
-        probe_cache_directory = paths.root .. "/var/cache/titan-probes/browser-34.0/" .. cprobe_cache.VERSION,
+        probe_cache_directory = paths.root .. "/var/cache/titan-probes/browser-34/" .. cprobe_cache.VERSION,
         output_policy = { requires_output = true, marker = ".titan-target", marker_contents = "browser\n" },
         provider_policy = { archive_only = true, sdk_first = true, dynamic = false } }
     for key, value in pairs(overrides or {}) do data[key] = value end

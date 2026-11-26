@@ -999,7 +999,7 @@ used them (including failures), and compare the identity on restoration in a
 fresh resolver. Do not request live validation for a publication with no such
 dependency.
 
-The lazy path locates pinned `wasi-sdk` 34.0, verifies the selected SDK's Lua
+The lazy path locates pinned `wasi-sdk` 34, verifies the selected SDK's Lua
 headers, and compares the live C profile and Wasm object fingerprint to the
 published target before serving a header or an acceptance probe. It can use the
 same SDK's packaged `src/lua-5.5.1` headers when `lib/browser/include` is absent
@@ -2239,7 +2239,7 @@ diagnostics and optional typed enum selection at
 `TITAN_PREFIX` when set and otherwise the installation root. Clear that
 directory or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse if
 external changes make results stale. Browser probes use the separate
-directory `<prefix>/var/cache/titan-probes/browser-34.0/2/`
+directory `<prefix>/var/cache/titan-probes/browser-34/2/`
 ([Probe-cache isolation](browser-target.md#probe-cache-isolation)). Generated C is compiled normally. See
 [compiled probe caching](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results)
 for record and failure handling.
@@ -3313,7 +3313,7 @@ table below maps contributor-internal variables and compiler-side readers:
 
 | Variable | Read by | Default | Compiler-internal role |
 | --- | --- | --- | --- |
-| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache (`var/cache/titan-probes/2` and `var/cache/titan-probes/browser-34.0/2`). |
+| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache (`var/cache/titan-probes/2` and `var/cache/titan-probes/browser-34/2`). |
 | `TITAN_PROBE_CACHE_DISABLE` | `driver.lua` | unset | Exact value `1` disables persistent C-probe reuse. |
 | `TITAN_RUNTIME_PREBUILT` | `driver.lua` `check_runtime` | unset | Exact value `1` skips the checkout `libtitan.a` rebuild. |
 | `MAKE` | `driver.lua` `check_runtime` | `make` | Make command for checkout runtime archive rebuilds. |

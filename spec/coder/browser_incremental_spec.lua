@@ -810,7 +810,7 @@ end
         assert.equal(provider, load(native_loader, "warm.provider"))
         local browser = context("browser")
         assert.is_string(browser.target_descriptor.identity)
-        assert.equal("34.0", browser.target_descriptor.tools.version)
+        assert.equal("34", browser.target_descriptor.tools.version)
         assert.equal("133", browser.target_descriptor.tools.optimizer.version)
         local native_path = subject.TITAN_BIN_PATH
         subject.TITAN_BIN_PATH = fixture.source

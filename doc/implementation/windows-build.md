@@ -1142,7 +1142,7 @@ refer to the same location.
 
 The CLI admits `--target browser` on Windows; browser option-policy tests
 assert the same disabled-line-directive diagnostic on all three hosts.
-Browser object compilation uses the fork's browser Lua, `wasi-sdk` 34.0, and
+Browser object compilation uses the fork's browser Lua, `wasi-sdk` 34, and
 Binaryen `version_133`, not the native DLL and compiler. Run `lua-browser` and `browser-sdk` through
 `Makefile.win` under MSYS2 CLANG64. The SDK's Wasm archives and JavaScript
 are published under `lib/titan-browser/0.6/`; the runner's job supervisor

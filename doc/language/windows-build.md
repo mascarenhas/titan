@@ -116,7 +116,7 @@ Windows output layout and limits:
 ## Build for the browser
 
 Run browser builds from the MSYS2 CLANG64 shell (not `cmd` or PowerShell).
-Install `wasi-sdk` 34.0 and Binaryen `version_133` (set `WASI_SDK_PATH` and
+Install `wasi-sdk` 34 and Binaryen `version_133` (set `WASI_SDK_PATH` and
 `BINARYEN_ROOT` or `WASM_OPT`), install Node 26+, and set `TITAN_NODE` (or put
 Node 26+ first on `PATH`):
 

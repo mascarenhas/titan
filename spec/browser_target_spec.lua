@@ -22,7 +22,7 @@ local other_library_series = require "spec.support.other_library_series"
 local FAKE_ROOT = platform.windows and "C:/fake" or "/fake"
 local LUA_REMEDY = platform.windows and "mingw32-make -f Makefile.win lua-browser" or "make install-browser"
 local PATH_SEPARATOR = platform.windows and ";" or ":"
-local SDK_INSTALL = "; install wasi-sdk 34.0 (https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34)" ..
+local SDK_INSTALL = "; install wasi-sdk 34 (https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34)" ..
     " and set WASI_SDK_PATH to its root"
 local OPTIMIZER_INSTALL = "; install Binaryen version_133" ..
     " (https://github.com/WebAssembly/binaryen/releases/tag/version_133)" ..
@@ -51,7 +51,7 @@ local function fresh_driver()
     return subject
 end
 
--- A fake filesystem holding the browser Lua installation, one wasi-sdk 34.0
+-- A fake filesystem holding the browser Lua installation, one wasi-sdk 34
 -- (`<tool_root>/wasi-sdk`) and one Binaryen 133 (`<tool_root>/binaryen`).
 -- `missing` names one installed file to remove: "clang", "llvm-ar",
 -- "llvm-ranlib", "wasm-ld", "wasm-opt" or "VERSION". `unstartable` and `failing` name a
@@ -147,7 +147,7 @@ local function fake_context(options)
     return { io = strategy, extra_ffi_include_dirs = {} },
         { paths = paths, runtime_include = paths.include,
             build_profile = options.build_profile or "validation",
-            probe_cache_directory = tool_root .. "/probes/browser-34.0/" .. cprobe_cache.VERSION },
+            probe_cache_directory = tool_root .. "/probes/browser-34/" .. cprobe_cache.VERSION },
         calls, files, record, directories
 end
 
@@ -212,8 +212,8 @@ describe("browser target descriptor", function()
         assert.is_nil(strategy:stat(directory))
     end)
 
-    it("pins wasi-sdk 34.0, Binaryen 133, the target compiler argv and both object profiles", function()
-        assert.equal("34.0", browser.WASI_SDK_VERSION)
+    it("pins wasi-sdk 34, Binaryen 133, the target compiler argv and both object profiles", function()
+        assert.equal("34", browser.WASI_SDK_VERSION)
         assert.equal("133", browser.BINARYEN_VERSION)
         assert.is_nil(browser.EMSCRIPTEN_VERSION)
         -- One launch envelope unsets every variable clang reads to edit its
@@ -254,7 +254,7 @@ describe("browser target descriptor", function()
         assert.equal("wasm32-wasip1", descriptor.triple)
         assert.same({ cc = { clang }, ar = { sdk .. "/bin/llvm-ar" .. suffix },
             ranlib = { sdk .. "/bin/llvm-ranlib" .. suffix }, ld = { sdk .. "/bin/wasm-ld" .. suffix },
-            sysroot = sysroot, version = "34.0",
+            sysroot = sysroot, version = "34",
             source = "WASI_SDK_PATH", location = sdk, version_output = CLANG_VERSION,
             optimizer = { argv = { optimizer }, version = "133", source = "BINARYEN_ROOT",
                 version_output = OPTIMIZER_VERSION } }, browser.export(descriptor.tools))
@@ -262,7 +262,7 @@ describe("browser target descriptor", function()
         assert.equal("integer=long long,float=double", descriptor.lua.record.numeric)
         assert.equal("wasm-exnref", descriptor.lua.record.sjlj)
         assert.equal("wasm32-wasip1", descriptor.lua.record.target)
-        assert.equal("34.0", descriptor.lua.record.wasi_sdk_version)
+        assert.equal("34", descriptor.lua.record.wasi_sdk_version)
         assert.equal(32, descriptor.profile_data.integers.long.bits)
         assert.equal(64, descriptor.profile_data.integers["long long"].bits)
         assert.equal(fixtures.features, descriptor.fingerprint.features)
@@ -339,7 +339,7 @@ describe("browser target descriptor", function()
             local data = assert(browser.decode_analysis(nil, bytes))
             assert.equal(build_profile, data.build_profile)
             assert.equal("wasm32-wasip1", data.triple)
-            assert.equal("34.0", data.wasi_sdk_version)
+            assert.equal("34", data.wasi_sdk_version)
             assert.is_nil(data.emscripten_version)
             assert.equal(provider, data.provider_sha256)
             assert.equal(absent, data.absent_sha256)
@@ -991,7 +991,7 @@ assert(file:close())
         local sdk, suffix = FAKE_ROOT .. "/wasi-sdk", platform.windows and ".exe" or ""
         local optimizer = FAKE_ROOT .. "/binaryen/bin/wasm-opt" .. suffix
         local function requires_sdk(detail)
-            return "browser target requires wasi-sdk 34.0: " .. detail .. SDK_INSTALL
+            return "browser target requires wasi-sdk 34: " .. detail .. SDK_INSTALL
         end
         local function requires_optimizer(detail)
             return "browser target requires Binaryen version_133 wasm-opt: " .. detail .. OPTIMIZER_INSTALL
@@ -1033,14 +1033,18 @@ assert(file:close())
         end
     end
 
-    it("reads the wasi-sdk release from the first line of its VERSION file", function()
-        for _, row in ipairs({ { "34.0\r\nwasi-libc: fixture\r\n", true }, { "34.0", true },
-                { "34.0.1\n", false }, { "34\n", false }, { "\n34.0\n", false } }) do
+    it("accepts the wasi-sdk major series and its numeric point releases from VERSION line 1", function()
+        for _, row in ipairs({
+                { "34.0\r\nwasi-libc: fixture\r\n", true }, { "34.0", true },
+                { "34.1\n", true }, { "34.0.1\n", true }, { "34\n", true },
+                { "33.0\n", false }, { "35.0\n", false }, { "340\n", false },
+                { "34.\n", false }, { "34..0\n", false }, { "34.0-rc1\n", false },
+                { "\n34.0\n", false } }) do
             local context, inputs = fake_context({ version_file = row[1] })
             local descriptor, err = browser.build(context, inputs)
             if row[2] then
                 assert.truthy(descriptor, err)
-                assert.equal("34.0", descriptor.tools.version)
+                assert.equal("34", descriptor.tools.version)
             else
                 assert.is_nil(descriptor)
                 contains(err, '/wasi-sdk/VERSION" reports ')
@@ -1064,7 +1068,7 @@ assert(file:close())
             assert.equal(FAKE_ROOT .. "/wasi-sdk/bin/wasm-ld" .. suffix, descriptor.tools.ld[1])
             assert.equal(FAKE_ROOT .. "/wasi-sdk/share/wasi-sysroot", descriptor.tools.sysroot)
         end
-        local empty = "browser target requires wasi-sdk 34.0: no wasi-sdk clang on PATH " ..
+        local empty = "browser target requires wasi-sdk 34: no wasi-sdk clang on PATH " ..
             "(WASI_SDK_PATH unset; a wasi-sdk clang has a sibling ../VERSION)" .. SDK_INSTALL
         for _, search in ipairs({ FAKE_ROOT .. "/usr/bin", false }) do
             platform.getenv = environment({ BINARYEN_ROOT = FAKE_ROOT .. "/binaryen", PATH = search or nil })
@@ -1229,12 +1233,12 @@ assert(file:close())
             local root = windows and "C:/project" or "/project"
             local function check()
                 for _, row in ipairs({
-                    { { WASI_SDK_PATH = "kit" }, "wasi-sdk 34.0", "kit", SDK_INSTALL },
+                    { { WASI_SDK_PATH = "kit" }, "wasi-sdk 34", "kit", SDK_INSTALL },
                     { { WASI_SDK_PATH = root .. "/wasi-sdk", BINARYEN_ROOT = "binaryen" },
                         "Binaryen version_133 wasm-opt", "binaryen", OPTIMIZER_INSTALL },
                     { { WASI_SDK_PATH = root .. "/wasi-sdk", WASM_OPT = "bin/wasm-opt" },
                         "Binaryen version_133 wasm-opt", "bin/wasm-opt", OPTIMIZER_INSTALL },
-                    { { PATH = "relative/bin" }, "wasi-sdk 34.0", "relative/bin", SDK_INSTALL },
+                    { { PATH = "relative/bin" }, "wasi-sdk 34", "relative/bin", SDK_INSTALL },
                     { { WASI_SDK_PATH = root .. "/wasi-sdk", PATH = "relative/bin" },
                         "Binaryen version_133 wasm-opt", "relative/bin", OPTIMIZER_INSTALL },
                 }) do
@@ -1260,7 +1264,7 @@ assert(file:close())
         platform.windows = true
         local root = "C:/fixture"
         for _, row in ipairs({
-            { "clang", false, root .. "/wasi-sdk/bin", "wasi-sdk 34.0", 0 },
+            { "clang", false, root .. "/wasi-sdk/bin", "wasi-sdk 34", 0 },
             { "wasm-opt", root .. "/wasi-sdk", root .. "/binaryen/bin", "Binaryen version_133 wasm-opt", 1 },
         }) do
             local tool, configured, directory, requirement, launched = table.unpack(row)
@@ -1293,10 +1297,10 @@ assert(file:close())
             if name == "BINARYEN_ROOT" then return root .. "/binaryen" end
         end
         for _, row in ipairs({
-            { root .. "/wasi-sdk/bin/clang.exe", "wasi-sdk 34.0", SDK_INSTALL, 0 },
-            { root .. "/wasi-sdk/bin/llvm-ar.exe", "wasi-sdk 34.0", SDK_INSTALL, 1 },
-            { root .. "/wasi-sdk/bin/llvm-ranlib.exe", "wasi-sdk 34.0", SDK_INSTALL, 1 },
-            { root .. "/wasi-sdk/bin/wasm-ld.exe", "wasi-sdk 34.0", SDK_INSTALL, 1 },
+            { root .. "/wasi-sdk/bin/clang.exe", "wasi-sdk 34", SDK_INSTALL, 0 },
+            { root .. "/wasi-sdk/bin/llvm-ar.exe", "wasi-sdk 34", SDK_INSTALL, 1 },
+            { root .. "/wasi-sdk/bin/llvm-ranlib.exe", "wasi-sdk 34", SDK_INSTALL, 1 },
+            { root .. "/wasi-sdk/bin/wasm-ld.exe", "wasi-sdk 34", SDK_INSTALL, 1 },
             { root .. "/binaryen/bin/wasm-opt.exe", "Binaryen version_133 wasm-opt", OPTIMIZER_INSTALL, 1 },
         }) do
             local candidate, requirement, install, launched = table.unpack(row)
@@ -1320,7 +1324,7 @@ assert(file:close())
         platform.windows = true
         local root = "C:/fixture"
         for _, row in ipairs({
-            { false, "wasi-sdk 34.0", SDK_INSTALL, 0 },
+            { false, "wasi-sdk 34", SDK_INSTALL, 0 },
             { root .. "/wasi-sdk", "Binaryen version_133 wasm-opt", OPTIMIZER_INSTALL, 1 },
         }) do
             local configured, requirement, install, launched = table.unpack(row)
@@ -1345,7 +1349,7 @@ assert(file:close())
             if name == "BINARYEN_ROOT" then return root .. "/binaryen" end
         end
         for _, row in ipairs({
-            { "clang", root .. "/wasi-sdk/bin/clang.exe", "wasi-sdk 34.0", SDK_INSTALL },
+            { "clang", root .. "/wasi-sdk/bin/clang.exe", "wasi-sdk 34", SDK_INSTALL },
             { "wasm-opt", root .. "/binaryen/bin/wasm-opt.exe", "Binaryen version_133 wasm-opt", OPTIMIZER_INSTALL },
         }) do
             local context, inputs = fake_context({ root = root, tool_root = root, unstartable = row[1] })
@@ -1511,7 +1515,7 @@ assert(file:close())
         local descriptor, err = browser.build(context, inputs)
         assert.is_nil(descriptor)
         contains(err, "browser target compiler probe")
-        contains(err, "check the selected wasi-sdk 34.0 installation")
+        contains(err, "check the selected wasi-sdk 34 installation")
         assert.is_nil(err:find("user compile flags", 1, true))
         assert.is_nil(err:find("browser Lua record", 1, true))
         assert.is_nil(err:find("make install-browser", 1, true))
@@ -1738,7 +1742,7 @@ assert(file:close())
         config, err = browser.analysis_toolchain(context,
             { target = { build_profile = "production" }, paths = paths }, paths.lua_source)
         assert.is_nil(config)
-        assert.equal(string.format("browser target requires wasi-sdk 34.0: %q is not an executable (WASI_SDK_PATH=%q)",
+        assert.equal(string.format("browser target requires wasi-sdk 34: %q is not an executable (WASI_SDK_PATH=%q)",
             FAKE_ROOT .. "/wasi-sdk/bin/clang" .. tool_suffix(), FAKE_ROOT .. "/wasi-sdk") .. SDK_INSTALL, err)
         assert.equal(0, #calls)
     end)
@@ -1843,7 +1847,7 @@ assert(file:close())
         local descriptor = assert(subject.context_target_descriptor(context))
         assert.equal(descriptor, subject.context_target_descriptor(context))
         assert.equal(3, #calls)
-        assert.equal(FAKE_ROOT .. "/cache-prefix/var/cache/titan-probes/browser-34.0/" ..
+        assert.equal(FAKE_ROOT .. "/cache-prefix/var/cache/titan-probes/browser-34/" ..
             cprobe_cache.VERSION, descriptor.probe_cache_directory)
         assert.equal(native_cache, subject.PROBE_CACHE_DIRECTORY)
         assert.equal(cc, subject.CC); assert.equal(flags, subject.CFLAGS)
@@ -1941,7 +1945,7 @@ assert(file:close())
         local context, _, calls, contents = fake_context()
         local source = "int identical_raw_probe_source;"
         local native_path = FAKE_ROOT .. "/probes/" .. cprobe_cache.VERSION
-        local browser_path = FAKE_ROOT .. "/probes/browser-34.0/" .. cprobe_cache.VERSION
+        local browser_path = FAKE_ROOT .. "/probes/browser-34/" .. cprobe_cache.VERSION
         local function service(directory)
             return assert(cprobe.new_service({ io = context.io, profile = fixtures.profile(),
                 toolchain = { compiler_argv = { "fake-compiler" }, compile_flags = {},

@@ -11,7 +11,7 @@ local version = require "titan-compiler.version"
 local util = require "titan-compiler.util"
 local M = {}
 
-M.WASI_SDK_VERSION = "34.0"
+M.WASI_SDK_VERSION = "34"
 M.BINARYEN_VERSION = "133"
 local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling " ..
     "+multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
@@ -667,11 +667,15 @@ local function discover_compiler(context)
     local version_file = sdk_path(root, "VERSION")
     local recorded = strategy:read_file(version_file, 64)
     local found = recorded and recorded:match("^([^\r\n]*)") or "unknown"
-    if found ~= M.WASI_SDK_VERSION then
+    local rest = found:match("^" .. M.WASI_SDK_VERSION .. "%.(.+)$")
+    local matches = found == M.WASI_SDK_VERSION or
+        (rest ~= nil and rest:match("^%d+[.%d]*$") ~= nil and not rest:find("..", 1, true) and rest:sub(-1) ~= ".")
+    if not matches then
         return nil, "browser target requires " .. SDK .. ": " .. string.format("%q", version_file) ..
             " reports " .. found .. SDK_INSTALL
     end
-    local tools = { cc = { cc }, sysroot = sdk_path(root, "share", "wasi-sysroot"), version = found,
+    local tools = { cc = { cc }, sysroot = sdk_path(root, "share", "wasi-sysroot"),
+        version = M.WASI_SDK_VERSION,
         source = configured and configured ~= "" and "WASI_SDK_PATH" or "PATH", location = root }
     local info = strategy:stat(tools.sysroot)
     if not (info and info.kind == "directory") then

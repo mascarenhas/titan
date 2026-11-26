@@ -219,7 +219,7 @@ under `env -u …` (never empty exports, which would make Clang emit its
 skipped; if none qualifies, it fails early with `no wasi-sdk clang on PATH
 (WASI_SDK_PATH is unset, and a wasi-sdk clang has a sibling ../VERSION)`), and
 requires `llvm-ar` and `llvm-ranlib` beside `clang` unless overridden. The
-exact `34.0` `VERSION` check happens in the fork's `browser-version-check` (and
+major-`34` `VERSION` check happens in the fork's `browser-version-check` (and
 the reuse check), not in the script's discovery. Its own failures start with
 `lua-browser: `.
 
@@ -1100,7 +1100,7 @@ separate image-size budget or partition policy.
 
 `make titan-stdlib-browser-test` (a test goal, so it defaults to the
 `validation` profile) needs the installed native provider, the browser SDK,
-`wasi-sdk` 34.0, Binaryen `version_133`, Node 26+, and a JSPI-capable headless
+`wasi-sdk` 34, Binaryen `version_133`, Node 26+, and a JSPI-capable headless
 Chromium. It:
 
 1. writes `roots.txt` in `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default
@@ -1334,7 +1334,7 @@ caller. General unbounded recursion is not promised safe.
 fork_revision=<40 lowercase hex>
 archive_sha256=<SHA-256 of lib/browser/liblua.a>
 headers_sha256=<digest of the installed Lua headers>
-wasi_sdk_version=34.0
+wasi_sdk_version=34
 target=wasm32-wasip1
 wasm_features=<canonical sorted feature list>
 sjlj=wasm-exnref
@@ -1370,7 +1370,7 @@ in this order; the first failure is reported:
    [unsupported-flag check](#unsupported-flags) and contain no option the
    build profile owns, except the one level that a `trace_control` build may
    add (`browser <profile> profile owns compile option "<flag>"`).
-2. `wasi-sdk` `clang`, `llvm-ar`, `llvm-ranlib`, and `wasm-ld` (version `34.0`)
+2. `wasi-sdk` `clang`, `llvm-ar`, `llvm-ranlib`, and `wasm-ld` (major version `34`)
    and Binaryen `wasm-opt` (version `133`) are located (see
    [Toolchain pins and tool location](#toolchain-pins-and-tool-location)).
 3. The record is read and parsed: banner (`v2`) and text encoding, then unknown
@@ -1378,7 +1378,7 @@ in this order; the first failure is reported:
 4. Field syntax: missing, non-text, or empty fields, then the three
    hexadecimal fields.
 5. The fixed fields: `sjlj` must be `wasm-exnref`, `target` must be
-   `wasm32-wasip1`, and `wasi_sdk_version` must equal the pin (`34.0`), which
+   `wasm32-wasip1`, and `wasi_sdk_version` must equal the major pin (`34`), which
    step 2 already verified from `<sdk>/VERSION`.
 6. `wasm_features` is a canonical list matching the expected baseline.
 7. `lua_defines` is canonical, sorted, and unique, equals the sorted unique
@@ -1448,7 +1448,7 @@ such as `-msimd128`:
 
 ```text
 browser target compiler probe does not match the required Wasm target: <mismatch>; user compile flags: "<flag>" ...; remove feature-changing flags from TITAN_EXTRA_CPPFLAGS/TITAN_EXTRA_CFLAGS/--cflag
-browser target compiler probe does not match the required Wasm target: <mismatch>; check the selected wasi-sdk 34.0 installation
+browser target compiler probe does not match the required Wasm target: <mismatch>; check the selected wasi-sdk 34 installation
 ```
 
 The first form applies whenever the invocation supplied compile extras; the
@@ -1459,13 +1459,13 @@ precedence.
 
 ## Toolchain pins and tool location
 
-`browsertarget.WASI_SDK_VERSION` is pinned to `34.0` (LLVM 23.1.0) and
+`browsertarget.WASI_SDK_VERSION` is pinned to major `34` (LLVM 23.1) and
 `browsertarget.BINARYEN_VERSION` is pinned to `133` (`version_133`).
 
 * **`wasi-sdk`:** When `WASI_SDK_PATH` is set and nonempty it is authoritative:
   the tools are `$WASI_SDK_PATH/bin/{clang,llvm-ar,llvm-ranlib,wasm-ld}`, the
   sysroot is `$WASI_SDK_PATH/share/wasi-sysroot`, and the version file is
-  `$WASI_SDK_PATH/VERSION` (line 1 must equal `34.0`). Otherwise Titan searches
+  `$WASI_SDK_PATH/VERSION` (line 1 must belong to major `34`, e.g. `34`, `34.0`, `34.1`). Otherwise Titan searches
   `PATH` for `clang` (an empty entry means `.`), resolves `llvm-ar`,
   `llvm-ranlib`, and `wasm-ld` only beside it, and checks its parent
   directory's `VERSION` file and `share/wasi-sysroot`.
@@ -1510,7 +1510,7 @@ strings without NUL, CR, or LF; paths are normalized absolute paths):
 {
   label = "browser", triple = "wasm32-wasip1", memory_bits = 32,
   tools = { cc = argv, ar = argv, ranlib = argv, ld = argv, sysroot = string,
-    version = "34.0", source = "WASI_SDK_PATH" | "PATH", location = string,
+    version = "34", source = "WASI_SDK_PATH" | "PATH", location = string,
     version_output = string,
     optimizer = { argv = argv, version = "133", source = "WASM_OPT" | "BINARYEN_ROOT" | "PATH",
       version_output = string } },
@@ -1933,8 +1933,8 @@ semantic-cache consumer.
 
 The C probe cache key is the digest of the raw probe source only, so a shared
 directory would hand LP64 answers to wasm32. Browser results live in
-`<prefix>/var/cache/titan-probes/browser-34.0/<cprobe_cache.VERSION>/`
-(`.../browser-34.0/2/` today), where `<prefix>` is `TITAN_PREFIX` when set
+`<prefix>/var/cache/titan-probes/browser-34/<cprobe_cache.VERSION>/`
+(`.../browser-34/2/` today), where `<prefix>` is `TITAN_PREFIX` when set
 and otherwise `TITAN_ROOT`. The `wasi-sdk` version in the path keeps a pin
 change from reusing stale answers. The native directory
 `<prefix>/var/cache/titan-probes/2/` is unchanged. `TITAN_PROBE_CACHE_DISABLE=1`
@@ -4158,7 +4158,7 @@ The driver admits `browser` on Linux, macOS, and Windows. A native host with
 no OS label still receives `browser builds are supported from Linux, macOS
 and Windows hosts (host is native)`. Browser compilation on Windows uses MSYS2
 CLANG64 and the fork's browser Lua; `make install-browser` in the Lua
-submodule works there with the pinned `wasi-sdk` 34.0 and Binaryen
+submodule works there with the pinned `wasi-sdk` 34 and Binaryen
 `version_133`. The compiler does not enable native cross-compilation.
 
 `Makefile.win` shares browser Lua/SDK staging, validation, and manifest
@@ -4545,7 +4545,7 @@ same texts.
   production program row, which follows the [ordered-subsequence
   contract](#test-images).
 
-The Busted files need `wasi-sdk` 34.0, Binaryen `version_133`, and the
+The Busted files need `wasi-sdk` 34, Binaryen `version_133`, and the
 installed browser Lua; the image,
 protocol, SDK, stdlib closure, entry and stdlib gate, bridge, fixture, budget,
 and minicoro files also need Node 26+ and an installed browser SDK, and all of

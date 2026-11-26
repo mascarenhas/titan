@@ -274,7 +274,7 @@ jobs:
   # loader/runner/trace suites; SDK and stdlib integrations run in parallel.
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   browser-toolchain:
-    name: browser target real toolchain (ubuntu-24.04, wasi-sdk 34.0, Binaryen 133, Node 26)
+    name: browser target real toolchain (ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -766,7 +766,7 @@ jobs:
   # lists together with the core suite, which runs only in the sdk shard.
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   browser-stdlib:
-    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, wasi-sdk 34.0, Binaryen 133, Node 26)
+    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -1514,7 +1514,7 @@ jobs:
   # clone moved away before the browser chapter. Then the complete application
   # under Node and in Chromium, and the release-profile records.
   browser-packaging:
-    name: browser packaging, clean checkout and records (ubuntu-24.04, wasi-sdk 34.0, Binaryen 133, Node 26, Playwright 1.64.1 Chromium)
+    name: browser packaging, clean checkout and records (ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26, Playwright 1.64.1 Chromium)
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45

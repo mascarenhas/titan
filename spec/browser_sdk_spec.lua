@@ -620,7 +620,7 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
             (clean_record_bytes:gsub("sjlj=wasm%-exnref", "sjlj=wasm")),
             (clean_record_bytes:gsub(" %-mexception%-handling", "")),
             (clean_record_bytes:gsub("%-wasm%-use%-legacy%-eh=false", "-wasm-use-legacy-eh=true")),
-            (clean_record_bytes:gsub("wasi_sdk_version=34%.0", "wasi_sdk_version=33.0")),
+            (clean_record_bytes:gsub("wasi_sdk_version=34", "wasi_sdk_version=33")),
             (clean_record_bytes:gsub(" %+exception%-handling", "")),
         }) do
             assert(strategy:write_file(record, bad_record))

@@ -246,7 +246,7 @@ the three aggregate `--c-source` helpers, and `-X $(STDLIB_EXTRA_OBJECTS)`
 
 `titan-stdlib-browser-test` is a phony test goal (so it defaults to the
 `validation` profile) needing the installed compiler, native standard provider,
-browser SDK, `wasi-sdk` 34.0, Binaryen `version_133`, Node 26+ with JSPI, and
+browser SDK, `wasi-sdk` 34, Binaryen `version_133`, Node 26+ with JSPI, and
 a JSPI-capable headless Chromium. Its root check rejects an empty or duplicate
 `TITAN_STDLIB_BROWSER_TEST_ROOTS` inventory before build setup. Under
 `BROWSER_SDK_ENV`, with `TITAN_PATH_0_6` pointing at the installed browser SDK,

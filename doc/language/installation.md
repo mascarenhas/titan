@@ -74,7 +74,7 @@ LuaRocks itself is unmodified.
 | OpenSSL 3.0+ development files and `pkg-config` | Default system-OpenSSL mode for `titan.ssl`. |
 | Perl | Only for `OPENSSL_MODE=bundled`. |
 | `clang-format` | Only for `titanc --pretty-print` (`CLANG_FORMAT` overrides). |
-| `wasi-sdk` 34.0 and Binaryen `version_133` | Only for `--target browser` and [the browser Lua and SDK](#the-browser-lua-and-sdk). |
+| `wasi-sdk` 34 and Binaryen `version_133` | Only for `--target browser` and [the browser Lua and SDK](#the-browser-lua-and-sdk). |
 | Node 26+ with WebAssembly JSPI | Only for browser SDK publication, linking, and CLI execution (`TITAN_NODE` or `PATH`). |
 | JSPI-capable Chrome or Chromium headless shell | Only for browser-engine runs via `titan-browser-run`. |
 
@@ -265,14 +265,14 @@ workflow, see [Repository workflow](../implementation/repository-workflow.md).
 
 ### The browser Lua and SDK
 
-Targeting WebAssembly (`titanc --target browser`) requires **`wasi-sdk` 34.0**
-(LLVM 23.1.0), **Binaryen `version_133`** (`wasm-opt`), Node 26+ with JSPI, the
+Targeting WebAssembly (`titanc --target browser`) requires **`wasi-sdk` 34**
+(LLVM 23.1), **Binaryen `version_133`** (`wasm-opt`), Node 26+ with JSPI, the
 browser Lua archive, and the browser SDK in the same prefix as Titan (plus
 headless Chrome/Chromium for browser-engine runs with `titan-browser-run`).
 Plain `luarocks install titan` and `luarocks make` never require `wasi-sdk` or
 Binaryen.
 
-After installing Titan from a checkout and making `wasi-sdk` 34.0 and Binaryen
+After installing Titan from a checkout and making `wasi-sdk` 34 and Binaryen
 `version_133` available (for example, by setting `WASI_SDK_PATH` and
 `BINARYEN_ROOT`, or placing their `bin` directories on `PATH`), install the
 browser Lua and browser SDK:
@@ -289,7 +289,7 @@ On Windows, run `make -f Makefile.win lua-browser` and
 
 - `titanc` locates `clang` (along with `llvm-ar`, `llvm-ranlib`, `wasm-ld`,
   `VERSION`, and `share/wasi-sysroot`) under `$WASI_SDK_PATH` when
-  `WASI_SDK_PATH` is set, or via `PATH`, and requires exact `wasi-sdk` **34.0**.
+  `WASI_SDK_PATH` is set, or via `PATH`, and requires `wasi-sdk` **34** (any `34.x` point release).
   It locates `wasm-opt` from `WASM_OPT`, then `$BINARYEN_ROOT/bin/wasm-opt`,
   then `PATH`, and requires exact Binaryen **133** (`version_133`).
 - `make lua-browser` builds the fork's `browser` target into

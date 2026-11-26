@@ -12,7 +12,7 @@
 -- Required environment (the slice's validation environment):
 --   PREFIX=<prefix>           installed compiler, runtime and browser SDK
 --   TITAN_ROOT=<prefix>       the same installed tree
---   WASI_SDK_PATH=<root>       wasi-sdk 34.0
+--   WASI_SDK_PATH=<root>       wasi-sdk 34
 --   BINARYEN_ROOT=<root>       Binaryen version_133 (or WASM_OPT=<wasm-opt>)
 --   TITAN_NODE=<node>          Node 26 or newer for the runner and reports
 --   TITAN_CHROME=<chrome>      headless Chromium for the Chromium cells

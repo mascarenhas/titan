@@ -242,7 +242,7 @@ app.titan:156: in app.main
 ## Prerequisites
 
 - **Host OS:** Linux, macOS, or Windows (MSYS2 CLANG64 shell; native PowerShell/`cmd` is unsupported).
-- **`wasi-sdk` 34.0 (exact):** Download and unpack `wasi-sdk-34.0` (LLVM 23.1.0), then set `WASI_SDK_PATH` (or put `<wasi-sdk>/bin` on `PATH`):
+- **`wasi-sdk` 34 (any `34.x` release, LLVM 23.1):** Download and unpack a `wasi-sdk-34` release (for example `wasi-sdk-34.0`), then set `WASI_SDK_PATH` (or put `<wasi-sdk>/bin` on `PATH`):
 
 ```sh
 export WASI_SDK_PATH=/path/to/wasi-sdk-34.0
@@ -286,7 +286,7 @@ Browser Lua, Titan's runtime, generated C, and authored C helpers all compile an
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-page.mjs`, `titan-browser-node-worker.mjs` | Command-line runner for Node and Chromium |
 | `build-profile`, `absent-modules`, `analysis-target`, `sdk-digests` | SDK profile (`production`/`validation`), absent-module diagnostics, editor target profile, and digests |
 
-Every browser link verifies that the active `TITAN_BUILD_PROFILE` matches the SDK's `build-profile` and that `liblua-config.txt` matches `wasi-sdk` 34.0 and the installed headers/archive.
+Every browser link verifies that the active `TITAN_BUILD_PROFILE` matches the SDK's `build-profile` and that `liblua-config.txt` matches `wasi-sdk` 34 and the installed headers/archive.
 
 ### Editor type checking
 

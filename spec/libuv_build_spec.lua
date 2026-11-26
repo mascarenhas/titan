@@ -5848,13 +5848,13 @@ printf '%s\n' "${schedule[@]}"
                     "\n  " .. job_name .. ":"), job_name)
             end
             assert.equal(1, count_literal(browser_job,
-                "\n    name: browser target real toolchain (ubuntu-24.04, wasi-sdk 34.0, Binaryen 133, Node 26)\n"),
+                "\n    name: browser target real toolchain (ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26)\n"),
                 browser_job)
             assert.equal(1, count_literal(browser_stdlib_job,
-                "\n    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, wasi-sdk 34.0, Binaryen 133, Node 26)\n"),
+                "\n    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, wasi-sdk 34, Binaryen 133, Node 26)\n"),
                 browser_stdlib_job)
             assert.equal(1, count_literal(packaging_job,
-                "\n    name: browser packaging, clean checkout and records (ubuntu-24.04, wasi-sdk 34.0, " ..
+                "\n    name: browser packaging, clean checkout and records (ubuntu-24.04, wasi-sdk 34, " ..
                 "Binaryen 133, Node 26, Playwright 1.64.1 Chromium)\n"), packaging_job)
             for _, removed in ipairs({
                 "\n  test-linux-stdlib:", "\n  compiler-coverage:",
