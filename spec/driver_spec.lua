@@ -6294,18 +6294,20 @@ describe("compiler module loader", function()
         end)
 
         -- A coordinator's planning loader over the given source modules, with
-        -- each module's ordinary or `.titan` imports supplied by name.
-        local function planning_loader(sources, imports, certified)
+        -- each module's ordinary or `.titan` imports supplied by name and any
+        -- further loader options.
+        local function planning_loader(sources, imports, certified, options)
             for name, contents in pairs(sources) do
                 write_file(source .. "/" .. name .. ".titan", contents)
             end
             if not certified then incremental.toolchain_identity = uncertain_toolchain end
             local context = tracked_context()
-            local loader = fresh_loader({
+            local loader_options = {
                 context = context, incremental = true, plan_mode = true,
                 imports_for = function(name) return imports[name] or {} end,
-            })
-            return context, loader
+            }
+            for key, value in pairs(options or {}) do loader_options[key] = value end
+            return context, fresh_loader(loader_options)
         end
 
         -- One worker over closed configuration and descriptor data.
@@ -6688,6 +6690,32 @@ describe("compiler module loader", function()
             result = staged()
             assert(os.remove(stem .. ".titan"))
             rejected(result, "cannot resolve module '" .. name .. "' for publication: ")
+        end)
+
+        it("publishes lean worker objects from the records the coordinator carries", function()
+            local producer, consumer = "planned_lean_producer", "planned_lean_consumer"
+            local context, loader = planning_loader({
+                [producer] = "function answer(): integer return 42 end\n",
+                [consumer] = 'local producer = import "' .. producer .. '"\n' ..
+                    "function answer(): integer return producer.answer() end\n",
+            }, { [consumer] = { { name = producer, source_required = false } } }, false,
+                { source_records = false })
+            assert.is_true((loader(consumer)))
+            local plan = driver.resolution_plan(context)
+            assert.same({ producer, consumer }, plan.order)
+            for _, name in ipairs(plan.order) do
+                local published, result = publish_planned(context, plan, name)
+                assert.is_string(result.interface)
+                assert.equal(result.interface, published.interface)
+                local generated = assert(util.get_file_contents(source .. "/" .. name .. ".c"))
+                assert.is_nil(generated:find("titan_source", 1, true))
+            end
+            local descriptor = driver.plan_descriptor(plan, consumer)
+            local result = assert(worker_compile(context, descriptor, consumer))
+            result.interface = nil
+            local published, err = driver.publish_staged_module(context, result)
+            assert.is_nil(published)
+            assert.equal("worker result for module '" .. consumer .. "' has no source record", err)
         end)
 
         it("rejects a certified worker object whose source changed during the build", function()

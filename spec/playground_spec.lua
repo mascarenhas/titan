@@ -1,4 +1,5 @@
 local assert = require "luassert"
+local checker = require "titan-compiler.checker"
 local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local graphcodec = require "titan-compiler.graphcodec"
@@ -99,6 +100,18 @@ describe("in-memory compiler I/O", function()
         assert.is_true(io:rename("/empty/a.titan", "/full/x"))
         assert.equal("a", io:read_file("/full/x"))
     end)
+
+    it("refuses invalid trees, existing directories and missing parents", function()
+        assert.has_error(function() compiler_io.new_memory({ files = { ["/"] = "root" } }) end)
+        assert.has_error(function() compiler_io.new_memory({ files = { ["/a"] = 1 } }) end)
+        local io = compiler_io.new_memory({ files = { ["/a/b"] = "x" } })
+        local made, err = io:mkdir("/a")
+        assert.is_nil(made)
+        assert.equal("path already exists: /a", err)
+        made, err = io:mkdir("/missing/child")
+        assert.is_nil(made)
+        assert.matches("does not exist", err)
+    end)
 end)
 
 -- The installed browser SDK's semantic assets: pending without the browser
@@ -115,12 +128,14 @@ local function semantic_assets()
     }
 end
 
-local function memory_pack(assets, root)
+local function memory_pack(assets, root, extra)
     local directory = driver.installed_paths(root, "browser").titan_bin
-    return compiler_io.new_memory({ files = {
+    local files = {
         [directory .. "/analysis-target"] = assets.analysis_target,
         [directory .. "/absent-modules"] = assets.absent_modules,
-    } })
+    }
+    for name, contents in pairs(extra or {}) do files[directory .. "/" .. name] = contents end
+    return compiler_io.new_memory({ files = files })
 end
 
 describe("browser semantic catalog", function()
@@ -148,6 +163,33 @@ describe("browser semantic catalog", function()
         assert.matches("does not describe the provider analysis%-target names", stale_error)
     end)
 
+    it("rejects malformed catalogs and mismatched archives", function()
+        local assets, why = semantic_assets()
+        if not assets then pending(why); return end
+        local function open(catalog, extra)
+            return driver.browser_analysis_target("/sdk", { io = memory_pack(assets, "/sdk", extra), catalog = catalog })
+        end
+        local function altered(change)
+            local catalog = assert(graphcodec.decode(assets.catalog))
+            change(catalog)
+            return graphcodec.encode(catalog)
+        end
+        for _, case in ipairs({
+            { altered(function(catalog) catalog.format = "other" end), "browser catalog: unsupported format" },
+            { altered(function(catalog) catalog.modules[next(catalog.modules)] = "member" end),
+                "browser catalog: malformed entry for" },
+            { altered(function(catalog) catalog.modules = {} end), "expected a nonempty Wasm provider archive" },
+            { "not a catalog", "browser catalog:" },
+        }) do
+            local handle, err = open(case[1])
+            assert.is_nil(handle)
+            assert.truthy(err:find(case[2], 1, true), err)
+        end
+        local handle, err = open(nil, { ["titan.a"] = "not the provider" })
+        assert.is_nil(handle)
+        assert.matches("titan%.a: digest disagrees with analysis%-target", err)
+    end)
+
     it("serves one analysis-only or one emit-only context per handle", function()
         local assets, why = semantic_assets()
         if not assets then pending(why); return end
@@ -167,6 +209,61 @@ describe("browser semantic catalog", function()
         assert.is_true(context.emit_c_only)
         assert.is_false(context.analysis_only)
         assert(driver.close_resolver_context(context))
+    end)
+
+    it("emits only checked sources of finalized emit-only contexts", function()
+        local assets, why = semantic_assets()
+        if not assets then pending(why); return end
+        local function refused(context, pattern)
+            local called, err = pcall(driver.emit_module_c, context, "main")
+            assert.is_false(called)
+            assert.matches(pattern, err)
+        end
+        local analysis = driver.new_resolver_context({ target = "browser", analysis_only = true,
+            browser_analysis_target = assets.native, io = compiler_io.new_memory() })
+        refused(analysis, "C emission requires an emit%-only browser context")
+        assert(driver.close_resolver_context(analysis))
+        local context = driver.new_resolver_context({ target = "browser", emit_c_only = true,
+            browser_analysis_target = assets.native, io = compiler_io.new_memory() })
+        refused(context, "C emission requires a finalized resolver context")
+        assert(driver.finalize_resolver_context(context))
+        local emitted, err = driver.emit_module_c(context, "main")
+        assert.is_nil(emitted)
+        assert.equal("module 'main' has no checked source in this context", err)
+        assert(driver.close_resolver_context(context))
+    end)
+
+    -- Foreign C checking runs the analysis toolchain through the context's
+    -- strategy, so only a host strategy reaches a foreign-function dependency.
+    it("emits a foreign-function dependency's header by its relative path", function()
+        local assets, why = semantic_assets()
+        if not assets then pending(why); return end
+        local workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.write(path.join(workspace, "main.titan"), 'local m = import "lib.math.titan"\n' ..
+            "function main(args: {string}): integer\n  return (m.same(0 as foreign int) as integer)\nend\n")
+        files.write(path.join(workspace, "lib/math.titan"), "foreign function same(a: int): int\n  return a\nend\n")
+        local previous = assert(lfs.currentdir())
+        assert(lfs.chdir(workspace))
+        local called, result = pcall(function()
+            driver.imported, types.registry = {}, {}
+            local context = driver.new_resolver_context({ target = "browser", emit_c_only = true,
+                browser_analysis_target = assets.native, io = compiler_io.new_sync(), transient_caches = true })
+            context.link_kind = "program"
+            local loader = driver.defaultloader({}, { context = context, source_roots = { main = true } })
+            local _, errors = checker.checkimport("main", loader)
+            assert.is_nil(errors[1])
+            assert(driver.finalize_resolver_context(context))
+            local emitted = { main = assert(driver.emit_module_c(context, "main")),
+                math = assert(driver.emit_module_c(context, "lib.math")) }
+            assert(driver.close_resolver_context(context))
+            return emitted
+        end)
+        assert(lfs.chdir(previous))
+        files.remove(workspace)
+        assert(called, result)
+        assert.truthy(result.main.unit.code:find('#include "lib/math.titan.h"', 1, true))
+        assert.equal("lib/math.titan.h", result.math.headers[2].filename)
+        assert.truthy(result.math.headers[2].contents:find('#include "math.ffi.h"', 1, true))
     end)
 end)
 
@@ -257,6 +354,45 @@ describe("playground compiler", function()
         local emitted = service:emit_c(project, string.rep("0", 64))
         assert.same({}, emitted.diagnostics)
         assert.same({ "a/b.c", "ink.c", "main.c", "v.c" }, emitted.units)
+    end)
+
+    it("reports invalid requests, unreadable folders and incomplete programs", function()
+        local opened, why = open(); if not opened then pending(why); return end
+        local identity = string.rep("2", 64)
+        assert.has_error(function() service:check({ "positional" }) end)
+        assert.has_error(function() service:check({ ["main.titan"] = 7 }) end)
+        assert.has_error(function() service:hover({ ["main.titan"] = MAIN }, { path = "main.titan", offset = -1 }) end)
+        assert.has_error(function() service:emit_c({ ["main.titan"] = MAIN }, "not an identity") end)
+        -- A misspelled contributor is an error on its file and on its folder's lookup.
+        local message = "mis-cased target label in source 'Odd.Browser.titan'"
+        assert.same({ { message = message, severity = "error" },
+            { message = message, severity = "error", path = "ink/Odd.Browser.titan", line = 1, col = 1 } },
+            service:check({ ["main.titan"] = MAIN, ["moons.titan"] = MOONS,
+                ["ink/ink.titan"] = "function digit(): integer\n  return 7\nend\n", ["ink/Odd.Browser.titan"] = "" }))
+        local missing = service:emit_c({ ["moons.titan"] = MOONS }, identity)
+        assert.equal(1, #missing.diagnostics)
+        assert.is_nil(missing.diagnostics[1].path)
+        assert.matches("main", missing.diagnostics[1].message)
+        assert.same({ { message = "the main module must declare function main(args: {string}): integer",
+            severity = "error", path = "main.titan", line = 1, col = 1 } },
+            service:emit_c({ ["main.titan"] = MOONS }, identity).diagnostics)
+    end)
+
+    it("describes methods and the declaration a name refers to", function()
+        local opened, why = open(); if not opened then pending(why); return end
+        local text = "record Moon\n  name: string\nend\n\nfunction Moon:describe(): string\n  return self.name\nend\n\n" ..
+            'local function helper(): string\n  return "Titan"\nend\n\n' ..
+            'function main(args: {string}): integer\n  local m = Moon.new("Titan")\n' ..
+            "  if m:describe() == helper() then return 0 end\n  return 1\nend\n"
+        local project = { ["main.titan"] = text }
+        local declaration = service:hover(project, { path = "main.titan", offset = text:find("describe(): string", 1, true) })
+        assert.equal("describe: main.Moon:describe(): string", declaration.signature)
+        local call = service:hover(project, { path = "main.titan", offset = text:find("describe() ==", 1, true) })
+        assert.equal("describe: function (): string", call.signature)
+        local named = service:hover(project, { path = "main.titan", offset = text:find("helper() then", 1, true) })
+        assert.equal("helper: function (): string", named.signature)
+        local declared = text:find("helper(): string", 1, true) - 1
+        assert.same({ path = "main.titan", from = declared, to = declared + 6 }, named.declaration)
     end)
 
     it("completes the module names an import string can name", function()
@@ -406,6 +542,109 @@ describe("playground compiler", function()
         assert.truthy(output:find("boom", 1, true), output)
         assert.truthy(output:find("main.titan:6: in main.main", 1, true), output)
         files.remove(workspace)
+    end)
+end)
+
+-- The titanc.wasm request handler over a stand-in service: framing, JSON
+-- results and every refusal, without an SDK or the Wasm host.
+describe("playground wire protocol", function()
+    local function frame(...)
+        local parts = table.pack(...)
+        local out = { string.pack("<I4", parts.n) }
+        for index = 1, parts.n do out[#out + 1] = string.pack("<s4", parts[index]) end
+        return table.concat(out)
+    end
+    local function unframe(bytes)
+        local count, position = string.unpack("<I4", bytes)
+        local strings = {}
+        for index = 1, count do strings[index], position = string.unpack("<s4", bytes, position) end
+        assert.equal(#bytes + 1, position)
+        return strings
+    end
+
+    it("frames every operation and its refusals", function()
+        local saved_open, saved_trace = playground.open, playground.build_trace
+        finally(function() playground.open, playground.build_trace = saved_open, saved_trace end)
+        local calls, results = {}, {}
+        local service = {}
+        for _, name in ipairs({ "check", "hover", "complete", "emit_c" }) do
+            service[name] = function(_, ...)
+                calls[name] = table.pack(...)
+                local result = results[name]
+                if type(result) == "function" then return result() end
+                return result
+            end
+        end
+        local opened
+        playground.open = function(assets)
+            calls.open = assets
+            return opened, "the catalog is damaged"
+        end
+        playground.build_trace = function(...)
+            calls.build_trace = table.pack(...)
+            if results.build_trace then return results.build_trace end
+            return nil, "not an optimized image"
+        end
+        local handler = playground.host()
+        local function reply(...) return unframe(handler(frame(...))) end
+
+        assert.same({ "error", "the playground compiler is not open" }, reply("check"))
+        assert.same({ "error", "the catalog is damaged" }, reply("open", "c", "a", "m"))
+        assert.same({ catalog = "c", analysis_target = "a", absent_modules = "m" }, calls.open)
+        opened = service
+        assert.same({ "ok", "true" }, reply("open", "c", "a", "m"))
+
+        results.check = {}
+        assert.same({ "ok", "[]" }, reply("check", "main.titan", "x", "a/b.titan", "y"))
+        assert.same({ ["main.titan"] = "x", ["a/b.titan"] = "y" }, calls.check[1])
+        results.check = { { message = 'say "hi"\\\n\r\t\1', severity = "error", path = "main.titan", line = 2,
+            col = 3, extra = false, nested = { 1, { two = true } } } }
+        assert.same({ "ok", '[{"col":3,"extra":false,"line":2,"message":"say \\"hi\\"\\\\\\n\\r\\t\\u0001",' ..
+            '"nested":[1,{"two":true}],"path":"main.titan","severity":"error"}]' }, reply("check", "main.titan", "x"))
+
+        assert.same({ "ok", "null" }, reply("hover", "main.titan", "12", "main.titan", "x"))
+        assert.same({ path = "main.titan", offset = 12 }, calls.hover[2])
+        results.hover = { at = { path = "main.titan", from = 1, to = 3 }, signature = "s" }
+        assert.same({ "ok", '{"at":{"from":1,"path":"main.titan","to":3},"signature":"s"}' },
+            reply("hover", "main.titan", "0", "main.titan", "x"))
+
+        assert.same({ "ok", "null" }, reply("complete", "main.titan", "0", "main.titan", "x"))
+        results.complete = { replace = { path = "main.titan", from = 0, to = 0 }, items = {} }
+        assert.same({ "ok", '{"items":[],"replace":{"from":0,"path":"main.titan","to":0}}' },
+            reply("complete", "main.titan", "0", "main.titan", "x"))
+
+        results.emit_c = { files = { ["main.c"] = "int x;" }, units = {}, entry = "", diagnostics = {} }
+        assert.same({ "ok", '{"diagnostics":[],"entry":"","files":{"main.c":"int x;"},"units":[]}' },
+            reply("emit_c", string.rep("a", 64), "main.titan", "x"))
+        assert.equal(string.rep("a", 64), calls.emit_c[2])
+
+        assert.same({ "error", "not an optimized image" }, reply("build_trace", "wasm", "id", "factory", "loader"))
+        assert.same({ "wasm", "id", "factory", "loader", n = 4 }, calls.build_trace)
+        results.build_trace = { mjs = "m", wasm = "w", trace = "t", map = "p" }
+        assert.same({ "ok", "null", "m", "w", "t", "p" }, reply("build_trace", "wasm", "id", "factory", "loader"))
+
+        results.check = { { line = 1.5 } }
+        assert.same({ "error", "cannot encode number as JSON" }, reply("check", "main.titan", "x"))
+        results.check = function() error({ "not a string" }) end
+        local failed = reply("check", "main.titan", "x")
+        assert.equal("error", failed[1])
+        assert.matches("stack traceback", failed[2])
+        assert.same({ "error", "unknown playground operation nope" }, reply("nope"))
+        assert.same({ "error", "malformed project files" }, reply("check", "main.titan"))
+        assert.same({ "error", "malformed project files" }, reply("check", "main.titan", "x", "main.titan", "y"))
+        assert.same({ "error", "malformed titanc request" }, unframe(handler(frame("check") .. "!")))
+        assert.equal("error", unframe(handler(string.pack("<I4", 2) .. string.pack("<s4", "check")))[1])
+    end)
+
+    it("refuses incomplete assets and images that are not optimized Wasm", function()
+        assert.has_error(function() playground.open(nil) end)
+        assert.has_error(function() playground.open({ analysis_target = "", catalog = "" }) end)
+        local service, err = playground.open({ analysis_target = "x", absent_modules = "", catalog = "y" })
+        assert.is_nil(service)
+        assert.matches("target 'browser' needs a matching browser SDK", err)
+        local image, trace_error = playground.build_trace("not wasm", string.rep("0", 64), "", "")
+        assert.is_nil(image)
+        assert.is_string(trace_error)
     end)
 end)
 

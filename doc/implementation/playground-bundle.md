@@ -152,8 +152,11 @@ that produced the catalog.
 A resolver context with `target = "browser"`, a `browser_analysis_target`
 handle and `emit_c_only = true` checks with the compiled-module ABI (runtime
 erasure on, `analysis_only` false) against the handle's provider, and never
-builds a descriptor, starts a compiler or probe, or writes outside its I/O
-strategy. It rejects `analysis_only`, completion options, an `output_root` and
+builds a descriptor, compiles, links or writes outside its I/O strategy. Like
+an analysis context, it checks foreign C with the analysis toolchain started
+through its strategy, which the playground's in-memory strategy cannot start,
+so there foreign C is a diagnostic. It rejects `analysis_only`, completion
+options, an `output_root` and
 a target descriptor. The handle's provider entries carry their actual
 dependencies (`imports`, `source_requirements`, `dynamic_providers`) and
 decoded nominal layouts in such a context, decoded once per handle.
@@ -256,16 +259,21 @@ no Lua allocation happens unprotected.
 ## Verification
 
 `spec/playground_spec.lua` covers the in-memory strategy, the catalog round
-trip and its digest binding, the emit-only context rules, every playground
-operation over the installed SDK (module selection with folders and target
-variants, import-string completion, the entry's reserved directory and pure
-source imports across directories), a program linked from emitted C whose
-trace names its frames (with the browser toolchain), a native
-`--no-source-records` build whose objects carry no record, and the recipe's
-refusal of directories it does not own. Its SDK cases pend without the browser
-toolchain and SDK and run in the
+trip, its digest binding and its rejections, the emit-only context rules and
+`driver.emit_module_c`'s refusals, every playground operation over the
+installed SDK (module selection with folders and target variants,
+import-string completion, request and project errors, the entry's reserved
+directory and pure source imports across directories), a foreign-function
+dependency's relative header through a host strategy, a program linked from
+emitted C whose trace names its frames (with the browser toolchain), the
+`titanc.wasm` request handler over a stand-in service (framing, JSON results
+and every refusal, with no SDK), a native `--no-source-records` build whose
+objects carry no record, and the recipe's refusal of directories it does not
+own. Its SDK cases pend without the browser toolchain and SDK and run in the
 [`browser-stdlib`](continuous-integration.md#browser-stdlib-job) scheduler
-shard, which also builds the bundle. `make playground-sdk` ends with
-`scripts/playground_smoke.mjs`, which drives the new `titanc.wasm` through its
-adapter: every operation, UTF-16 offsets, a failed open, recovery after
-refused requests, independent instances and disposal.
+shard, which also builds the bundle. `spec/driver_spec.lua` publishes lean
+worker objects from the records the coordinator carries, and
+`spec/titanc_parallel_spec.lua` checks the option's conflicts. `make
+playground-sdk` ends with `scripts/playground_smoke.mjs`, which drives the new
+`titanc.wasm` through its adapter: every operation, UTF-16 offsets, a failed
+open, recovery after refused requests, independent instances and disposal.

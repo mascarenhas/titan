@@ -1398,7 +1398,7 @@ function driver._new_resolver_context(options, target_descriptor)
     end
     -- A browser semantic handle serves analysis-only contexts and emit-only
     -- contexts: the latter check with the compiled runtime ABI and render C in
-    -- memory, but never resolve a compiler, probe, write output or link.
+    -- memory, but never build a descriptor, compile, write output or link.
     local browser_semantics
     if options.emit_c_only ~= nil and options.emit_c_only ~= true then
         error("emit_c_only must be true when present", 2)
