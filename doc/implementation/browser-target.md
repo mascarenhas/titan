@@ -3870,17 +3870,16 @@ disposed, never at console output, and a later trap or abort overrides the
 completed result. Classification follows the evidence chain: a tagged original
 trap (`TITAN_BROWSER_TRAP` anywhere in the `cause` chain) or an observed engine
 trap (reported through `onEngineFailure` as `{type: "trap", reason}`) is a trap
-even when an abort
-follows or precedes it; both observed traps and observed aborts are recorded
-while a catching harness finishes (bounded by `--timeout`/`--grace`), reporting
-71 for a trap, 70 for an abort alone, or 73 for a late observation after
-completion. An observed abort without a trap makes the run an abort, including
-the factory's subsequent `RuntimeError`; and a bare `RuntimeError` without
-abort evidence is a trap. Malformed, duplicate, or unknown controls, a
+even when an abort follows or precedes it; both observed traps and observed
+aborts are recorded while a catching harness finishes (bounded by `--timeout`),
+reporting 71 for a trap, 70 for an abort alone, or 73 for a late observation
+after completion. An observed abort without a trap makes the run an abort,
+including the factory's subsequent `RuntimeError`; and a bare `RuntimeError`
+without abort evidence is a trap. Malformed, duplicate, or unknown controls, a
 premature engine exit, a crashed page target, a missing or invalid image, and
 an interrupted runner (`SIGINT`, `SIGTERM`) are harness failures. Timers longer
-than Node's 32-bit limit are
-armed in bounded slices against a monotonic deadline.
+than Node's 32-bit limit are armed in bounded slices against a monotonic
+deadline.
 
 **Public image observation, trace readiness, and terminal cleanup.** Each
 image's public default creator is wrapped once (`observeImage`, one cached
@@ -3904,7 +3903,7 @@ path (75); an unhandled Promise rejection still follows the unhandled policy
 (74). An abort or trap observation is evidence, not shutdown: before
 completion the monitor records the reason and waits for the execution path's
 terminal failure, which the page sends only after `dispose()` returns. A
-deadline still yields72 if disposal never finishes. Observations after
+deadline still yields 72 if disposal never finishes. Observations after
 completion are late engine failures (73), and a later completion, including a
 fulfilled host test, cannot erase an observed abort or trap.
 
