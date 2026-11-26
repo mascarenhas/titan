@@ -19,9 +19,9 @@ void trace_fixture_sleep(void);
  * (spec/fixtures/browser_runtime/fixture-imports.mjs). */
 TITAN_WASM_IMPORT("trace_fixture_host_recover") void trace_fixture_host_recover(void);
 /* Publishes the instance's trace metadata to the gate's __traceTest binding
- * (fixture-imports.mjs). Each trace image calls it from its module's
- * initialization, never from a C constructor: the compiler's protocol probe
- * links this file and runs its constructors, but no image module. */
+ * (fixture-imports.mjs). Each trace image calls it from its own module's
+ * initialization, so the controls exist when initialize() resolves and the
+ * compiler's protocol probe, which runs no image module, never publishes. */
 TITAN_WASM_IMPORT("trace_fixture_publish_controls") void trace_fixture_publish_controls(void);
 void trace_fixture_handler(lua_State *L);
 #endif
