@@ -1,10 +1,10 @@
 # Garbage-collection standard library
 
 `titan.gc` configures weak Maps and ephemerons, attaches reachability
-finalizers to tables and full userdata, and controls Lua 5.5's garbage
-collector. Collector state belongs to the entire Lua state, so pausing,
-switching modes, or tuning parameters affects all Titan and Lua code in that
-state.
+finalizers to tables and full userdata, keeps GC-managed values reachable
+through explicit call points, and controls Lua 5.5's garbage collector.
+Collector state belongs to the entire Lua state, so pausing, switching modes,
+or tuning parameters affects all Titan and Lua code in that state.
 
 - **Import:** `local gc = import "gc"` (Titan) · `require "titan.gc"` (Lua)
 - **Targets:** Native & Browser (complete)
@@ -160,6 +160,52 @@ Inside a running finalizer:
 - While a Lua state is closing, new `finalizable` calls are ignored. These same
   restrictions apply to `defer` cleanup of abandoned coroutines (see
   [abandoned coroutines](coroutines.md#abandoned-coroutines)).
+
+## Keeping values reachable
+
+```text
+function keep_alive<|T|>(v: T)
+```
+
+`keep_alive` ensures that `v` remains reachable for Lua's garbage collector at
+least until the call point (modeled on Go's `runtime.KeepAlive`), and returns
+no values. Use it when native code, a raw pointer, or a reentrant callback
+relies on a GC-managed owner staying live past the last ordinary read of its
+Titan binding:
+
+```titan
+local gc = import "gc"
+
+record Buffer
+  const label: string
+end
+
+record Request
+  buffer: Buffer?
+end
+
+function finish_request(req: Request, notify: function(Request))
+  const retained? = req.buffer
+  req.buffer = nil
+  notify(req)
+  gc.keep_alive(retained)
+end
+```
+
+Direct calls to `gc.keep_alive` lower as a compiler intrinsic with no C
+function call and no `value` boxing, while evaluating all arguments
+(positional, named, or surplus) once in written order and preserving ordinary
+unconstrained generic ingress. Using `gc.keep_alive` as a first-class function
+value or calling `require("titan.gc").keep_alive` from Lua invokes the exported
+entry and returns zero values.
+
+Type parameter `T` obeys ordinary generic type admission on both direct and
+first-class uses: Titan values, options, and `owned` C storage are accepted,
+while borrowed raw C pointers, fixed C arrays, C structs or unions, C function
+pointers, and `foreign void` are rejected at compile time. Because `keep_alive`
+expects a value argument and returns no values, passing a zero-result call
+expression or using its result as a value is a compile-time error, as with any
+Titan call.
 
 ## Collector actions and queries
 

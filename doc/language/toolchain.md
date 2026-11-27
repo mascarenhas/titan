@@ -147,10 +147,11 @@ opt-in rules report `hint`s only after `--lint-enable`. The rule options apply
 strictly left to right: `--lint-enable` turns a rule on (keeping it denied if
 it was), `--lint-allow` turns it off, `--lint-deny=RULE` turns it on and
 denies it, and `--lint-deny=warnings` or `=hints` denies every rule of that
-severity that is on at that point. An unknown rule name is an error.
-Suppression is command-line only; comments in the source never change lint
-results. `titanc --lint` exits with status 1 when any denied diagnostic is
-reported, and with status 0 otherwise, warnings included.
+severity that is on at that point. An unknown rule name is an error. Individual
+lines can also suppress named rules with
+[in-source exceptions](#in-source-exceptions). `titanc --lint` exits with
+status 1 when any invalid directive or denied diagnostic is reported, and with
+status 0 otherwise, warnings included.
 
 | Rule | Default | Reports |
 | --- | --- | --- |
@@ -160,7 +161,7 @@ reported, and with status 0 otherwise, warnings included.
 | `unmatched-public-test-signature` | hint | A public `test_*` function in a module importing `test` that `--test` does not discover (it does not take exactly one `test.Context`). |
 | `union-identity-equality` | hint | `==`/`~=` against a freshly constructed variant of an `async`, `uv`, HTTP mode, `reflect.Type`, or `websocket.MessageType` union: union equality is identity, so the result never changes. |
 | `stdlib-import-spelling` | hint | `import "titan.<name>"` where the short standard-library spelling `"<name>"` exists. |
-| `prefer-const-local-field` | hint | A non-const `local` record field (other than inline C storage) that this module never assigns. |
+| `prefer-const-local-field` | hint | A non-const `local` record field, or an unmarked field of a `local record` (other than inline C storage), that this module never assigns. |
 | `prefer-const-local` | hint | A single-name local with a written initializer, other than inline C storage, that is read but never reassigned. |
 | `boolean-option-silent-truthiness-local` | hint | An unannotated local initialized from a `boolean?`, which turns nil into false. |
 | `ephemeral-interface-map-key` | hint | Indexing a Map keyed by an Interface with a concrete value, which builds a new wrapper key each time. |
@@ -180,6 +181,64 @@ As a conservative v1 exclusion, they and `header-dependent-public-c-export`
 skip every module that defines a discovered `test_*` function, including a
 module that mixes tests with production code; this does not mean such a
 module has no importers.
+
+### In-source exceptions
+
+Suppress a named lint rule on a specific declaration or statement with a
+short comment of the form:
+
+```titan
+local record Counter
+  -- titan-lint: allow(prefer-const-local-field): mutated through Lua
+  count: integer
+  step: integer -- titan-lint: allow(prefer-const-local-field) -- assigned by tests
+end
+```
+
+Multiple rule IDs are comma-separated inside `allow(...)`, and an optional
+explanation follows `:` or `--`:
+
+- **Placement.** A directive after code on the same line covers that line. A
+  standalone directive covers the next code line, skipping blank lines,
+  ordinary comments, and `---` documentation comment blocks; stacked standalone
+  directives combine. Place standalone directives *above* `---` documentation
+  comments, never inside them.
+- **Strict validation.** Every directive must name one or more valid rule IDs
+  explicitly (group names `all`, `warnings`, and `hints` are rejected).
+  `titanc --lint` exits with status 1 and reports
+  `file:line:col: invalid titan-lint directive: ...` for missing colons
+  (`-- titan-lint allow(...)`), unknown verbs, empty or duplicate rule lists,
+  unclosed parentheses, unexpected trailing text, empty reasons after `:` or
+  `--`, directives inside `---` documentation comments, or dangling standalone
+  directives before end of file or a block closer (`end`, `else`, `elseif`,
+  `until`, `catch`, `when`). Ordinary comments that mention `titan-lint`
+  without `titan-lint:` (or `titan-lint allow(`) and directive text inside
+  string literals or `--[[ ... ]]` long comments are ignored.
+- **Precedence with `--lint-deny`.** An in-source `allow(...)` drops matching
+  diagnostics before reporting, counting, and `--lint-deny` checks, so an
+  allowed line passes even under `--lint-deny=warnings`, `--lint-deny=hints`,
+  or `--lint-deny=<rule>`.
+- **Unused exceptions.** An `allow(...)` whose rule does not fire on that line
+  never fails, so an exception for a rule that triggers only on another
+  target's source variant or contributor remains safe across targets.
+
+### Repository standard-library lint targets
+
+In a Titan source checkout, two `Makefile` targets run `titanc --lint` over the
+standard library and its test suites:
+
+- `make titan-stdlib-lint` lints the native standard library in its build
+  environment and all native test roots and helper modules under
+  `spec/stdlib/titan`.
+- `make titan-stdlib-browser-lint` lints the browser standard library, browser
+  test owners, and helper modules under `--target browser` (requiring the
+  installed browser SDK) and verifies that the native and browser lint roots
+  cover every source under `spec/stdlib/titan`.
+
+Both targets default `TITAN_LINT_FLAGS` to
+`--lint-enable=all --lint-deny=warnings --lint-deny=hints`. Override
+`TITAN_LINT_FLAGS` to replace the rule switches (for example,
+`TITAN_LINT_FLAGS='--lint-enable=all --lint-format=json'`).
 
 ## Environment variables
 

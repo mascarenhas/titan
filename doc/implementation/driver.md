@@ -2254,9 +2254,12 @@ preprocessor macro cache. This dependency tracking belongs to C header parsing.
 Compiled C probes use only SHA-256 of their complete unpreprocessed source as
 the cache key. Include directives count as literal text; forced-header
 contents, toolchain options, target profiles, and header search state do not.
-Memory and disk reuse acceptance and rejection under that same key. Format 2
-(`titan-compiler/cprobe_cache.lua` `VERSION`) stores one bounded result with
-diagnostics and optional typed enum selection at
+Memory and disk reuse acceptance and rejection under that same key, with one
+exception: a `compiler_rejection` at the header-baseline stage
+(`stage == "baseline"`) is cached in-process only and is not persisted to disk,
+so an ad-hoc CLI run missing `-D`/`-I` flags cannot poison later invocations.
+Format 2 (`titan-compiler/cprobe_cache.lua` `VERSION`) stores one bounded
+result with diagnostics and optional typed enum selection at
 `<prefix>/var/cache/titan-probes/2/<digest>.result`, where `<prefix>` is
 `TITAN_PREFIX` when set and otherwise the installation root. Clear that
 directory or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse if
@@ -2975,17 +2978,22 @@ because `authored_source_roots` stays unset. One `defaultloader`, released by
 `driver.with_loader`, checks the roots in order.
 
 Any resolution, parse, or check error returns `nil, errors` (a deduplicated
-list of compiler diagnostics) without linting a partial tree. Otherwise the
-linter receives `requested roots ∩ context.checked_source_modules`, each with
-its `driver.imported` AST and a `provider_kind(modname)` query (the `kind` of
-that module's entry: `source`, `dynamic`, `static`, or `embedded`), and returns
-`{ diagnostics, warning_count, hint_count, denied_count }`; each diagnostic has
-`file`, `line`, `col`, `severity`, `rule`, `message`, and `denied`, attributed
-through the node's own `loc` (so folder contributors keep their filenames) and
-sorted by file, line, column, and rule. The body runs under `pcall`: the live
-context is closed with `driver.close_resolver_context` on every exit, a raised
-error is re-raised after cleanup (a string gains any cleanup failure), and a
-cleanup failure after a returned result becomes an error.
+list of compiler diagnostics) without linting a partial tree. Otherwise each
+unit in `requested roots ∩ context.checked_source_modules` receives its
+`driver.imported` AST, its contributing `{ filename, text }` files in
+`unit.sources` (read from the exact checked bytes via
+`perf.compiler_file_contents` over `entry.source_files`), and a
+`provider_kind(modname)` query (the `kind` of that module's entry: `source`,
+`dynamic`, `static`, or `embedded`). `linter.lint` validates all in-source
+directives first (returning `nil, errors` if any directive is invalid), and
+otherwise returns `{ diagnostics, warning_count, hint_count, denied_count }`;
+each diagnostic has `file`, `line`, `col`, `severity`, `rule`, `message`, and
+`denied`, attributed through the node's own `loc` (so folder contributors keep
+their filenames) and sorted by file, line, column, and rule. The body runs
+under `pcall`: the live context is closed with `driver.close_resolver_context`
+on every exit, a raised error is re-raised after cleanup (a string gains any
+cleanup failure), and a cleanup failure after a returned result becomes an
+error.
 
 ### Traversal and the rename-interval index
 
@@ -3026,6 +3034,48 @@ types, so a hidden `_.T` reference cannot be ruled out. The check is
 conservative, with constant work per candidate and one linear walk per
 module.
 
+### In-source directive scanner
+
+Before walking any AST, `linter.lint` scans every contributing file in
+`unit.sources` with `scan_directives`, using LPeg patterns built from the
+parser's own `lexer.COMMENT` and `lexer.STRINGLIT` tokens. Keeping directive
+scanning inside `linter.lua` leaves the parser and LDoc attachment
+(`documentation.attach`) untouched and prevents text inside string literals or
+long comments (`--[[ ... ]]`) from being read as directives. Only short
+comments starting with `titan-lint:` (or the misspelling `titan-lint allow(`)
+enter `parse_directive`; other comments starting with `titan-lint` remain
+ordinary prose.
+
+A directive after code on the same line attaches to `code_line`; a standalone
+directive queues in `pending` until the next code token, skipping blank lines,
+ordinary comments, and `---` documentation comment blocks, and stacked
+directives combine. A directive inside a `---` documentation run
+(`in_documentation`) is rejected so exception text never leaks into LDoc.
+
+`parse_directive` requires `-- titan-lint: allow(<rule-id>[, ...])` with an
+optional `: <reason>` or `-- <reason>` tail and rejects missing colons,
+unknown verbs, missing or unclosed parentheses, empty lists or empty comma
+items, severity groups (`all`, `warnings`, `hints`), unknown or duplicate rule
+IDs (including duplicates targeting the same line), unexpected trailing text,
+and empty reasons. Pending standalone directives at end of file or before a
+block closer (`BLOCK_CLOSERS`: `end`, `else`, `elseif`, `until`, `catch`,
+`when`) fail as dangling. Because keywords may also name declarations, fields,
+named arguments, or union variants, `closes_block` treats a closer word
+followed by `:` (not `::`) or `=` (not `==`) as a declaration rather than a
+closer, and `keyword_variants(units)` collects the `"line:col"` positions of
+keyword-named union variants from `Ast.TopLevelUnion` `variant._name_loc` in
+the parsed AST. Using the parsed AST lets `end(...)` and `else()` union
+variants take preceding directives while parenthesized closers such as
+`until (...)` and `elseif (...)` remain dangling. Any directive problem aborts
+`linter.lint` with sorted `file:line:col: invalid titan-lint directive:
+<message>` errors before diagnostics are emitted.
+
+During the walk, `emit` checks `w.allowed[loc.filename][loc.line][rule]` before
+recording a diagnostic. Allowed diagnostics are dropped ahead of reporting,
+counting, and `--lint-deny` enforcement, so an in-source exception takes
+precedence over CLI deny flags. An unused `allow(...)` never fails, keeping
+target-specific exceptions valid across platform variants and contributors.
+
 ### Lint rules
 
 A rule has a fixed severity: a default rule reports `warning`s and starts on,
@@ -3061,13 +3111,17 @@ matchers rely on resolved declarations and types, never on spellings:
   not match.
 * `stdlib-import-spelling` compares `_written_modname` (the import literal
   before `parser.normalize_import`) against the canonical `modname`.
-* `prefer-const-local-field` and `prefer-const-local` exclude inline C
-  aggregates (`types.is_c_aggregate`), public fields, unread locals,
-  checker-supplied `nil` initializers (an `ExpNil` at the declaration's own
-  location), and `_assigned` bindings (which include mutable C
-  address-taking); field writes are keyed by the `Type.Field` owner and name,
-  counting implicit and written `mutable_c_address` casts. The field rule is
-  not closed-world: a `.titan` source importer may assign the field.
+* `prefer-const-local-field` checks both `local` fields of any record and
+  unmarked fields of a `local record` (`(node.islocal or field.islocal) and
+  not field.isconst`), excluding inline C aggregates (`types.is_c_aggregate`)
+  and public fields of exported records; `prefer-const-local` excludes inline C
+  aggregates, unread locals, checker-supplied `nil` initializers (an `ExpNil`
+  at the declaration's own location), and `_assigned` bindings (which include
+  mutable C address-taking). Field writes are keyed by the `Type.Field` owner
+  and name, counting implicit and written `mutable_c_address` casts. The field
+  rule is not closed-world: a `.titan` source importer may assign a `local`
+  field, and a `.titan` source importer or Lua code may assign an unmarked
+  field of a `local record`.
 * `boolean-option-silent-truthiness-local` reads the implicit `truthiness`
   cast in `_result_adjustment`; `ephemeral-interface-map-key` matches an
   implicit `interface_wrapper` key cast on a Map keyed by an Interface.
@@ -3121,6 +3175,21 @@ opt-in. The opt-in rules with corpus diagnostics (`prefer-const-local`,
 `prefer-const-local-field`, `extra-do-block-around-try`, and
 `stdlib-import-spelling`) passed the same rewrite-and-re-check oracle without a
 false positive.
+
+Repository CI and local verification enforce every rule over both the standard
+library and `spec/stdlib/titan` through `make titan-stdlib-lint` (native) and
+`make titan-stdlib-browser-lint` (browser), both classified as `validation`
+Make goals (`Makefile`, `Makefile.win`, `scripts/browser.mk`) and configured
+through `TITAN_LINT_FLAGS` (default `--lint-enable=all --lint-deny=warnings
+--lint-deny=hints`). `titan-stdlib-lint` runs the native stdlib in
+`STDLIB_COMPILER_ENV` (including `-D_GNU_SOURCE`) and then lints the native
+test roots plus `TITAN_STDLIB_NATIVE_HELPER_ROOTS` from the test build
+directory with staged fixture headers and `--tree spec/stdlib/titan`.
+`titan-stdlib-browser-lint` lints `BROWSER_STDLIB_ROOTS` and every browser test
+owner and helper root under `--target browser`, then runs
+`scripts/check_browser_stdlib.lua lint-roots` to prove that the native and
+browser lint root inventories together select every `.titan` source under
+`spec/stdlib/titan`.
 
 ## Optional `clang-format` generated-source formatting
 

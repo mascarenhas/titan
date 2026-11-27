@@ -21,11 +21,16 @@ A record plan assigns public UV fields first and private UV fields afterward.
 This is a layout convention, not a GC requirement. The exported map associates
 each logical field index with its dense UV index. Public native members form a
 prefix struct that is the first actual subobject of the producer's full payload
-struct; private native members follow it (`coder._nominal_declarations`). A
-binary consumer emits only the compatible public prefix. It never fabricates
-producer-private types or casts an unrelated shorter struct over flattened
-members. `getudatamem(u)` uses the object's actual `nuvalue`, including its
-private traced slots. Public prefix members are named `_field_<name>` after the
+struct; private native members follow it (`coder._nominal_declarations`). Every
+ordinary importer lacking a direct `.titan` source-import edge—whether it
+imports a compiled provider or a source-checked module in the same build—emits
+only the compatible public prefix (`nominallayout.public` in
+`coder._nominal_plan`). Only the defining module and its direct `.titan`
+source importers emit the full layout from the checked source declaration, even
+when a published public layout also exists for that owner. An ordinary importer
+never fabricates producer-private types or casts an unrelated shorter struct
+over flattened members. `getudatamem(u)` uses the object's actual `nuvalue`,
+including its private traced slots. Public prefix members are named `_field_<name>` after the
 public field name rather than its logical index, so the consumer's emitted
 prefix stays stable when private fields move.
 

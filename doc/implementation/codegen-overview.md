@@ -1396,14 +1396,18 @@ before requiring the root:
   JavaScript/loader changes. Ordinary browser builds without recorded
   obligations omit the table.
 
-When `app_requirements` holds (`context.application_source_requirements` is
-non-nil), `finalize_resolver_context` also populates
-`context.application_nominal_layouts` through `perf.public_source_layout(name,
-mod)` (backed by `coder._own_nominal_layouts`) across all compiled
-`source_names`, so non-collaborating consumers (without a direct explicit
-`.titan` import on that owner) use erased public nominal layouts
-(`coder/nominal.lua`)—including for installed sources reached transitively
-through another required source.
+`coder.generate` always records `tlcontext.private_layout_owners` for the
+current module and its direct explicit `.titan` source imports, regardless of
+whether `app_requirements` holds. In `coder._nominal_plan`
+(`coder/nominal.lua`), any owner outside `private_layout_owners` receives a
+public-only nominal layout: it checks `imported_nominal_layouts` and
+`application_nominal_layouts` (populated across compiled `source_names` via
+`perf.public_source_layout` when `app_requirements` holds), and otherwise
+projects the checked source plan through `nominallayout.public`. A trusted
+owner (the defining module or a direct `.titan` source importer) bypasses
+published and application layouts and always builds its complete layout from
+its checked source declaration, even when a compiled provider also publishes a
+public layout for that owner.
 
 `titan_module_provider` preserves its four-step order: (1) initialized
 per-state canonical module, (2) matching native preload descriptor, (3) binary

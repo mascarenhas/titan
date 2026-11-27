@@ -133,7 +133,11 @@ gates. Immediately before installation, remove only the restored unregistered
 `share/lua/5.5/c-parser/` preparation copies. Otherwise LuaRocks preserves them
 as `~` backups. Preserve dependencies and SDK/runtime files.
 
-Run `make stdlib-busted-test`, then the installed-stdlib integrations listed in
+After verifying the installed `titanc` shebang environment, `native-coverage`
+runs `make titan-stdlib-lint` (**Lint standard library and native test
+suites**), checking every lint rule across the native standard library and
+`spec/stdlib/titan` without adding a separate CI job. It then runs
+`make stdlib-busted-test` and the installed-stdlib integrations listed in
 `spec/support/ci_stdlib_compiler_test_files.txt` with LuaCov through
 `ci_parallel_compiler_tests.sh stdlib`. As for a compiler shard pair, two
 workers run `ci_test_groups.sh stdlib-compiler-shard-1` and `-2` concurrently
@@ -283,7 +287,13 @@ disk-space step:
 
 `browser-toolchain` then runs:
 
-8. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
+8. **Browser stdlib lint.** With `WASI_SDK_PATH` and `BINARYEN_ROOT` exported,
+   `make titan-stdlib-browser-lint PREFIX="$PREFIX"` lints the browser standard
+   library, its portable and browser-only test owners, and its helper roots
+   under every rule, and runs `scripts/check_browser_stdlib.lua lint-roots` to
+   prove that the native and browser lint roots cover every source under
+   `spec/stdlib/titan` (no separate CI job).
+9. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
    prefix's installed `busted -c -o gtest -v` runs the five real-toolchain
    files `spec/wasm_toolchain_spec.lua`, `spec/coder/browser_toolchain_spec.lua`,
@@ -294,19 +304,19 @@ disk-space step:
    browser real-toolchain spec: <path>` before Busted starts. The budget spec
    builds its probe images (using `titan-browser-run --imports` for outer-wait
    suspension fixtures) and runs both engines.
-9. **Browser compiler coverage.** `luacov` and
+10. **Browser compiler coverage.** `luacov` and
    `prepare_codecov_report.lua` produce `luacov.report.out` and
    `luacov.codecov.out`, and `codecov/codecov-action@v7` uploads
    `./luacov.codecov.out` with `flags: compiler`, `name: browser`,
    `use_oidc: true`, and `fail_ci_if_error: true`, so the real linking,
    trace-map, and budget paths that are pending in the toolchain-free shards are
    measured.
-10. **Runner images.** The installed `titanc` builds `runner_image` (a
+11. **Runner images.** The installed `titanc` builds `runner_image` (a
     `--test` image) and `runner_status` (a program) from `spec/browser` into
     `out/browser/runner` and asserts `.mjs`, `.wasm`, `.wasm.map`, and `.wasm.trace` for each.
     `scripts/check_browser_stdlib.lua imports entry` then checks both images
     against the [import manifest](browser-target.md#import-manifest).
-11. **Loader images.** The job builds `loader_app` and `fidelity`
+12. **Loader images.** The job builds `loader_app` and `fidelity`
     (programs with `--c-source spec/fixtures/browser_loader/loader.c`) with the
     `program` purpose and `loader_names` (a `--test` image) with the `test`
     purpose, because a contrary purpose is refused
@@ -319,7 +329,7 @@ disk-space step:
     the profile. The import check accepts the `entry` class for `loader_names`
     and `entry,fixture:loader,fixture:controls` for all four program images
     (`loader_app` and `fidelity` in both `program` and `optimized`).
-12. **Loader suite.** The installed `titan-browser-run --timeout 300000
+13. **Loader suite.** The installed `titan-browser-run --timeout 300000
     --grace 2000 --root "$GITHUB_WORKSPACE" --imports
     spec/fixtures/browser_runtime/fixture-imports.mjs --js-test
     spec/browser/loader.test.mjs`, given relative paths to `program/loader_app`,
@@ -327,16 +337,16 @@ disk-space step:
     another link's `.wasm`), `--fidelity program/fidelity`, and `--names
     program/loader_names`, runs under Node and then Chromium, with output copied
     to `$RUNNER_TEMP/browser-loader.log`.
-13. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
+14. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
     runs against `out/browser/loader/optimized/fidelity.mjs` under both engines
     with the same `--root`, `--imports`, timeout, and grace, with output copied
     to `$RUNNER_TEMP/browser-guard.log`.
-14. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
+15. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
     `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
     `TITAN_BROWSER_RUNNER` (the installed launcher), and
     `TITAN_BROWSER_LOADER_IMAGE` (the `fidelity` image), with output copied to
     `$RUNNER_TEMP/browser-runner.log`.
-15. **Trace adapter and supervisor units.** After unsetting the seven D11
+16. **Trace adapter and supervisor units.** After unsetting the seven D11
     compiler-environment variables (`CCC_OVERRIDE_OPTIONS`, `CPATH`,
     `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`,
     `LIBRARY_PATH`, `COMPILER_PATH`), `$WASI_SDK_PATH/bin/clang
@@ -352,7 +362,7 @@ disk-space step:
     `titan-wasm-factory.mjs`) with both `TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE`
     and `TITAN_BROWSER_TRACE_FILTER_IMAGE` set (so no adapter prerequisite
     skips occur), with output copied to `$RUNNER_TEMP/browser-trace-units.log`.
-16. **Node trace gate.** `lua -E spec/browser/build-trace.lua
+17. **Node trace gate.** `lua -E spec/browser/build-trace.lua
     "$GITHUB_WORKSPACE/out/browser/trace-node"` stages the trace gate
     (`$RUNNER_TEMP/browser-trace-build.log`); the installed
     `titan-browser-run --engine node --timeout 300000 --grace 2000 --root
@@ -365,7 +375,7 @@ disk-space step:
     --allow-degraded-trace --root "$output" --js-test "$output/trace.test.mjs"
     -- --degraded` exercises the degraded Lua-only fallback rows
     (`$RUNNER_TEMP/browser-trace-node-degraded.log`).
-17. **Failure logs.** On failure, `actions/upload-artifact` uploads the
+18. **Failure logs.** On failure, `actions/upload-artifact` uploads the
     `browser-*.log` files and `out/browser` as `browser-toolchain-failure` for
     seven days.
 
