@@ -6,7 +6,9 @@ local layout = require "titan-compiler.nominallayout"
 -- A nominal's logical indices never denote physical storage. All generated
 -- clients (including Lua accessors and callback bridges) use these plans.
 -- An owner outside `private_layout_owners` contributes only its public layout,
--- whether it was compiled earlier or is checked from source in this build.
+-- whether it was compiled earlier or is checked from source in this build. The
+-- owner itself and its direct `.titan` importers hold its checked source
+-- declaration, so they never take a published public layout of that owner.
 function coder._nominal_plan(ctx, owner, variant)
     if owner._tag == "Type.Nominal" then
         owner = assert(types.registry[owner.fqtn])
@@ -16,9 +18,11 @@ function coder._nominal_plan(ctx, owner, variant)
     local plan = tl.nominal_plans[key]
     if not plan then
         local trusted = tl.private_layout_owners[owner.name:match("^(.*)%.[^.]+$")]
-        plan = tl.imported_nominal_layouts[key]
-        if not plan and not trusted and tl.application_nominal_layouts then
-            plan = tl.application_nominal_layouts[key]
+        if not trusted then
+            plan = tl.imported_nominal_layouts[key]
+            if not plan and tl.application_nominal_layouts then
+                plan = tl.application_nominal_layouts[key]
+            end
         end
         if not plan then
             plan = assert(variant and layout.variant(owner, variant)

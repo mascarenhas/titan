@@ -2,10 +2,10 @@ local types = require "titan-compiler.types"
 local layout = require "titan-compiler.nominallayout"
 local graphcodec = require "titan-compiler.graphcodec"
 local coder = require "titan-compiler.coder"
-local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
+local process = require "titan-compiler.process"
 local h = require "spec.support.helpers"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
@@ -298,6 +298,7 @@ describe("source-built nominal layout privacy", function()
     if platform.windows then ROOT = assert(platform.path.normalize(ROOT)) end
     local PREFIX = require("spec.support.installed_prefix").active()
     local LUA = paths.join(PREFIX, "bin/lua" .. (platform.windows and ".exe" or ""))
+    local EXE = platform.windows and ".exe" or ""
     local PUBLIC = "_titan_nominal_pkg_2ea_2eHandle_public_payload"
     local COMPLETE = "_titan_nominal_pkg_2ea_2eHandle_payload"
     local workspace, saved_imported, saved_registry
@@ -314,8 +315,10 @@ describe("source-built nominal layout privacy", function()
         files.remove(workspace)
     end)
 
-    -- `c` imports `a` as source and reads a private field; `d` and `e` reach
-    -- `a.Handle` only through `c`, so neither gains `a`'s private layout.
+    -- `b` and `app` import `a` ordinarily. They read public native and traced
+    -- fields of `a.Handle` and construct its public-only record and public
+    -- variant. `c` imports `a` as source and reads a private field; `d` and `e`
+    -- reach `a.Handle` only through `c`, so neither gains `a`'s private layout.
     local function sources()
         return {
             ["pkg.a"] = string.format("foreign import %q\n", paths.join(workspace, "opaque.h")) .. [[
@@ -324,12 +327,27 @@ record Handle
   local const raw: foreign *my_handle
   local const state: foreign priv_state
   local const tag: string
+  const label: string
+end
+
+record Point
+  const x: integer
+  const y: integer
+end
+
+union Shape
+  circle(integer)
+  local opaque(foreign priv_state)
 end
 
 function make(width: integer): Handle
   local state = foreign priv_state.new()
   state.x = 3
-  return Handle(width, nil, state, "private")
+  return Handle(width, nil, state, "private", "public")
+end
+
+function hidden_shape(): Shape
+  return Shape.opaque(foreign priv_state.new())
 end
 ]],
             ["pkg.b"] = [[
@@ -341,6 +359,22 @@ end
 
 function seven(): integer
   return width_of(a.make(7))
+end
+
+function label_of(h: a.Handle): string
+  return h.label
+end
+
+function point_sum(): integer
+  const point = a.Point(1, 2)
+  return point.x + point.y
+end
+
+function radius(shape: a.Shape): integer
+  case shape
+  when circle(r) then return r
+  else return -1
+  end
 end
 ]],
             ["pkg.c"] = [[
@@ -369,13 +403,18 @@ function width(): integer
 end
 ]],
             ["pkg.app"] = [[
+local a = import "pkg.a"
 local b = import "pkg.b"
 local c = import "pkg.c"
 local d = import "pkg.d"
 local e = import "pkg.e"
 
 function main(args: {string}): integer
-  return b.seven() + d.width() + e.width() + c.state_of(c.pass_handle()) - 28
+  if b.seven() + d.width() + e.width() ~= 25 then return 1 end
+  if c.state_of(c.pass_handle()) ~= 3 or b.label_of(a.make(1)) ~= "public" then return 2 end
+  if b.point_sum() ~= 3 then return 3 end
+  if b.radius(a.Shape.circle(5)) ~= 5 or b.radius(a.hidden_shape()) ~= -1 then return 4 end
+  return 0
 end
 ]],
         }
@@ -395,12 +434,16 @@ end
 
     -- `code_of(name)` returns the generated C of module `pkg.<name>`.
     local function assert_layouts(code_of)
+        local code = {}
+        for _, name in ipairs({ "b", "c", "d", "e" }) do code[name] = code_of(name) end
         for _, name in ipairs({ "b", "d", "e" }) do
-            local code = code_of(name)
-            assert.truthy(code:find("} " .. PUBLIC .. ";", 1, true), name)
-            public_only(code, name)
+            assert.truthy(code[name]:find("} " .. PUBLIC .. ";", 1, true), name)
+            public_only(code[name], name)
         end
-        assert.truthy(code_of("c"):find("} " .. COMPLETE .. ";", 1, true))
+        -- An ordinary importer still allocates a public-only record and a public variant.
+        assert.truthy(code.b:find("} _titan_nominal_pkg_2ea_2ePoint_payload;", 1, true))
+        assert.truthy(code.b:find("} _titan_nominal_pkg_2ea_2eShape_2ecircle_payload;", 1, true))
+        assert.truthy(code.c:find("} " .. COMPLETE .. ";", 1, true))
     end
 
     -- The CLI writes `pkg/b.c` below its output; in-process builds write `pkg.b.c`.
@@ -410,33 +453,41 @@ end
         end
     end
 
-    -- This checkout's CLI and compiler with the selected installation's SDK.
-    local function titanc(...)
-        local argv = { LUA, "-e", "package.path = " .. string.format("%q",
-            ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path",
-            ROOT .. "/titanc", "--tree", workspace, ... }
-        local environment = { TITAN_ROOT = PREFIX, TITAN_PROBE_CACHE_DISABLE = "1",
-            TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" }
-        local options = { stderr_to_stdout = true }
-        if platform.windows then
-            options.env = environment
-        else
-            local command = { "env" }
-            for name, value in pairs(environment) do command[#command + 1] = name .. "=" .. value end
-            for _, word in ipairs(argv) do command[#command + 1] = word end
-            argv = command
-        end
-        local result = compiler_io.new_sync():run(argv, options)
+    local function generated_code(generated)
+        local parts = {}
+        for _, part in ipairs(generated.parts) do parts[#parts + 1] = part.code end
+        return table.concat(parts, "\n")
+    end
+
+    -- Run `argv` to a zero exit with `environment` over this process's.
+    local function run(argv, environment)
+        local result = process.capture(argv, { env = environment, stderr_to_stdout = true })
         local output = (result.output or result.diagnostic or ""):gsub("\r\n", "\n")
         assert.is_true(result.ok == true, output)
         return output
     end
 
+    -- This checkout's CLI and compiler with the selected installation's SDK.
+    -- `providers` names a directory of compiled providers ahead of the SDK's.
+    local function titanc(tree, providers, ...)
+        return run({ LUA, "-E", "-e", "package.path = " .. string.format("%q",
+            ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path",
+            ROOT .. "/titanc", "--tree", tree, ... }, {
+            TITAN_ROOT = PREFIX, TITAN_PROBE_CACHE_DISABLE = "1", TITAN_RUNTIME_PREBUILT = "1",
+            TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "-O0 -fno-lto",
+            TITAN_EXTRA_LDFLAGS = "-fno-lto", TITAN_PATH_0_6 = providers and providers .. ";;" or nil,
+        })
+    end
+
+    -- On Windows, an in-process program build compiles in a child Lua that
+    -- requires this checkout's spec helpers, which `chdir` moves out of reach.
     local function in_workspace(body)
-        local previous = assert(lfs.currentdir())
+        local previous, search = assert(lfs.currentdir()), package.path
+        package.path = search .. ";" .. ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua"
         assert(lfs.chdir(workspace))
         local ok, err = pcall(body)
         assert(lfs.chdir(previous))
+        package.path = search
         assert(ok, err)
     end
 
@@ -445,12 +496,22 @@ end
         for _, mode in ipairs({ "library", "objects" }) do
             local out = paths.join(workspace, mode)
             if mode == "objects" then
-                titanc("-q", "-c", "-o", out, "pkg.b", "pkg.d", "pkg.e")
+                titanc(workspace, nil, "-q", "-c", "-o", out, "pkg.b", "pkg.d", "pkg.e")
             else
-                titanc("-q", "-o", out, "pkg.b", "pkg.d", "pkg.e")
+                titanc(workspace, nil, "-q", "-o", out, "pkg.b", "pkg.d", "pkg.e")
             end
             assert_layouts(generated_file(out, "pkg/"))
         end
+    end)
+
+    it("links and runs a CLI executable whose importers keep public layouts", function()
+        write_sources()
+        local out = paths.join(workspace, "out")
+        local program = paths.join(workspace, "app")
+        titanc(workspace, nil, "-q", "-o", out, "--exe", program, "pkg.app")
+        assert_layouts(generated_file(out, "pkg/"))
+        public_only(generated_file(out, "pkg/")("app"), "app")
+        run({ program .. EXE }, {})
     end)
 
     it("emits the same public importer layout in cold and warm incremental builds", function()
@@ -464,12 +525,13 @@ end
             end
             return table.concat(found, "\n")
         end
-        titanc("-q", "--incremental", "-c", "-o", out, "pkg.b", "pkg.d", "pkg.e")
+        titanc(workspace, nil, "-q", "--incremental", "-c", "-o", out, "pkg.b", "pkg.d", "pkg.e")
         assert_layouts(generated_file(out, "pkg/"))
         local cold = declarations("b")
         local b = paths.join(workspace, "pkg/b.titan")
         files.write(b, files.read(b) .. "\nfunction eight(): integer\n  return 8\nend\n")
-        local output = titanc("-v", "--incremental", "-c", "-o", out, "pkg.b", "pkg.d", "pkg.e")
+        local output = titanc(workspace, nil, "-v", "--incremental", "-c", "-o", out,
+            "pkg.b", "pkg.d", "pkg.e")
         assert.truthy(output:find("Titan object hit pkg.a:", 1, true), output)
         assert.truthy(output:find("Titan object miss pkg.b: source-content", 1, true), output)
         assert.equal(cold, declarations("b"))
@@ -499,11 +561,45 @@ end
         local ok, err, imported = h.run_checker_modules(sources(), "pkg.app", { interface = "source" })
         assert.is_true(ok, err)
         assert_layouts(function(name)
-            local generated = coder.generate("pkg." .. name, imported["pkg." .. name].ast, {},
-                driver.TITAN_ABI_VERSION, false, {})
-            local parts = {}
-            for _, part in ipairs(generated.parts) do parts[#parts + 1] = part.code end
-            return table.concat(parts, "\n")
+            return generated_code(coder.generate("pkg." .. name, imported["pkg." .. name].ast, {},
+                driver.TITAN_ABI_VERSION, false, {}))
         end)
+    end)
+
+    -- A resolver can hold the owner's published public layout (from a compiled
+    -- provider) while the owner itself or a direct source importer is generated.
+    it("keeps trusted owners complete beside a published public layout", function()
+        local ok, err, imported = h.run_checker_modules(sources(), "pkg.app", { interface = "source" })
+        assert.is_true(ok, err)
+        local published = assert(layout.decode(assert(require("titan-compiler.coder.core").coder
+            ._own_nominal_layouts("pkg.a", imported["pkg.a"].ast)), "pkg.a")).layouts
+        assert.is_false(published["pkg.a.Handle"].complete)
+        local function code_of(name)
+            return generated_code(coder.generate("pkg." .. name, imported["pkg." .. name].ast, {},
+                driver.TITAN_ABI_VERSION, false, { nominal_layouts = published }))
+        end
+        assert.truthy(code_of("a"):find("} " .. COMPLETE .. ";", 1, true))
+        assert_layouts(code_of)
+    end)
+
+    it("keeps a source-imported owner complete beside its compiled providers", function()
+        local owner = "record Box\n  local const hidden: integer\n  const shown: integer\nend\n\n" ..
+            "function make(): Box\n  return Box(40, 2)\nend\n"
+        files.write(paths.join(workspace, "owner/mix/owner.titan"), owner)
+        files.write(paths.join(workspace, "facade/mix/facade.titan"), 'local owner = import "mix.owner"\n\n' ..
+            "function get(): owner.Box\n  return owner.make()\nend\n")
+        files.write(paths.join(workspace, "consumer/mix/owner.titan"), owner)
+        files.write(paths.join(workspace, "consumer/mixapp.titan"), 'local facade = import "mix.facade"\n' ..
+            'local owner = import "mix.owner.titan"\n\nfunction main(args: {string}): integer\n' ..
+            "  return owner.make().hidden + facade.get().shown - 42\nend\n")
+        local providers = paths.join(workspace, "providers")
+        titanc(paths.join(workspace, "owner"), nil, "-q", "-o", providers, "mix.owner")
+        titanc(paths.join(workspace, "facade"), providers, "-q", "-o", providers, "mix.facade")
+        local out = paths.join(workspace, "out")
+        local program = paths.join(workspace, "mixapp")
+        titanc(paths.join(workspace, "consumer"), providers, "-q", "-o", out, "--exe", program, "mixapp")
+        assert.truthy(files.read(paths.join(out, "mixapp.c"))
+            :find("} _titan_nominal_mix_2eowner_2eBox_payload;", 1, true))
+        run({ program .. EXE }, { TITAN_PATH_0_6 = providers .. ";;" })
     end)
 end)
