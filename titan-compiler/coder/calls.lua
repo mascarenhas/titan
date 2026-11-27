@@ -2243,7 +2243,31 @@ function codevaluecall(ctx, node)
     end
 end
 
+-- A direct `gc.keep_alive` call evaluates its arguments exactly like a native
+-- call's inputs and calls nothing. A local or parameter already roots its
+-- value in this frame; any other GC-bearing argument is published in a
+-- borrowed slot that lives until the enclosing block ends.
+-- Implementation notes: doc/implementation/gc-library.md#keep-alive-intrinsic
+local function code_keep_alive(ctx, node)
+    local args = node.args.args
+    local stats, names
+    if node._named_arg_order then
+        stats, names = named_ordered_call_args(ctx, args,
+            node._named_arg_order)
+    else
+        stats, names = coder._codeadjustedfixed(ctx, {
+            _result_adjustment = assert(node._arg_adjustment),
+            exps = args,
+        }, coder._stabilize_input_code)
+    end
+    table.insert(stats, "(void)(" .. assert(names[1]) .. ");")
+    return table.concat(stats, "\n"), "((void)0)"
+end
+
 local function lower_call(ctx, node)
+    if node._keep_alive_intrinsic then
+        return code_keep_alive(ctx, node)
+    end
     local constructor = node._nominal_constructor
     if constructor then
         local module = constructor.owner.name:match("^(.*)%.[^.]+$")

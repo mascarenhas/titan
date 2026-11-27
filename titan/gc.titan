@@ -87,6 +87,13 @@ function finalizable<|T|>(v: T, f: function (T): ()): ()
   ffi.lua_setmetatable(L, -2)
 end
 
+--- Keep a value reachable for the garbage collector through this call point.
+-- @param v Value kept live at least until the call; direct calls emit no C call.
+-- @usage standard-library-gc.md
+function keep_alive<|T|>(v: T)
+  -- Implementation notes: doc/implementation/gc-library.md#keep-alive-intrinsic
+end
+
 --- Stop automatic garbage collection for the complete Lua state.
 -- @usage standard-library-gc.md
 function pause()

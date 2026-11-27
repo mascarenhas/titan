@@ -46,6 +46,8 @@
 # gates, which run them in the browser-stdlib scheduler shard.
 # The titanc --lint row uses the same unmeasured 1.000 planning weight; its
 # browser-target case pends when the selected installation lacks a browser SDK.
+# The gc.keep_alive row uses the same unmeasured 1.000 planning weight; its
+# fixtures import the installed standard provider.
 compiler spec/abi_spec.lua 0.201 2.926 0.907
 retained spec/asan_generated_c_context_spec.lua 0.587 - 0.250
 compiler spec/binary_compatibility_spec.lua 0.017 0.107 0.047
@@ -160,6 +162,7 @@ compiler spec/coder/flexible_returns_spec.lua 7.073 18.873 22.844
 compiler spec/coder/folder_modules_spec.lua 7.504 12.203 131.172
 compiler spec/coder/for_in_spec.lua 5.981 9.721 39.375
 compiler spec/coder/foreign_functions_spec.lua 7.726 42.897 56.547
+stdlib spec/coder/gc_keep_alive_spec.lua 1.000
 compiler spec/coder/generics_spec.lua 10.497 31.540 47.672
 compiler spec/coder/grammar_semantics_spec.lua 3.993 25.896 10.718
 stdlib spec/coder/immediate_functions_spec.lua 6.013 6.859 9.094

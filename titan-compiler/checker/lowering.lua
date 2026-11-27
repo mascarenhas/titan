@@ -476,6 +476,15 @@ function generic_lower_call_arguments(
     end
 end
 
+-- A `gc.keep_alive` intrinsic calls no entry, so its argument keeps its own
+-- erased carrier rather than entering the erased signature's `value` boundary.
+-- Implementation notes: doc/implementation/gc-library.md#keep-alive-intrinsic
+local function keep_alive_argument_signature(node)
+    local adjusted = node._arg_adjustment
+    local argument = adjusted and adjusted.fixed[1] or node.args.args[1]
+    return types.Function({ types.erase(argument._type) }, {}, false, nil, nil)
+end
+
 function generic_lower_call_in_place(node, state)
     local prior = state.calls[node]
     if prior then return prior end
@@ -536,8 +545,10 @@ function generic_lower_call_in_place(node, state)
         info.surface_visible[index] = typ
     end
 
-    generic_lower_call_arguments(
-        node, signature, surface_signature, state)
+    generic_lower_call_arguments(node,
+        node._keep_alive_intrinsic and keep_alive_argument_signature(node)
+            or signature,
+        surface_signature, state)
 
     if node.args._tag == "Ast.ArgsMethod" then
         -- Runtime lowering must rebind the call to the erased method, but

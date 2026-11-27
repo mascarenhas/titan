@@ -1,4 +1,3 @@
-local wake_gc = import "gc"
 foreign import "stdlib.h"
 foreign import "external-wake-native.h"
 
@@ -396,7 +395,7 @@ function external_wake_t.new(): external_wake_t
   end
   -- Register before native acquisition, including the rooted-owner lua_close
   -- case. Finalization only detaches native data; it never drives a loop.
-  wake_gc.finalizable(owner, external_wake_finalize)
+  gc.finalizable(owner, external_wake_finalize)
   return owner
 end
 

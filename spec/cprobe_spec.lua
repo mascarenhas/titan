@@ -2111,15 +2111,21 @@ struct titan_probe_target_s { int value; };
                 local dependency_path = staged.dependencies[1].filename
                 assert.equal(header.contents, assert(strategy:read_file(consumer_path)))
                 assert.equal(dependency.contents, assert(strategy:read_file(dependency_path)))
+                -- The accepted baseline is followed by one rejected candidate;
+                -- only a candidate rejection is persisted.
+                if calls == 1 then
+                    return { started = true, ok = true, status = 0, diagnostic = "" }
+                end
                 return { started = true, ok = false, status = 1,
                     diagnostic = "In file included from " .. consumer_path .. ":2,\n"
                         .. dependency_path .. ":5: error: generated declaration rejected" }
             end,
         }))
         local context = assert(service:module_context({ includes = { include } }))
-        local result = context:validate_baseline()
+        assert.equal("success", context:validate_baseline().status)
+        local result = context:probe_unsafe_object_pointer(cpointer("s"), cpointer("t"))
         assert.equal("rejected", result.status)
-        assert.equal(1, calls)
+        assert.equal(2, calls)
         local expected = "In file included from " .. fixture_path("/project/app/consumer.ffi.h") .. ":2,\n"
             .. fixture_path("/project/lib/dep.ffi.h") .. ":5: error: generated declaration rejected"
         assert.equal(expected, result.diagnostic)
@@ -2133,7 +2139,8 @@ struct titan_probe_target_s { int value; };
             cache_directory = cache, relocation_roots = { output = fixture_path("/moved-project") },
             runner = function() error("persistent generated result must not compile") end,
         }))
-        local replay = assert(restored:module_context({ includes = { include } })):validate_baseline()
+        local replay = assert(restored:module_context({ includes = { include } }))
+            :probe_unsafe_object_pointer(cpointer("s"), cpointer("t"))
         assert.is_true(replay.persistent_cached)
         local moved = "In file included from " .. fixture_path("/moved-project/app/consumer.ffi.h") .. ":2,\n"
             .. fixture_path("/moved-project/lib/dep.ffi.h") .. ":5: error: generated declaration rejected"
@@ -2141,8 +2148,7 @@ struct titan_probe_target_s { int value; };
         assert.is_nil(replay.diagnostic:find("<titan:", 1, true))
         assert.is_nil(restored.generated_workspaces)
         assert.is_true(restored:close())
-        assert(os.remove(result.cache_path))
-        assert(lfs.rmdir(cache))
+        remove_directory(cache)
     end)
 
     it("keeps a post-spawn missing baseline status retryable", function()
@@ -2804,24 +2810,63 @@ describe("source-only probe cache", function()
         remove_directory(cache)
     end)
 
-    it("persists baseline rejection without inferring a candidate verdict", function()
+    it("reuses baseline rejection only inside its service process", function()
         local cache = temporary_directory()
-        local first, first_state = new_fake_service({ cache_directory = cache }, function()
+        local function reject()
             return { started = true, ok = false, status = 1, diagnostic = "broken header" }
-        end)
+        end
+        local first, first_state = new_fake_service({ cache_directory = cache }, reject)
         local module = assert(first:module_context({ includes = { "broken.h" } }))
+        local rejected = module:validate_baseline()
+        assert.equal("rejected", rejected.status)
         assert.equal("rejected", module:validate_baseline().status)
-        assert.equal(1, #first_state.calls)
-        assert.is_true(first:close())
-        local second, second_state = new_fake_service({ cache_directory = cache })
-        local second_module = assert(second:module_context({ includes = { "broken.h" } }))
-        assert.equal("rejected", second_module:validate_baseline().status)
-        local result = second_module:probe_unsafe_object_pointer(cpointer("s"), cpointer("t"))
+        local result = module:probe_unsafe_object_pointer(cpointer("s"), cpointer("t"))
         assert.equal("infrastructure_failure", result.status)
         assert.equal("baseline", result.stage)
-        assert.equal(0, #second_state.calls)
-        assert.equal(1, #entries(cache))
+        assert.equal(1, #first_state.calls)
+        assert.is_true(first:close())
+        assert.equal(0, #entries(cache))
+        local second, second_state = new_fake_service({ cache_directory = cache }, reject)
+        local second_module = assert(second:module_context({ includes = { "broken.h" } }))
+        local recompiled = second_module:validate_baseline()
+        assert.equal("rejected", recompiled.status)
+        assert.equal(rejected.key, recompiled.key)
+        assert.is_false(recompiled.cached)
+        assert.equal(1, #second_state.calls)
+        assert.equal(0, #entries(cache))
         assert.is_true(second:close())
+        remove_directory(cache)
+    end)
+
+    it("does not let a baseline rejected without -D_GNU_SOURCE poison a run with it", function()
+        local cache = temporary_directory()
+        local function needs_gnu_source(_, argv)
+            for _, argument in ipairs(argv) do
+                if argument == "-D_GNU_SOURCE" then
+                    return { started = true, ok = true, status = 0, diagnostic = "" }
+                end
+            end
+            return { started = true, ok = false, status = 1,
+                diagnostic = "uv.h: unknown type name 'pthread_rwlock_t'" }
+        end
+        local plain, plain_state = new_fake_service({ cache_directory = cache },
+            needs_gnu_source)
+        local plain_module = assert(plain:module_context({ includes = { "uv.h" } }))
+        local rejected = plain_module:validate_baseline()
+        assert.equal("rejected", rejected.status)
+        assert.equal(1, #plain_state.calls)
+        assert.is_true(plain:close())
+        assert.equal(0, #entries(cache))
+
+        local gnu, gnu_state = new_fake_service({ cache_directory = cache,
+            cppflags = { "-D_GNU_SOURCE" } }, needs_gnu_source)
+        local gnu_module = assert(gnu:module_context({ includes = { "uv.h" } }))
+        local accepted = gnu_module:validate_baseline()
+        assert.equal("success", accepted.status)
+        assert.equal(rejected.key, accepted.key)
+        assert.equal(1, #gnu_state.calls)
+        assert.is_true(gnu:close())
+        assert.same({ accepted.key .. ".result" }, entries(cache))
         remove_directory(cache)
     end)
 

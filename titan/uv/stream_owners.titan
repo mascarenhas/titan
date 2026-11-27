@@ -719,15 +719,18 @@ local function write_deliver(owner: write_t, loop: loop_t, status: integer)
   -- Keep the old buffers, descriptors, and string through actual callback
   -- return, independent of the new fields installed if user code resubmits
   -- this same request.
-  local buffers? = owner.buffers
-  local native_buffers? = owner.native_buffers
-  local string_data? = owner.string_data
+  const buffers? = owner.buffers
+  const native_buffers? = owner.native_buffers
+  const string_data? = owner.string_data
   local callback? = owner.callback
   owner.callback = nil
   owner.buffers = nil
   owner.native_buffers = nil
   owner.string_data = nil
   if callback ~= nil then callback(owner, status) end
+  gc.keep_alive(buffers)
+  gc.keep_alive(native_buffers)
+  gc.keep_alive(string_data)
 catch
   if loop.failure_count == 0 then
     loop.failure_error = error

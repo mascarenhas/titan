@@ -1717,6 +1717,8 @@ end
 -- All memory and disk reuse answers the same question: has this exact raw C
 -- source already completed? Environment changes deliberately do not invalidate
 -- either outcome. Removing the cache is the programmer's refresh mechanism.
+-- A rejected header baseline is the exception on disk: it usually reflects one
+-- invocation's missing -D/-I flags, so only this service process reuses it.
 -- An adapter digest yields the same hexadecimal key as the Lua fallback.
 function Service:_digest(source)
     local adapter = self.cache_adapter
@@ -1800,7 +1802,7 @@ local function semantic_run(result, source, tier, path)
     }
 end
 
-function Service:_publish_result(key, path, run, question)
+function Service:_publish_result(key, path, run, question, stage)
     run.cache_path = path
     if run.classification ~= "success" and
        run.classification ~= "compiler_rejection" then
@@ -1821,6 +1823,9 @@ function Service:_publish_result(key, path, run, question)
         self.analysis_result_cache[key] = result
     end
     if not path then return run, "disabled" end
+    if stage == "baseline" and run.classification == "compiler_rejection" then
+        return run, "process_only"
+    end
     if run.diagnostic_persistent_safe == false then
         return run, "unstable_diagnostic"
     end
@@ -1956,7 +1961,8 @@ function Service:_run_source(stage, source, kind, context, question, deferrable,
     local execution = self:_execute_source(stage, source, key,
         kind:gsub("_", "-"), question, context and context.generated_header)
     if batch and not nested_baseline then batch:_observe(key, execution) end
-    local run, publication = self:_publish_result(key, path, execution, question)
+    local run, publication = self:_publish_result(
+        key, path, execution, question, stage)
     run.key = key
     if baseline then run.baseline_cached = baseline.cached end
     self:_trace_execution(key, kind, context, execution, lookup, publication)

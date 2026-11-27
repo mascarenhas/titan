@@ -2,6 +2,7 @@
 -- @module titan.uv
 -- @usage standard-library-uv.md
 
+local gc = import "gc"
 local iteration = import "iteration"
 local protobuf = import "protobuf"
 local reflect = import "reflect"
@@ -1076,7 +1077,7 @@ local function work_deliver(owner: work_t, loop: loop_t, status: integer)
   -- user code can resubmit this owner, possibly on a different loop.
   loop.requests[owner] = nil
   owner.pending = false
-  local argument_owner = owner.argument_owner
+  const argument_owner = owner.argument_owner
   owner.argument_owner = nil
   local callback? = owner.callback
   owner.callback = nil
@@ -1085,6 +1086,7 @@ local function work_deliver(owner: work_t, loop: loop_t, status: integer)
   -- The old argument graph stays in this handler frame through user delivery;
   -- request reuse may independently install a new graph.
   if callback ~= nil then callback(owner, status) end
+  gc.keep_alive(argument_owner)
 catch
   -- This is the originating loop, even if the callback requeued owner.
   -- No allocating Titan helper entry may run outside this catch boundary.

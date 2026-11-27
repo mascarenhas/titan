@@ -543,3 +543,167 @@ function test_gc_parameters_round_trip_and_validate(_context: test.Context)
     gclib.step(-1)
   end, "must be non-negative")
 end
+
+local record KeepAlivePayload
+  const label: string
+end
+
+local record KeepAliveOwner
+  slot: KeepAlivePayload?
+end
+
+-- The payload under test is reachable only from `weak` (weak values) and the
+-- frame that keeps it alive; `finalized` counts its finalizer runs.
+local record KeepAliveProbe
+  const weak: {value: value}
+  finalized: integer
+end
+
+local type KeepAliveCallback = function (KeepAliveOwner)
+
+local function new_keep_alive_probe(): KeepAliveProbe
+  const weak: {value: value} = {}
+  gclib.weak(weak)
+  return KeepAliveProbe(weak, 0)
+end
+
+-- Install a tracked payload in owner.slot without leaving it in this frame
+-- of the test body.
+local function track_keep_alive_payload(probe: KeepAliveProbe,
+                                        owner: KeepAliveOwner)
+  const payload = KeepAlivePayload("tracked")
+  probe.weak[1] = payload
+  gclib.finalizable<|KeepAlivePayload|>(payload,
+      function(_: KeepAlivePayload)
+    probe.finalized = probe.finalized + 1
+  end)
+  owner.slot = payload
+end
+
+-- The reentrant uv delivery shape: retire the old slot value, let the callback
+-- replace the slot again, and keep the retired value alive through delivery.
+local function deliver_keep_alive(owner: KeepAliveOwner,
+                                  callback: KeepAliveCallback)
+  const kept? = owner.slot
+  owner.slot = KeepAlivePayload("replacement")
+  callback(owner)
+  gclib.keep_alive(kept)
+end
+
+local function collect_in_callback(probe: KeepAliveProbe,
+                                   failure: string?): KeepAliveCallback
+  return function(target: KeepAliveOwner)
+    target.slot = KeepAlivePayload("callback")
+    for index = 1, 256 do
+      local churn = { KeepAlivePayload("churn " .. index) }
+      test.assert(#churn == 1)
+    end
+    gclib.collect()
+    gclib.collect()
+    test.assert(probe.weak[1] ~= nil, "kept payload was collected during delivery")
+    test.assert(probe.finalized == 0, "kept payload was finalized during delivery")
+    if failure then raise failure end
+  end
+end
+
+function test_gc_keep_alive_roots_value_through_reentrant_delivery(
+    _context: test.Context)
+  const probe = new_keep_alive_probe()
+  const owner = KeepAliveOwner(nil)
+  track_keep_alive_payload(probe, owner)
+  deliver_keep_alive(owner, collect_in_callback(probe, nil))
+  gclib.collect()
+  gclib.collect()
+  test.assert(probe.finalized == 1, "finalized " .. probe.finalized)
+  test.assert(probe.weak[1] == nil)
+end
+
+function test_gc_keep_alive_roots_value_until_callback_raises(
+    _context: test.Context)
+  const probe = new_keep_alive_probe()
+  const owner = KeepAliveOwner(nil)
+  track_keep_alive_payload(probe, owner)
+  local caught = false
+  do
+    deliver_keep_alive(owner, collect_in_callback(probe, "boom"))
+  catch
+    caught = error == "boom"
+  end
+  test.assert(caught)
+  gclib.collect()
+  gclib.collect()
+  test.assert(probe.finalized == 1, "finalized " .. probe.finalized)
+  test.assert(probe.weak[1] == nil)
+end
+
+function test_gc_keep_alive_evaluates_arguments_once_in_order(
+    _context: test.Context)
+  const log: {string} = {}
+  const record_label = function(label: string): string
+    log[#log + 1] = label
+    return label
+  end
+  const record_nothing = function()
+    log[#log + 1] = "nothing"
+  end
+  gclib.keep_alive(record_label("positional"))
+  gclib.keep_alive { v = record_label("named") }
+  gclib.keep_alive(record_label("first"), record_label("surplus"),
+                   record_nothing())
+  gclib.keep_alive<|string?|>(record_label("explicit"))
+  test.assert(#log == 6, "logged " .. #log)
+  test.assert(log[1] == "positional" and log[2] == "named")
+  test.assert(log[3] == "first" and log[4] == "surplus")
+  test.assert(log[5] == "nothing" and log[6] == "explicit")
+
+  const fail = function(): string
+    raise "boom"
+  end
+  local caught = false
+  do
+    gclib.keep_alive(record_label("before"), fail())
+  catch
+    caught = error == "boom"
+  end
+  test.assert(caught)
+  test.assert(#log == 7 and log[7] == "before")
+end
+
+local function hold_generic<|U|>(item: U)
+  gclib.keep_alive(item)
+end
+
+function test_gc_keep_alive_accepts_indirect_lua_generic_and_option_forms(
+    _context: test.Context)
+  const payload = KeepAlivePayload("forms")
+  const first_class: function (KeepAlivePayload): () = gclib.keep_alive
+  first_class(payload)
+  const from_lua = support.lua_helper([[
+return function(item)
+  local result = table.pack(require("titan.gc").keep_alive(item))
+  return result.n
+end
+]]) as function (value): (integer)
+  test.assert(from_lua(payload) == 0)
+  hold_generic(payload)
+  hold_generic<|string?|>(nil)
+
+  local captured = KeepAlivePayload("captured")
+  const replace = function()
+    captured = KeepAlivePayload("replaced")
+  end
+  gclib.keep_alive(captured)
+  replace()
+  gclib.keep_alive(captured)
+  test.assert(captured.label == "replaced")
+
+  local text: string? = nil
+  gclib.keep_alive(text)
+  text = "present"
+  gclib.keep_alive(text)
+  local cells: (owned int[])? = nil
+  gclib.keep_alive(cells)
+  cells = foreign int.new_array(4)
+  gclib.keep_alive(cells)
+  gclib.keep_alive(42)
+end

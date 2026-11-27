@@ -4,6 +4,7 @@ spec/coder/browser_docs_spec.lua
 spec/coder/build_coordination_spec.lua
 spec/coder/compiler_build_scenarios_spec.lua
 spec/coder/documentation_spec.lua
+spec/coder/gc_keep_alive_spec.lua
 spec/coder/immediate_functions_spec.lua
 spec/coder/incremental_compilation_spec.lua
 spec/coder/link_certification_spec.lua

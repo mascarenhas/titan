@@ -145,13 +145,15 @@ local function udp_sent(owner: udp_send_t, loop: loop_t, status: foreign int)
   owner.loop = nil
   -- Keep the old buffer closure through actual callback return, independent
   -- of the new fields installed if user code resubmits this same request.
-  local retained? = owner.buffers
-  local native? = owner.native_buffers
+  const retained? = owner.buffers
+  const native? = owner.native_buffers
   local callback? = owner.callback
   owner.buffers = nil
   owner.native_buffers = nil
   owner.callback = nil
   if callback ~= nil then callback(owner, status as integer) end
+  gc.keep_alive(retained)
+  gc.keep_alive(native)
 catch
   if loop.failure_count == 0 then
     loop.failure_error = error
