@@ -1400,7 +1400,7 @@ titan-stdlib-test-objects: $(filter %.h,$(TITAN_TEST_FIXTURE_OUTPUTS)) | check-t
 # helpers that test-root discovery never names. titan-stdlib-browser-lint
 # proves that these roots cover the whole test tree.
 titan-stdlib-lint: $(LUA_SDK_PREREQ) $(STDLIB_BOOTSTRAP_PREREQ) $(STDLIB_PLATFORM_PREREQS) $(SQLITE3_HEADER) $(LLHTTP_HEADER) $(LPEGLABEL_HEADERS) $(filter %.h,$(TITAN_TEST_FIXTURE_OUTPUTS)) | check-titan-test-sdk ## Lint the native stdlib and its tests under every rule
-	@unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
+	+@$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	status=0; \
 	$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) -q --lint $(TITAN_LINT_FLAGS) $(STDLIB_ROOTS) || status=1; \
 	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)) && \

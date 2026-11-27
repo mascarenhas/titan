@@ -180,7 +180,7 @@ TITAN_STDLIB_LINT_ROOTS_CHECK = $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TIT
 # The browser stdlib as the browser SDK builds it, then every browser test
 # owner and helper as their images build them.
 titan-stdlib-browser-lint: ## Lint the browser stdlib, test owners and helpers under every rule
-	@unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
+	+@$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	status=0; \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(BROWSER_INSTALL_TREE)/bin/titanc$(BROWSER_EXE_SUFFIX)) \
 	  -q --lint $(TITAN_LINT_FLAGS) --target browser \

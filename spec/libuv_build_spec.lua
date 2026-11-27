@@ -8416,6 +8416,8 @@ printf '%s %s %s\n' "$jobs" "$pool" "${TITAN_C_PARTS:-default}" >> "$TITAN_FIXTU
             -- Every recipe line that launches titanc directly or through a
             -- variable is a `+` line whose first command is the
             -- dry-run/query/touch guard, so those modes do no other work.
+            -- A build passes the job count; `--lint` builds nothing and
+            -- titanc rejects a job count beside it.
             local logical = makefile:gsub("\\\n", " ")
             local launches = 0
             for line in logical:gmatch("[^\n]+") do
@@ -8425,7 +8427,7 @@ printf '%s %s %s\n' "$jobs" "$pool" "${TITAN_C_PARTS:-default}" >> "$TITAN_FIXTU
                     assert.truthy(line:match(
                         "^\t[@-]*%+[@-]*%$%$?%(RECURSIVE_WRAPPER_GUARD%) "), line)
                     assert.truthy(line:find("-j$$(TITAN_JOBS)", 1, true) or
-                        line:find("-j$(TITAN_JOBS)", 1, true), line)
+                        line:find("-j$(TITAN_JOBS)", 1, true) or line:find(" --lint ", 1, true), line)
                 end
             end
             assert.is_true(launches >= 5)
