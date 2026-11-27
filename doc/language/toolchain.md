@@ -71,6 +71,16 @@ least one module name is required unless you pass `--print-root`,
 | `--print-ast` | Parse, typecheck, and print the checked AST to stdout. |
 | `--no-line-directives` | Omit `#line` directives from generated C so native tools report generated C lines. Disallowed on `--target browser`. |
 
+### Lint options
+
+| Option | Meaning |
+| --- | --- |
+| `--lint` | Check the named modules (and `--test --test-dir` roots) and print [style diagnostics](#linting-with---lint) instead of building. |
+| `--lint-enable RULE` | Turn on an opt-in rule; `--lint-enable=all` turns on every rule. Repeatable. |
+| `--lint-allow RULE` | Turn a rule off. Repeatable. |
+| `--lint-deny RULE` | Turn a rule on and make its diagnostics fail the run; `--lint-deny=warnings` or `--lint-deny=hints` fails every enabled rule of that severity. Repeatable. |
+| `--lint-format FMT` | Diagnostic output: `human` (default) or `json`. |
+
 ### Incompatible option combinations
 
 - `-q` and `-v` cannot be combined.
@@ -81,6 +91,7 @@ least one module name is required unless you pass `--print-root`,
 - `--print-c-objects` requires `-c` and at least one `--c-source`.
 - `--test-dir` requires `--test`; `--test-exclude` requires both `--test` and `--test-dir`.
 - `--test` reserves `titan.test` and rejects it as an explicit root.
+- `--lint` accepts only `-t`, `-T`, `-I`, `-D`, `-u`, `-q`, `-v`, `--test`, `--test-dir`, `--test-exclude`, and the `--lint-*` options; every other build, link, output, or `--print-*` option is rejected. The `--lint-*` options require `--lint`.
 
 ### Selecting the target (`-T` / `--target` and `TITAN_TARGET`)
 
@@ -101,6 +112,74 @@ macOS, and Windows hosts also support `browser` (see
 Target validation runs before source lookup. Only `titanc` reads
 `TITAN_TARGET`; the language server selects targets from workspace
 configuration.
+
+## Linting with `--lint`
+
+`titanc --lint` checks modules exactly as a build would (parsing, type
+checking, and C-header analysis for `foreign import`) and then reports style
+and correctness diagnostics. It generates no C, objects, providers, or
+executables and takes no output locks; header analysis may still run cached C
+preprocessor and probe commands.
+
+```sh
+titanc --lint -t src app.main app.store
+titanc --lint --lint-enable=all --test --test-dir src/tests -t src app.main
+titanc --lint --lint-deny=warnings --lint-format=json -t src app.main
+```
+
+Positional modules are dotted logical names resolved only from the `-t`
+roots, never from the SDK source fallback, and `--test --test-dir` (with
+`--test-exclude`) adds the [discovered test roots](#testing-and-coverage-options)
+without building a runner. Imports resolve as usual, but only the requested
+roots are linted; each diagnostic names the file (including a folder-module
+contributor) that contains the construct. `-T`/`--target` selects the target's
+source variants; `browser` needs the installed browser SDK. If any requested
+module fails to resolve, parse, or type-check, `titanc` prints the compiler
+errors, reports no lint diagnostics, and exits with status 1.
+
+Diagnostics are sorted by file, line, column, and rule. The `human` format
+prints `file:line:col: warning[rule]: message` (or `hint[rule]`); the `json`
+format prints one document,
+`{"version":1,"diagnostics":[{"file":…,"line":…,"col":…,"severity":"warning"|"hint","rule":…,"message":…,"denied":true|false}]}`.
+
+Every rule has a fixed severity: the default rules report `warning`s, and the
+opt-in rules report `hint`s only after `--lint-enable`. The rule options apply
+strictly left to right: `--lint-enable` turns a rule on (keeping it denied if
+it was), `--lint-allow` turns it off, `--lint-deny=RULE` turns it on and
+denies it, and `--lint-deny=warnings` or `=hints` denies every rule of that
+severity that is on at that point. An unknown rule name is an error.
+Suppression is command-line only; comments in the source never change lint
+results. `titanc --lint` exits with status 1 when any denied diagnostic is
+reported, and with status 0 otherwise, warnings included.
+
+| Rule | Default | Reports |
+| --- | --- | --- |
+| `unused-local-binding` | warning | A local or loop variable that is never read or written; rename it to `_` (its initializer still runs). |
+| `unused-lambda-param` | warning | The only named parameter of a lambda when it is never used; rename it to `_`. |
+| `prefer-record-call-shorthand` | warning | `Record.new(...)` where deleting `.new` gives the same call ([calling a record](records.md#calling-a-record)); keep any owner type arguments. |
+| `unmatched-public-test-signature` | hint | A public `test_*` function in a module importing `test` that `--test` does not discover (it does not take exactly one `test.Context`). |
+| `union-identity-equality` | hint | `==`/`~=` against a freshly constructed variant of an `async`, `uv`, HTTP mode, `reflect.Type`, or `websocket.MessageType` union: union equality is identity, so the result never changes. |
+| `stdlib-import-spelling` | hint | `import "titan.<name>"` where the short standard-library spelling `"<name>"` exists. |
+| `prefer-const-local-field` | hint | A non-const `local` record field (other than inline C storage) that this module never assigns. |
+| `prefer-const-local` | hint | A single-name local with a written initializer, other than inline C storage, that is read but never reassigned. |
+| `boolean-option-silent-truthiness-local` | hint | An unannotated local initialized from a `boolean?`, which turns nil into false. |
+| `ephemeral-interface-map-key` | hint | Indexing a Map keyed by an Interface with a concrete value, which builds a new wrapper key each time. |
+| `catch-reraise-resets-trace` | hint | `raise error` inside `catch`, which starts a new traceback (bare `raise` keeps it). |
+| `extra-do-block-around-try` | hint | A `do ... catch ... end` that is a block's only statement, where the block could carry the `catch`. |
+| `duplicate-record-literal-field` | hint | A record literal naming the same field twice. |
+| `gc-finalizable-non-collectable-arg` | hint | `gc.finalizable` on a scalar, string, or raw C value, which always raises. |
+| `gc-finalizable-captures-target` | hint | A finalizer lambda that captures its own target. |
+| `race-any-unmanaged-losers` | hint | An inline `async.run*` argument to `async.race_*`/`any_*`, whose losing Task can never be cancelled. |
+| `header-dependent-public-c-export` | hint | A public declaration whose type, including the public fields and variants of the records and unions it reaches, exposes a header-dependent C type, so importers need the same headers. |
+| `dso-imported-record-literal` | hint | A raw record literal for a record from a compiled provider. |
+| `dso-closed-union-case` | hint | An exhaustive `case` without `else` on a union from a compiled provider. |
+
+The last two matter when that provider is replaced independently of the code
+that uses it ([Replacing shared-library dependencies](#replacing-shared-library-dependencies)).
+As a conservative v1 exclusion, they and `header-dependent-public-c-export`
+skip every module that defines a discovered `test_*` function, including a
+module that mixes tests with production code; this does not mean such a
+module has no importers.
 
 ## Environment variables
 

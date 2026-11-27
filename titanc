@@ -47,6 +47,16 @@ local function native_switch(kind)
     end
 end
 
+-- `--lint-enable`/`--lint-allow`/`--lint-deny` apply strictly left to right.
+local lint_directives = {}
+local function lint_directive(op)
+    return function(result, target, value)
+        result[target] = result[target] or {}
+        table.insert(result[target], value)
+        lint_directives[#lint_directives + 1] = { op = op, value = value }
+    end
+end
+
 -- Implementation notes: doc/implementation/driver.md#the-titanc-command-line
 local p = argparse('titan', 'Titan compiler')
 p:argument('module', 'Names of the modules to compile.'):args("*")
@@ -94,6 +104,11 @@ p:option('--test-dir', 'With --test, use every source module below this director
 p:option('--test-exclude', 'With --test-dir, exclude this discovered logical module; repeatable.'):count('*')
 p:option('-X --extra-object',
     'Additional native object/archive payload carried into the linked provider outputs.'):args("*")
+p:flag('--lint', 'Check the named authored modules (and --test --test-dir roots) and report style diagnostics without building anything.')
+p:option('--lint-enable', 'With --lint, turn on an opt-in rule, or all of them with --lint-enable=all; repeatable, applied left to right.'):count('*'):action(lint_directive('enable'))
+p:option('--lint-allow', 'With --lint, turn a rule off; repeatable, applied left to right.'):count('*'):action(lint_directive('allow'))
+p:option('--lint-deny', 'With --lint, turn on a rule and make its diagnostics fail the run; --lint-deny=warnings or =hints fails every enabled rule of that severity; repeatable, applied left to right.'):count('*'):action(lint_directive('deny'))
+p:option('--lint-format', 'With --lint, diagnostic output: human (default) or json.')
 local args = p:parse()
 
 local resolver_context
@@ -170,6 +185,73 @@ end
 -- it; the plain renderer serves verbose mode and both switches are refusals.
 if args.quiet and args.verbose then
     exit("-q/--quiet and -v/--verbose cannot be combined")
+end
+
+-- `titanc --lint` checks authored roots in an analysis-only resolver and
+-- reports style diagnostics; it builds, writes and links nothing.
+-- Implementation notes: doc/implementation/driver.md#the-titanc---lint-command
+if not args.lint and (#lint_directives > 0 or args.lint_format) then
+    exit("--lint-enable, --lint-allow, --lint-deny and --lint-format require --lint")
+end
+if args.lint then
+    local coverage_options = args.coverage or #args.coverage_module > 0 or
+        #args.coverage_format > 0 or args.coverage_root or args.coverage_gcov or
+        args.coverage_backend or args.coverage_output or args.coverage_gcovr
+    local native_kinds = {}
+    for _, switch in ipairs(native_cli) do native_kinds[switch.kind] = true end
+    for _, rejected in ipairs({
+        { args.output, "-o/--output" }, { args.exe, "--exe" },
+        { args.compile_only, "-c/--compile-only" }, { args.static, "--static" },
+        { args.source_first, "--source-first" }, { args.incremental, "--incremental" },
+        { args.no_source_records, "--no-source-records" }, { coverage_options, "--coverage" },
+        { #args.c_source > 0, "--c-source" }, { args.print_c_objects, "--print-c-objects" },
+        { args.extra_object ~= nil, "-X/--extra-object" }, { native_kinds.library, "-l/--link" },
+        { native_kinds.libdir, "-L/--library-dir" }, { native_kinds.cflag, "--cflag" },
+        { native_kinds.ldflag, "--ldflag" }, { args.c_parts, "--c-parts" },
+        { args.jobs, "-j/--jobs" }, { args.pretty_print, "--pretty-print" },
+        { args.no_line_directives, "--no-line-directives" },
+        { args.no_uv_bootstrap, "--no-uv-bootstrap" }, { args.print_ast, "--print-ast" },
+        { args.print_root, "--print-root" },
+    }) do
+        if rejected[1] then
+            exit("--lint cannot be combined with " .. rejected[2] .. ": linting builds no outputs")
+        end
+    end
+    if (#args.test_dir > 0 or #args.test_exclude > 0) and not args.test then
+        exit("--test-dir and --test-exclude require --test")
+    end
+    if #args.test_exclude > 0 and #args.test_dir == 0 then
+        exit("--test-exclude requires --test-dir")
+    end
+    local format = args.lint_format or "human"
+    if format ~= "human" and format ~= "json" then
+        exit("--lint-format must be human or json")
+    end
+    if args.lua and driver.INSTALLED then
+        exit("--lua is only available in a source checkout; the installed " ..
+            "compiler must use its matching Lua SDK")
+    end
+    local target, target_origin = args.target, "--target"
+    if target == nil then
+        target, target_origin = platform.getenv("TITAN_TARGET"), "TITAN_TARGET"
+    end
+    local called, result, errors = pcall(driver.lint_modules, {
+        modules = args.module, tree = args.tree, target = target,
+        target_origin = target_origin, native_cli = native_cli, lua_dir = args.lua,
+        test_dirs = args.test_dir, test_excludes = args.test_exclude,
+        rule_directives = lint_directives, verbose = args.verbose,
+    })
+    if not called then
+        if type(result) ~= "string" then error(result, 0) end
+        exit(result)
+    end
+    if not result then exit(table.concat(errors, "\n")) end
+    local linter = require 'titan-compiler.linter'
+    io.stdout:write(format == "json" and linter.format_json(result) or
+        linter.format_human(result))
+    io.stdout:flush()
+    if result.denied_count > 0 then os.exit(1) end
+    return
 end
 
 if args.print_c_objects then

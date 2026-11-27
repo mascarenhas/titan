@@ -1867,6 +1867,14 @@ rejected, never silently shared. Returning to an earlier target identity
 creates a new generation, so an old context of that target stays stale.
 Closing a stale context to release its own resources is allowed.
 
+Generations come from a strictly monotonic allocator, so no two epochs ever
+share one. [`driver.lint_modules`](driver.md#lint-analysis-driverlint_modules)
+is the one nested owner: it saves the complete ownership state (both tables,
+the target identity, and the generation), analyzes in a fresh epoch, and
+restores the caller's state on every exit path. A caller context of any
+target therefore stays valid across a lint, and the lint's own contexts are
+stale afterwards.
+
 The guard runs at every semantic entry point: layout, platform, and foreign-C
 initialization; the default and table loaders, at creation and on every warm
 loader call; embedded-cache reconciliation; source lookup and object

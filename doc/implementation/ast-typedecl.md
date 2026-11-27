@@ -371,6 +371,8 @@ remain booleans.
 | `_coder_spread` | `ExpSpread` | coder | coder | prepared subject/range/count/result-run state shared by every generated projection and open sink |
 | `_adjusted_spread` | `ExpAdjust` | checker | flow analysis, coder | the evaluated-once carrier for the scalar projection of a parenthesized spread |
 | `_parenthesized` | node returned by `defs.adjust_exp` | parser | checker | the expression was parenthesized; rejects it as an lvalue |
+| `_written_modname` | `TopLevelImport` | parser (`defs.importdecl`) | linter | the import literal as written, before `parser.normalize_import` canonicalizes `modname` ([lint rules](driver.md#lint-rules)) |
+| `_shorthand_record_call` | `ExpCall` | checker (record-call rewrite) | linter | the call was written `Record(...)` and rewritten to `Record.new(...)` ([lint rules](driver.md#lint-rules)) |
 | `_numeral` | parsed `ExpInteger` and `ExpFloat` | parser | checker | validated source spelling; preserves radix and exact integer digits for [C99 literal typing](c-ffi-expressions.md#c-operator-traits), independently of the Lua numeric value |
 | `_c_literal` | C-typed numeric literals, including contextual signed `ExpUnop` | checker | coder, C operator probe | exact typed C literal expression selected by [C99 or contextual typing](c-ffi-expressions.md#c-operator-traits); floating values are rendered from the lexer's double value |
 | `_c_operator` | C-mode `ExpUnop` and `ExpBinop` | checker | coder | validated operator, operand conversions, result type, literal expressions, and probe key ([C operator traits](c-ffi-expressions.md#c-operator-traits)) |

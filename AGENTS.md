@@ -14,6 +14,7 @@ TypeScript, Go, or C. Load every applicable peer cartridge as well:
 
 | Work | Skill |
 | --- | --- |
+| Everyday stdlib (`string`/`Regex`, `math`, `iteration`, `io`, `path`, `fs`, `os`, `gc`) | [titan-stdlib](.agents/skills/titan-stdlib/SKILL.md) |
 | Application repository, build layout, executable delivery, browser application layout and deployment | [titan-application](.agents/skills/titan-application/SKILL.md) |
 | Packaging and distributing Titan library modules as LuaRocks rocks (`titan-install`, `titan-uninstall`, staging `dist/`, rockspecs, source-only vs compiled rocks) | [titan-package](.agents/skills/titan-package/SKILL.md) |
 | Native tests, fixtures, test-layer placement, filtering | [titan-tester](.agents/skills/titan-tester/SKILL.md) |
@@ -25,8 +26,10 @@ TypeScript, Go, or C. Load every applicable peer cartridge as well:
 | PEG/relabel parsers and combinators | [titan-pegs](.agents/skills/titan-pegs/SKILL.md) |
 | Runtime schemas, nominal descriptors, reflected access | [titan-reflect](.agents/skills/titan-reflect/SKILL.md) |
 | JSON, null policy, typed mappings, diagnostics | [titan-json](.agents/skills/titan-json/SKILL.md) |
-| Compiler completion and language-server completion integration | [titan-completion](.agents/skills/titan-completion/SKILL.md) |
-| Querying Titan code through an agent harness's language-server tool (omp `lsp`), per-checkout SDK selection | [titan-language-server](.agents/skills/titan-language-server/SKILL.md) |
+| Proto3 wire serialization, record/union codecs, portable browser codec (`titan-protobuf.mjs`) | [titan-protobuf](.agents/skills/titan-protobuf/SKILL.md) |
+| Async SQLite connections, prepared statements, Blob binding, cursors, transactions, handoff | [titan-sqlite3](.agents/skills/titan-sqlite3/SKILL.md) |
+| Editing compiler Lua completion internals (`completion.lua`, `checker/completion.lua`, detached descriptors) | [titan-completion](.agents/skills/titan-completion/SKILL.md) |
+| Configuring, running, or querying `titan-language-server` via omp `lsp`/stdio (diagnostics, completion, hover, definition, refs, rename) | [titan-language-server](.agents/skills/titan-language-server/SKILL.md) |
 
 For example, async networking behavior tests require programmer, tester, async,
 and networking. The cartridges are the operational default; follow their links
@@ -91,7 +94,7 @@ Read the [style guide](doc/style-guide.md) before application or stdlib work.
 | C casts/operators/macros/enums, target arithmetic, compile-probe result caching | [C FFI declarations and expressions](doc/implementation/c-ffi-expressions.md) |
 | Public/local C-ABI functions, runtime-resolved raw imports, restricted foreign bodies, `.titan.h`, sequencing | [Foreign functions](doc/implementation/foreign-functions.md) |
 | Trusted raw Lua C API: stack/root ledger, protected independent-state calls, native preload helpers, longjmp, audited allowlist | [Trusted Lua C API boundary](doc/implementation/ffi-lua-api-followup.md) |
-| Module lookup, C compilation/linking, native CLI switches, SDK/tool paths, language-server API | [Driver and toolchain](doc/implementation/driver.md) |
+| Module lookup, C compilation/linking, native CLI switches, SDK/tool paths, language-server API, static linting (`titanc --lint`) | [Driver and toolchain](doc/implementation/driver.md), [linting guide](doc/language/toolchain.md#linting-with---lint) |
 | Native loader/provider snapshots, canonical module selection, per-state Titan bindings, stable raw-function image bindings, ABI checks before initialization | [Module protocol](doc/implementation/codegen-overview.md#the-module-protocol), [dependency wiring](doc/implementation/codegen-overview.md#static-vs-dynamic-dependency-wiring), [runtime verification](doc/implementation/binary-compatibility.md#generated-exports-and-runtime-verification) |
 | Generated files under `-o`/`--output`, `--exe` destinations, `.titan`/`.native`/`.titan-links` state, incremental/coverage paths | [Output-directory routing](doc/implementation/output-directory.md), [output user guide](doc/language/toolchain.md#output-directories) |
 | Folder mains/contributors, declaration order, canonical module/output identity | [Folder modules](doc/implementation/folder-modules.md) |

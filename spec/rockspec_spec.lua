@@ -380,7 +380,7 @@ describe("standalone-prefix source installation", function()
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
             "version.lua", "build.lua", "build_worker.lua", "incremental.lua",
             "depfile.lua", "linkcertificate.lua", "nativeinputs.lua", "progress.lua",
-            "testroots.lua",
+            "testroots.lua", "linter.lua",
         }) do
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
@@ -1218,7 +1218,9 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             local file = relative(path)
             local top = file and file:match("^([^/]+)/")
             if top and top ~= "titan" and top ~= "spec" and top ~= "doc" then
-                if file ~= "titan-runtime/browser/_titan_browser/windows_job.titan" then
+                -- Agent skill evaluation suites carry standalone fixture/oracle .titan files.
+                if file ~= "titan-runtime/browser/_titan_browser/windows_job.titan" and
+                   not file:match("^%.agents/skills/[^/]+/evals/") then
                     assert.falsy(file:match("%.titan$"), file)
                 end
                 local duplicated = stdlib_files[file:match("[^/]+$")]
