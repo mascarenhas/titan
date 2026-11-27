@@ -5,6 +5,8 @@ local layout = require "titan-compiler.nominallayout"
 
 -- A nominal's logical indices never denote physical storage. All generated
 -- clients (including Lua accessors and callback bridges) use these plans.
+-- An owner outside `private_layout_owners` contributes only its public layout,
+-- whether it was compiled earlier or is checked from source in this build.
 function coder._nominal_plan(ctx, owner, variant)
     if owner._tag == "Type.Nominal" then
         owner = assert(types.registry[owner.fqtn])
@@ -13,14 +15,15 @@ function coder._nominal_plan(ctx, owner, variant)
     local key = owner.name .. (variant and "." .. variant.name or "")
     local plan = tl.nominal_plans[key]
     if not plan then
+        local trusted = tl.private_layout_owners[owner.name:match("^(.*)%.[^.]+$")]
         plan = tl.imported_nominal_layouts[key]
-        if not plan and tl.application_nominal_layouts and
-                not tl.private_layout_owners[owner.name:match("^(.*)%.[^.]+$")] then
+        if not plan and not trusted and tl.application_nominal_layouts then
             plan = tl.application_nominal_layouts[key]
         end
         if not plan then
             plan = assert(variant and layout.variant(owner, variant)
                 or layout.record(owner))
+            if not trusted then plan = assert(layout.public(plan)) end
         end
         tl.nominal_plans[key] = plan
         tl.nominal_plan_list[#tl.nominal_plan_list + 1] = plan
@@ -33,6 +36,7 @@ end
 function coder._own_nominal_layouts(modname, ast, ctx)
     ctx = ctx or {
         nominal_plans = {}, nominal_plan_list = {}, imported_nominal_layouts = {},
+        private_layout_owners = { [modname] = true },
     }
     local own = {}
     for _, node in ipairs(ast) do

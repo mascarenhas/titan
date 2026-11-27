@@ -483,6 +483,28 @@ describe("playground compiler", function()
         assert.truthy(emitted.files["nested/util.c"]:find('#include "util.ffi.h"', 1, true))
     end)
 
+    -- Issue #450: a project module's private native storage stays out of its
+    -- ordinary importers; only a direct `.titan` importer sees the whole layout.
+    it("emits private record storage only into the owner and its source importers", function()
+        local opened, why = open(); if not opened then pending(why); return end
+        local project = {
+            ["a.titan"] = "record Box\n  const pub: integer\n  local const secret: float\nend\n\n" ..
+                "function make(pub: integer): Box\n  return Box(pub, 0.5)\nend\n",
+            ["peek.titan"] = 'local a = import "a.titan"\nfunction secret(box: a.Box): float\n' ..
+                "  return box.secret\nend\n",
+            ["main.titan"] = 'local a = import "a"\nlocal peek = import "peek"\n' ..
+                "function main(args: {string}): integer\n  local box = a.make(7)\n" ..
+                "  if peek.secret(box) ~= 0.5 then return 1 end\n  return box.pub - 7\nend\n",
+        }
+        local emitted = service:emit_c(project, string.rep("2", 64))
+        assert.same({}, emitted.diagnostics)
+        assert.same({ "a.c", "main.c", "peek.c" }, emitted.units)
+        local main = emitted.files["main.c"]
+        assert.truthy(main:find("} _titan_nominal_a_2eBox_public_payload;", 1, true))
+        assert.is_nil(main:find("_titan_nominal_a_2eBox_payload", 1, true))
+        assert.truthy(emitted.files["peek.c"]:find("} _titan_nominal_a_2eBox_payload;", 1, true))
+    end)
+
     it("links emitted C into an image whose trace names the program's frames", function()
         local opened, why = open(); if not opened then pending(why); return end
         local info
