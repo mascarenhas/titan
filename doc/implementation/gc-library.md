@@ -145,8 +145,9 @@ the exported entry or boxing the argument into `value`:
    `types.transient_roundtrip` admission still run through the ordinary generic
    scheme path, so direct and first-class calls accept and reject the exact
    same types (rejecting borrowed raw C pointers, fixed C arrays, C structs and
-   unions, C function pointers, and `foreign void`; zero-result call arguments
-   fail ordinary value demand).
+   unions, C function pointers, and `foreign void`; a zero-result call passed
+   as `v` fails ordinary value demand, while surplus positional arguments
+   evaluate for effect and are discarded).
 2. **Generic lowering (`titan-compiler/checker/lowering.lua`).** Because no
    erased entry is called, `keep_alive_argument_signature` peels generic
    ingress (`generic_peel_generic_ingress`) on argument 1 and lowers it against
@@ -161,11 +162,12 @@ the exported entry or boxing the argument into `value`:
    ordinary native-call input helpers (`named_ordered_call_args` or
    `coder._codeadjustedfixed` with `coder._stabilize_input_code`), preserving
    positional, named, surplus, and raising-argument order. It then emits
-   `(void)(<name>);` and yields `((void)0)`. Locals and parameters already root
-   their values in the frame, and referencing them keeps them live through the
-   call point under optimizing C compilers; any other GC-bearing expression
-   (such as a record field read that reentrant code could overwrite) is
-   stabilized in a borrowed frame slot until the enclosing block exits
+   `(void)(<name>);` and yields `((void)0)`. Unboxed locals and parameters
+   already root their values in the frame (`has_stable_root`), and referencing
+   them keeps them live through the call point under optimizing C compilers;
+   any other GC-bearing argument (such as a boxed local, module variable, or
+   record field read that reentrant code could overwrite) is stabilized in a
+   borrowed frame slot until the enclosing block exits
    ([home roots and borrowed copies](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
 
 In the standard library, `titan/uv` (`stream_owners.titan`, `udp.titan`, and

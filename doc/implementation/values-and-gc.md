@@ -445,11 +445,11 @@ hold the old value until that block ends.
 
 `gc.keep_alive(v)` pins reachability explicitly at a call point without
 emitting a C call or boxing `v` into `value`
-([Keep-alive intrinsic](gc-library.md#keep-alive-intrinsic)). A local or
-parameter keeps its existing frame root live through the call point; any other
-GC-bearing argument (such as a record field read) is stabilized by
-`coder._stabilize_input_code` into a borrowed slot until the enclosing block
-exits.
+([Keep-alive intrinsic](gc-library.md#keep-alive-intrinsic)). An unboxed local
+or parameter keeps its existing frame root live through the call point; any
+other GC-bearing argument (such as a boxed local, module variable, or record
+field read) is stabilized by `coder._stabilize_input_code` into a borrowed slot
+until the enclosing block exits.
 
 #### Mutable GC out-parameters
 

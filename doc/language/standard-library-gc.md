@@ -203,9 +203,10 @@ Type parameter `T` obeys ordinary generic type admission on both direct and
 first-class uses: Titan values, options, and `owned` C storage are accepted,
 while borrowed raw C pointers, fixed C arrays, C structs or unions, C function
 pointers, and `foreign void` are rejected at compile time. Because `keep_alive`
-expects a value argument and returns no values, passing a zero-result call
-expression or using its result as a value is a compile-time error, as with any
-Titan call.
+expects a value for `v` and returns no values, passing a zero-result call
+expression as `v` or using `gc.keep_alive(...)`'s result as a value is a
+compile-time error, as with any Titan call. Surplus positional arguments,
+including zero-result calls, are evaluated for their effects and discarded.
 
 ## Collector actions and queries
 

@@ -3177,11 +3177,13 @@ opt-in. The opt-in rules with corpus diagnostics (`prefer-const-local`,
 false positive.
 
 Repository CI and local verification enforce every rule over both the standard
-library and `spec/stdlib/titan` through `make titan-stdlib-lint` (native) and
-`make titan-stdlib-browser-lint` (browser), both classified as `validation`
-Make goals (`Makefile`, `Makefile.win`, `scripts/browser.mk`) and configured
-through `TITAN_LINT_FLAGS` (default `--lint-enable=all --lint-deny=warnings
---lint-deny=hints`). `titan-stdlib-lint` runs the native stdlib in
+library and `spec/stdlib/titan` through `make titan-stdlib-lint` (native,
+defined in `Makefile`) and `make titan-stdlib-browser-lint` (browser, defined
+in `scripts/browser.mk` along with `TITAN_LINT_FLAGS`, default
+`--lint-enable=all --lint-deny=warnings --lint-deny=hints`). `Makefile`
+classifies both targets as `validation` goals in `TITAN_TEST_GOALS`, and
+`Makefile.win` classifies `titan-stdlib-browser-lint` in
+`TITAN_WINDOWS_TEST_GOALS`. `titan-stdlib-lint` runs the native stdlib in
 `STDLIB_COMPILER_ENV` (including `-D_GNU_SOURCE`) and then lints the native
 test roots plus `TITAN_STDLIB_NATIVE_HELPER_ROOTS` from the test build
 directory with staged fixture headers and `--tree spec/stdlib/titan`.
