@@ -33,9 +33,9 @@ local function make_tree(files)
 end
 
 local function remove_tree(target)
-    local attributes = lfs.symlinkattributes(target)
-    if not attributes then return end
-    if attributes.mode == "directory" then
+    local mode = lfs.symlinkattributes(target, "mode")
+    if not mode then return end
+    if mode == "directory" then
         for entry in lfs.dir(target) do
             if entry ~= "." and entry ~= ".." then remove_tree(target .. "/" .. entry) end
         end
