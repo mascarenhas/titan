@@ -582,7 +582,12 @@ end
         assert_layouts(code_of)
     end)
 
+    -- Only Linux and macOS executables link a source owner and rebind a
+    -- compiled facade's global reference to it (`elect_linked` in
+    -- `driver.finalize_resolver_context`). A Windows executable rejects the
+    -- mixture, since the facade DLL keeps its producer-chosen owner identity.
     it("keeps a source-imported owner complete beside its compiled providers", function()
+        if platform.windows then pending("only Linux and macOS executables link a facade's owner from source"); return end
         local owner = "record Box\n  local const hidden: integer\n  const shown: integer\nend\n\n" ..
             "function make(): Box\n  return Box(40, 2)\nend\n"
         files.write(paths.join(workspace, "owner/mix/owner.titan"), owner)
