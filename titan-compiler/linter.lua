@@ -1133,8 +1133,10 @@ local STRING_END = (lexer.STRINGLIT / 0) * lpeg.Cp()
 -- Every exception names its rules: no severity group or wildcard.
 local RULE_GROUPS = set_of({ "all", "warnings", "hints" })
 -- Keywords that close a block or start its next clause, so no statement of
--- the block follows them. Followed by ':', '=' or '(' the same spelling names
--- a declaration, field, named argument or union variant (`end: integer`).
+-- the block follows them. Followed by ':' (not '::') or '=' (not '==') the
+-- same spelling names a declaration, field or named argument
+-- (`end: integer`); a keyword-named union variant (`end(...)`) is known from
+-- the parsed union instead, since a closer may precede '(' as well.
 local BLOCK_CLOSERS = set_of({ "end", "else", "elseif", "until", "catch", "when" })
 
 -- The rule IDs of a directive comment body (the comment text after `--`,
@@ -1179,9 +1181,10 @@ end
 -- or nil for a file without directives. A directive after code on its line
 -- covers that line; a directive alone on its line covers the line of the
 -- next code token, past blank, comment and `---` documentation lines, and
--- stacked directives combine. Only the parser counts lines: '\n' ends one,
--- and '\r' is whitespace.
-local function scan_directives(filename, text, problems)
+-- stacked directives combine. `variants` holds the `"line:col"` positions of
+-- the file's keyword-named union variants. Only the parser counts lines:
+-- '\n' ends one, and '\r' is whitespace.
+local function scan_directives(filename, text, problems, variants)
     if not text:find("titan-lint", 1, true) then return nil end
     local allowed, pending = nil, {}
     local pos, size, line, line_start = 1, #text, 1, 1
@@ -1226,15 +1229,16 @@ local function scan_directives(filename, text, problems)
     -- Whether the keyword `word` at `pos` closes its block rather than
     -- naming the declaration that follows.
     local function closes_block(word)
-        if not BLOCK_CLOSERS[word] then return false end
+        if not BLOCK_CLOSERS[word] or variants[line .. ":" .. (pos - line_start + 1)] then
+            return false
+        end
         local at = pos + #word
         while true do
             at = text:find("%S", at)
             if not at then return true end
             if text:sub(at, at + 1) ~= "--" then
-                local next_byte = text:sub(at, at)
-                return not (next_byte == ":" or next_byte == "(" or
-                    (next_byte == "=" and text:sub(at + 1, at + 1) ~= "="))
+                local next_byte, after = text:sub(at, at), text:sub(at + 1, at + 1)
+                return not ((next_byte == ":" and after ~= ":") or (next_byte == "=" and after ~= "="))
             end
             at = lpeg.match(COMMENT_END, text, at) or size + 1
         end
@@ -1324,6 +1328,25 @@ local function diagnostic_less(a, b)
     return a.message < b.message
 end
 
+-- The `"line:col"` positions of keyword-named union variants, by file.
+local function keyword_variants(units)
+    local positions = {}
+    for _, unit in ipairs(units) do
+        for _, node in ipairs(unit.ast) do
+            if node._tag == "Ast.TopLevelUnion" then
+                for _, variant in ipairs(node.variants) do
+                    local loc = variant._name_loc
+                    if BLOCK_CLOSERS[variant.name] and loc then
+                        positions[loc.filename] = positions[loc.filename] or {}
+                        positions[loc.filename][loc.line .. ":" .. loc.col] = true
+                    end
+                end
+            end
+        end
+    end
+    return positions
+end
+
 -- Lint checked analysis ASTs. `units` is a list of `{ modname, ast, sources }`
 -- where `sources` lists the `{ filename, text }` of the module's contributing
 -- files, whose `-- titan-lint:` directives are validated first: any invalid
@@ -1332,10 +1355,13 @@ end
 -- each node and sorted by file, line, column and rule.
 function linter.lint(units, config)
     local allowed, problems = {}, {}
+    local variants = keyword_variants(units)
     for _, unit in ipairs(units) do
         for _, source in ipairs(unit.sources or {}) do
-            if allowed[source.filename] == nil then
-                allowed[source.filename] = scan_directives(source.filename, source.text, problems) or false
+            local filename = source.filename
+            if allowed[filename] == nil then
+                allowed[filename] = scan_directives(filename, source.text, problems,
+                    variants[filename] or {}) or false
             end
         end
     end

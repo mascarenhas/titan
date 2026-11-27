@@ -1420,6 +1420,29 @@ end
         assert.equal("A documented keyword-named field.", span.fields[2]._documentation.summary)
     end)
 
+    it("fails a directive before a parenthesized closer even when every rule is denied", function()
+        local path = tree({ ["paren.titan"] = table.concat({
+            "record Point",
+            "  x: integer",
+            "end",
+            "",
+            "function loop(): integer",
+            "  local n = 0",
+            "  repeat",
+            "    n = n + 1",
+            "    -- titan-lint: allow(prefer-record-call-shorthand)",
+            "  until (Point.new(n).x > 2)",
+            "  return n",
+            "end", "" }, "\n") })
+        local lint_result, lint_errors = lint(path, { "paren" }, { rule_directives = {
+            { op = "enable", value = "all" }, { op = "deny", value = "warnings" },
+            { op = "deny", value = "hints" } } })
+        assert.is_nil(lint_result)
+        assert.equal(1, #lint_errors)
+        assert.matches("paren%.titan:9:5: invalid titan%-lint directive: no declaration or statement " ..
+            "follows it before 'until'$", lint_errors[1])
+    end)
+
     it("rejects every malformed, misplaced or redundant directive", function()
         local lines, expected = { "function g(): integer" }, {}
         local function inline(index, directive, message)
@@ -1468,10 +1491,20 @@ end
         standalone("  else")
         standalone("    " .. directive, "no declaration or statement follows it before 'end'")
         standalone("  end")
+        -- A closer followed by '(' still closes its block.
+        standalone("  if d > e then")
+        standalone("    d = 2")
+        standalone("    " .. directive, "no declaration or statement follows it before 'elseif'")
+        standalone("  elseif (d < e) then")
+        standalone("    d = 3")
+        standalone("    " .. directive, "no declaration or statement follows it before 'else'")
+        standalone("  else")
+        standalone("    (g)(d)")
+        standalone("  end")
         standalone("  repeat")
         standalone("    e = e + 1")
         standalone("    " .. directive, "no declaration or statement follows it before 'until'")
-        standalone("  until e > 3")
+        standalone("  until (e > 3)")
         standalone("  do")
         standalone("    e = 0")
         standalone("    " .. directive, "no declaration or statement follows it before 'catch'")
