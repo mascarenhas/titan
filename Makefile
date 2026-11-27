@@ -19,7 +19,7 @@ make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 # provider dependencies. Choose it before Make expands the test graph.
 TITAN_TEST_GOALS := test rock-test busted-test stdlib-test stdlib-busted-test \
 	titan-stdlib-test titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run \
-	titan-stdlib-test-run-parallel titan-stdlib-browser-test \
+	titan-stdlib-test-run-parallel titan-stdlib-browser-test titan-stdlib-lint titan-stdlib-browser-lint \
 	titan-native-coverage titan-native-coverage-build titan-native-coverage-run
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)

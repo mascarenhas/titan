@@ -1378,6 +1378,48 @@ end
         assert.same({}, result.diagnostics)
     end)
 
+    it("treats keyword-named declarations as code and leaves prose comments alone", function()
+        local text = table.concat({
+            "-- titan-lint is the name of the linter, and this is prose.",
+            "-- titan-lint (issue #453) adds in-source exceptions.",
+            "-- titan-lint allows exceptions; this comment is prose too.",
+            "local record Span",
+            "  -- titan-lint: allow(prefer-const-local-field): exercised by the keyword tests",
+            "  end: integer",
+            "  -- titan-lint: allow(prefer-const-local-field)",
+            "  --- A documented keyword-named field.",
+            "  when: integer",
+            "  until: integer",
+            "end",
+            "",
+            "union Mark",
+            "  -- titan-lint: allow(header-dependent-public-c-export)",
+            "  end(at: integer)",
+            "  -- titan-lint: allow(header-dependent-public-c-export)",
+            "  else()",
+            "end",
+            "",
+            "function span(): integer",
+            "  const s: Span = {",
+            "    -- titan-lint: allow(duplicate-record-literal-field)",
+            "    end = 1,",
+            "    when = 2, until = 3,",
+            "  }",
+            "  local total = s.end + s.when -- titan-lint: allow(prefer-const-local):-D_GNU_SOURCE style",
+            "  return total + s.until",
+            "end", "" }, "\n")
+        local path = tree({ ["keywords.titan"] = text })
+        local lint_result, lint_errors = lint(path, { "keywords" })
+        assert.is_nil(lint_errors, lint_errors and table.concat(lint_errors, "\n"))
+        assert.same({ "keywords.titan:10:prefer-const-local-field" }, hits(lint_result))
+        local nodes = assert(parser.parse("keywords.titan", text))
+        local span
+        for _, node in ipairs(nodes) do
+            if node._tag == "Ast.TopLevelRecord" and node.name == "Span" then span = node end
+        end
+        assert.equal("A documented keyword-named field.", span.fields[2]._documentation.summary)
+    end)
+
     it("rejects every malformed, misplaced or redundant directive", function()
         local lines, expected = { "function g(): integer" }, {}
         local function inline(index, directive, message)
@@ -1421,7 +1463,20 @@ end
             (#lines + 2) .. " by the directive on line " .. #lines)
         standalone("  local e = 2")
         standalone("  if d > e then")
+        standalone("    d = 1")
+        standalone("    " .. directive, "no declaration or statement follows it before 'else'")
+        standalone("  else")
         standalone("    " .. directive, "no declaration or statement follows it before 'end'")
+        standalone("  end")
+        standalone("  repeat")
+        standalone("    e = e + 1")
+        standalone("    " .. directive, "no declaration or statement follows it before 'until'")
+        standalone("  until e > 3")
+        standalone("  do")
+        standalone("    e = 0")
+        standalone("    " .. directive, "no declaration or statement follows it before 'catch'")
+        standalone("  catch")
+        standalone("    e = 1")
         standalone("  end")
         standalone("  return d + e")
         standalone("end")

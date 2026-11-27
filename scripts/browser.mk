@@ -169,7 +169,8 @@ titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all
 # in-source `-- titan-lint: allow(...)` exception names. TITAN_LINT_FLAGS
 # replaces the rule switches, for example '--lint-enable=all --lint-format=json'.
 TITAN_LINT_FLAGS ?= --lint-enable=all --lint-deny=warnings --lint-deny=hints
-# Both gates also prove that their roots cover every test-tree source.
+# The browser gate also proves that the native and browser lint roots cover
+# every test-tree source (it needs the installed browser SDK's selection).
 TITAN_STDLIB_LINT_ROOTS_CHECK = $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E \
 	scripts/check_browser_stdlib.lua lint-roots $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,spec/stdlib/titan)) \
 	--native $(TITAN_STDLIB_TEST_ROOTS) $(TITAN_STDLIB_NATIVE_HELPER_ROOTS) \

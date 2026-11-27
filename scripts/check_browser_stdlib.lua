@@ -131,7 +131,8 @@ elseif action == "lint-roots" then
             roots[target][#roots[target] + 1] = word
         end
     end
-    assert(first and target, "lint-roots requires a test tree and its --native and --browser roots")
+    assert(first and #roots.native > 0 and #roots.browser > 0,
+        "lint-roots requires a test tree and nonempty --native and --browser root lists")
     local function key(file) return path.normalize((file:gsub("\\", "/"))) end
     local covered = {}
     for _, name in ipairs({ "native", "browser" }) do

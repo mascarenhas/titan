@@ -1132,8 +1132,10 @@ local COMMENT_END = (lexer.COMMENT / 0) * lpeg.Cp()
 local STRING_END = (lexer.STRINGLIT / 0) * lpeg.Cp()
 -- Every exception names its rules: no severity group or wildcard.
 local RULE_GROUPS = set_of({ "all", "warnings", "hints" })
--- Tokens that close a block, so no statement of that block follows them.
-local BLOCK_CLOSERS = set_of({ "end", "else", "elseif", "until", "catch", "finally", "when" })
+-- Keywords that close a block or start its next clause, so no statement of
+-- the block follows them. Followed by ':', '=' or '(' the same spelling names
+-- a declaration, field, named argument or union variant (`end: integer`).
+local BLOCK_CLOSERS = set_of({ "end", "else", "elseif", "until", "catch", "when" })
 
 -- The rule IDs of a directive comment body (the comment text after `--`,
 -- starting at `titan-lint`), or `nil, message`.
@@ -1162,11 +1164,12 @@ local function parse_directive(body)
         rules[#rules + 1] = id
     end
     if tail:find("%S") then
-        local separator, reason = tail:match("^%s*([:%-]%-?)%s*(.-)%s*$")
-        if separator ~= ":" and separator ~= "--" then
+        local separator, reason = tail:match("^%s*(:)(.*)$")
+        if not separator then separator, reason = tail:match("^%s*(%-%-)(.*)$") end
+        if not separator then
             return nil, "unexpected text after 'allow(...)' (write ': <reason>')"
         end
-        if reason == "" then return nil, "expected a reason after '" .. separator .. "'" end
+        if not reason:find("%S") then return nil, "expected a reason after '" .. separator .. "'" end
     end
     return rules
 end
@@ -1220,12 +1223,30 @@ local function scan_directives(filename, text, problems)
         pos = stop
     end
 
+    -- Whether the keyword `word` at `pos` closes its block rather than
+    -- naming the declaration that follows.
+    local function closes_block(word)
+        if not BLOCK_CLOSERS[word] then return false end
+        local at = pos + #word
+        while true do
+            at = text:find("%S", at)
+            if not at then return true end
+            if text:sub(at, at + 1) ~= "--" then
+                local next_byte = text:sub(at, at)
+                return not (next_byte == ":" or next_byte == "(" or
+                    (next_byte == "=" and text:sub(at + 1, at + 1) ~= "="))
+            end
+            at = lpeg.match(COMMENT_END, text, at) or size + 1
+        end
+    end
+
     -- A code token spanning `pos` up to `stop`.
     local function code(stop)
         if #pending > 0 then
             local word = text:match("^[%a_][%w_]*", pos)
+            local closes = closes_block(word)
             for _, directive in ipairs(pending) do
-                if BLOCK_CLOSERS[word] then
+                if closes then
                     problem(directive, "no declaration or statement follows it before '" .. word .. "'")
                 else
                     allow(line, directive)
@@ -1255,7 +1276,9 @@ local function scan_directives(filename, text, problems)
                 in_documentation = true
             else
                 local body = raw:sub(3):gsub("[\r\n]+$", ""):match("^%s*(.*)$")
-                if body:match("^titan%-lint%f[^%w_%-]") then
+                -- Only the `titan-lint:` marker (or its obvious misspelling
+                -- `titan-lint allow(`) starts a directive; other prose is free.
+                if body:match("^titan%-lint%s*:") or body:match("^titan%-lint%s+allow%s*%(") then
                     local directive = { line = line, col = pos - line_start + 1 }
                     local rules, message = parse_directive(body)
                     if in_documentation then

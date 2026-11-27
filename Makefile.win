@@ -9,7 +9,7 @@ SHELL := $(if $(filter Windows_NT,$(OS)),bash.exe,/bin/bash)
 
 # Choose the policy before configuring any source or native object graph.
 TITAN_WINDOWS_COVERAGE_GOALS := titan-native-coverage-build titan-native-coverage-run titan-native-coverage
-TITAN_WINDOWS_TEST_GOALS := toolchain-check lua-source-check lua-check native-source-check native-check compiler-check runtime-check stdlib-check compiler-publication-check titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test titan-stdlib-browser-test rock-test test $(TITAN_WINDOWS_COVERAGE_GOALS)
+TITAN_WINDOWS_TEST_GOALS := toolchain-check lua-source-check lua-check native-source-check native-check compiler-check runtime-check stdlib-check compiler-publication-check titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test titan-stdlib-browser-test titan-stdlib-browser-lint rock-test test $(TITAN_WINDOWS_COVERAGE_GOALS)
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_WINDOWS_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)
 ifneq ($(TITAN_BUILD_PROFILE),validation)
