@@ -15,8 +15,8 @@ local KEEP_ALIVE_PREFIX = coder_names._function_prefix("titan.gc", "keep_alive")
 local KEEP_ALIVE_ENTRY = KEEP_ALIVE_PREFIX .. "_titan"
 
 local function clean()
-    for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".a", ".ffi.h",
-                              ".titan.h", ".priv.h", ".parts" }) do
+    for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".def", ".dll.def", ".a",
+                              ".ffi.h", ".titan.h", ".priv.h", ".parts" }) do
         os.remove("test" .. suffix)
     end
     local removed, remove_error = driver.remove_path("test.so.dSYM")
@@ -263,13 +263,7 @@ describe("gc.keep_alive intrinsic", function()
                 return gc.keep_alive(note(label))
             end
 
-            local function joined(): string
-                local text = ""
-                for index = 1, #log do text = text .. log[index] .. ";" end
-                return text
-            end
-
-            function run(): string
+            function run(): {string}
                 log = {}
                 gc.keep_alive(note("positional"))
                 gc.keep_alive { v = note("named") }
@@ -280,12 +274,58 @@ describe("gc.keep_alive intrinsic", function()
                 catch
                     log[#log + 1] = error as string
                 end
-                return joined()
+                return log
             end
         ]])
         local ok, err = h.call("test", [[
-            local text = test.run()
-            assert(text == "positional;named;first;surplus;nothing;tail;before;boom;", text)
+            local log = test.run()
+            local expected = { "positional", "named", "first", "surplus",
+                               "nothing", "tail", "before", "boom" }
+            assert(#log == #expected, "logged " .. #log)
+            for index, label in ipairs(expected) do
+                assert(log[index] == label, index .. ": " .. tostring(log[index]))
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    -- Raw `value` entering the unconstrained parameter is transported without
+    -- the explicit type argument's projection, as for any generic call.
+    it("transports a raw value like an ordinary generic call", function()
+        build([[
+            local gc = import "gc"
+
+            local function ignore<|T|>(item: T) end
+
+            function intrinsic_positional(raw: value)
+                gc.keep_alive<|integer|>(raw)
+            end
+
+            function intrinsic_named(raw: value)
+                gc.keep_alive<|integer|> { v = raw }
+            end
+
+            function ordinary_positional(raw: value)
+                ignore<|integer|>(raw)
+            end
+
+            function ordinary_named(raw: value)
+                ignore<|integer|> { item = raw }
+            end
+
+            function written_cast(raw: value)
+                gc.keep_alive<|integer|>(raw as integer)
+            end
+        ]])
+        local ok, err = h.call("test", [[
+            for _, name in ipairs({ "intrinsic_positional", "intrinsic_named",
+                                    "ordinary_positional", "ordinary_named" }) do
+                local called, failure = pcall(test[name], "not an integer")
+                assert(called, name .. ": " .. tostring(failure))
+            end
+            assert(not pcall(test.written_cast, "not an integer"),
+                "a written cast must still check its operand")
+            assert(pcall(test.written_cast, 7))
         ]])
         assert.truthy(ok, err)
     end)

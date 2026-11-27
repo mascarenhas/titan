@@ -478,11 +478,15 @@ end
 
 -- A `gc.keep_alive` intrinsic calls no entry, so its argument keeps its own
 -- erased carrier rather than entering the erased signature's `value` boundary.
+-- The carrier is read after generic ingress, which transports a raw `value`
+-- into the unconstrained parameter without the surface projection.
 -- Implementation notes: doc/implementation/gc-library.md#keep-alive-intrinsic
-local function keep_alive_argument_signature(node)
+local function keep_alive_argument_signature(node, surface_signature)
     local adjusted = node._arg_adjustment
     local argument = adjusted and adjusted.fixed[1] or node.args.args[1]
-    return types.Function({ types.erase(argument._type) }, {}, false, nil, nil)
+    local ingress = generic_peel_generic_ingress(
+        argument, surface_signature.params[1])
+    return types.Function({ types.erase(ingress._type) }, {}, false, nil, nil)
 end
 
 function generic_lower_call_in_place(node, state)
@@ -546,7 +550,8 @@ function generic_lower_call_in_place(node, state)
     end
 
     generic_lower_call_arguments(node,
-        node._keep_alive_intrinsic and keep_alive_argument_signature(node)
+        node._keep_alive_intrinsic
+            and keep_alive_argument_signature(node, surface_signature)
             or signature,
         surface_signature, state)
 

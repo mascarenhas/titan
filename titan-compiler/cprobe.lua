@@ -2106,7 +2106,7 @@ function ProbeBatch:flush()
             local execution = executions[index]
             self:_observe(request.key, execution)
             local run, publication = service:_publish_result(
-                request.key, request.path, execution)
+                request.key, request.path, execution, nil, request.stage)
             request.run, request.publication = run, publication
             service:_trace_execution(request.key, request.kind, request.context,
                 execution, request.lookup, publication, "speculative")

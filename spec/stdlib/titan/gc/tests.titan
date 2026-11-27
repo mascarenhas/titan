@@ -595,7 +595,7 @@ local function collect_in_callback(probe: KeepAliveProbe,
   return function(target: KeepAliveOwner)
     target.slot = KeepAlivePayload("callback")
     for index = 1, 256 do
-      local churn = { KeepAlivePayload("churn " .. index) }
+      const churn = { KeepAlivePayload("churn " .. index) }
       test.assert(#churn == 1)
     end
     gclib.collect()
