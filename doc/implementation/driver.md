@@ -2727,6 +2727,29 @@ calls `driver.cleanup_stale_staging` between `prepare` and `check`
 ([End-to-end invocation sequence](build-coordinator.md#end-to-end-invocation-sequence)).
 The digest cache is saved before the locks are released.
 
+### The `titanc --lint` command
+
+`--lint` takes its own branch right after the `-q`/`-v` check, before the
+support-module check, the resolver context, output locks, or any other
+preflight. The branch rejects `--lint-enable`, `--lint-allow`, `--lint-deny`,
+or `--lint-format` without `--lint`; then, with `--lint`, every build, link,
+output, and `--print-*` switch (`-o`, `--exe`, `-c`, `--static`,
+`--source-first`, `--incremental`, `--no-source-records`, the `--coverage`
+family, `--c-source`, `--print-c-objects`, `-X`, `-l`, `-L`, `--cflag`,
+`--ldflag`, `--c-parts`, `-j`, `--pretty-print`, `--no-line-directives`,
+`--no-uv-bootstrap`, `--print-ast`, `--print-root`), the `--test-dir` and
+`--test-exclude` dependencies, a format other than `human` or `json`, and
+`--lua` in an installed compiler. The three rule options share one ordered
+directive list, recorded by their `argparse` actions in command-line order like
+the native switches. The branch reads `TITAN_TARGET` when `-T` is absent and
+calls [`driver.lint_modules`](#lint-analysis-driverlint_modules) with the
+modules, `--tree`, target and its origin, the ordered `-I`/`-D` switches,
+`--lua`, the test directories and exclusions, and the directives. A returned
+error list or a raised string is printed to standard error with status 1;
+otherwise `linter.format_human` or `linter.format_json` writes standard
+output and the status is 1 exactly when a diagnostic was denied. Only this
+branch and `driver.lint_modules` require `titan-compiler.linter`.
+
 ### Progress reporting
 
 `titan-compiler/progress.lua` renders the progress that only the `titanc`
@@ -2898,6 +2921,206 @@ Plain, verbose, and quiet runs, and every non-CLI caller, leave
 output and coordinator-run native jobs are already captured. They reach the
 terminal through the scheduler's plan-order flush, which writes through the
 reporter.
+
+## Lint analysis: `driver.lint_modules`
+
+`driver.lint_modules(options)` checks authored roots in a private
+analysis-only resolver and runs `titan-compiler/linter.lua` over their typed
+ASTs. It is the only loader of the linter module, so ordinary compilation and
+semantic clients never load it; the compiler itself carries two lint
+provenance fields, `_written_modname` and `_shorthand_record_call`
+([decorations](ast-typedecl.md#decorations-who-writes-what-who-reads-it)).
+
+| Option | Meaning |
+| --- | --- |
+| `modules` | Dense list of dotted logical root names. |
+| `tree` | `;`-separated string or list of authored roots (default `driver.TITAN_SOURCE_PATH`). |
+| `target`, `target_origin` | `nil`/`""` (host), `linux`, `darwin`, `windows`, or `browser`, validated by `driver.validate_target`; the origin names the source in messages. The driver never reads `TITAN_TARGET`. |
+| `browser_prefix` | Installation passed to `driver.browser_analysis_target` (default: the compiler root). |
+| `native_cli` | Ordered `{ kind = "include" \| "define", value }` switches. |
+| `lua_dir` | Checkout Lua tree (`--lua`). |
+| `test_dirs`, `test_excludes` | Test-root discovery directories and excluded discovered modules. |
+| `rule_directives` | Ordered `{ op = "enable" \| "allow" \| "deny", value }` list for `linter.configure`. |
+| `verbose` | Passed to the resolver contexts. |
+
+Option, module-name, and directive errors return `nil, { message }` before
+any context exists; a non-table `options` raises. Every call is a fresh
+analysis in its own semantic-cache epoch. `driver.imported`,
+`types.registry`, the active target identity, and the active generation are
+one ownership state: the call saves all four, installs empty tables, no
+identity, and a generation from the strictly monotonic allocator that
+`driver.activate_target_caches` also uses, and restores the caller's state on
+every exit path. Roots, dependencies, and nominal lookups therefore never come
+from an earlier compiler consumer or lint, a live caller context of any target
+stays valid, and the lint's own contexts can never match a later epoch.
+`driver.TARGET_PROFILE`, `driver.TITAN_SOURCE_PATH`, `driver.LUA_SOURCE_PATH`,
+and the normalized native compile/link flags (`nativeinputs.normalize` over
+the ambient `TITAN_EXTRA_*` values and `native_cli`, applied with
+`driver.apply_native_inputs`) are replaced and restored the same way;
+`driver.FOREIGN_C_CONFIGURATION_ID` stays advanced, so a caller context
+reconfigures foreign C with its restored flags on next use. A host
+`analysis_only` context validates the target. For `browser`,
+`browserlink.validate_extras` checks the compile flags, the host context is
+closed, and a context with the `driver.browser_analysis_target` handle replaces
+it; an absent browser SDK is an ordinary returned error. After
+`initialize_platform` and `configure_foreign_c`, `testroots.discover` (with the
+lint `tree` as its source path) supplies discovered roots after the positional
+ones, and `driver.resolve_source(context, modname, tree)` selects every other
+root. Roots therefore come only from authored source, never the installed
+fallback, and their descriptors become `source_overrides` alongside
+`source_roots`, so no compiled provider can stand in for a root. Imports keep
+ordinary resolution, including open-world
+[contextual source-requirement recovery](#contextual-source-requirement-recovery),
+because `authored_source_roots` stays unset. One `defaultloader`, released by
+`driver.with_loader`, checks the roots in order.
+
+Any resolution, parse, or check error returns `nil, errors` (a deduplicated
+list of compiler diagnostics) without linting a partial tree. Otherwise the
+linter receives `requested roots ∩ context.checked_source_modules`, each with
+its `driver.imported` AST and a `provider_kind(modname)` query (the `kind` of
+that module's entry: `source`, `dynamic`, `static`, or `embedded`), and returns
+`{ diagnostics, warning_count, hint_count, denied_count }`; each diagnostic has
+`file`, `line`, `col`, `severity`, `rule`, `message`, and `denied`, attributed
+through the node's own `loc` (so folder contributors keep their filenames) and
+sorted by file, line, column, and rule. The body runs under `pcall`: the live
+context is closed with `driver.close_resolver_context` on every exit, a raised
+error is re-raised after cleanup (a string gains any cleanup failure), and a
+cleanup failure after a returned result becomes an error.
+
+### Traversal and the rename-interval index
+
+`linter.lua` makes one walk per module. It visits syntax children through a
+fixed per-tag field list plus the written expressions that checked nodes keep
+only in decorations: the parenthesized-spread carrier (`ExpAdjust`
+`_adjusted_spread`, `ExpSpreadIndex.spread`), `ExpExtra.exp`, and the `exps`
+and `fixed` lists of `_tuple_adjustment` (where generic `for` keeps written
+surplus expressions), `_result_adjustment`, `_arg_adjustment`, and
+`_positional_adjustment`. Written type annotations (declaration types, lambda
+results, call and owner type arguments) are walked as well. A `seen` set
+visits each node once. Ignored top-level nodes, synthesized
+`_record_constructor`/`_union_constructor` bodies, and `TopLevelForeignFunc`
+bodies are skipped; the root initializer is a function body of its own. The
+active `catch` declaration is the innermost handler's (only it is in scope as
+`error`), and it resets at every function body and in a `finally`, so the
+re-raise check is constant time. `unwrap` looks through
+`_implicit_coercion` casts and `ExpAdjust`. Each rule reports at most once per
+AST node.
+
+Renaming an unused binding to `_` is safe only if no `_` occurrence inside its
+scope would then resolve to it and the binding's use flags are real evidence.
+The walk visits nodes in lexical order, increments `seq` at every node, and
+counts hazards in `prefix[seq]`: every `_` `VarName` (reads, assignment
+targets, captures in nested lambdas), every written annotation naming the
+type `_` or a qualified `_.T`, and every name read inside a statement the
+checker never reached (a statement after one that always returns has no
+`_always_returns` and its reads set no use flags). A candidate needs a
+checked declaration (`_type` set) and records the `seq` at which it becomes
+visible (after its initializer) and, when its scope closes, the scope's final
+`seq`; it is reported only if `prefix[exit] - prefix[ready]` is zero. A
+`defer` tail (`_defer_tail`) opens no scope of its own, so its bindings close
+with the enclosing block, after the deferred cleanup; a `repeat` scope closes
+after its `until` condition. A module that declares `_` at top level (an
+import, variable, function, or type named `_`) gets no rename hints at all:
+the checker replaces written cast and `is` targets with their resolved
+types, so a hidden `_.T` reference cannot be ruled out. The check is
+conservative, with constant work per candidate and one linear walk per
+module.
+
+### Lint rules
+
+A rule has a fixed severity: a default rule reports `warning`s and starts on,
+an opt-in rule reports `hint`s and starts off. `linter.configure` applies the
+directives left to right over these defaults: enable (keeping a deny), allow,
+deny (which enables), `enable=all`, and `deny=warnings`/`deny=hints` (only
+rules already emitting). The user-facing list is in
+[Linting with `--lint`](../language/toolchain.md#linting-with---lint). The
+matchers rely on resolved declarations and types, never on spellings:
+
+* `unused-local-binding` (`StatDecl`, `StatFor`, `StatForIn` declarations) and
+  `unused-lambda-param` (an `ExpFunction` with exactly one named parameter)
+  require a checked declaration with `_used == nil`, no `_assigned` (a
+  write-only scalar has no `_used`), not `_catch_implicit`, a name other than
+  `_`, and an empty rename interval. An unused binding has no storage, and its
+  initializer still runs, so the rename preserves behavior.
+* `prefer-record-call-shorthand` matches an `ExpCall` of
+  `ExpVar(VarDot(namespace, "new"))` whose namespace has `Type.Record` and whose
+  `_decl` is a `Type.StaticMethod`, without call type arguments or the
+  `_shorthand_record_call` mark that the checker sets when it rewrites
+  `Record(...)`. The advice is to delete only `.new`, so written owner type
+  arguments stay.
+* `unmatched-public-test-signature` uses `test_runner.is_test_function` for
+  public monomorphic top-level `test_*` functions of a module importing
+  `titan.test` and only describes the missed discovery.
+* `union-identity-equality` matches `==`/`~=` with an operand that calls a
+  declared variant constructor (`_nominal_constructor` of kind `union`) of a
+  union owned by exactly `titan.async` or `titan.uv`, of
+  `titan.http.{RedirectMode,CacheMode,CredentialsMode,RequestMode}`,
+  `titan.reflect.Type`, or `titan.websocket.MessageType`: the fresh variant
+  makes the result constant. Stored values and constants such as
+  `uv.RUN_DEFAULT` or `websocket.TEXT`, other unions, and static functions do
+  not match.
+* `stdlib-import-spelling` compares `_written_modname` (the import literal
+  before `parser.normalize_import`) against the canonical `modname`.
+* `prefer-const-local-field` and `prefer-const-local` exclude inline C
+  aggregates (`types.is_c_aggregate`), public fields, unread locals,
+  checker-supplied `nil` initializers (an `ExpNil` at the declaration's own
+  location), and `_assigned` bindings (which include mutable C
+  address-taking); field writes are keyed by the `Type.Field` owner and name,
+  counting implicit and written `mutable_c_address` casts. The field rule is
+  not closed-world: a `.titan` source importer may assign the field.
+* `boolean-option-silent-truthiness-local` reads the implicit `truthiness`
+  cast in `_result_adjustment`; `ephemeral-interface-map-key` matches an
+  implicit `interface_wrapper` key cast on a Map keyed by an Interface.
+* `catch-reraise-resets-trace` matches `raise` without a trace of the
+  innermost active `StatTry._error_decl`; `extra-do-block-around-try` matches
+  an owner block whose only statement is a non-defer `StatTry` with a `catch`
+  and the parser's `_structure_loc`.
+* `gc-finalizable-non-collectable-arg` checks the pre-coercion type of the
+  first `titan.gc.finalizable` argument, `gc-finalizable-captures-target` the
+  callback's `_captures`, and `race-any-unmanaged-losers` an inline
+  `titan.async.run*` argument to `titan.async.race_*`/`any_*`.
+* `header-dependent-public-c-export` mirrors the export walk of
+  `reject_exported_c_ffi_types` over public declarations, fields, and variant
+  parts and reports the first `CTypedef`, `CStruct`, or `CUnion` with a
+  `types.c_declaration_origin` that the declaration's closed type graph
+  reaches, following every nominal through its public record fields, public
+  union variant parts, and Interface members. Reachability over nominals uses
+  Tarjan's strongly connected components with one result per component, so a
+  cycle shares the header type found on any of its edges, and each owner is
+  expanded once per module.
+* `dso-imported-record-literal` and `dso-closed-union-case` match a record
+  literal or a `_binary_closed_union` exhaustive `case` whose owner module is
+  neither the current module nor a `source_required` import and was selected
+  from a compiled provider (`provider_kind` is not `source`).
+* The packaging rules (`header-dependent-public-c-export` and both `dso-*`
+  rules) skip every module that defines a discovered test
+  (`test_runner.is_test_function`). This is a conservative v1 exclusion, not
+  a proof that the module has no importers: a module that mixes tests with
+  production code is skipped too.
+
+`boolean-option-condition`, `loop-string-concat`, `unobserved-spawned-task`,
+`ipairs-unwrapped-hole-binder`, and `discarded-transfer-payload` were
+deferred from v1 because they failed the opt-in corpus gate (fewer than 10 %
+adjudicated false positives): deliberate true-only `boolean?` tests, small
+bounded concatenation loops, deliberate fire-and-forget Tasks in tests, Arrays
+that are dense by their owner's construction, and refusal tests whose
+error-expectation helpers live in another module. An opt-in rule with no
+corpus diagnostic passes that gate vacuously; its evidence is the curated
+positives and near misses in `spec/linter_spec.lua`.
+
+Three of the four default candidates are promoted. Their adjudication ran
+`titanc --lint --lint-enable=all` over the standard library (`titan.*` from a
+checkout) and the native suites (`spec/stdlib/titan` with `--test
+--test-dir`), applied every advertised fix to a copy of both corpora, and
+re-checked the copies: 66 `unused-local-binding`, 501 `unused-lambda-param`,
+and 305 `prefer-record-call-shorthand` diagnostics, none of them a false
+positive, alongside the curated counterexamples in `spec/linter_spec.lua`.
+`unmatched-public-test-signature` reported no diagnostics on that corpus,
+fewer than the 20 adjudicated diagnostics that promotion requires, so it ships
+opt-in. The opt-in rules with corpus diagnostics (`prefer-const-local`,
+`prefer-const-local-field`, `extra-do-block-around-try`, and
+`stdlib-import-spelling`) passed the same rewrite-and-re-check oracle without a
+false positive.
 
 ## Optional `clang-format` generated-source formatting
 

@@ -37,16 +37,19 @@ driver.imported = {}
 
 -- Logical module names and FQTNs have one process-wide nominal closure.
 -- Contexts survive only while that closure belongs to their target generation.
-local semantic_target_identity
-local semantic_cache_generation = 0
+-- `driver.imported`, `types.registry`, `identity`, and `generation` form one
+-- ownership state. Generations come from the strictly monotonic
+-- `next_generation` allocator, so an epoch that `driver.lint_modules` installs
+-- and later replaces with its caller's never collides with another epoch.
+local semantic_cache = { identity = nil, generation = 0, next_generation = 0 }
 
 function driver.assert_target_context(context)
     if type(context) ~= "table" or context._semantic_cache_generation == nil then
         error("compiler target context is not initialized", 0)
     end
-    if context._semantic_cache_generation ~= semantic_cache_generation then
+    if context._semantic_cache_generation ~= semantic_cache.generation then
         error("compiler caches now belong to target " ..
-            semantic_target_identity .. "; create a new context", 0)
+            tostring(semantic_cache.identity) .. "; create a new context", 0)
     end
     return true
 end
@@ -57,17 +60,18 @@ function driver.activate_target_caches(context, identity)
     end
     assert(type(identity) == "string" and identity ~= "",
         "semantic cache target identity is required")
-    if semantic_target_identity ~= identity then
+    if semantic_cache.identity ~= identity then
         -- The first native owner can adopt a host-installed registry. A
         -- browser semantic target must never adopt native nominal state.
-        if semantic_target_identity ~= nil or context.browser_semantics then
+        if semantic_cache.identity ~= nil or context.browser_semantics then
             driver.imported = {}
             types.registry = {}
         end
-        semantic_cache_generation = semantic_cache_generation + 1
-        semantic_target_identity = identity
+        semantic_cache.next_generation = semantic_cache.next_generation + 1
+        semantic_cache.generation = semantic_cache.next_generation
+        semantic_cache.identity = identity
     end
-    context._semantic_cache_generation = semantic_cache_generation
+    context._semantic_cache_generation = semantic_cache.generation
     return true
 end
 
@@ -7756,6 +7760,265 @@ function driver.resolve_source(context, modname, source_path)
     end
     driver.assert_target_context(context)
     return resolve_source(source_path, modname, context)
+end
+
+-- `titanc --lint`: check the requested authored roots in a private
+-- analysis-only resolver, then run the style linter over their typed ASTs.
+-- The linter module is loaded only here. Implementation notes:
+-- doc/implementation/driver.md#lint-analysis-driverlint_modules
+do
+    local function string_list(value, what)
+        if value == nil then return {} end
+        if type(value) ~= "table" then
+            return nil, what .. " must be a dense list of strings"
+        end
+        local count = 0
+        for _ in pairs(value) do count = count + 1 end
+        if count ~= #value then
+            return nil, what .. " must be a dense list of strings"
+        end
+        for index = 1, count do
+            if type(value[index]) ~= "string" then
+                return nil, what .. " must be a dense list of strings"
+            end
+        end
+        return value
+    end
+
+    local function append_unique(list, seen, message)
+        message = tostring(message)
+        if not seen[message] then
+            seen[message] = true
+            list[#list + 1] = message
+        end
+    end
+
+    -- Runs with `state.context` naming the live resolver; the caller closes
+    -- it on every exit path, including a raised error.
+    local function lint_roots(state, options, config, linter)
+        local host = driver.new_resolver_context({
+            analysis_only = true, verbose = options.verbose })
+        state.context = host
+        local target, target_error = driver.validate_target(host,
+            options.target, options.target_origin or "--target")
+        if not target then return nil, { target_error } end
+        local context = host
+        if target == "browser" then
+            local valid, extras_error = driver.browserlink.validate_extras(
+                driver.NATIVE_COMPILE_FLAGS or {}, driver.browser_link_options,
+                driver.BUILD_PROFILE, "compile")
+            if not valid then return nil, { extras_error } end
+            state.context = nil
+            local closed, close_error = driver.close_resolver_context(host)
+            if not closed then
+                return nil, { "failed to clean C probe service: " .. tostring(close_error) }
+            end
+            local handle, handle_error = driver.browser_analysis_target(options.browser_prefix)
+            if not handle then return nil, { handle_error } end
+            context = driver.new_resolver_context({ target = "browser",
+                analysis_only = true, browser_analysis_target = handle,
+                verbose = options.verbose })
+            state.context = context
+        else
+            context.target = target
+        end
+        local initialized, platform_error = driver.initialize_platform(context)
+        if not initialized then return nil, { platform_error } end
+        local configured, configure_error = driver.configure_foreign_c(context)
+        if not configured and configure_error then return nil, { configure_error } end
+
+        local errors, seen = {}, {}
+        local requested, requested_set, overrides = {}, {}, {}
+        for _, modname in ipairs(driver.deduplicate_module_names(state.modules)) do
+            requested[#requested + 1] = modname
+            requested_set[modname] = true
+        end
+        if #state.test_dirs > 0 then
+            local discovered, sources = require("titan-compiler.testroots").discover(
+                context, state.test_dirs, state.test_excludes, requested, state.tree)
+            if not discovered then return nil, { sources } end
+            requested, requested_set = {}, {}
+            for _, modname in ipairs(discovered) do
+                if not requested_set[modname] then
+                    requested_set[modname] = true
+                    requested[#requested + 1] = modname
+                end
+            end
+            for modname, source in pairs(sources or {}) do overrides[modname] = source end
+        end
+        -- Requested roots are authored source from the given trees only: no
+        -- installed-SDK fallback, and no compiled provider may stand in.
+        for _, modname in ipairs(requested) do
+            if not overrides[modname] then
+                local source, source_error = driver.resolve_source(context, modname, state.tree)
+                if not source then
+                    append_unique(errors, seen, source_error or
+                        driver.missing_module_message(context, modname, true))
+                elseif source.kind == "blocked" then
+                    append_unique(errors, seen, blocked_source_error(modname, source))
+                else
+                    overrides[modname] = source
+                end
+            end
+        end
+        if #errors > 0 then return nil, errors end
+
+        local loader = driver.defaultloader({}, { context = context,
+            source_roots = requested_set, source_overrides = overrides })
+        driver.with_loader(loader, function()
+            for _, modname in ipairs(requested) do
+                local ok, result, check_errors = loader(modname)
+                if not ok then
+                    append_unique(errors, seen, result)
+                else
+                    for _, message in ipairs(check_errors or {}) do
+                        append_unique(errors, seen, message)
+                    end
+                end
+            end
+        end)
+        -- Never lint a partial tree.
+        if #errors > 0 then return nil, errors end
+
+        -- The DSO rules ask how this analysis selected a nominal's owner,
+        -- and the refusal guard reads checked source of other modules.
+        local function provider_kind(modname)
+            local entry = driver.imported[modname]
+            return type(entry) == "table" and entry.kind or nil
+        end
+        local function module_ast(modname)
+            local entry = driver.imported[modname]
+            return type(entry) == "table" and entry.ast or nil
+        end
+        local units = {}
+        for _, modname in ipairs(context.checked_source_modules) do
+            local entry = requested_set[modname] and driver.imported[modname]
+            if entry and entry.ast then
+                units[#units + 1] = { modname = modname, ast = entry.ast,
+                    provider_kind = provider_kind, module_ast = module_ast }
+            end
+        end
+        return linter.lint(units, config)
+    end
+
+    function driver.lint_modules(options)
+        if type(options) ~= "table" then
+            error("driver.lint_modules requires an options table", 2)
+        end
+        local state = {}
+        local list_error
+        state.modules, list_error = string_list(options.modules, "modules")
+        if not state.modules then return nil, { list_error } end
+        state.test_dirs, list_error = string_list(options.test_dirs, "test_dirs")
+        if not state.test_dirs then return nil, { list_error } end
+        state.test_excludes, list_error = string_list(options.test_excludes, "test_excludes")
+        if not state.test_excludes then return nil, { list_error } end
+        for _, modname in ipairs(state.modules) do
+            if not staticmetadata.valid_module_name(modname) then
+                return nil, { "invalid logical module name '" .. modname .. "'" }
+            end
+        end
+        if #state.test_excludes > 0 and #state.test_dirs == 0 then
+            return nil, { "test_excludes requires test_dirs" }
+        end
+        if #state.modules == 0 and #state.test_dirs == 0 then
+            return nil, { "at least one module name or test directory is required" }
+        end
+        local tree = options.tree
+        if type(tree) == "table" then
+            local roots, roots_error = string_list(tree, "tree")
+            if not roots then return nil, { roots_error } end
+            tree = table.concat(roots, ";")
+        end
+        if tree ~= nil and (type(tree) ~= "string" or tree == "") then
+            return nil, { "tree must be a nonempty source root list" }
+        end
+        state.tree = tree or driver.TITAN_SOURCE_PATH
+        local native_cli = options.native_cli
+        if native_cli ~= nil then
+            if type(native_cli) ~= "table" then
+                return nil, { "native_cli must be a list of include and define switches" }
+            end
+            for _, item in ipairs(native_cli) do
+                if type(item) ~= "table" or (item.kind ~= "include" and item.kind ~= "define") then
+                    return nil, { "native_cli must be a list of include and define switches" }
+                end
+            end
+        end
+
+        local linter = require "titan-compiler.linter"
+        local config, config_error = linter.configure(options.rule_directives)
+        if not config then return nil, { config_error } end
+
+        -- Every call is a fresh analysis with its own semantic-cache epoch:
+        -- empty tables, no target identity, and a newly allocated generation,
+        -- which the lint's contexts then activate. Afterwards the caller's
+        -- complete ownership state (identity, generation, both tables, and the
+        -- native target profile) comes back on every exit path. The allocator
+        -- stays monotonic, so the lint's contexts can never match a later
+        -- epoch; `FOREIGN_C_CONFIGURATION_ID` also stays advanced, so a caller
+        -- context reconfigures foreign C with its restored flags.
+        local saved_identity, saved_generation = semantic_cache.identity, semantic_cache.generation
+        local saved_imported, saved_registry = driver.imported, types.registry
+        local saved_profile = driver.TARGET_PROFILE
+        local saved_source, saved_lua = driver.TITAN_SOURCE_PATH, driver.LUA_SOURCE_PATH
+        local saved_compile, saved_link = driver.NATIVE_COMPILE_FLAGS, driver.NATIVE_LINK_FLAGS
+        local function restore()
+            semantic_cache.identity, semantic_cache.generation = saved_identity, saved_generation
+            driver.imported, types.registry = saved_imported, saved_registry
+            driver.TARGET_PROFILE = saved_profile
+            driver.TITAN_SOURCE_PATH, driver.LUA_SOURCE_PATH = saved_source, saved_lua
+            driver.NATIVE_COMPILE_FLAGS, driver.NATIVE_LINK_FLAGS = saved_compile, saved_link
+        end
+        semantic_cache.identity = nil
+        semantic_cache.next_generation = semantic_cache.next_generation + 1
+        semantic_cache.generation = semantic_cache.next_generation
+        driver.imported, types.registry = {}, {}
+        driver.TITAN_SOURCE_PATH = state.tree
+        if options.lua_dir ~= nil then driver.LUA_SOURCE_PATH = options.lua_dir end
+        if native_cli ~= nil then
+            local normalized, native_error = require("titan-compiler.nativeinputs").normalize({
+                env = {
+                    TITAN_EXTRA_CPPFLAGS = driver.EXTRA_CPPFLAGS,
+                    TITAN_EXTRA_CFLAGS = driver.EXTRA_CFLAGS,
+                    TITAN_EXTRA_LDFLAGS = driver.EXTRA_LDFLAGS,
+                },
+                cli = { ordered = native_cli },
+            })
+            if not normalized then
+                restore()
+                return nil, { native_error }
+            end
+            driver.apply_native_inputs(normalized)
+        end
+
+        local outcome = table.pack(pcall(lint_roots, state, options, config, linter))
+        local close_error
+        if state.context then
+            local called, closed, err = pcall(driver.close_resolver_context, state.context)
+            state.context = nil
+            if not called then
+                close_error = tostring(closed)
+            elseif not closed then
+                close_error = tostring(err)
+            end
+        end
+        restore()
+        if not outcome[1] then
+            local err = outcome[2]
+            if close_error and type(err) == "string" then
+                err = err .. "\nfailed to clean C probe service: " .. close_error
+            end
+            error(err, 0)
+        end
+        local result, errors = outcome[2], outcome[3]
+        if close_error then
+            errors = errors or {}
+            errors[#errors + 1] = "failed to clean C probe service: " .. close_error
+            return nil, errors
+        end
+        return result, errors
+    end
 end
 
 -- Coordinator and worker entry points; their private helpers stay local to

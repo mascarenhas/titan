@@ -130,7 +130,7 @@ Two invariants shape everything downstream of the checker:
 
 | Chapter | Covers |
 | --- | --- |
-| [Driver and toolchain](driver.md) | Module lookup, loaders, Titan path and SDK fallback, language-server API, C compile/link dispatch, job scheduler/jobserver, `titanc` flags, and `titan-runtime/`. |
+| [Driver and toolchain](driver.md) | Module lookup, loaders, Titan path and SDK fallback, language-server API, C compile/link dispatch, job scheduler/jobserver, `titanc` flags, [`titanc --lint` and `driver.lint_modules`](driver.md#lint-analysis-driverlint_modules), and `titan-runtime/`. |
 | [Compiler-owned build coordinator](build-coordinator.md) | `.titan-build.lock`, closure planning, preflight, `titan-build-worker-v1` RPC, job-slot ledger, staged publication, `--c-source` nodes, final-link certificates, and `--test-dir`. |
 | [Output-directory routing](output-directory.md) | `-o`/`--output` and `--exe` path mapping, lock domains, `.titan`/`.native`/`.titan-links` state directories, temporary files, and coverage artifact routing. |
 | [Object-backed source modules](incremental-compilation.md) | `--incremental` and `-c` `.titan.source` certificates, persistent digest cache, C-literal-aware root relocation, POSIX backslash depfile policy, semantic header revalidation, miss codes, split parts, and LTO. |

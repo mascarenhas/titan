@@ -44,6 +44,8 @@
 # The playground compiler row uses the same unmeasured 1.000 planning weight;
 # its catalog, emission and linked-image cases pend outside the browser CI
 # gates, which run them in the browser-stdlib scheduler shard.
+# The titanc --lint row uses the same unmeasured 1.000 planning weight; its
+# browser-target case pends when the selected installation lacks a browser SDK.
 compiler spec/abi_spec.lua 0.201 2.926 0.907
 retained spec/asan_generated_c_context_spec.lua 0.587 - 0.250
 compiler spec/binary_compatibility_spec.lua 0.017 0.107 0.047
@@ -232,6 +234,7 @@ compiler spec/incremental_spec.lua 1.000 - 1.063
 compiler spec/installed_prefix_spec.lua 0.121 0.095 0.156
 compiler spec/lexer_spec.lua 0.069 0.322 0.094
 retained spec/libuv_build_spec.lua 37.702 - 418.781
+compiler spec/linter_spec.lua 1.000
 compiler spec/location_spec.lua 0.001 0.003 0.000
 retained spec/lpeglabel_build_spec.lua 2.545 - 21.391
 compiler spec/maybe3_spec.lua 0.001 0.003 0.000

@@ -140,9 +140,9 @@ end
 
 function defs.importdecl(loc, name_loc, localname, modname)
     local normalized, source_required = parser.normalize_import(modname)
-    return with_name_loc(
-        ast.TopLevelImport(loc, localname, normalized, source_required),
-        name_loc)
+    local node = ast.TopLevelImport(loc, localname, normalized, source_required)
+    node._written_modname = modname
+    return with_name_loc(node, name_loc)
 end
 
 function defs.get_loc(pos)

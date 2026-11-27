@@ -736,6 +736,7 @@ checkexp = util.make_visitor({
                     node.typeargs = {}
                 end
                 namespace._generic_var_prechecked = true
+                node._shorthand_record_call = true
                 node.exp = ast.ExpVar(namespace.loc,
                     ast.VarDot(namespace.loc, namespace, "new"))
                 generic_checkvar_for_expression(node.exp, st, errors)
