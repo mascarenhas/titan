@@ -136,8 +136,8 @@ as `~` backups. Preserve dependencies and SDK/runtime files.
 After verifying the installed `titanc` shebang environment, `native-coverage`
 runs `make titan-stdlib-lint` (**Lint standard library and native test
 suites**), checking every lint rule across the native standard library and
-`spec/stdlib/titan` without adding a separate CI job. It then runs
-`make stdlib-busted-test` and the installed-stdlib integrations listed in
+`spec/stdlib/titan`. It then runs `make stdlib-busted-test` and the
+installed-stdlib integrations listed in
 `spec/support/ci_stdlib_compiler_test_files.txt` with LuaCov through
 `ci_parallel_compiler_tests.sh stdlib`. As for a compiler shard pair, two
 workers run `ci_test_groups.sh stdlib-compiler-shard-1` and `-2` concurrently
@@ -292,7 +292,7 @@ disk-space step:
    library, its portable and browser-only test owners, and its helper roots
    under every rule, and runs `scripts/check_browser_stdlib.lua lint-roots` to
    prove that the native and browser lint roots cover every source under
-   `spec/stdlib/titan` (no separate CI job).
+   `spec/stdlib/titan`.
 9. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
    prefix's installed `busted -c -o gtest -v` runs the five real-toolchain

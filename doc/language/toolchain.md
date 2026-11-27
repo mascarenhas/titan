@@ -161,7 +161,7 @@ status 0 otherwise, warnings included.
 | `unmatched-public-test-signature` | hint | A public `test_*` function in a module importing `test` that `--test` does not discover (it does not take exactly one `test.Context`). |
 | `union-identity-equality` | hint | `==`/`~=` against a freshly constructed variant of an `async`, `uv`, HTTP mode, `reflect.Type`, or `websocket.MessageType` union: union equality is identity, so the result never changes. |
 | `stdlib-import-spelling` | hint | `import "titan.<name>"` where the short standard-library spelling `"<name>"` exists. |
-| `prefer-const-local-field` | hint | A non-const `local` record field, or an unmarked field of a `local record` (other than inline C storage), that this module never assigns. |
+| `prefer-const-local-field` | hint | A non-const `local` field of any record, or any non-const field of a `local record` (other than inline C storage), that this module never assigns. |
 | `prefer-const-local` | hint | A single-name local with a written initializer, other than inline C storage, that is read but never reassigned. |
 | `boolean-option-silent-truthiness-local` | hint | An unannotated local initialized from a `boolean?`, which turns nil into false. |
 | `ephemeral-interface-map-key` | hint | Indexing a Map keyed by an Interface with a concrete value, which builds a new wrapper key each time. |
@@ -203,17 +203,18 @@ explanation follows `:` or `--`:
   ordinary comments, and `---` documentation comment blocks; stacked standalone
   directives combine. Place standalone directives *above* `---` documentation
   comments, never inside them.
-- **Strict validation.** Every directive must name one or more valid rule IDs
-  explicitly (group names `all`, `warnings`, and `hints` are rejected).
-  `titanc --lint` exits with status 1 and reports
-  `file:line:col: invalid titan-lint directive: ...` for missing colons
-  (`-- titan-lint allow(...)`), unknown verbs, empty or duplicate rule lists,
-  unclosed parentheses, unexpected trailing text, empty reasons after `:` or
-  `--`, directives inside `---` documentation comments, or dangling standalone
-  directives before end of file or a block closer (`end`, `else`, `elseif`,
-  `until`, `catch`, `when`). Ordinary comments that mention `titan-lint`
-  without `titan-lint:` (or `titan-lint allow(`) and directive text inside
-  string literals or `--[[ ... ]]` long comments are ignored.
+- **Strict validation.** Every directive must name valid rule IDs explicitly;
+  group names `all`, `warnings`, and `hints` are rejected. `titanc --lint`
+  exits with status 1 and reports
+  `file:line:col: invalid titan-lint directive: ...` for syntax or rule-list
+  errors—missing colons (`-- titan-lint allow(...)`), unknown verbs, unclosed
+  parentheses, empty rule lists, unknown or duplicate rule IDs, unexpected
+  trailing text, or empty reasons after `:` or `--`. It fails the same way for
+  directives placed inside `---` documentation comments or left dangling before
+  end of file or a block closer (`end`, `else`, `elseif`, `until`, `catch`,
+  `when`). Ordinary comments that mention `titan-lint` without `titan-lint:` or
+  `titan-lint allow(`, as well as directive text inside string literals or
+  `--[[ ... ]]` long comments, are ignored.
 - **Precedence with `--lint-deny`.** An in-source `allow(...)` drops matching
   diagnostics before reporting, counting, and `--lint-deny` checks, so an
   allowed line passes even under `--lint-deny=warnings`, `--lint-deny=hints`,

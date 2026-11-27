@@ -1403,11 +1403,11 @@ whether `app_requirements` holds. In `coder._nominal_plan`
 public-only nominal layout: it checks `imported_nominal_layouts` and
 `application_nominal_layouts` (populated across compiled `source_names` via
 `perf.public_source_layout` when `app_requirements` holds), and otherwise
-projects the checked source plan through `nominallayout.public`. A trusted
-owner (the defining module or a direct `.titan` source importer) bypasses
-published and application layouts and always builds its complete layout from
-its checked source declaration, even when a compiled provider also publishes a
-public layout for that owner.
+projects the checked source plan through `nominallayout.public`. The defining
+module and its direct `.titan` source importers bypass published and
+application layouts and always build the full layout from the owner's checked
+source declaration, even when a compiled provider also publishes a public
+layout for that owner.
 
 `titan_module_provider` preserves its four-step order: (1) initialized
 per-state canonical module, (2) matching native preload descriptor, (3) binary

@@ -195,9 +195,9 @@ end
 Direct calls to `gc.keep_alive` lower as a compiler intrinsic with no C
 function call and no `value` boxing, while evaluating all arguments
 (positional, named, or surplus) once in written order and preserving ordinary
-unconstrained generic ingress. Using `gc.keep_alive` as a first-class function
-value or calling `require("titan.gc").keep_alive` from Lua invokes the exported
-entry and returns zero values.
+unconstrained generic argument passing. Using `gc.keep_alive` as a first-class
+function value or calling `require("titan.gc").keep_alive` from Lua invokes
+the exported entry and returns no values.
 
 Type parameter `T` obeys ordinary generic type admission on both direct and
 first-class uses: Titan values, options, and `owned` C storage are accepted,

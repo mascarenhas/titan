@@ -171,9 +171,9 @@ the exported entry or boxing the argument into `value`:
 In the standard library, `titan/uv` (`stream_owners.titan`, `udp.titan`, and
 `uv.native.titan`) pairs `const` bindings with `gc.keep_alive` after callback
 delivery so retired request buffers and strings stay rooted across reentrant
-callbacks. `spec/coder/gc_keep_alive_spec.lua` verifies the generated C
-(zero-call/zero-boxing, borrowed-slot field rooting, `-O2` reentrant liveness,
-evaluation order, generic ingress, and admission/rejections), and
+callbacks. `spec/coder/gc_keep_alive_spec.lua` verifies the generated C (no C
+call or `value` boxing, borrowed-slot field rooting, `-O2` reentrant liveness,
+evaluation order, generic ingress, and type admission and rejections), and
 `spec/stdlib/titan/gc/tests.titan` covers public behavior on native and browser
 targets.
 
