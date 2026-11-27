@@ -1218,7 +1218,9 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             local file = relative(path)
             local top = file and file:match("^([^/]+)/")
             if top and top ~= "titan" and top ~= "spec" and top ~= "doc" then
-                if file ~= "titan-runtime/browser/_titan_browser/windows_job.titan" then
+                -- Agent skill evaluation suites carry standalone fixture/oracle .titan files.
+                if file ~= "titan-runtime/browser/_titan_browser/windows_job.titan" and
+                   not file:match("^%.agents/skills/[^/]+/evals/") then
                     assert.falsy(file:match("%.titan$"), file)
                 end
                 local duplicated = stdlib_files[file:match("[^/]+$")]
