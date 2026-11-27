@@ -3,6 +3,8 @@
 -- `driver.lint_modules` loads this module, so ordinary compilation and
 -- semantic clients never pay for it.
 -- Implementation notes: doc/implementation/driver.md#lint-analysis-driverlint_modules
+local lpeg = require "lpeglabel"
+local lexer = require "titan-compiler.lexer"
 local parser = require "titan-compiler.parser"
 local types = require "titan-compiler.types"
 local test_runner = require "titan-compiler.test_runner"
@@ -200,6 +202,12 @@ end
 local function emit(w, rule, node, message, loc)
     local mode = w.mode[rule]
     if mode == "off" then return end
+    loc = loc or node.loc
+    -- An in-source `-- titan-lint: allow(...)` exception suppresses the
+    -- diagnostic before it is reported, counted or denied.
+    local allowed = w.allowed[loc.filename]
+    local rules = allowed and allowed[loc.line]
+    if rules and rules[rule] then return end
     local emitted = w.emitted[rule]
     if not emitted then
         emitted = {}
@@ -207,7 +215,6 @@ local function emit(w, rule, node, message, loc)
     end
     if emitted[node] then return end
     emitted[node] = true
-    loc = loc or node.loc
     w.sink[#w.sink + 1] = {
         file = loc.filename, line = loc.line, col = loc.col,
         severity = RULE_BY_ID[rule].severity, rule = rule, message = message,
@@ -1035,9 +1042,9 @@ local function check_test_signature(w, node)
         "'test.Context' parameter, so 'titanc --test' does not discover it as a test")
 end
 
-local function lint_module(unit, mode, sink)
+local function lint_module(unit, mode, sink, allowed)
     local w = {
-        modname = unit.modname, mode = mode, sink = sink, emitted = {}, seen = {},
+        modname = unit.modname, mode = mode, sink = sink, allowed = allowed, emitted = {}, seen = {},
         seq = 0, hazards = 0, prefix = { [0] = 0 }, scopes = {},
         catch_error = nil, unchecked = 0,
         source_imports = {}, field_writes = {}, local_fields = {},
@@ -1079,10 +1086,14 @@ local function lint_module(unit, mode, sink)
                 visit_decl(w, node.decl)
                 visit(w, node.value)
             elseif tag == "Ast.TopLevelRecord" then
+                -- Only this module and its '.titan' source importers assign a
+                -- 'local' field; Lua code may also assign a public field of a
+                -- 'local record'.
                 for _, field in ipairs(node.fields) do
                     local descriptor = field._decl
-                    if field.islocal and not field.isconst and type(descriptor) == "table" and
-                       descriptor._tag == "Type.Field" and not types.is_c_aggregate(descriptor.type) then
+                    if (node.islocal or field.islocal) and not field.isconst and
+                       type(descriptor) == "table" and descriptor._tag == "Type.Field" and
+                       not types.is_c_aggregate(descriptor.type) then
                         w.local_fields[#w.local_fields + 1] = { node = field, record = node.name,
                             key = tostring(descriptor.fqtn) .. "\0" .. tostring(descriptor.name) }
                     end
@@ -1099,12 +1110,187 @@ local function lint_module(unit, mode, sink)
     close_scope(w)
     for _, field in ipairs(w.local_fields) do
         if not w.field_writes[field.key] then
-            emit(w, "prefer-const-local-field", field.node,
-                "local field '" .. field.record .. "." .. field.node.name .. "' is never assigned in " ..
-                "this module; consider 'local const' (unless a '.titan' source importer assigns it)",
+            local name = field.record .. "." .. field.node.name
+            emit(w, "prefer-const-local-field", field.node, field.node.islocal and
+                ("local field '" .. name .. "' is never assigned in this module; consider " ..
+                    "'local const' (unless a '.titan' source importer assigns it)") or
+                ("field '" .. name .. "' of local record '" .. field.record .. "' is never " ..
+                    "assigned in this module; consider 'const' (unless a '.titan' source " ..
+                    "importer or Lua code assigns it)"),
                 field.node._name_loc)
         end
     end
+end
+
+---------------------------------------------------------------------------
+-- In-source exceptions: `-- titan-lint: allow(<rule-id>[, ...])`
+---------------------------------------------------------------------------
+
+-- The parser's own comment and string tokens, so a directive spelled inside
+-- a string literal or a long comment is never one.
+local COMMENT_END = (lexer.COMMENT / 0) * lpeg.Cp()
+local STRING_END = (lexer.STRINGLIT / 0) * lpeg.Cp()
+-- Every exception names its rules: no severity group or wildcard.
+local RULE_GROUPS = set_of({ "all", "warnings", "hints" })
+-- Tokens that close a block, so no statement of that block follows them.
+local BLOCK_CLOSERS = set_of({ "end", "else", "elseif", "until", "catch", "finally", "when" })
+
+-- The rule IDs of a directive comment body (the comment text after `--`,
+-- starting at `titan-lint`), or `nil, message`.
+local function parse_directive(body)
+    local rest = body:match("^titan%-lint%s*:(.*)$")
+    if not rest then return nil, "expected ':' after 'titan-lint'" end
+    local verb, after = rest:match("^%s*([%a_][%w_%-]*)(.*)$")
+    if verb ~= "allow" then
+        return nil, verb and "unknown directive '" .. verb .. "' (expected 'allow')" or
+            "expected 'allow(<rule-id>, ...)' after 'titan-lint:'"
+    end
+    if not after:match("^%s*%(") then return nil, "expected '(' after 'allow'" end
+    local list, tail = after:match("^%s*%(([^)]*)%)(.*)$")
+    if not list then return nil, "unclosed '(' in 'allow(...)'" end
+    if not list:find("%S") then return nil, "empty 'allow()': name each rule it allows" end
+    local rules, seen = {}, {}
+    for item in (list .. ","):gmatch("([^,]*),") do
+        local id = item:match("^%s*(.-)%s*$")
+        if id == "" then return nil, "empty rule ID in 'allow(...)'" end
+        if RULE_GROUPS[id] then
+            return nil, "'allow(" .. id .. ")' is not supported: name each rule it allows"
+        end
+        if not RULE_BY_ID[id] then return nil, "unknown lint rule '" .. id .. "'" end
+        if seen[id] then return nil, "duplicate lint rule '" .. id .. "'" end
+        seen[id] = true
+        rules[#rules + 1] = id
+    end
+    if tail:find("%S") then
+        local separator, reason = tail:match("^%s*([:%-]%-?)%s*(.-)%s*$")
+        if separator ~= ":" and separator ~= "--" then
+            return nil, "unexpected text after 'allow(...)' (write ': <reason>')"
+        end
+        if reason == "" then return nil, "expected a reason after '" .. separator .. "'" end
+    end
+    return rules
+end
+
+-- Scan one contributing file's directives, appending `{ file, line, col,
+-- message }` problems. Returns `{ [line] = { [rule-id] = directive line } }`,
+-- or nil for a file without directives. A directive after code on its line
+-- covers that line; a directive alone on its line covers the line of the
+-- next code token, past blank, comment and `---` documentation lines, and
+-- stacked directives combine. Only the parser counts lines: '\n' ends one,
+-- and '\r' is whitespace.
+local function scan_directives(filename, text, problems)
+    if not text:find("titan-lint", 1, true) then return nil end
+    local allowed, pending = nil, {}
+    local pos, size, line, line_start = 1, #text, 1, 1
+    -- The line on which the latest code token ended.
+    local code_line = 0
+    -- Inside a `---` comment run that `documentation.attach` collects: a
+    -- directive there would become documentation text.
+    local in_documentation = false
+
+    local function problem(directive, message)
+        problems[#problems + 1] = { file = filename, line = directive.line, col = directive.col,
+            message = message }
+    end
+
+    local function allow(target, directive)
+        allowed = allowed or {}
+        local rules = allowed[target]
+        if not rules then
+            rules = {}
+            allowed[target] = rules
+        end
+        for _, id in ipairs(directive.rules) do
+            if rules[id] then
+                problem(directive, "lint rule '" .. id .. "' is already allowed for line " .. target ..
+                    " by the directive on line " .. rules[id])
+            else
+                rules[id] = directive.line
+            end
+        end
+    end
+
+    -- Move to `stop`, counting the line breaks passed over.
+    local function advance(stop)
+        local at = text:find("\n", pos, true)
+        while at and at < stop do
+            line, line_start = line + 1, at + 1
+            at = text:find("\n", at + 1, true)
+        end
+        pos = stop
+    end
+
+    -- A code token spanning `pos` up to `stop`.
+    local function code(stop)
+        if #pending > 0 then
+            local word = text:match("^[%a_][%w_]*", pos)
+            for _, directive in ipairs(pending) do
+                if BLOCK_CLOSERS[word] then
+                    problem(directive, "no declaration or statement follows it before '" .. word .. "'")
+                else
+                    allow(line, directive)
+                end
+            end
+            pending = {}
+        end
+        in_documentation = false
+        advance(stop)
+        code_line = line
+    end
+
+    while pos <= size do
+        local byte = text:byte(pos)
+        if byte == 10 or byte == 13 then
+            -- A line break outside a comment ends any `---` comment run.
+            in_documentation = false
+            advance(pos + 1)
+        elseif byte == 32 or byte == 9 or byte == 11 or byte == 12 then
+            pos = pos + 1
+        elseif byte == 45 and text:byte(pos + 1) == 45 then
+            local stop = lpeg.match(COMMENT_END, text, pos) or size + 1
+            local raw = text:sub(pos, stop - 1)
+            if raw:match("^%-%-%[=*%[") then
+                in_documentation = false
+            elseif raw:byte(3) == 45 then
+                in_documentation = true
+            else
+                local body = raw:sub(3):gsub("[\r\n]+$", ""):match("^%s*(.*)$")
+                if body:match("^titan%-lint%f[^%w_%-]") then
+                    local directive = { line = line, col = pos - line_start + 1 }
+                    local rules, message = parse_directive(body)
+                    if in_documentation then
+                        problem(directive, "it is inside a '---' documentation comment; " ..
+                            "place it above the documentation")
+                    elseif not rules then
+                        problem(directive, message)
+                    else
+                        directive.rules = rules
+                        if code_line == line then
+                            allow(line, directive)
+                        else
+                            pending[#pending + 1] = directive
+                        end
+                    end
+                end
+            end
+            advance(stop)
+        elseif byte == 34 or byte == 39 or byte == 91 then
+            code(lpeg.match(STRING_END, text, pos) or pos + 1)
+        else
+            code(text:find("[%s\"'%[%-]", pos + 1) or size + 1)
+        end
+    end
+    for _, directive in ipairs(pending) do
+        problem(directive, "no declaration or statement follows it")
+    end
+    return allowed
+end
+
+local function problem_less(a, b)
+    if a.file ~= b.file then return a.file < b.file end
+    if a.line ~= b.line then return a.line < b.line end
+    if a.col ~= b.col then return a.col < b.col end
+    return a.message < b.message
 end
 
 local function diagnostic_less(a, b)
@@ -1115,12 +1301,32 @@ local function diagnostic_less(a, b)
     return a.message < b.message
 end
 
--- Lint checked analysis ASTs. `units` is a list of `{ modname, ast }`;
--- `config` comes from `linter.configure`. Diagnostics are attributed to the
--- contributing file of each node and sorted by file, line, column and rule.
+-- Lint checked analysis ASTs. `units` is a list of `{ modname, ast, sources }`
+-- where `sources` lists the `{ filename, text }` of the module's contributing
+-- files, whose `-- titan-lint:` directives are validated first: any invalid
+-- one fails the run with `nil, errors`. `config` comes from
+-- `linter.configure`. Diagnostics are attributed to the contributing file of
+-- each node and sorted by file, line, column and rule.
 function linter.lint(units, config)
+    local allowed, problems = {}, {}
+    for _, unit in ipairs(units) do
+        for _, source in ipairs(unit.sources or {}) do
+            if allowed[source.filename] == nil then
+                allowed[source.filename] = scan_directives(source.filename, source.text, problems) or false
+            end
+        end
+    end
+    if #problems > 0 then
+        table.sort(problems, problem_less)
+        local errors = {}
+        for index, p in ipairs(problems) do
+            errors[index] = string.format("%s:%d:%d: invalid titan-lint directive: %s",
+                p.file, p.line, p.col, p.message)
+        end
+        return nil, errors
+    end
     local diagnostics = {}
-    for _, unit in ipairs(units) do lint_module(unit, config.mode, diagnostics) end
+    for _, unit in ipairs(units) do lint_module(unit, config.mode, diagnostics, allowed) end
     table.sort(diagnostics, diagnostic_less)
     local result = { diagnostics = diagnostics, warning_count = 0, hint_count = 0, denied_count = 0 }
     for _, diagnostic in ipairs(diagnostics) do

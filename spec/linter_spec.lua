@@ -3,6 +3,7 @@ local driver = require "titan-compiler.driver"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local linter = require "titan-compiler.linter"
+local parser = require "titan-compiler.parser"
 local platform = require "titan-compiler.platform"
 local temporary = require "spec.support.temporary"
 local types = require "titan-compiler.types"
@@ -431,17 +432,26 @@ end
 fixture("consts", { "prefer-const-local-field", "prefer-const-local" }, [==[
 foreign import "time.h"
 
+-- Every unmarked field of a 'local record' is module-private as well.
 local record Session
   local token: string --! prefer-const-local-field
   local uses: integer
-  label: string
+  label: string --! prefer-const-local-field
+  note: string
+  const name: string
   local const fixed: integer
   local stamp: foreign tm
+  start: foreign tm
+end
+
+record Public
+  value: integer
 end
 
 local function Session:bump(): integer
   self.uses = self.uses + 1
-  return self.uses + #self.token + #self.label + self.fixed
+  self.note = "bumped"
+  return self.uses + #self.token + #self.label + #self.note + #self.name + self.fixed
 end
 
 function locals(n: integer): integer
@@ -1159,10 +1169,16 @@ describe("driver.lint_modules", function()
                 assert.equal(suffix, d.message:sub(-#suffix))
             elseif d.rule == "union-identity-equality" then
                 assert.matches("so it is always (%a+);", d.message)
+            elseif d.rule == "prefer-const-local-field" then
+                assert.is_true(d.message == "local field 'Session.token' is never assigned in this " ..
+                    "module; consider 'local const' (unless a '.titan' source importer assigns it)" or
+                    d.message == "field 'Session.label' of local record 'Session' is never assigned " ..
+                    "in this module; consider 'const' (unless a '.titan' source importer or Lua code " ..
+                    "assigns it)", d.message)
             end
         end
         for _, rule in ipairs({ "prefer-record-call-shorthand", "unmatched-public-test-signature",
-                "union-identity-equality" }) do
+                "union-identity-equality", "prefer-const-local-field" }) do
             assert.is_true(seen[rule] == true, rule)
         end
     end)
@@ -1175,6 +1191,245 @@ describe("driver.lint_modules", function()
         assert.equal("dso-closed-union-case", denied.diagnostics[1].rule)
         assert.equal("records.titan", basename(denied.diagnostics[1].file))
         assert.is_true(denied.diagnostics[1].denied)
+    end)
+end)
+
+describe("titan-lint in-source exceptions", function()
+    local roots = {}
+    local function tree(files)
+        local path = make_tree(files)
+        roots[#roots + 1] = path
+        return path
+    end
+    after_each(function()
+        for _, path in ipairs(roots) do remove_tree(path) end
+        roots = {}
+    end)
+
+    local function hits(lint_result)
+        local found = {}
+        for _, d in ipairs(lint_result.diagnostics) do
+            found[#found + 1] = basename(d.file) .. ":" .. d.line .. ":" .. d.rule
+        end
+        return found
+    end
+
+    -- Directive problems are reported before any rule runs, so a unit
+    -- without a checked AST is enough to exercise them.
+    local function scan(files)
+        local units = {}
+        for _, file in ipairs(files) do
+            units[#units + 1] = { modname = file[1]:gsub("%.titan$", ""), ast = {},
+                sources = { { filename = file[1], text = file[2] } } }
+        end
+        local config = assert(linter.configure({ { op = "enable", value = "all" } }))
+        return linter.lint(units, config)
+    end
+
+    local SUPPRESSED = [===[
+record Point
+  x: integer
+  y: integer
+end
+
+local record Box
+  -- titan-lint: allow(prefer-const-local-field): exercised by the exception tests
+  --- The boxed value.
+  value: integer
+  other: integer
+end
+
+function inline(n: integer): integer
+  local p = Point.new(1, 2) -- titan-lint: allow(prefer-record-call-shorthand)
+  local q = Point.new(3, 4) -- titan-lint: allow(prefer-const-local, prefer-record-call-shorthand): both
+  local r = Point.new(5, 6) -- titan-lint: allow(prefer-const-local) -- a dash-dash reason
+  return p.x + q.y + r.x + n
+end
+
+function standalone(n: integer): integer
+  -- titan-lint: allow(prefer-const-local)
+
+  -- An ordinary comment between the directive and its line.
+  local a = 1
+  local b = 2
+  -- titan-lint: allow(prefer-const-local)
+  -- titan-lint: allow(prefer-record-call-shorthand)
+  local c = Point.new(a, b)
+  return a + b + c.x + n
+end
+
+function ignored(): integer
+  local s = "-- titan-lint: allow(bogus)"
+  local t = [[
+-- titan-lint: allow(bogus)
+]]
+  --[[ titan-lint: allow(bogus) ]]
+  --[==[
+  -- titan-lint: allow(bogus)
+  ]==]
+  -- see titan-lint: allow(bogus) for the syntax
+  -- titan-lint-like comments are ordinary comments
+  local u = 1
+  return #s + #t + u
+end
+]===]
+
+    it("suppresses exactly the named rules on the covered line", function()
+        local path = tree({ ["allowed.titan"] = SUPPRESSED })
+        local lint_result, lint_errors = lint(path, { "allowed" })
+        assert.is_nil(lint_errors, lint_errors and table.concat(lint_errors, "\n"))
+        -- Two diagnostics share lines 14 and 16; only the named one goes.
+        assert.same({
+            "allowed.titan:10:prefer-const-local-field",
+            "allowed.titan:14:prefer-const-local",
+            "allowed.titan:16:prefer-record-call-shorthand",
+            "allowed.titan:25:prefer-const-local",
+            "allowed.titan:33:prefer-const-local",
+            "allowed.titan:34:prefer-const-local",
+            "allowed.titan:43:prefer-const-local",
+        }, hits(lint_result))
+        assert.equal(0, lint_result.denied_count)
+    end)
+
+    it("leaves documentation attached when a directive precedes it", function()
+        local nodes = assert(parser.parse("allowed.titan", SUPPRESSED))
+        local box
+        for _, node in ipairs(nodes) do
+            if node._tag == "Ast.TopLevelRecord" and node.name == "Box" then box = node end
+        end
+        assert.equal("The boxed value.", box.fields[1]._documentation.summary)
+        assert.equal("", box.fields[1]._documentation.description)
+        assert.is_nil(box.fields[2]._documentation)
+    end)
+
+    it("removes allowed diagnostics before --lint-deny counts them", function()
+        local text = "record Point\n  x: integer\nend\n\n" ..
+            "function f(): integer\n" ..
+            "  -- titan-lint: allow(prefer-const-local, prefer-record-call-shorthand)\n" ..
+            "  local p = Point.new(1)\n" ..
+            "  local unused = 2 -- titan-lint: allow(unused-local-binding)\n" ..
+            "  return p.x\nend\n"
+        local path = tree({ ["denied.titan"] = text,
+            ["control.titan"] = text:gsub(" *%-%- titan%-lint:[^\n]*", "") })
+        local directives = { { op = "enable", value = "all" }, { op = "deny", value = "warnings" },
+            { op = "deny", value = "hints" } }
+        local lint_result, lint_errors = lint(path, { "denied", "control" },
+            { rule_directives = directives })
+        assert.is_nil(lint_errors, lint_errors and table.concat(lint_errors, "\n"))
+        assert.same({ "control.titan:7:prefer-const-local", "control.titan:7:prefer-record-call-shorthand",
+            "control.titan:8:unused-local-binding" }, hits(lint_result))
+        assert.equal(3, lint_result.denied_count)
+    end)
+
+    it("reads CRLF sources by the parser's line numbers", function()
+        local text = table.concat({
+            "function crlf(): integer",
+            "  -- titan-lint: allow(prefer-const-local)",
+            "  local a = 1",
+            "  local b = 2 -- titan-lint: allow(prefer-const-local)",
+            "  local c = 3",
+            "  return a + b + c",
+            "end", "" }, "\r\n")
+        local path = tree({ ["crlf.titan"] = text })
+        local lint_result, lint_errors = lint(path, { "crlf" })
+        assert.is_nil(lint_errors, lint_errors and table.concat(lint_errors, "\n"))
+        assert.same({ "crlf.titan:5:prefer-const-local" }, hits(lint_result))
+        local result, errors = scan({ { "bad_crlf.titan",
+            "function g(): integer\r\n  local v = 1 -- titan-lint: allow(nope)\r\n  return v\r\nend\r\n" } })
+        assert.is_nil(result)
+        assert.same({ "bad_crlf.titan:2:15: invalid titan-lint directive: unknown lint rule 'nope'" }, errors)
+    end)
+
+    it("honors an exception whose rule does not fire on the active target", function()
+        local path = tree({
+            ["pkg/pkg.titan"] = "local record Counter\n" ..
+                "  -- titan-lint: allow(prefer-const-local-field): only the native contributor assigns it\n" ..
+                "  count: integer\nend\n",
+            ["pkg/bump.native.titan"] = "function bump(n: integer): integer\n" ..
+                "  const c: Counter = { count = n }\n  c.count = c.count + 1\n  return c.count\nend\n",
+            ["pkg/bump.browser.titan"] = "function bump(n: integer): integer\n" ..
+                "  const c: Counter = { count = n }\n  return c.count + 1\nend\n",
+            ["other/other.titan"] = "function value(): integer\n  return 1\nend\n",
+            ["other/page.browser.titan"] = "-- titan-lint: allow(no-such-rule)\n" ..
+                "function page(): integer\n  return 2\nend\n",
+        })
+        -- The native contributor assigns the field, so the exception is
+        -- unused there, and the browser-only file is not a native source.
+        local lint_result, lint_errors = lint(path, { "pkg", "other" })
+        assert.is_nil(lint_errors, lint_errors and table.concat(lint_errors, "\n"))
+        assert.same({}, hits(lint_result))
+        if not driver.browser_analysis_target(nil) then
+            pending("the selected installation has no browser SDK")
+            return
+        end
+        lint_result, lint_errors = lint(path, { "pkg" }, { target = "browser" })
+        assert.is_nil(lint_errors, lint_errors and table.concat(lint_errors, "\n"))
+        assert.same({}, hits(lint_result))
+        lint_result, lint_errors = lint(path, { "other" }, { target = "browser" })
+        assert.is_nil(lint_result)
+        assert.equal(1, #lint_errors)
+        assert.matches("page%.browser%.titan:1:1: invalid titan%-lint directive: unknown lint rule " ..
+            "'no%-such%-rule'$", lint_errors[1])
+    end)
+
+    it("ignores directive spellings inside strings and long comments", function()
+        local result, errors = scan({ { "ignored.titan", SUPPRESSED } })
+        assert.is_nil(errors)
+        assert.same({}, result.diagnostics)
+    end)
+
+    it("rejects every malformed, misplaced or redundant directive", function()
+        local lines, expected = { "function g(): integer" }, {}
+        local function inline(index, directive, message)
+            local line = "  local v" .. index .. " = " .. index .. " -- " .. directive
+            lines[#lines + 1] = line
+            expected[#expected + 1] = string.format("bad.titan:%d:%d: invalid titan-lint directive: %s",
+                #lines, line:find("--", 1, true), message)
+        end
+        for index, case in ipairs({
+            { "allow(no-such-rule)", "unknown lint rule 'no-such-rule'" },
+            { "allow(all)", "'allow(all)' is not supported: name each rule it allows" },
+            { "allow(warnings)", "'allow(warnings)' is not supported: name each rule it allows" },
+            { "allow(hints)", "'allow(hints)' is not supported: name each rule it allows" },
+            { "allow()", "empty 'allow()': name each rule it allows" },
+            { "allow(prefer-const-local, prefer-const-local)", "duplicate lint rule 'prefer-const-local'" },
+            { "allow(prefer-const-local,)", "empty rule ID in 'allow(...)'" },
+            { "allow(prefer-const-local", "unclosed '(' in 'allow(...)'" },
+            { "allow(prefer-const-local) because", "unexpected text after 'allow(...)' (write ': <reason>')" },
+            { "allow(prefer-const-local):", "expected a reason after ':'" },
+            { "allow(prefer-const-local) --", "expected a reason after '--'" },
+            { "allow prefer-const-local", "expected '(' after 'allow'" },
+            { "deny(prefer-const-local)", "unknown directive 'deny' (expected 'allow')" },
+            { "", "expected 'allow(<rule-id>, ...)' after 'titan-lint:'" },
+        }) do
+            inline(index, "titan-lint: " .. case[1], case[2])
+        end
+        inline(15, "titan-lint allow(prefer-const-local)", "expected ':' after 'titan-lint'")
+        local function standalone(line, message)
+            lines[#lines + 1] = line
+            if message then
+                expected[#expected + 1] = string.format("bad.titan:%d:%d: invalid titan-lint directive: %s",
+                    #lines, line:find("--", 1, true), message)
+            end
+        end
+        local directive = "-- titan-lint: allow(prefer-const-local)"
+        standalone("  --- A documented local.")
+        standalone("  " .. directive, "it is inside a '---' documentation comment; place it above the documentation")
+        standalone("  local d = 1")
+        standalone("  " .. directive)
+        standalone("  " .. directive, "lint rule 'prefer-const-local' is already allowed for line " ..
+            (#lines + 2) .. " by the directive on line " .. #lines)
+        standalone("  local e = 2")
+        standalone("  if d > e then")
+        standalone("    " .. directive, "no declaration or statement follows it before 'end'")
+        standalone("  end")
+        standalone("  return d + e")
+        standalone("end")
+        standalone(directive, "no declaration or statement follows it")
+        local result, errors = scan({ { "bad.titan", table.concat(lines, "\n") .. "\n" },
+            { "good.titan", "local x = 1 -- titan-lint: allow(prefer-const-local)\n" } })
+        assert.is_nil(result)
+        assert.same(expected, errors)
     end)
 end)
 
@@ -1608,6 +1863,24 @@ describe("titanc --lint command line", function()
         status, output = run({ "--lint", "-t", path, "-I", path .. "/include", "app" })
         assert.equal(1, status, output)
         assert.matches("lint_fixture_t", output, 1, true)
+    end)
+
+    it("exits 0 when every denied diagnostic is allowed in source, and 1 on an invalid directive", function()
+        local path = make_tree({
+            ["ok.titan"] = "function f(): integer\n" ..
+                "  local unused = 1 -- titan-lint: allow(unused-local-binding): kept for the test\n" ..
+                "  return 2\nend\n",
+            ["bad.titan"] = "function f(): integer\n  return 2 -- titan-lint: allow(all)\nend\n",
+        })
+        roots[#roots + 1] = path
+        local status, output = run({ "--lint", "-t", path, "--lint-enable=all", "--lint-deny=warnings",
+            "--lint-deny=hints", "ok" })
+        assert.equal(0, status, output)
+        assert.equal("", output)
+        status, output = run({ "--lint", "-t", path, "bad" })
+        assert.equal(1, status, output)
+        assert.matches("bad.titan:2:12: invalid titan-lint directive: 'allow(all)' is not supported: " ..
+            "name each rule it allows", output, 1, true)
     end)
 
     it("loads the linter only for --lint", function()

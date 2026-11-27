@@ -1356,7 +1356,7 @@ TITAN_ROCK_TEST_NATIVE_STATUS = $(abspath $(TITAN_TEST_BUILD_DIR))/.rock-test-na
 
 .PHONY: busted-test stdlib-busted-test stdlib-test \
 	titan-stdlib-test-build titan-stdlib-test-objects check-titan-test-sdk \
-	titan-stdlib-test-run titan-stdlib-test-run-parallel titan-stdlib-test
+	titan-stdlib-test-run titan-stdlib-test-run-parallel titan-stdlib-test titan-stdlib-lint
 
 busted-test: ## Run retained Busted specs, optionally with BUSTED_FILTER
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) $(ROCK_TEST_BUSTED)
@@ -1392,6 +1392,24 @@ titan-stdlib-test-objects: $(filter %.h,$(TITAN_TEST_FIXTURE_OUTPUTS)) | check-t
 	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	  --test-dir $(call make_shell_quote,$(abspath spec/stdlib/titan)) $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	  $(foreach source,$(TITAN_TEST_C_SOURCES),--c-source $(call make_shell_quote,$(abspath $(source))))
+
+# Implementation notes: doc/implementation/driver.md#lint-analysis-driverlint_modules
+# The stdlib lints in its own build environment. Its tests lint as
+# titan-stdlib-test-objects compiles them: from the test output directory, with
+# the staged fixture headers and canonical test namespaces, plus the native
+# helpers that test-root discovery never names. titan-stdlib-browser-lint
+# proves that these roots cover the whole test tree.
+titan-stdlib-lint: $(LUA_SDK_PREREQ) $(STDLIB_BOOTSTRAP_PREREQ) $(STDLIB_PLATFORM_PREREQS) $(SQLITE3_HEADER) $(LLHTTP_HEADER) $(LPEGLABEL_HEADERS) $(filter %.h,$(TITAN_TEST_FIXTURE_OUTPUTS)) | check-titan-test-sdk ## Lint the native stdlib and its tests under every rule
+	@unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
+	status=0; \
+	$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) -q --lint $(TITAN_LINT_FLAGS) $(STDLIB_ROOTS) || status=1; \
+	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)) && \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
+	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) -q --lint $(TITAN_LINT_FLAGS) --test \
+	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
+	  --test-dir $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
+	  $(TITAN_STDLIB_TEST_PROGRAM_ROOT) $(TITAN_STDLIB_NATIVE_HELPER_ROOTS) || status=1; \
+	test "$$status" = 0
 
 # Staged headers support child compiler invocations from the test output CWD.
 TITAN_TEST_FIXTURE_HEADERS := async_foreign_work.h uv_stdio_probe.h \

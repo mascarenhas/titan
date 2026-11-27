@@ -17,6 +17,22 @@ TITAN_STDLIB_BROWSER_TEST_ROOTS := \
 	string.core_test string.format_pack_test string.regex_test url.tests path.tests \
 	test.tests reflect.tests json.tests protobuf.tests protobuf.portable_tests transfer.tests async.tests timer.tests os.tests io.tests http.tests websocket.tests
 
+# Lint-only owners: the browser-only test harness owners and helper programs
+# beyond the portable subset, and native helper modules that test-root
+# discovery never names. With the discovered native owners and the portable
+# browser owners they cover every source under spec/stdlib/titan
+# (`scripts/check_browser_stdlib.lua lint-roots`).
+TITAN_STDLIB_BROWSER_ONLY_TEST_ROOTS := async.browser_tests browser.portable_tests \
+	browser.public_state_tests browser.tests http.browser_tests os.browser_tests websocket.browser_tests
+TITAN_STDLIB_BROWSER_HELPER_ROOTS := async.browser_child browser.early_close browser.independent \
+	browser.public_state
+TITAN_STDLIB_NATIVE_HELPER_ROOTS := async.test_support coroutine.test_support \
+	coroutine.unwind_init_fixture fs.test_support http.test_support io.print_values io.test_support \
+	lua.handle_transfer_fixture lua.preload_fixture lua.receiver_fixture lua.test_support \
+	lua.transfer_fixture net.test_support os.process_test_support os.test_support peg.test_support \
+	ssl.backpressure_support ssl.test_support string.test_support support.async support.command \
+	support.common support.owned_tcp support.runtime uv.task_test_support
+
 # One JSPI image holds the complete portable suite. titanc owns the general
 # Wasm body/module bounds; this manifest has no separate image-size policy.
 define TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK
