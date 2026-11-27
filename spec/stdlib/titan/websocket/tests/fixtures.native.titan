@@ -7,19 +7,19 @@ local type PeerAction = function (Wire): ()
 
 local function fixture_failure(failure: value): string
   if failure is websocket.Error then
-    local actual = failure as websocket.Error
+    const actual = failure as websocket.Error
     return string.format("websocket.Error(kind=%s operation=%s message=%s close_code=%s)",
       actual.kind, actual.operation, actual.message, string.tostring(actual.close_code))
   elseif failure is websocket.HandshakeError then
-    local actual = failure as websocket.HandshakeError
+    const actual = failure as websocket.HandshakeError
     return string.format("websocket.HandshakeError(message=%s status=%s)",
       actual.message, string.tostring(actual.status))
   elseif failure is ssl.Error then
-    local actual = failure as ssl.Error
+    const actual = failure as ssl.Error
     return string.format("ssl.Error(name=%s operation=%s message=%s)",
       actual.name, actual.operation, actual.message)
   elseif failure is async.OperationError then
-    local actual = failure as async.OperationError
+    const actual = failure as async.OperationError
     return string.format("async.OperationError(name=%s operation=%s message=%s)",
       actual.name, actual.operation, actual.message)
   elseif failure is async.CancellationReason then
@@ -39,10 +39,10 @@ end
 
 local function assert_ws_error(failure: value, kind: string, operation: string,
                               code: integer?)
-  local diagnostic = string.format("expected websocket.Error(kind=%s operation=%s close_code=%s); actual=%s",
+  const diagnostic = string.format("expected websocket.Error(kind=%s operation=%s close_code=%s); actual=%s",
     kind, operation, string.tostring(code), fixture_failure(failure))
   test.assert(failure is websocket.Error, "expected nominal websocket.Error; " .. diagnostic)
-  local actual = failure as websocket.Error
+  const actual = failure as websocket.Error
   test.assert(actual.kind == kind and actual.operation == operation and
               actual.close_code == code and #actual.message > 0,
               "WebSocket error fields differ from the contract; " .. diagnostic)
@@ -58,7 +58,7 @@ end
 local function assert_terminal_trace(connection: websocket.Connection,
                                      first: value, first_trace: string)
   test.assert(first ~= nil and #first_trace > 0, "terminal cause lost its original trace")
-  local operations: {function (): ()} = {
+  const operations: {function (): ()} = {
     function () connection:read() end,
     function () connection:write(websocket.BINARY, "later") end,
     function () connection:ping(1000) end,
@@ -82,7 +82,7 @@ local function assert_binary(kind: websocket.MessageType?, data: string?, expect
 end
 
 local function assert_succeeded(task: async.Task, label: string)
-  local state = async.join(task)
+  const state = async.join(task)
   if state:has_failed() then
     local _, failure? = state:has_failed()
     raise failure.error
@@ -113,16 +113,14 @@ end
 local function listen_http(handler: http.Handler, secure: boolean): (http.Server, integer)
   local port = 42100
   for _ = 1, 100 do
-    do
-      if secure then
-        return http.listen_tls("127.0.0.1", CERTIFICATE, handler, PRIVATE_KEY, port), port
-      end
-      return http.listen("127.0.0.1", handler, port), port
-    catch
-      if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
-        port = port + 1
-      else raise end
+    if secure then
+      return http.listen_tls("127.0.0.1", CERTIFICATE, handler, PRIVATE_KEY, port), port
     end
+    return http.listen("127.0.0.1", handler, port), port
+  catch
+    if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
+      port = port + 1
+    else raise end
   end
   raise "WebSocket fixture exhausted loopback ports"
 end
@@ -130,12 +128,11 @@ end
 local function listen_raw(): (net.Server, integer)
   local port = 42300
   for _ = 1, 100 do
-    do return net.listen("127.0.0.1", port), port
-    catch
-      if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
-        port = port + 1
-      else raise end
-    end
+    return net.listen("127.0.0.1", port), port
+  catch
+    if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
+      port = port + 1
+    else raise end
   end
   raise "WebSocket raw fixture exhausted loopback ports"
 end
@@ -143,11 +140,11 @@ end
 local function with_server(action: SessionAction, peer: PeerAction,
                            options: websocket.AcceptOptions?, secure: boolean?,
                            extra: string?, suffix: string?, upgrade: string?, connection_header: string?)
-  local state = ServerFixture(nil, nil, false, nil)
-  local handler: http.Handler = function (request: http.Request, response: http.Response)
+  const state = ServerFixture(nil, nil, false, nil)
+  const handler: http.Handler = function (request: http.Request, response: http.Response)
     state.handler = async.running()
     do
-      local connection = websocket.accept(request, response, options)
+      const connection = websocket.accept(request, response, options)
       state.connection = connection
       defer connection:close()
       action(connection)
@@ -156,7 +153,7 @@ local function with_server(action: SessionAction, peer: PeerAction,
   end
   local listener, port = listen_http(handler, secure or false)
   runtime_test.cleanup(function () listener:close() end)
-  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  const serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
   runtime_test.cleanup(function ()
     listener:close()
     task_support.cancel_and_join_task(serving, "WebSocket listener cleanup")
@@ -164,11 +161,11 @@ local function with_server(action: SessionAction, peer: PeerAction,
   local stream: io.ReaderWriterCloser? = nil
   local abort: function (): () = function () end
   if secure then
-    local tls = ssl.connect("localhost", port, TRUST_ROOT)
+    const tls = ssl.connect("localhost", port, TRUST_ROOT)
     stream = tls
     abort = function () tls:abort() end
   else
-    local tcp = net.connect("127.0.0.1", port)
+    const tcp = net.connect("127.0.0.1", port)
     stream = tcp
     abort = function () tcp:close() end
   end
@@ -178,7 +175,7 @@ local function with_server(action: SessionAction, peer: PeerAction,
     if state.connection then state.connection:close() end
     if state.handler then task_support.cancel_and_join_task(state.handler, "WebSocket handler cleanup") end
   end)
-  local wire = Wire(stream, "", "")
+  const wire = Wire(stream, "", "")
   wire:open_client(port, extra, suffix, upgrade, connection_header)
   peer(wire)
   while not state.done do timer.yield() end
@@ -192,11 +189,11 @@ local function with_client(peer: PeerAction, action: SessionAction,
   local listener, port = listen_raw()
   runtime_test.cleanup(function () listener:close() end)
   local transport: net.Connection? = nil
-  local worker = async.run<|value, value|>(function (): value
-    local accepted = listener:accept()
+  const worker = async.run<|value, value|>(function (): value
+    const accepted = listener:accept()
     transport = accepted
     defer accepted:close()
-    local wire = Wire(accepted, "", "")
+    const wire = Wire(accepted, "", "")
     wire:open_server(suffix, extra, upgrade, connection_header)
     peer(wire)
     return nil
@@ -206,7 +203,7 @@ local function with_client(peer: PeerAction, action: SessionAction,
     if transport then transport:close() end
     task_support.cancel_and_join_task(worker, "WebSocket raw server cleanup")
   end)
-  local connection = websocket.connect("ws://127.0.0.1:" .. port .. "/wire?query=yes", options)
+  const connection = websocket.connect("ws://127.0.0.1:" .. port .. "/wire?query=yes", options)
   runtime_test.cleanup(function () connection:close() end)
   action(connection)
   assert_succeeded(worker, "WebSocket raw server")

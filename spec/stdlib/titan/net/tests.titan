@@ -16,9 +16,9 @@ local owned_tcp = import "support.owned_tcp.titan"
 
 local function expect_cancelled_net_operation(action: function (): (),
                                               label: string)
-  local reason = async.CancellationReason.simple(label)
+  const reason = async.CancellationReason.simple(label)
   local observed: value = nil
-  local competitor = async.run<|value, value|>(function (): value
+  const competitor = async.run<|value, value|>(function (): value
     async.running():cancel(reason)
     do action() catch observed = error end
     return nil
@@ -35,13 +35,13 @@ function test_net_cancelled_reader_allows_immediate_replacement(
   runtime_test.run(function ()
     local server, port = support.listen_available(28100)
     support.cleanup_server(context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
-    local reason = async.CancellationReason.simple("replace TCP reader")
+    const reason = async.CancellationReason.simple("replace TCP reader")
     local observed: value = nil
-    local old = async.run<|value, value|>(function (): value
+    const old = async.run<|value, value|>(function (): value
       do connection:read() catch observed = error end
       return nil
     end)
@@ -53,7 +53,7 @@ function test_net_cancelled_reader_allows_immediate_replacement(
     test.assert(old:status():as_string() == "waiting",
                 "cancelled competitor disturbed the TCP reader")
 
-    local sender = async.run<|value, value|>(function (): value
+    const sender = async.run<|value, value|>(function (): value
       async.join(old)
       peer:write("replacement\0")
       peer:shutdown()
@@ -78,9 +78,9 @@ function test_net_cancelled_acceptor_allows_immediate_replacement(
   runtime_test.run(function ()
     local server, port = support.listen_available(28200)
     support.cleanup_server(context, server)
-    local reason = async.CancellationReason.simple("replace TCP acceptor")
+    const reason = async.CancellationReason.simple("replace TCP acceptor")
     local observed: value = nil
-    local old = async.run<|value, value|>(function (): value
+    const old = async.run<|value, value|>(function (): value
       do server:accept() catch observed = error end
       return nil
     end)
@@ -92,9 +92,9 @@ function test_net_cancelled_acceptor_allows_immediate_replacement(
     test.assert(old:status():as_string() == "waiting",
                 "cancelled competitor disturbed the TCP acceptor")
 
-    local connector = async.run<|value, value|>(function (): value
+    const connector = async.run<|value, value|>(function (): value
       async.join(old)
-      local connection = net.connect("127.0.0.1", port)
+      const connection = net.connect("127.0.0.1", port)
       defer connection:close()
       connection:write("replacement\0")
       return nil
@@ -103,7 +103,7 @@ function test_net_cancelled_acceptor_allows_immediate_replacement(
     old:cancel(reason)
     test.assert(observed == nil, "old TCP acceptor unwound before replacement")
     -- No join or yield may separate cancellation from this new accept.
-    local connection = server:accept()
+    const connection = server:accept()
     support.cleanup_connection(context, connection)
     test.assert(connection:read_until("\0", true) == "replacement",
                 "replacement TCP acceptor lost its connection")
@@ -119,8 +119,8 @@ function test_net_exchanges_binary_streams_through_tcp(
   runtime_test.run(function ()
     local server, port = support.listen_available(26000)
     support.cleanup_server(context, server)
-    local peer = async.run<|value, value|>(function (): value
-      local connection = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const connection = server:accept()
       defer connection:close()
       test.assert(connection:read_until("\0END", true) == "alpha",
                   "binary delimiter read returned wrong prefix")
@@ -141,9 +141,9 @@ function test_net_exchanges_binary_streams_through_tcp(
     end)
     task_support.cleanup_task(peer, "net exchange cleanup")
 
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
-    local concrete: stream.ReaderWriterCloser = connection
+    const concrete: stream.ReaderWriterCloser = connection
     concrete:write("alpha\0ENDtail")
     connection:shutdown()
     test.assert(concrete:read_until("\n", true) == "reply\0",
@@ -163,7 +163,7 @@ function test_net_exchanges_binary_streams_through_tcp(
     while task_support.active(peer) do timer.yield() end
     test.assert(peer:status():as_string() == "succeeded",
                 "TCP peer Task failed")
-    local closer: stream.Closer = server
+    const closer: stream.Closer = server
     closer:close()
     closer:close()
   end)
@@ -174,13 +174,13 @@ function test_net_received_chunks_remain_immutable_through_gc_and_cancellation(
   runtime_test.run(function ()
     local server, port = support.listen_available(28300)
     support.cleanup_server(_context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(_context, connection)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(_context, peer)
-    local first_payload = strings.rep("first\0\255", 20000)
-    local second_payload = strings.rep("second\0\128", 20000)
-    local sender = async.run<|value, value|>(function (): value
+    const first_payload = strings.rep("first\0\255", 20000)
+    const second_payload = strings.rep("second\0\128", 20000)
+    const sender = async.run<|value, value|>(function (): value
       peer:write(first_payload)
       test.assert(peer:read_until("\n", true) == "next",
                   "TCP receive phases lost their acknowledgement")
@@ -197,10 +197,10 @@ function test_net_received_chunks_remain_immutable_through_gc_and_cancellation(
       async.join(sender)
     end)
 
-    local first_chunks: {string} = {}
+    const first_chunks: {string} = {}
     local first_length = 0
     while first_length < #first_payload do
-      local chunk? = connection:read()
+      const chunk? = connection:read()
       if not chunk then raise "TCP first receive phase ended early" end
       first_chunks[#first_chunks + 1] = chunk
       first_length = first_length + #chunk
@@ -209,9 +209,9 @@ function test_net_received_chunks_remain_immutable_through_gc_and_cancellation(
     test.assert(first_length == #first_payload,
                 "TCP second receive phase preceded its acknowledgement")
 
-    local reason = async.CancellationReason.simple("cancel between TCP receive phases")
+    const reason = async.CancellationReason.simple("cancel between TCP receive phases")
     local observed: value = nil
-    local blocked = async.run<|value, value|>(function (): value
+    const blocked = async.run<|value, value|>(function (): value
       do connection:read() catch observed = error end
       return nil
     end)
@@ -230,9 +230,9 @@ function test_net_received_chunks_remain_immutable_through_gc_and_cancellation(
                 "TCP receive waiter lost its cancellation reason")
 
     connection:write("next\n")
-    local second_chunks: {string} = {}
+    const second_chunks: {string} = {}
     while true do
-      local chunk? = connection:read()
+      const chunk? = connection:read()
       if not chunk then break end
       second_chunks[#second_chunks + 1] = chunk
       gc.collect()
@@ -258,18 +258,18 @@ function test_net_overlapping_writes_preserve_bytes_through_gc_and_cancellation(
   runtime_test.run(function ()
     local server, port = support.listen_available(28400)
     support.cleanup_server(_context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(_context, connection)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(_context, peer)
     local start_first: (function (nil): ())? = nil
     local start_second: (function (nil): ())? = nil
     local first_piece, second_piece = "first\0\255", "second\0\128"
-    local repetitions = 32768
+    const repetitions = 32768
     local first_submitted, second_submitted = false, false
     local first_returned, second_returned = false, false
     local second: async.Task<|value, value|>? = nil
-    local first = async.run<|value, value|>(function (): value
+    const first = async.run<|value, value|>(function (): value
       async.await<|nil, nil|>(function (resolve, _reject, _fatal)
         start_first = resolve
       end)
@@ -285,12 +285,12 @@ function test_net_overlapping_writes_preserve_bytes_through_gc_and_cancellation(
       end
       -- Cancel before releasing unused gates, so cleanup cannot start a write.
       if start_first ~= nil then
-        local release = start_first
+        const release = start_first
         start_first = nil
         release(nil)
       end
       if start_second ~= nil then
-        local release = start_second
+        const release = start_second
         start_second = nil
         release(nil)
       end
@@ -312,7 +312,7 @@ function test_net_overlapping_writes_preserve_bytes_through_gc_and_cancellation(
     end)
     while start_first == nil or start_second == nil do timer.yield() end
 
-    local reason = async.CancellationReason.simple("cancel accepted TCP write")
+    const reason = async.CancellationReason.simple("cancel accepted TCP write")
     -- Registration runs outside a Task: settling each gate synchronously
     -- reaches its real write submission before any UV completion can interleave.
     async.await<|nil, nil|>(function (resolve, _reject, _fatal)
@@ -341,7 +341,7 @@ function test_net_overlapping_writes_preserve_bytes_through_gc_and_cancellation(
     -- the socket buffers. Each writer constructed its own temporary payload.
     local received = ""
     while #received < (#first_piece + #second_piece) * repetitions do
-      local chunk? = peer:read()
+      const chunk? = peer:read()
       if not chunk then raise "overlapping TCP writes ended early" end
       received = received .. chunk
       gc.collect()
@@ -392,11 +392,11 @@ function test_net_validates_endpoints_and_wakes_pending_accept(
     local server, _ = support.listen_available(27000)
     support.cleanup_server(context, server)
     local accept_failed = false
-    local waiter = async.run<|value, value|>(function (): value
+    const waiter = async.run<|value, value|>(function (): value
       do
         server:accept()
       catch
-        local failure = error as async.OperationError
+        const failure = error as async.OperationError
         test.assert(failure.operation == "net.accept",
                     "closed accept reported the wrong operation")
         accept_failed = true
@@ -427,11 +427,11 @@ function test_net_validates_endpoints_and_wakes_pending_accept(
     -- resolution and candidate fallback without assuming address order.
     local buffered_server, buffered_port = support.listen_available(28000)
     support.cleanup_server(context, buffered_server)
-    local buffered_client = net.connect("localhost", buffered_port)
+    const buffered_client = net.connect("localhost", buffered_port)
     support.cleanup_connection(context, buffered_client)
     buffered_client:write("buffered-client")
     buffered_client:shutdown()
-    local buffered_peer = buffered_server:accept()
+    const buffered_peer = buffered_server:accept()
     support.cleanup_connection(context, buffered_peer)
     test.assert(buffered_peer:read() == "buffered-client" and
                 not buffered_peer:read(),
@@ -446,14 +446,14 @@ function test_net_resolved_address_dialing(context: test.Context)
   runtime_test.run(function ()
     local server, port = support.listen_available(28600)
     support.cleanup_server(context, server)
-    local addresses = net.resolve("127.0.0.1", port)
+    const addresses = net.resolve("127.0.0.1", port)
     test.assert(#addresses > 0, "resolver returned no TCP address")
-    local address = addresses[1]
+    const address = addresses[1]
     test.assert(address:is_complete() and address:family() == uv.AF_INET and
                 address:port() == port and #address:address_bytes() == 4,
                 "resolver did not retain an owned address")
     gc.collect()
-    local connection = net.Connection()
+    const connection = net.Connection()
     support.cleanup_connection(context, connection)
     support.expect_failure(function () connection:read() end,
                            "unconnected endpoint admitted reading")
@@ -464,12 +464,12 @@ function test_net_resolved_address_dialing(context: test.Context)
     connection:connect_address(address)
     support.expect_failure(function () connection:connect_address(address) end,
                            "connected endpoint admitted a second connect")
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
     peer:write("resolved\0")
     test.assert(connection:read_until("\0", true) == "resolved",
                 "address-aware transport lost binary data")
-    local fresh = net.Connection.new()
+    const fresh = net.Connection()
     fresh:close()
     fresh:close()
     test.assert(fresh:read() == nil, "closed fresh endpoint did not return EOF")
@@ -482,12 +482,12 @@ function test_net_preowned_connect_close_and_contention(context: test.Context)
   runtime_test.run(function ()
     local server, port = support.listen_available(28700)
     support.cleanup_server(context, server)
-    local addresses = net.resolve("127.0.0.1", port)
-    local connection = net.Connection()
+    const addresses = net.resolve("127.0.0.1", port)
+    const connection = net.Connection()
     support.cleanup_connection(context, connection)
     local observed: value = nil
     local begin_dial: (function (nil): ())? = nil
-    local dialer = async.run<|value, value|>(function (): value
+    const dialer = async.run<|value, value|>(function (): value
       async.await<|nil, nil|>(function (resolve, _reject, _fatal)
         begin_dial = resolve
       end)
@@ -500,7 +500,7 @@ function test_net_preowned_connect_close_and_contention(context: test.Context)
     -- any UV completion can interleave. Resume this owner in the same turn so
     -- a fast loopback connect cannot finish before contention and close.
     async.await<|nil, nil|>(function (resolve, _reject, _fatal)
-      local release = begin_dial
+      const release = begin_dial
       begin_dial = nil
       release(nil)
       test.assert(dialer:status():as_string() == "waiting" and observed == nil,
@@ -518,14 +518,14 @@ end
 
 function test_net_pending_input_query_preserves_delimiter_suffix(context: test.Context)
   runtime_test.run(function ()
-    local unconnected = net.Connection()
+    const unconnected = net.Connection()
     defer unconnected:close()
     test.assert(unconnected:has_pending_input(), "unconnected endpoint appeared reusable")
     local server, port = support.listen_available(28400)
     support.cleanup_server(context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
     test.assert(not connection:has_pending_input(), "fresh TCP connection had pending input")
     peer:write("prefix\nsuffix")
@@ -546,36 +546,36 @@ function test_net_input_listeners_observe_without_consuming_or_reserving(context
   runtime_test.run(function ()
     local server, port = support.listen_available(28400)
     support.cleanup_server(context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
     local first = 0
     local skipped = 0
     local last = 0
     local outside_task = false
     local remove_second: function (): () = function () end
-    local remove_first = connection:add_input_listener(function ()
+    const remove_first = connection:add_input_listener(function ()
       first = first + 1
       test.assert(connection:has_pending_input(), "observer ran before buffering input")
       do async.running() catch outside_task = true end
       remove_second()
     end)
     remove_second = connection:add_input_listener(function () skipped = skipped + 1 end)
-    local remove_last = connection:add_input_listener(function () last = last + 1 end)
+    const remove_last = connection:add_input_listener(function () last = last + 1 end)
     test.assert(first == 0 and last == 0, "input listener fired during registration")
     peer:write("head\n")
     test.assert(connection:read_until("\n", true) == "head", "observer consumed the reader's bytes")
     test.assert(first > 0 and skipped == 0 and last == first and outside_task,
       "input observer order, removal, or callback context changed")
-    local delivered = first
+    const delivered = first
     remove_first()
     remove_first()
     remove_last()
     peer:write("old")
     while not connection:has_pending_input() do timer.yield() end
     local no_replay = 0
-    local remove_replay = connection:add_input_listener(function () no_replay = no_replay + 1 end)
+    const remove_replay = connection:add_input_listener(function () no_replay = no_replay + 1 end)
     test.assert(no_replay == 0, "registration replayed previously buffered input")
     remove_replay()
     test.assert(connection:read_until("old", false) == "old",
@@ -585,7 +585,7 @@ function test_net_input_listeners_observe_without_consuming_or_reserving(context
         first == delivered and last == delivered and no_replay == 0,
       "removed input listener ran again")
     local terminal = 0
-    local remove_terminal = connection:add_input_listener(function () terminal = terminal + 1 end)
+    const remove_terminal = connection:add_input_listener(function () terminal = terminal + 1 end)
     peer:shutdown()
     test.assert(connection:read() == nil and terminal == 1,
       "input listener missed the terminal receive event")
@@ -599,18 +599,18 @@ function test_net_transfer_moves_fresh_connection_across_states(context: test.Co
   runtime_test.run(function ()
     local server, port = support.listen_available(28500)
     support.cleanup_server(context, server)
-    local state = transfer_lua.new()
+    const state = transfer_lua.new()
     defer state:close()
-    local operation = function (): async.TransferValue
-      local connection = net.connect("127.0.0.1", port)
+    const operation = function (): async.TransferValue
+      const connection = net.connect("127.0.0.1", port)
       defer connection:close()
       -- The native connect callback must retire before moving its endpoint.
       async.yield()
-      local packet = async.TransferValue.from_value(connection)
+      const packet = async.TransferValue.from_value(connection)
       test.assert(connection:read() == nil, "detached source retained its endpoint")
       return packet
     end
-    local packet: async.TransferValue = state:run_async([[
+    const packet: async.TransferValue = state:run_async([[
       local operation = ...
       local async = require('titan.async')
       local task = async.run(operation)
@@ -626,9 +626,9 @@ function test_net_transfer_moves_fresh_connection_across_states(context: test.Co
     state:close()
     gc.collect()
     gc.collect()
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
-    local connection: net.Connection = packet:to_value()
+    const connection: net.Connection = packet:to_value()
     support.cleanup_connection(context, connection)
     connection:write("new-state\0")
     test.assert(peer:read_until("\0", true) == "new-state")
@@ -642,9 +642,9 @@ function test_net_transfer_preserves_input_and_rejects_native_pending_reads(
   runtime_test.run(function ()
     local server, port = support.listen_available(28600)
     support.cleanup_server(context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
     peer:write("prefix\nsuffix\0")
     test.assert(connection:read_until("\n", true) == "prefix")
@@ -655,7 +655,7 @@ function test_net_transfer_preserves_input_and_rejects_native_pending_reads(
       do connection:to_transfer_payload()
       catch
         test.assert(error is async.OperationError)
-        local failure = error as async.OperationError
+        const failure = error as async.OperationError
         test.assert(failure.name == "EBUSY" and failure.operation == "net.transfer")
         refused = true
       end
@@ -665,8 +665,8 @@ function test_net_transfer_preserves_input_and_rejects_native_pending_reads(
       peer:write("still-live\0")
       test.assert(connection:read_until("\0", true) == "still-live")
     else
-      local packet = async.TransferValue.from_value(connection)
-      local target: net.Connection = packet:to_value()
+      const packet = async.TransferValue.from_value(connection)
+      const target: net.Connection = packet:to_value()
       support.cleanup_connection(context, target)
       connection:close()
       test.assert(target:has_pending_input())
@@ -682,16 +682,16 @@ function test_net_transfer_rejects_waiters_and_observers_before_detach(context: 
   runtime_test.run(function ()
     local server, port = support.listen_available(28700)
     support.cleanup_server(context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
-    local remove = connection:add_input_listener(function () end)
+    const remove = connection:add_input_listener(function () end)
     common.assert_raises_contains(function () connection:to_transfer_payload() end,
       "input observers")
     remove()
     local received = ""
-    local reader = async.run<|nil, value|>(function (): nil
+    const reader = async.run<|nil, value|>(function (): nil
       received = connection:read_until("\0", true)
       return nil
     end)
@@ -710,18 +710,18 @@ function test_net_transfer_rejected_delivery_can_be_recovered(context: test.Cont
   runtime_test.run(function ()
     local server, port = support.listen_available(28800)
     support.cleanup_server(context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
     async.yield()
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
-    local packet = async.TransferValue.from_value(connection)
-    local inbox = async.receiver()
+    const packet = async.TransferValue.from_value(connection)
+    const inbox = async.receiver()
     defer inbox:close()
     inbox:close()
     common.assert_raises_contains(function () async.send(inbox:handle(), packet) end,
       "receiver is closed")
-    local recovered: net.Connection = packet:to_value()
+    const recovered: net.Connection = packet:to_value()
     support.cleanup_connection(context, recovered)
     recovered:write("recovered\0")
     test.assert(peer:read_until("\0", true) == "recovered")
@@ -741,14 +741,14 @@ function test_net_reuse_port_is_opt_in(context: test.Context)
     support.cleanup_server(context, server)
     local observed: value = nil
     do
-      local duplicate = net.listen("127.0.0.1", port, nil, false)
+      const duplicate = net.listen("127.0.0.1", port, nil, false)
       defer duplicate:close()
     catch
       observed = error
     end
     test.assert(observed is async.OperationError,
                 "default listener allowed another listener without reuse_port")
-    local failure = observed as async.OperationError
+    const failure = observed as async.OperationError
     test.assert(failure.name == "EADDRINUSE" and
                 failure.operation == "net.listen",
                 "exclusive bind lost its native address-in-use error")
@@ -764,19 +764,19 @@ function test_net_reuse_port_shares_address(context: test.Context)
     catch
       test.assert(error is async.OperationError,
                   "reuse_port did not preserve its native operation error")
-      local failure = error as async.OperationError
+      const failure = error as async.OperationError
       test.assert(failure.name == "ENOTSUP" and failure.code == uv.ENOTSUP and
                   failure.operation == "net.listen",
                   "reuse_port failed with an unexpected native error")
       return
     end
     support.cleanup_server(context, first)
-    local second = net.listen("127.0.0.1", port, nil, true)
+    const second = net.listen("127.0.0.1", port, nil, true)
     support.cleanup_server(context, second)
     first:close()
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
-    local peer = second:accept()
+    const peer = second:accept()
     support.cleanup_connection(context, peer)
     connection:write("survivor\0")
     test.assert(peer:read_until("\0", true) == "survivor",
@@ -788,17 +788,17 @@ function test_net_transfer_hooks_run_without_a_current_task(context: test.Contex
   runtime_test.run(function ()
     local server, port = support.listen_available(28900)
     support.cleanup_server(context, server)
-    local source = net.connect("127.0.0.1", port)
+    const source = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, source)
     async.yield()
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
     local target: net.Connection? = nil
     async.await<|nil, nil|>(function (resolve, _reject, _fatal)
       local outside_task = false
       do async.running() catch outside_task = true end
       test.assert(outside_task, "transfer fixture still ran in a Task")
-      local packet = async.TransferValue.from_value(source)
+      const packet = async.TransferValue.from_value(source)
       target = packet:to_value()
       resolve(nil)
     end)
@@ -813,9 +813,9 @@ function test_net_demand_read_policy_survives_handoff(context: test.Context)
   runtime_test.run(function ()
     local server, port = support.listen_available(28900)
     support.cleanup_server(context, server)
-    local source = net.connect("127.0.0.1", port)
+    const source = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, source)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
     test.assert(source:read_ahead(), "TCP read-ahead did not default to enabled")
     test.assert(source:read_ahead(false), "TCP read-ahead setter lost the previous policy")
@@ -826,8 +826,8 @@ function test_net_demand_read_policy_survives_handoff(context: test.Context)
       "reading has started")
     -- Move only after the read callback's native request has retired.
     async.yield()
-    local payload = source:to_transfer_payload()
-    local target = net.Connection.from_transfer_payload(payload)
+    const payload = source:to_transfer_payload()
+    const target = net.Connection.from_transfer_payload(payload)
     support.cleanup_connection(context, target)
     test.assert(not target:read_ahead(), "TCP handoff lost demand-read policy")
     common.assert_raises_contains(function () target:read_ahead(true) end,
@@ -835,9 +835,9 @@ function test_net_demand_read_policy_survives_handoff(context: test.Context)
     test.assert(target:read_until("\0", true) == "suffix", "handoff lost delimiter excess")
     -- Consuming transferred excess must not restart an idle native reader.
     async.yield()
-    local worker_payload = target:to_transfer_payload()
-    local worker = thread.spawn_one(function (bytes: string): string
-      local connection = net.Connection.from_transfer_payload(bytes)
+    const worker_payload = target:to_transfer_payload()
+    const worker = thread.spawn_one(function (bytes: string): string
+      const connection = net.Connection.from_transfer_payload(bytes)
       defer connection:close()
       test.assert(not connection:read_ahead(), "thread handoff enabled read-ahead")
       test.assert(connection:read_until("\0", true) == "worker")
@@ -859,12 +859,12 @@ function test_net_demand_reader_cancellation_allows_replacement(context: test.Co
   runtime_test.run(function ()
     local server, port = support.listen_available(29000)
     support.cleanup_server(context, server)
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
     connection:read_ahead(false)
-    local reader = async.run<|nil, value|>(function (): nil
+    const reader = async.run<|nil, value|>(function (): nil
       connection:read()
       return nil
     end)
@@ -872,7 +872,7 @@ function test_net_demand_reader_cancellation_allows_replacement(context: test.Co
     while reader:status():as_string() == "ready" do timer.yield() end
     test.assert(reader:status():as_string() == "waiting")
     reader:cancel()
-    local writer = async.run<|nil, value|>(function (): nil
+    const writer = async.run<|nil, value|>(function (): nil
       async.join(reader)
       peer:write("replacement\0tail")
       peer:shutdown()
@@ -890,17 +890,15 @@ end
 
 -- An unavailable IPv6 loopback is an environment limitation, not a failure.
 local function listen_ipv6_loopback(): net.Server
-  do
-    return net.listen("::1", 0)
-  catch
-    if error is async.OperationError then
-      local name = (error as async.OperationError).name
-      if name == "EADDRNOTAVAIL" or name == "EAFNOSUPPORT" then
-        test.skip("capability: IPv6 loopback is unavailable (" .. name .. ")")
-      end
+  return net.listen("::1", 0)
+catch
+  if error is async.OperationError then
+    const name = (error as async.OperationError).name
+    if name == "EADDRNOTAVAIL" or name == "EAFNOSUPPORT" then
+      test.skip("capability: IPv6 loopback is unavailable (" .. name .. ")")
     end
-    raise
   end
+  raise
 end
 
 local function expect_endpoint(address: net.Address, ip: string, ipv6: boolean, label: string)
@@ -915,15 +913,15 @@ end
 local function check_loopback_addresses(context: test.Context, server: net.Server,
                                         ip: string, ipv6: boolean)
   support.cleanup_server(context, server)
-  local bound = server:local_address()
+  const bound = server:local_address()
   expect_endpoint(bound, ip, ipv6, "listener")
   test.assert(server:local_address() == bound, "listener address was not cached")
-  local client = net.connect(ip, bound.port)
+  const client = net.connect(ip, bound.port)
   support.cleanup_connection(context, client)
-  local peer = server:accept()
+  const peer = server:accept()
   support.cleanup_connection(context, peer)
-  local client_local = client:local_address()
-  local client_peer = client:peer_address()
+  const client_local = client:local_address()
+  const client_peer = client:peer_address()
   expect_endpoint(client_local, ip, ipv6, "client local endpoint")
   expect_endpoint(client_peer, ip, ipv6, "client peer endpoint")
   test.assert(client_peer.port == bound.port, "client peer is not the listener port")
@@ -960,32 +958,32 @@ end
 function test_net_socket_address_rejections(context: test.Context)
   local earlier: net.Server? = nil
   runtime_test.run(function ()
-    local fresh = net.Connection()
+    const fresh = net.Connection()
     support.cleanup_connection(context, fresh)
     common.assert_raises_contains(function () fresh:local_address() end,
       "cannot query local address of an unconnected TCP Connection")
     common.assert_raises_contains(function () fresh:peer_address() end,
       "cannot query peer address of an unconnected TCP Connection")
 
-    local server = net.listen("127.0.0.1", 0)
+    const server = net.listen("127.0.0.1", 0)
     support.cleanup_server(context, server)
     earlier = server
-    local port = server:local_address().port
-    local source = net.connect("127.0.0.1", port)
+    const port = server:local_address().port
+    const source = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, source)
-    local peer = server:accept()
+    const peer = server:accept()
     support.cleanup_connection(context, peer)
-    local source_local = source:local_address()
+    const source_local = source:local_address()
     -- The native connect callback must retire before moving its endpoint.
     async.yield()
-    local packet = async.TransferValue.from_value(source)
+    const packet = async.TransferValue.from_value(source)
     common.assert_raises_contains(function () source:local_address() end,
       "cannot query local address of a closed TCP resource")
     common.assert_raises_contains(function () source:peer_address() end,
       "cannot query peer address of a closed TCP resource")
-    local target: net.Connection = packet:to_value()
+    const target: net.Connection = packet:to_value()
     support.cleanup_connection(context, target)
-    local target_local = target:local_address()
+    const target_local = target:local_address()
     test.assert(target_local ~= source_local and target_local.port == source_local.port,
                 "adopted connection did not query its own live socket")
     test.assert(target:peer_address().port == port, "adopted connection lost its peer")
@@ -1005,9 +1003,9 @@ local function no_delay_of(connection: net.Connection): integer
 end
 
 local function connected_pair(context: test.Context, server: net.Server): (net.Connection, net.Connection)
-  local client = net.connect("127.0.0.1", server:local_address().port)
+  const client = net.connect("127.0.0.1", server:local_address().port)
   support.cleanup_connection(context, client)
-  local peer = server:accept()
+  const peer = server:accept()
   support.cleanup_connection(context, peer)
   return client, peer
 end
@@ -1022,21 +1020,21 @@ local function check_thread_preserves_no_delay(context: test.Context, server: ne
   if enabled then expected = 1 end
   test.assert(no_delay_of(source) == expected)
   async.yield()
-  local payload = source:to_transfer_payload()
-  local worker = thread.spawn_one(function (bytes: string): string
-    local connection = net.Connection.from_transfer_payload(bytes)
+  const payload = source:to_transfer_payload()
+  const worker = thread.spawn_one(function (bytes: string): string
+    const connection = net.Connection.from_transfer_payload(bytes)
     defer connection:close()
-    local local_port = connection:local_address().port
-    local peer_port = connection:peer_address().port
-    local adopted = owned_tcp.kernel_no_delay(local_port, peer_port)
+    const local_port = connection:local_address().port
+    const peer_port = connection:peer_address().port
+    const adopted = owned_tcp.kernel_no_delay(local_port, peer_port)
     connection:set_no_delay(not enabled)
-    local toggled = owned_tcp.kernel_no_delay(local_port, peer_port)
+    const toggled = owned_tcp.kernel_no_delay(local_port, peer_port)
     connection:write("moved\0")
     return strings.tostring(adopted) .. "," .. strings.tostring(toggled)
   end, payload)
   runtime_test.cleanup(function () worker:cancel(); worker:join() end)
   test.assert(peer:read_until("\0", true) == "moved", "thread handoff lost its live socket")
-  local wanted = strings.tostring(expected) .. "," .. strings.tostring(1 - expected)
+  const wanted = strings.tostring(expected) .. "," .. strings.tostring(1 - expected)
   case worker:join()
   when succeeded(result) then
     test.assert(result == wanted, "thread handoff observed TCP_NODELAY " .. result ..
@@ -1049,7 +1047,7 @@ end
 function test_net_no_delay_kernel_option(context: test.Context)
   context:run("dialed_and_accepted_default_on", function (child: test.Context)
     runtime_test.run(function ()
-      local server = net.listen("127.0.0.1", 0)
+      const server = net.listen("127.0.0.1", 0)
       support.cleanup_server(child, server)
       local client, peer = connected_pair(child, server)
       test.assert(no_delay_of(client) == 1, "dialed connection lacked TCP_NODELAY")
@@ -1058,14 +1056,14 @@ function test_net_no_delay_kernel_option(context: test.Context)
   end)
   context:run("pre_dial_opt_out", function (child: test.Context)
     runtime_test.run(function ()
-      local server = net.listen("127.0.0.1", 0)
+      const server = net.listen("127.0.0.1", 0)
       support.cleanup_server(child, server)
-      local address = net.resolve("127.0.0.1", server:local_address().port)[1]
-      local client = net.Connection()
+      const address = net.resolve("127.0.0.1", server:local_address().port)[1]
+      const client = net.Connection()
       support.cleanup_connection(child, client)
       client:set_no_delay(false)
       client:connect_address(address)
-      local peer = server:accept()
+      const peer = server:accept()
       support.cleanup_connection(child, peer)
       test.assert(no_delay_of(client) == 0, "pre-dial opt-out did not reach the socket")
       test.assert(no_delay_of(peer) == 1, "accepted connection lacked TCP_NODELAY")
@@ -1073,7 +1071,7 @@ function test_net_no_delay_kernel_option(context: test.Context)
   end)
   context:run("post_connect_toggles", function (child: test.Context)
     runtime_test.run(function ()
-      local server = net.listen("127.0.0.1", 0)
+      const server = net.listen("127.0.0.1", 0)
       support.cleanup_server(child, server)
       local client, peer = connected_pair(child, server)
       client:set_no_delay(false)
@@ -1088,14 +1086,14 @@ function test_net_no_delay_kernel_option(context: test.Context)
   end)
   context:run("thread_preserves_off", function (child: test.Context)
     runtime_test.run(function ()
-      local server = net.listen("127.0.0.1", 0)
+      const server = net.listen("127.0.0.1", 0)
       support.cleanup_server(child, server)
       check_thread_preserves_no_delay(child, server, false)
     end)
   end)
   context:run("thread_preserves_on", function (child: test.Context)
     runtime_test.run(function ()
-      local server = net.listen("127.0.0.1", 0)
+      const server = net.listen("127.0.0.1", 0)
       support.cleanup_server(child, server)
       check_thread_preserves_no_delay(child, server, true)
     end)
@@ -1105,14 +1103,14 @@ end
 function test_net_no_delay_rejections(context: test.Context)
   local earlier: net.Connection? = nil
   runtime_test.run(function ()
-    local server = net.listen("127.0.0.1", 0)
+    const server = net.listen("127.0.0.1", 0)
     support.cleanup_server(context, server)
-    local port = server:local_address().port
-    local address = net.resolve("127.0.0.1", port)[1]
+    const port = server:local_address().port
+    const address = net.resolve("127.0.0.1", port)[1]
 
-    local dialing = net.Connection()
+    const dialing = net.Connection()
     support.cleanup_connection(context, dialing)
-    local connector = async.run<|nil, value|>(function (): nil
+    const connector = async.run<|nil, value|>(function (): nil
       dialing:connect_address(address)
       return nil
     end)
@@ -1123,14 +1121,14 @@ function test_net_no_delay_rejections(context: test.Context)
     common.assert_raises_contains(function () dialing:set_no_delay(false) end,
       "cannot configure no-delay while TCP connect is in progress")
     async.join(connector)
-    local accepted = server:accept()
+    const accepted = server:accept()
     support.cleanup_connection(context, accepted)
     earlier = dialing
 
-    local closed_port = net.listen("127.0.0.1", 0)
-    local refused_port = closed_port:local_address().port
+    const closed_port = net.listen("127.0.0.1", 0)
+    const refused_port = closed_port:local_address().port
     closed_port:close()
-    local failed = net.Connection()
+    const failed = net.Connection()
     support.cleanup_connection(context, failed)
     support.expect_failure(function ()
       failed:connect_address(net.resolve("127.0.0.1", refused_port)[1])
@@ -1140,8 +1138,8 @@ function test_net_no_delay_rejections(context: test.Context)
 
     local source, _ = connected_pair(context, server)
     async.yield()
-    local payload = source:to_transfer_payload()
-    local target = net.Connection.from_transfer_payload(payload)
+    const payload = source:to_transfer_payload()
+    const target = net.Connection.from_transfer_payload(payload)
     support.cleanup_connection(context, target)
     common.assert_raises_contains(function () source:set_no_delay(true) end,
       "cannot configure no-delay on a closed TCP resource")

@@ -7,7 +7,7 @@ local uv = import "uv"
 -- Cleanup registration also permits observing native retirement when
 -- cancellation is pending.
 local function native_timers(): integer?
-  local outcome = async.await_cleanup<|integer, nil|>(function (resolve, _reject, _fatal)
+  const outcome = async.await_cleanup<|integer, nil|>(function (resolve, _reject, _fatal)
     local count = 0
     uv.walk(async.current_loop(), function (_handle: uv.handle_t, _: value)
       count = count + 1
@@ -22,10 +22,10 @@ end
 
 function test_timer_ticker_is_an_io_closer(_context: test.Context)
   runtime_test.run(function ()
-    local baseline? = native_timers()
-    local ticker = timer.ticker(1)
+    const baseline? = native_timers()
+    const ticker = timer.ticker(1)
     defer ticker:close()
-    local closer: stream.Closer = ticker
+    const closer: stream.Closer = ticker
     closer:close()
     closer:close()
     test.assert(not ticker:tick(), "a Ticker closed as an io.Closer produced a tick")
@@ -37,8 +37,8 @@ function test_timer_sleep_closes_after_native_resume_queue_failure(
     _context: test.Context)
   local unwound, returned, native_closed = false, false, false
   local wake: uv.timer_t? = nil
-  local sleeper = async.run<|nil, value|>(function (): nil
-    local trigger = uv.timer_t.new()
+  const sleeper = async.run<|nil, value|>(function (): nil
+    const trigger = uv.timer_t()
     test.assert(uv.timer_init(async.current_loop(), trigger) == 0,
         "sleep fault trigger initialization failed")
     test.assert(uv.timer_start(trigger, function (owner: uv.timer_t)
@@ -73,7 +73,7 @@ function test_timer_sleep_closes_after_native_resume_queue_failure(
   test.assert(sleeper:status():has_cancelled(),
       "failed native token wake lost shutdown cancellation")
   runtime_test.run(function ()
-    local baseline? = native_timers()
+    const baseline? = native_timers()
     timer.sleep(0)
     check_native_timers(baseline, 0, "failed sleep left native state in the next Runtime")
   end)

@@ -3,9 +3,9 @@ local string = import "string"
 local support = import "string.test_support.titan"
 
 local record RegexCase
-  expression: string
-  subject: string
-  expected: string?
+  const expression: string
+  const subject: string
+  const expected: string?
 end
 
 local function bracket(found: string): string
@@ -14,13 +14,13 @@ end
 
 local function whole(subject: string, expression: string,
                      initial: integer?): string?
-  local found? = string.match(subject, expression, initial)
+  const found? = string.match(subject, expression, initial)
   if not found then return nil end
   return found:whole()
 end
 
 local function diagnostic(expression: string, label: string): string
-  local message = support.expect_error(function()
+  const message = support.expect_error(function()
     string.compile_regex(expression)
   end, "[" .. label .. "]")
   test.assert(support.contains(message, "(byte "), message)
@@ -33,10 +33,10 @@ local function check_empty_progress(subject: string,
                                     expected: {string},
                                     expected_output: string,
                                     expected_count: integer)
-  local actual: {string} = {}
-  local iterator = string.gmatch(subject, "a*", nil)
+  const actual: {string} = {}
+  const iterator = string.gmatch(subject, "a*", nil)
   while true do
-    local found? = iterator()
+    const found? = iterator()
     if not found then break end
     actual[#actual + 1] = found:whole()
   end
@@ -46,7 +46,7 @@ local function check_empty_progress(subject: string,
                 "empty-match iterator value differs")
   end
 
-  local replacements: {string} = {}
+  const replacements: {string} = {}
   local output, count = string.gsub(
     subject, "a*", function(found: string): string
       replacements[#replacements + 1] = found
@@ -60,7 +60,7 @@ local function check_empty_progress(subject: string,
 end
 
 function test_capture_iteration_and_split(context: test.Context)
-  local words = string.matches("one two", "\\w+")
+  const words = string.matches("one two", "\\w+")
   local word? = words()
   test.assert(word == "one")
   word = words()
@@ -68,7 +68,7 @@ function test_capture_iteration_and_split(context: test.Context)
   word = words()
   test.assert(word == nil)
 
-  local assignments = string.matches(
+  const assignments = string.matches(
     "from=world,to=Lua", "(\\w+)=(\\w+)")
   local key?, captured_value? = assignments()
   test.assert(key == "from" and captured_value == "world")
@@ -77,20 +77,20 @@ function test_capture_iteration_and_split(context: test.Context)
   key, captured_value = assignments()
   test.assert(key == nil and captured_value == nil)
 
-  local optional = string.matches("b a", "(a)|(b)")
+  const optional = string.matches("b a", "(a)|(b)")
   local first?, second? = optional()
   test.assert(first == nil and second == "b")
   first, second = optional()
   test.assert(first == "a" and second == nil)
 
-  local bytes = string.split("a\0b", nil)
+  const bytes = string.split("a\0b", nil)
   test.assert(bytes() == "a")
   test.assert(bytes() == "\0")
   test.assert(bytes() == "b")
   test.assert(bytes() == nil)
   test.assert(string.split("", nil)() == nil)
 
-  local fields = string.split(",a,,b,", ",")
+  const fields = string.split(",a,,b,", ",")
   test.assert(fields() == "")
   test.assert(fields() == "a")
   test.assert(fields() == "")
@@ -98,14 +98,14 @@ function test_capture_iteration_and_split(context: test.Context)
   test.assert(fields() == "")
   test.assert(fields() == nil)
 
-  local zero = string.split("ab", "")
+  const zero = string.split("ab", "")
   test.assert(zero() == "")
   test.assert(zero() == "a")
   test.assert(zero() == "b")
   test.assert(zero() == "")
   test.assert(zero() == nil)
 
-  local captured = string.split("a1b22c", "(\\d+)")
+  const captured = string.split("a1b22c", "(\\d+)")
   test.assert(captured() == "a")
   test.assert(captured() == "b")
   test.assert(captured() == "c")
@@ -113,111 +113,111 @@ function test_capture_iteration_and_split(context: test.Context)
 end
 
 function test_unmatched_and_empty_capture_spans(context: test.Context)
-  local found? = string.match("", "(a)?()", nil)
+  const found? = string.match("", "(a)?()", nil)
   test.assert(found ~= nil)
   test.assert(found:group_span(1) == nil)
-  local empty = found:group_span(2)
+  const empty = found:group_span(2)
   test.assert(empty.first == 1 and empty.last == 0)
   local first?, second? = found:values()
   test.assert(first == nil and second == "")
 end
 
 function test_pinned_ta_regex_corpus(context: test.Context)
-  local cases: {RegexCase} = {
-    RegexCase.new("foo", "xxfooy", "foo"),
-    RegexCase.new("foo", "bar", nil),
-    RegexCase.new("f.o", "xxfoo", "foo"),
-    RegexCase.new(".", "\n", nil),
-    RegexCase.new("[ab]", "xb", "b"),
-    RegexCase.new("[A-Z]+", "xABCy", "ABC"),
-    RegexCase.new("[ab]", "x", nil),
-    RegexCase.new("[^ab]+", "abXYZ", "XYZ"),
-    RegexCase.new("\\w+", "--abc", "abc"),
-    RegexCase.new("\\w+", "--9", "9"),
-    RegexCase.new("\\w+", "--_", "_"),
-    RegexCase.new("\\w", "\x80", nil),
-    RegexCase.new("\\W", "-", "-"),
-    RegexCase.new("\\d+", "a123", "123"),
-    RegexCase.new("\\D+", "1abc", "abc"),
-    RegexCase.new("\\s", " x", " "),
-    RegexCase.new("\\s", "\t", "\t"),
-    RegexCase.new("\\s", "\v", "\v"),
-    RegexCase.new("\\s", "\n", "\n"),
-    RegexCase.new("\\s", "\r", "\r"),
-    RegexCase.new("\\s", "\f", nil),
-    RegexCase.new("\\S", "\f", "\f"),
-    RegexCase.new("\\t", "\t", "\t"),
-    RegexCase.new("\\n", "\n", "\n"),
-    RegexCase.new("\\r", "\r", "\r"),
-    RegexCase.new("\\f", "\f", "\f"),
-    RegexCase.new("\\e", "\27", "\27"),
-    RegexCase.new("\\a", "\7", "\7"),
-    RegexCase.new("\\.", ".", "."),
-    RegexCase.new("\\*", "*", "*"),
-    RegexCase.new("\\+", "+", "+"),
-    RegexCase.new("\\?", "?", "?"),
-    RegexCase.new("\\(x\\)", "(x)", "(x)"),
-    RegexCase.new("\\[x\\]", "[x]", "[x]"),
-    RegexCase.new("\\{x\\}", "{x}", "{x}"),
-    RegexCase.new("foo|bar", "xxfoo", "foo"),
-    RegexCase.new("foo|bar", "xxbar", "bar"),
-    RegexCase.new("a|ab", "ab", "a"),
-    RegexCase.new("ab", "zab", "ab"),
-    RegexCase.new("", "abc", ""),
-    RegexCase.new("|", "abc", ""),
-    RegexCase.new("a|", "b", ""),
-    RegexCase.new("(ab)", "zab", "ab"),
-    RegexCase.new("((a)b)", "zab", "ab"),
-    RegexCase.new("(?:ab)", "zab", "ab"),
-    RegexCase.new("a*", "bbb", ""),
-    RegexCase.new("a*", "aaab", "aaa"),
-    RegexCase.new("a+", "baa", "aa"),
-    RegexCase.new("a+", "bbb", nil),
-    RegexCase.new("ab?", "a", "a"),
-    RegexCase.new("ab?", "ab", "ab"),
-    RegexCase.new("a{3}", "aaaa", "aaa"),
-    RegexCase.new("a{2,}", "baaa", "aaa"),
-    RegexCase.new("a{2,}", "ba", nil),
-    RegexCase.new("a{2,3}", "aaaa", "aaa"),
-    RegexCase.new("a{2,3}b", "aab", "aab"),
-    RegexCase.new("(a)+", "aaa", "aaa"),
-    RegexCase.new("^a", "abc", "a"),
-    RegexCase.new("^a", "ba", nil),
-    RegexCase.new("a$", "ba", "a"),
-    RegexCase.new("^a|b$", "xxb", nil),
-    RegexCase.new("^a|b$", "b", "b"),
-    RegexCase.new("\\<foo", " foo", "foo"),
-    RegexCase.new("\\<foo", "afoo", nil),
-    RegexCase.new("foo\\>", "foo!", "foo"),
-    RegexCase.new("(a)\\1", "zaa", "aa"),
-    RegexCase.new("(a)\\1", "zab", nil),
-    RegexCase.new("(a)\\1b", "zaab", "aab"),
-    RegexCase.new("[-a]+", "--a", "--a"),
-    RegexCase.new("[a-]+", "--a", "--a"),
-    RegexCase.new("[a\\-]+", "--a", "--a"),
-    RegexCase.new("[a\\]]+", "]]a", "]]a"),
-    RegexCase.new("\x80", "x\x80", "\x80"),
-    RegexCase.new("a\0b", "xa\0b", "a\0b"),
-    RegexCase.new(".", "\xff", "\xff"),
-    RegexCase.new(".", "\r", "\r"),
-    RegexCase.new("|a", "a", ""),
-    RegexCase.new("()", "abc", ""),
-    RegexCase.new("(?:)", "abc", ""),
-    RegexCase.new("(a){0}", "a", ""),
-    RegexCase.new("(a){0,1}", "a", "a"),
-    RegexCase.new("\\d{2}", "x42", "42"),
-    RegexCase.new("[\\dA-F]+", "xA9F", "A9F"),
-    RegexCase.new("\\W", "9", nil),
-    RegexCase.new("\\$", "$", "$"),
-    RegexCase.new("\\^", "^", "^"),
-    RegexCase.new("\\|", "|", "|"),
-    RegexCase.new("\\\\", "\\", "\\"),
-    RegexCase.new("$", "abc", ""),
+  const cases: {RegexCase} = {
+    RegexCase("foo", "xxfooy", "foo"),
+    RegexCase("foo", "bar", nil),
+    RegexCase("f.o", "xxfoo", "foo"),
+    RegexCase(".", "\n", nil),
+    RegexCase("[ab]", "xb", "b"),
+    RegexCase("[A-Z]+", "xABCy", "ABC"),
+    RegexCase("[ab]", "x", nil),
+    RegexCase("[^ab]+", "abXYZ", "XYZ"),
+    RegexCase("\\w+", "--abc", "abc"),
+    RegexCase("\\w+", "--9", "9"),
+    RegexCase("\\w+", "--_", "_"),
+    RegexCase("\\w", "\x80", nil),
+    RegexCase("\\W", "-", "-"),
+    RegexCase("\\d+", "a123", "123"),
+    RegexCase("\\D+", "1abc", "abc"),
+    RegexCase("\\s", " x", " "),
+    RegexCase("\\s", "\t", "\t"),
+    RegexCase("\\s", "\v", "\v"),
+    RegexCase("\\s", "\n", "\n"),
+    RegexCase("\\s", "\r", "\r"),
+    RegexCase("\\s", "\f", nil),
+    RegexCase("\\S", "\f", "\f"),
+    RegexCase("\\t", "\t", "\t"),
+    RegexCase("\\n", "\n", "\n"),
+    RegexCase("\\r", "\r", "\r"),
+    RegexCase("\\f", "\f", "\f"),
+    RegexCase("\\e", "\27", "\27"),
+    RegexCase("\\a", "\7", "\7"),
+    RegexCase("\\.", ".", "."),
+    RegexCase("\\*", "*", "*"),
+    RegexCase("\\+", "+", "+"),
+    RegexCase("\\?", "?", "?"),
+    RegexCase("\\(x\\)", "(x)", "(x)"),
+    RegexCase("\\[x\\]", "[x]", "[x]"),
+    RegexCase("\\{x\\}", "{x}", "{x}"),
+    RegexCase("foo|bar", "xxfoo", "foo"),
+    RegexCase("foo|bar", "xxbar", "bar"),
+    RegexCase("a|ab", "ab", "a"),
+    RegexCase("ab", "zab", "ab"),
+    RegexCase("", "abc", ""),
+    RegexCase("|", "abc", ""),
+    RegexCase("a|", "b", ""),
+    RegexCase("(ab)", "zab", "ab"),
+    RegexCase("((a)b)", "zab", "ab"),
+    RegexCase("(?:ab)", "zab", "ab"),
+    RegexCase("a*", "bbb", ""),
+    RegexCase("a*", "aaab", "aaa"),
+    RegexCase("a+", "baa", "aa"),
+    RegexCase("a+", "bbb", nil),
+    RegexCase("ab?", "a", "a"),
+    RegexCase("ab?", "ab", "ab"),
+    RegexCase("a{3}", "aaaa", "aaa"),
+    RegexCase("a{2,}", "baaa", "aaa"),
+    RegexCase("a{2,}", "ba", nil),
+    RegexCase("a{2,3}", "aaaa", "aaa"),
+    RegexCase("a{2,3}b", "aab", "aab"),
+    RegexCase("(a)+", "aaa", "aaa"),
+    RegexCase("^a", "abc", "a"),
+    RegexCase("^a", "ba", nil),
+    RegexCase("a$", "ba", "a"),
+    RegexCase("^a|b$", "xxb", nil),
+    RegexCase("^a|b$", "b", "b"),
+    RegexCase("\\<foo", " foo", "foo"),
+    RegexCase("\\<foo", "afoo", nil),
+    RegexCase("foo\\>", "foo!", "foo"),
+    RegexCase("(a)\\1", "zaa", "aa"),
+    RegexCase("(a)\\1", "zab", nil),
+    RegexCase("(a)\\1b", "zaab", "aab"),
+    RegexCase("[-a]+", "--a", "--a"),
+    RegexCase("[a-]+", "--a", "--a"),
+    RegexCase("[a\\-]+", "--a", "--a"),
+    RegexCase("[a\\]]+", "]]a", "]]a"),
+    RegexCase("\x80", "x\x80", "\x80"),
+    RegexCase("a\0b", "xa\0b", "a\0b"),
+    RegexCase(".", "\xff", "\xff"),
+    RegexCase(".", "\r", "\r"),
+    RegexCase("|a", "a", ""),
+    RegexCase("()", "abc", ""),
+    RegexCase("(?:)", "abc", ""),
+    RegexCase("(a){0}", "a", ""),
+    RegexCase("(a){0,1}", "a", "a"),
+    RegexCase("\\d{2}", "x42", "42"),
+    RegexCase("[\\dA-F]+", "xA9F", "A9F"),
+    RegexCase("\\W", "9", nil),
+    RegexCase("\\$", "$", "$"),
+    RegexCase("\\^", "^", "^"),
+    RegexCase("\\|", "|", "|"),
+    RegexCase("\\\\", "\\", "\\"),
+    RegexCase("$", "abc", ""),
   }
   test.assert(#cases == 89)
   for index = 1, #cases do
-    local current = cases[index]
-    local found? = string.compile_regex(current.expression):match(
+    const current = cases[index]
+    const found? = string.compile_regex(current.expression):match(
       current.subject, nil)
     if current.expected == nil then
       test.assert(found == nil,
@@ -232,20 +232,20 @@ function test_pinned_ta_regex_corpus(context: test.Context)
 end
 
 function test_compiled_spans_captures_and_positions(context: test.Context)
-  local regex = string.compile_regex("(a|(b))+(c)?")
+  const regex = string.compile_regex("(a|(b))+(c)?")
   test.assert(regex:source() == "(a|(b))+(c)?")
   test.assert(regex:group_count() == 3)
-  local found? = regex:match("xxabb", 1)
+  const found? = regex:match("xxabb", 1)
   test.assert(found ~= nil and found:whole() == "abb")
   test.assert(found:group_count() == regex:group_count())
   test.assert(found:group(1) == "b")
   test.assert(found:group(2) == "b")
   test.assert(found:group(3) == nil)
-  local span = found:span()
+  const span = found:span()
   test.assert(span.first == 3 and span.last == 5)
   span.first = 99
   test.assert(found:span().first == 3)
-  local group_span = found:group_span(1)
+  const group_span = found:group_span(1)
   group_span.first = 99
   test.assert(found:group_span(1).first == 5)
   support.expect_error(function() found:group(0) end,
@@ -292,7 +292,7 @@ function test_regex_corrected_defects(context: test.Context)
   test.assert(nested ~= nil and nested:whole() == "abbbab-abbbab")
   test.assert(nested:group(1) == "abbbab")
 
-  local expressions: {string} = {
+  const expressions: {string} = {
     "(a){0}", "(a){2}", "(a){2,}", "(a){2,4}",
   }
   for index = 1, #expressions do
@@ -326,13 +326,13 @@ end
 
 function test_regex_diagnostics(context: test.Context)
   diagnostic("*a", "misplaced_quantifier")
-  local exact = diagnostic("a{5,2}", "bad_quantifier_bounds")
+  const exact = diagnostic("a{5,2}", "bad_quantifier_bounds")
   test.assert(exact ==
     "invalid regular expression [bad_quantifier_bounds] " ..
     "at L1:C6 (byte 6): maximum repeat is smaller than minimum\n" ..
     "a{5,2}\n     ^")
   diagnostic("(a", "expected_group_close")
-  local crlf_eof = diagnostic("a|\r\n[", "expected_class_close")
+  const crlf_eof = diagnostic("a|\r\n[", "expected_class_close")
   test.assert(support.contains(crlf_eof, "at L2:C2 (byte 6)"), crlf_eof)
   diagnostic("[]", "empty_class")
   diagnostic("[^]", "empty_class")
@@ -342,7 +342,7 @@ function test_regex_diagnostics(context: test.Context)
   diagnostic("[a-b--d]", "bad_range")
   diagnostic("\\", "dangling_escape")
   diagnostic("\\v", "unsupported_escape")
-  local crlf_target = diagnostic("a\\\r\n", "unsupported_escape")
+  const crlf_target = diagnostic("a\\\r\n", "unsupported_escape")
   test.assert(crlf_target ==
     "invalid regular expression [unsupported_escape] " ..
     "at L2:C1 (byte 4): unsupported escape\n\n^")
@@ -399,21 +399,21 @@ function test_regex_diagnostics(context: test.Context)
   test.assert(support.contains(anchored, "(byte 2)"), anchored)
   diagnostic("(a$)", "misplaced_anchor")
   diagnostic("a{10000}", "pattern_too_large")
-  local after_prefix = diagnostic(
+  const after_prefix = diagnostic(
     "prefixa{10000}", "pattern_too_large")
   test.assert(support.contains(
     after_prefix, "at L1:C8 (byte 8)"), after_prefix)
-  local after_newline = diagnostic(
+  const after_newline = diagnostic(
     "prefix\na{10000}", "pattern_too_large")
   test.assert(support.contains(
     after_newline, "at L2:C2 (byte 9)"), after_newline)
 
-  local groups200 = string.rep("()", 200)
-  local regex = string.compile_regex(groups200)
+  const groups200 = string.rep("()", 200)
+  const regex = string.compile_regex(groups200)
   test.assert(regex:group_count() == 200)
-  local found? = regex:match("", nil)
+  const found? = regex:match("", nil)
   test.assert(found ~= nil)
-  local values: {string?} = {found:values()}
+  const values: {string?} = {found:values()}
   test.assert(#values == 200)
   diagnostic(string.rep("()", 201), "too_many_captures")
   diagnostic(string.rep("(?:", 312) .. string.rep("(", 201),
@@ -421,37 +421,37 @@ function test_regex_diagnostics(context: test.Context)
 end
 
 function test_regex_group_depth_and_size_limits(context: test.Context)
-  local noncapturing =
+  const noncapturing =
     string.rep("(?:", 512) .. "a" .. string.rep(")", 512)
   local regex = string.compile_regex(noncapturing)
   test.assert(regex:group_count() == 0)
   local found? = regex:match("a", nil)
   test.assert(found ~= nil and found:whole() == "a")
 
-  local siblings = string.compile_regex(string.rep("(?:a)", 513))
+  const siblings = string.compile_regex(string.rep("(?:a)", 513))
   test.assert(siblings:group_count() == 0)
   test.assert(siblings:match(string.rep("a", 513), nil):whole() ==
               string.rep("a", 513))
 
-  local flat = string.rep("a", 1000)
+  const flat = string.rep("a", 1000)
   test.assert(string.compile_regex(flat):match(flat, nil):whole() == flat)
-  local wide_class = "[" .. string.rep("a", 1000) .. "]"
+  const wide_class = "[" .. string.rep("a", 1000) .. "]"
   test.assert(string.compile_regex(wide_class):match("a", nil):whole() ==
               "a")
 
-  local capturing =
+  const capturing =
     string.rep("(", 200) .. "a" .. string.rep(")", 200)
   regex = string.compile_regex(capturing)
   test.assert(regex:group_count() == 200)
   found = regex:match("a", nil)
   test.assert(found ~= nil and found:whole() == "a")
-  local values: {string?} = {found:values()}
+  const values: {string?} = {found:values()}
   test.assert(#values == 200)
   for index = 1, #values do
     test.assert(values[index] == "a")
   end
 
-  local too_deep =
+  const too_deep =
     string.rep("(?:", 513) .. "a" .. string.rep(")", 513)
   local message = support.expect_error(function()
     string.compile_regex(too_deep)
@@ -460,7 +460,7 @@ function test_regex_group_depth_and_size_limits(context: test.Context)
     "at L1:C1537 (byte 1537): regular expression has more than " ..
     "512 nested groups"), message)
 
-  local too_many =
+  const too_many =
     string.rep("(", 201) .. "a" .. string.rep(")", 201)
   message = support.expect_error(function()
     string.compile_regex(too_many)
@@ -469,11 +469,11 @@ function test_regex_group_depth_and_size_limits(context: test.Context)
 end
 
 function test_typed_iteration_and_empty_match_progress(context: test.Context)
-  local iterator = string.gmatch("b a", "(a)|(b)", nil)
-  local first? = iterator()
+  const iterator = string.gmatch("b a", "(a)|(b)", nil)
+  const first? = iterator()
   test.assert(first ~= nil and first:whole() == "b")
   test.assert(first:group(1) == nil and first:group(2) == "b")
-  local second? = iterator()
+  const second? = iterator()
   test.assert(second ~= nil and second:whole() == "a")
   test.assert(second:group(1) == "a" and second:group(2) == nil)
   test.assert(iterator() == nil)
@@ -485,7 +485,7 @@ function test_typed_iteration_and_empty_match_progress(context: test.Context)
 end
 
 function test_gsub_callback_and_maximum(context: test.Context)
-  local calls: {string} = {}
+  const calls: {string} = {}
   local output, count = string.gsub(
     "b ab", "(a)?b", function(found: string): string
       calls[#calls + 1] = found
@@ -515,7 +515,7 @@ function test_gsub_callback_and_maximum(context: test.Context)
     "a", "a", function(_: string): string return "%1" end, nil) ==
     "%1")
 
-  local regex = string.compile_regex("a+")
+  const regex = string.compile_regex("a+")
   output, count = regex:gsub(
     "xaaayaa", function(found: string): string
       return "<" .. found .. ">"
@@ -541,16 +541,16 @@ function test_gsub_callback_and_maximum(context: test.Context)
 end
 
 function test_regex_gc_rooting(context: test.Context)
-  local previous_mode = support.set_gc_mode("generational")
+  const previous_mode = support.set_gc_mode("generational")
   defer support.set_gc_mode(previous_mode)
-  local iterator: function (): (string.RegexMatch?) =
+  const iterator: function (): (string.RegexMatch?) =
     string.compile_regex("((a|b)+)-\\1"):gmatch(
       "ab-ab xx b-b aa-aa", nil)
   for _ = 1, 12 do support.collect_gc() end
-  local values: {string} = {}
+  const values: {string} = {}
   while true do
     support.collect_gc()
-    local found? = iterator()
+    const found? = iterator()
     if not found then break end
     values[#values + 1] = found:whole()
     test.assert(found:group(1) .. "-" .. found:group(1) == found:whole())
@@ -572,17 +572,17 @@ function test_regex_gc_rooting(context: test.Context)
 
   support.set_gc_mode("incremental")
   for _ = 1, 12 do support.collect_gc() end
-  local found? = string.match("zz-aa-aa", "((a)+)-\\1", nil)
+  const found? = string.match("zz-aa-aa", "((a)+)-\\1", nil)
   test.assert(found ~= nil and found:whole() == "aa-aa")
   test.assert(found:group(1) == "aa")
 end
 
 function test_weak_cache_and_binary_matches_across_gc(context: test.Context)
-  local previous_mode = support.set_gc_mode("generational")
+  const previous_mode = support.set_gc_mode("generational")
   defer support.set_gc_mode(previous_mode)
   for _ = 1, 12 do
-    local subject = "\0\xffA\0\xff"
-    local found? = string.match(subject, "[\0\xff]+", nil)
+    const subject = "\0\xffA\0\xff"
+    const found? = string.match(subject, "[\0\xff]+", nil)
     test.assert(found ~= nil and found:whole() == "\0\xff")
     local output, count = string.gsub(
       subject, "[\0\xff]+", function(found_text: string): string

@@ -18,7 +18,7 @@ end
 --- Opaque child-process configuration borrowed by SpawnOption callbacks.
 -- @usage standard-library-os.md
 record SpawnConfig
-  local handle: ProcessConfig
+  local const handle: ProcessConfig
 end
 
 --- Child-process option callback returning a native status code.
@@ -35,7 +35,7 @@ type SpawnOption = function (SpawnConfig): (integer)
 -- @field stderr Readable child stderr endpoint, possibly shared with stdout, or nil.
 -- @usage standard-library-os.md
 record Process
-  local handle: ProcessOwner
+  local const handle: ProcessOwner
   stdin: OutputStream?
   stdout: InputStream?
   stderr: InputStream?
@@ -44,7 +44,7 @@ end
 --- Owned shell-process stream exposing stdin and merged stdout/stderr.
 -- @usage standard-library-os.md
 record InputOutputStream
-  local process: Process?
+  local const process: Process?
   local input: OutputStream?
   local output: InputStream?
   local input_packet: string?
@@ -177,7 +177,7 @@ end
 -- @usage standard-library-os.md
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
-  local config = SpawnConfig(os_spawn_config_new())
+  const config = SpawnConfig(os_spawn_config_new())
   defer os_spawn_config_close(config.handle)
   do
     local status = with_stdin(config)
@@ -185,7 +185,7 @@ function spawn(file: string, args: {string},
     if status >= 0 then status = with_stderr(config) end
     local index = 1
     while status >= 0 and index <= #... do
-      local option = ...[index]
+      const option = ...[index]
       status = option(config)
       index = index + 1
     end
@@ -197,17 +197,17 @@ function spawn(file: string, args: {string},
 
     local input: OutputStream? = nil
     if raw_stdin then
-      local stdio = raw_stdin as Stdio
+      const stdio = raw_stdin as Stdio
       input = OutputStream { handle = stdio, parent_descriptor = -1 }
     end
 
     local output: InputStream? = nil
     if raw_stdout then
-      local stdio = raw_stdout as Stdio
+      const stdio = raw_stdout as Stdio
       output = InputStream { handle = stdio, parent_descriptor = -1, excess = "" }
     end
 
-    local diagnostics: InputStream? =
+    const diagnostics: InputStream? =
       (function (stderr: Stdio?, stdout: Stdio?,
                  output: InputStream?): InputStream?
         if not stderr then return nil end
@@ -215,13 +215,13 @@ function spawn(file: string, args: {string},
         return InputStream { handle = stderr, parent_descriptor = -1, excess = "" }
       end)(raw_stderr, raw_stdout, output)
 
-    local result = Process {
+    const result = Process {
       handle = process_handle,
       stdin = input,
       stdout = output,
       stderr = diagnostics,
     }
-    local empty_slots: {SpawnSlot} = {}
+    const empty_slots: {SpawnSlot} = {}
     config.handle.cleanup(true)
     config.handle.slots = empty_slots
     config.handle.cleanup = nil
@@ -280,22 +280,22 @@ local union SpawnSlot
 end
 
 local record SpawnEnvironmentEntry
-  name: string
-  contents: string
+  const name: string
+  const contents: string
 end
 
 local record ProcessConfig
-  loop: uv.loop_t
-  options: uv.process_options_t
+  const loop: uv.loop_t
+  const options: uv.process_options_t
   slots: {SpawnSlot}
-  environment: {SpawnEnvironmentEntry}
+  const environment: {SpawnEnvironmentEntry}
   consumed: boolean
   cleanup: (function (boolean): ())?
 end
 
 local record ProcessOwner
-  native: uv.process_t
-  loop: uv.loop_t
+  const native: uv.process_t
+  const loop: uv.loop_t
   result: ExitStatus?
   exits: async.CoalescingSubscription<|ExitStatus, async.OperationError|>?
 end
@@ -363,15 +363,15 @@ local function os_ppid(): integer return uv.os_getppid() end
 local function os_exit(code: integer) async.request_exit(code) end
 
 local function os_wait_signal(name: string): string
-  local signum = signal_number(name)
+  const signum = signal_number(name)
   if signum <= 0 or name == "kill" then raise "unsupported waitable signal name '" .. name .. "'" end
   async.checkpoint()
-  local signal = uv.signal_t.new()
+  const signal = uv.signal_t()
   local initialized = false
   local published = false
   defer if initialized and not published then close_native(signal:as_handle_t()) end
-  local subscription = async.CoalescingSubscription<|string, async.OperationError|>.new(function (publish, fail, finish)
-    local actions = async.SubscriptionActions<|string|>(function ()
+  const subscription = async.CoalescingSubscription<|string, async.OperationError|>(function (publish, fail, finish)
+    const actions = async.SubscriptionActions<|string|>(function ()
       if not stream_is_closed(signal:as_handle_t()) then uv.signal_stop(signal) end
     end, function (drain) drain(); close_native(signal:as_handle_t()) end)
     check_status(uv.signal_init(async.current_loop(), signal), "signal.init")
@@ -416,7 +416,7 @@ end
 
 local function validate_config(state: ProcessConfig): integer
   async.running()
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   if state.consumed or state.loop ~= loop then
     return uv.EINVAL
   end
@@ -426,7 +426,7 @@ end
 local function discard_slot(candidate: SpawnSlot?,
                             keep_a: SpawnSlot?, keep_b: SpawnSlot?)
   if not candidate or candidate == keep_a or candidate == keep_b then return end
-  local slot = candidate as SpawnSlot
+  const slot = candidate as SpawnSlot
   case slot
   when inherit() then
     return
@@ -458,7 +458,7 @@ end
 local function configure_slot(state: ProcessConfig,
                               descriptor: integer,
                               slot: SpawnSlot, flags: integer)
-  local old? = config_slot(state, descriptor)
+  const old? = config_slot(state, descriptor)
   defer if slot ~= config_slot(state, 0) and slot ~= config_slot(state, 1) and
       slot ~= config_slot(state, 2) then discard_slot(slot, nil, nil) end
   bind_slot(state, descriptor, slot, flags)
@@ -471,9 +471,9 @@ local function configure_slot(state: ProcessConfig,
 end
 
 local function discard_config_streams(state: ProcessConfig)
-  local stdin? = config_slot(state, 0)
-  local stdout? = config_slot(state, 1)
-  local stderr? = config_slot(state, 2)
+  const stdin? = config_slot(state, 0)
+  const stdout? = config_slot(state, 1)
+  const stderr? = config_slot(state, 2)
   state.slots = {}
   discard_slot(stdin, stdout, stderr)
   discard_slot(stdout, stderr, nil)
@@ -484,10 +484,10 @@ local function config_capture(
     state: ProcessConfig): (integer, SpawnSlot?)
   local status, stream? = new_pipe_stdio(state.loop)
   if status < 0 then return status, nil end
-  local captured = stream as Stdio
+  const captured = stream as Stdio
   local keep = false
   defer if not keep then discard_unpublished_stdio(captured) end
-  local slot = SpawnSlot.capture(captured)
+  const slot = SpawnSlot.capture(captured)
   keep = true
   return 0, slot
 end
@@ -500,7 +500,7 @@ local function prepare_inherited_stdio(state: ProcessConfig,
     prepared = initialize_parent_stdio(state.loop, descriptor)
   catch
     if error is async.OperationError then
-      local failure = error as async.OperationError
+      const failure = error as async.OperationError
       return failure.code, nil
     end
     raise
@@ -543,7 +543,7 @@ local function config_merged_output(state: ProcessConfig): (integer, SpawnSlot?)
   when file() then raise "expected pipe stream"
   end
   if status < 0 then return status, nil end
-  local slot = SpawnSlot.merged(child, parent)
+  const slot = SpawnSlot.merged(child, parent)
   keep = true
   return 0, slot
 end
@@ -553,7 +553,7 @@ local function os_spawn_config_new(): ProcessConfig
   if async.is_closing() then
     raise "cannot configure a Process while async Runtime is shutting down"
   end
-  return ProcessConfig(async.current_loop(), uv.process_options_t.new("", {}), {}, {}, false, nil)
+  return ProcessConfig(async.current_loop(), uv.process_options_t("", {}), {}, {}, false, nil)
 end
 
 local function configure_capture(config: ProcessConfig,
@@ -563,7 +563,7 @@ local function configure_capture(config: ProcessConfig,
   local captured: SpawnSlot? = nil
   status, captured = config_capture(config)
   if status < 0 then return status end
-  local slot = captured as SpawnSlot
+  const slot = captured as SpawnSlot
   if descriptor == 0 then
     configure_slot(config, descriptor, slot,
                    uv.CREATE_PIPE | uv.READABLE_PIPE)
@@ -581,7 +581,7 @@ local function configure_parent(config: ProcessConfig,
   local parent: SpawnSlot? = nil
   status, parent = prepare_inherited_stdio(config, descriptor)
   if status < 0 then return status end
-  local slot = parent as SpawnSlot
+  const slot = parent as SpawnSlot
   local flags = uv.INHERIT_STREAM
   case slot_child(slot).backing
   when stream() then
@@ -598,7 +598,7 @@ local function os_spawn_config_with_merged_output(
   local merged: SpawnSlot? = nil
   status, merged = config_merged_output(config)
   if status >= 0 then
-    local slot = merged as SpawnSlot
+    const slot = merged as SpawnSlot
     configure_slot(config, 1, slot, uv.INHERIT_STREAM)
     configure_slot(config, 2, slot, uv.INHERIT_STREAM)
   end
@@ -606,7 +606,7 @@ local function os_spawn_config_with_merged_output(
 end
 
 local function os_spawn_config_for_shell(config: ProcessConfig): integer
-  local status = validate_config(config)
+  const status = validate_config(config)
   if status < 0 then return status end
   if ffi.TITAN_OS_WINDOWS ~= 0 then
     config.options.flags = uv.PROCESS_WINDOWS_VERBATIM_ARGUMENTS
@@ -617,21 +617,21 @@ end
 local function os_spawn_config_with_env(config: ProcessConfig,
                                          name: string,
                                          contents: string): integer
-  local status = validate_config(config)
+  const status = validate_config(config)
   if status < 0 then return status end
   if #name == 0 or contains_nul(name) or contains_nul(contents) then
     return uv.EINVAL
   end
-  local bytes = name as foreign const *unsigned char
+  const bytes = name as foreign const *unsigned char
   local byte_index = 0
   while byte_index < #name do
     if bytes[byte_index] == 61 then return uv.EINVAL end
     byte_index = byte_index + 1
   end
-  local entry = SpawnEnvironmentEntry(name, contents)
+  const entry = SpawnEnvironmentEntry(name, contents)
   local index = 1
   while index <= #config.environment do
-    local equal = ffi.titan_process_environment_name_equal(
+    const equal = ffi.titan_process_environment_name_equal(
         config.environment[index].name, name) as integer
     if equal < 0 then return platform_status(equal) end
     if equal == 1 then
@@ -647,11 +647,11 @@ end
 local function os_spawn_config_close(config: ProcessConfig)
   if config.consumed then return end
   async.running()
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   if config.loop ~= loop then
     raise "SpawnConfig belongs to a different async Runtime"
   end
-  local cleanup? = config.cleanup
+  const cleanup? = config.cleanup
   config.consumed = true
   config.cleanup = nil
   if cleanup ~= nil then cleanup(false)
@@ -674,10 +674,10 @@ local function os_shell_command(command: string): (string, {string})
   local capacity = 256
   local directory = ""
   while true do
-    local bytes = foreign char.new_array(capacity)
+    const bytes = foreign char.new_array(capacity)
     local sizes = foreign size_t.new_array(1)
     sizes[0] = capacity
-    local status = platform_status(ffi.titan_process_system_directory(bytes, sizes))
+    const status = platform_status(ffi.titan_process_system_directory(bytes, sizes))
     if status == uv.ENOBUFS then capacity = sizes[0] as integer
     else
       check_status(status, "process.shell.directory")
@@ -692,12 +692,12 @@ local function spawn_environment(config: ProcessConfig): {string}?
   if #config.environment == 0 then return nil end
   local status, entries?, count = uv.os_environ()
   check_status(status, "process.spawn.environment")
-  local result: {string} = {}
+  const result: {string} = {}
   for index = 1, count do
-    local inherited = entries[index]
+    const inherited = entries[index]
     local replaced = false
     for _, option in iteration.ipairs(config.environment) do
-      local equal = ffi.titan_process_environment_name_equal(inherited.name, option.name) as integer
+      const equal = ffi.titan_process_environment_name_equal(inherited.name, option.name) as integer
       if equal < 0 then check_status(platform_status(equal), "process.spawn.environment") end
       if equal == 1 then replaced = true; break end
     end
@@ -710,9 +710,9 @@ end
 -- Implementation notes: doc/implementation/os-library.md#spawn-transaction-and-exit-delivery
 local function os_process_spawn_with_config(file: string, args: {string}, config: ProcessConfig): (ProcessOwner, Stdio?, Stdio?, Stdio?)
   check_status(validate_config(config), "process.spawn.config")
-  local stdin_slot? = config_slot(config, 0)
-  local stdout_slot? = config_slot(config, 1)
-  local stderr_slot? = config_slot(config, 2)
+  const stdin_slot? = config_slot(config, 0)
+  const stdout_slot? = config_slot(config, 1)
+  const stderr_slot? = config_slot(config, 2)
   if stdin_slot == nil or stdout_slot == nil or stderr_slot == nil then os_spawn_config_error(config, uv.EINVAL) end
   if async.is_closing() then
     raise "cannot spawn a Process while async Runtime is shutting down"
@@ -723,25 +723,25 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
   if ffi.TITAN_OS_WINDOWS ~= 0 and (config.options.flags & uv.PROCESS_WINDOWS_VERBATIM_ARGUMENTS) ~= 0 then
     argument_zero = '"' .. file .. '"'
   end
-  local arguments = {argument_zero}
+  const arguments = {argument_zero}
   for _, arg in iteration.ipairs(args) do arguments[#arguments + 1] = arg end
   config.options.file = file
   config.options.args = arguments
   config.options.env = spawn_environment(config)
-  local process = ProcessOwner(uv.process_t.new(), config.loop, nil, nil)
-  local handle = process.native:as_handle_t()
-  local timer = uv.timer_t.new()
-  local timer_handle = timer:as_handle_t()
+  const process = ProcessOwner(uv.process_t(), config.loop, nil, nil)
+  const handle = process.native:as_handle_t()
+  const timer = uv.timer_t()
+  const timer_handle = timer:as_handle_t()
   local rollback = false
-  local term = signal_number("term")
-  local kill = signal_number("kill")
+  const term = signal_number("term")
+  const kill = signal_number("kill")
   local completion: async.Completion<|ProcessOwner, nil, async.OperationError|>? = nil
   local completion_number = 0
   -- Native close callbacks run after root retirement. A callback may precede
   -- wait registration, so registration also checks this exact same condition.
-  local retired = function (_: uv.handle_t)
-    local done? = completion
-    local number = completion_number
+  const retired = function (_: uv.handle_t)
+    const done? = completion
+    const number = completion_number
     if done ~= nil and not handle:is_initialized() and
         not timer_handle:is_initialized() then
       completion = nil
@@ -749,13 +749,13 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
       catch done:fatal(number, error, traceback); raise end
     end
   end
-  local escalate = function (_: uv.timer_t)
+  const escalate = function (_: uv.timer_t)
     if handle:is_initialized() and uv.is_active(handle) then
       uv.process_kill(process.native, kill)
     end
     uv.close(timer_handle, retired)
   end
-  local register = function (done: async.Completion<|ProcessOwner, nil, async.OperationError|>,
+  const register = function (done: async.Completion<|ProcessOwner, nil, async.OperationError|>,
                             number: integer): uv.req_t?
     completion = done
     completion_number = number
@@ -790,17 +790,17 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
   -- Prepare escalation before accepting a child, including the loop root.
   -- The Config capability already owns this timer if subsequent setup fails.
   check_status(uv.timer_init(config.loop, timer), "process.spawn.cleanup.timer.init")
-  process.exits = async.CoalescingSubscription<|ExitStatus, async.OperationError|>.new(function (publish, fail, finish)
+  process.exits = async.CoalescingSubscription<|ExitStatus, async.OperationError|>(function (publish, fail, finish)
     -- Cancelling a wait detaches only that waiter. The accepted child remains
     -- owned until its exit callback reaps it and closes the process handle.
-    local actions = async.SubscriptionActions<|ExitStatus|>(function () end, function (drain) drain() end)
+    const actions = async.SubscriptionActions<|ExitStatus|>(function () end, function (drain) drain() end)
     config.options.exit_cb = function (_: uv.process_t, code: integer, signum: integer)
       if rollback then
         if not stream_is_closed(timer_handle) then uv.close(timer_handle, retired) end
         uv.close(handle, retired)
         return
       end
-      local result = ExitStatus(code, signal_name(signum), signum)
+      const result = ExitStatus(code, signal_name(signum), signum)
       process.result = result
       uv.close(process.native:as_handle_t(), nil)
       publish(result)
@@ -808,11 +808,11 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
     end
     return actions
   end)
-  local status = uv.spawn(config.loop, process.native, config.options)
+  const status = uv.spawn(config.loop, process.native, config.options)
   if status < 0 then raise make_error(status, "process.spawn") end
-  local stdin? = slot_parent(stdin_slot)
-  local stdout? = slot_parent(stdout_slot)
-  local stderr? = slot_parent(stderr_slot)
+  const stdin? = slot_parent(stdin_slot)
+  const stdout? = slot_parent(stdout_slot)
+  const stderr? = slot_parent(stderr_slot)
   discard_unpublished_stdio(slot_merged_child(stdout_slot))
   discard_unpublished_stdio(slot_merged_child(stderr_slot))
   -- Everything is still lexically owned by config until read registration
@@ -848,10 +848,10 @@ end
 
 local function os_process_kill(process: ProcessOwner, signal: string)
   validate_process(process)
-  local signum = signal_number(signal)
+  const signum = signal_number(signal)
   if signum <= 0 then raise "unsupported process signal name '" .. signal .. "'" end
   if not os_process_is_running(process) then raise "cannot signal an exited Process" end
-  local status = uv.process_kill(process.native, signum)
+  const status = uv.process_kill(process.native, signum)
   if status < 0 and status ~= uv.ESRCH then raise make_error(status, "process.kill") end
 end
 
@@ -885,9 +885,9 @@ end
 -- A failed second pipe handoff leaves the first packet here, still owned by
 -- this facade. Clear it only after adoption succeeds or handoff returns both.
 local function InputOutputStream:restore_input()
-  local packet? = self.input_packet
+  const packet? = self.input_packet
   if packet ~= nil then
-    local input = OutputStream.from_transfer_payload(packet)
+    const input = OutputStream.from_transfer_payload(packet)
     self.input = input
     if self.process ~= nil then self.process.stdin = input end
     self.input_packet = nil
@@ -915,7 +915,7 @@ function InputOutputStream:wait(): ExitStatus
     raise "transferred InputOutputStream has no child process owner"
   end
   if self.status then return self.status end
-  local status = self.process:wait()
+  const status = self.process:wait()
   self.status = status
   return status
 end
@@ -927,9 +927,9 @@ function InputOutputStream:close()
   self.pending_operations = self.pending_operations + 1
   defer self.pending_operations = self.pending_operations - 1
   if self.closed then return end
-  local packet? = self.input_packet
+  const packet? = self.input_packet
   if packet ~= nil then
-    local status = OutputStream.discard_transfer_payload(packet)
+    const status = OutputStream.discard_transfer_payload(packet)
     self.input_packet = nil
     check_status(status, "stdio.transfer.discard")
   end
@@ -968,8 +968,8 @@ function InputOutputStream:to_transfer_payload(): string
     self.input_packet = self.input:to_transfer_payload()
     self.input = nil
   end
-  local output_packet = self.output:to_transfer_payload()
-  local input_packet: string = self.input_packet
+  const output_packet = self.output:to_transfer_payload()
+  const input_packet: string = self.input_packet
   self.output = nil
   self.input_packet = nil
   local exported = false
@@ -977,7 +977,7 @@ function InputOutputStream:to_transfer_payload(): string
     defer InputStream.discard_transfer_payload(output_packet)
     OutputStream.discard_transfer_payload(input_packet)
   end
-  local payload = protobuf.serialize_fields(stream_transfer_fields, input_packet, output_packet)
+  const payload = protobuf.serialize_fields(stream_transfer_fields, input_packet, output_packet)
   exported = true
   return payload
 end
@@ -989,7 +989,7 @@ end
 function InputOutputStream.from_transfer_payload(payload: string): InputOutputStream
   local input_packet: string, output_packet: string =
     protobuf.deserialize_fields(payload, stream_transfer_fields)
-  local result = InputOutputStream(nil, nil, nil, nil, nil, false, 0)
+  const result = InputOutputStream(nil, nil, nil, nil, nil, false, 0)
   local adopted = false
   defer if not adopted and result.input ~= nil then
     discard_unpublished_stdio(result.input.handle)
@@ -1006,9 +1006,9 @@ end
 -- @usage standard-library-os.md
 function popen(command: string): InputOutputStream
   local file, args = os_shell_command(command)
-  local process = spawn(file, args, with_stdin, with_merged_output, with_shell_arguments)
-  local input? = process.stdin
-  local output? = process.stdout
+  const process = spawn(file, args, with_stdin, with_merged_output, with_shell_arguments)
+  const input? = process.stdin
+  const output? = process.stdout
   if not input or not output then
     raise "internal popen spawn did not capture its streams"
   end

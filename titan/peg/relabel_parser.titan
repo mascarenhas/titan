@@ -13,56 +13,56 @@
 
 -- Implementation notes: doc/implementation/lpeglabel-embedding.md#relabel-translation
 local function _relabel_build_parser(): Pattern
-  local lex = _relabel_build_lexical()
-  local suffix_operation =
+  const lex = _relabel_build_lexical()
+  const suffix_operation =
     _relabel_build_suffix_operation(lex)
-  local primary = _relabel_build_primary(lex)
-  local suffix = function_capture(
+  const primary = _relabel_build_primary(lex)
+  const suffix = function_capture(
     sequence(
       primary, zero_or_more(suffix_operation)),
     _relabel_apply_suffixes)
-  local positive = function_capture(
+  const positive = function_capture(
     sequence(
       literal("&"),
       _relabel_expect(
         sequence(lex.spacing, variable("Prefix")),
         "ExpPatt2")),
     _relabel_lookahead_capture)
-  local negative_prefix = function_capture(
+  const negative_prefix = function_capture(
     sequence(
       literal("!"),
       _relabel_expect(
         sequence(lex.spacing, variable("Prefix")),
         "ExpPatt3")),
     _relabel_negative_capture)
-  local prefix = choice(positive, negative_prefix, suffix)
-  local sequence_expression = function_capture(
+  const prefix = choice(positive, negative_prefix, suffix)
+  const sequence_expression = function_capture(
     sequence(
       constant(succeed()), prefix,
       zero_or_more(sequence(lex.spacing, prefix))),
     _relabel_sequence_capture)
-  local choice_tail = sequence(
+  const choice_tail = sequence(
     lex.spacing, literal("/"),
     _relabel_expect(
       sequence(lex.spacing, variable("Seq")),
       "ExpPatt1"))
-  local choice_expression = function_capture(
+  const choice_expression = function_capture(
     sequence(
       sequence_expression, zero_or_more(choice_tail)),
     _relabel_choice_capture)
-  local parsed_definition = function_capture(
+  const parsed_definition = function_capture(
     sequence(
       lex.name, lex.arrow,
       _relabel_expect(variable("Exp"), "ExpPatt8")),
     _relabel_parsed_rule)
-  local target_grammar = function_capture(
+  const target_grammar = function_capture(
     sequence(
       group(constant(true), "G"),
       parsed_definition,
       zero_or_more(sequence(
         lex.spacing, parsed_definition))),
     _relabel_target_grammar)
-  local meta = grammar("Exp", {
+  const meta = grammar("Exp", {
     rule("Exp", sequence(
       lex.spacing,
       choice(variable("Grammar"), choice_expression))),

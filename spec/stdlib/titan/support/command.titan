@@ -216,14 +216,14 @@ end
 local function capture(argv: {string}, directory: string?,
                        environment: {string: string}?, unset: {string}?,
                        input: string?): (string, string, integer)
-  local run: Runner = helper_functions()("capture")
+  const run: Runner = helper_functions()("capture")
   return run(argv, directory, environment, unset, input)
 end
 
 local function execute(argv: {string}, directory: string?,
                        environment: {string: string}?, unset: {string}?,
                        input: string?): (boolean?, string, integer)
-  local run: Runner = helper_functions()("execute")
+  const run: Runner = helper_functions()("execute")
   local _: string, why: string, code: integer =
     run(argv, directory, environment, unset, input)
   if why == "exit" and code == 0 then return true, why, code end
@@ -233,7 +233,7 @@ end
 local function system(argv: {string}, directory: string?,
                       environment: {string: string}?, unset: {string}?,
                       input: string?): integer
-  local _: boolean?, why: string, code: integer =
+  local _: boolean?, _: string, code: integer =
     execute(argv, directory, environment, unset, input)
   return code
 end
@@ -241,26 +241,26 @@ end
 local function compile(directory: string, name: string, extra: {string}?,
                        static: boolean?, environment: {string: string}?):
                        (string, string, integer)
-  local compile_child: Compiler = helper_functions()("compile")
+  const compile_child: Compiler = helper_functions()("compile")
   return compile_child(directory, name, extra, static, environment)
 end
 
 local function program(directory: string, name: string): string
-  local program_path: Program = helper_functions()("program")
+  const program_path: Program = helper_functions()("program")
   return program_path(directory, name)
 end
 
 local function fixture_object(name: string): string
-  local object_path: FixtureObject = helper_functions()("fixture_object")
+  const object_path: FixtureObject = helper_functions()("fixture_object")
   return object_path(name)
 end
 
 local function remove_tree(path: string)
-  local remove: Remover = helper_functions()("remove_tree")
+  const remove: Remover = helper_functions()("remove_tree")
   remove(path)
 end
 
 local function lua(source: string): (string, string, integer)
-  local run_lua: LuaRunner = helper_functions()("lua")
+  const run_lua: LuaRunner = helper_functions()("lua")
   return run_lua(source)
 end

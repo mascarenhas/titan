@@ -9,8 +9,8 @@ local uv = import "uv"
 
 -- The Runtime's native state (Runtime.backend).
 local record Backend
-  loop: uv.loop_t
-  wake: uv.timer_t
+  const loop: uv.loop_t
+  const wake: uv.timer_t
   external: ExternalBridge?
   -- Releases of run_foreign jobs whose wait a Lua state close abandoned.
   abandoned_work: {ForeignWork}
@@ -29,7 +29,7 @@ local function check_status(code: integer, operation: string)
 end
 
 local function new_backend(): Backend
-  return Backend {loop = uv.loop_t.new(), wake = uv.timer_t.new(), external = nil,
+  return Backend {loop = uv.loop_t(), wake = uv.timer_t(), external = nil,
     abandoned_work = {}}
 end
 
@@ -38,7 +38,7 @@ local function start_backend(runtime: Runtime)
   check_status(uv.loop_init(runtime.backend.loop), "runtime.loop.init")
   do uv.bind_transfer_loop(runtime.backend.loop)
   catch uv.loop_close(runtime.backend.loop); raise end
-  local status = uv.timer_init(runtime.backend.loop, runtime.backend.wake)
+  const status = uv.timer_init(runtime.backend.loop, runtime.backend.wake)
   if status < 0 then
     uv.unbind_transfer_loop(runtime.backend.loop)
     uv.loop_close(runtime.backend.loop)
@@ -68,7 +68,7 @@ end
 -- listeners belong to ordinary retirement and do not run here.
 local function runtime_finalize(candidate: value)
   -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
-  local runtime: Runtime = candidate
+  const runtime: Runtime = candidate
   if active_runtime ~= runtime then return end
   require_main_thread()
   runtime.closing = true
@@ -82,7 +82,7 @@ local function runtime_finalize(candidate: value)
   -- Every accepted job has returned. Release what abandoned run_foreign
   -- waits handed over, here on the closing thread: such a release may itself
   -- wait for the worker pool, which no abandoned job occupies any more.
-  local abandoned_work = runtime.backend.abandoned_work
+  const abandoned_work = runtime.backend.abandoned_work
   runtime.backend.abandoned_work = {}
   for index = 1, #abandoned_work do
     abandoned_work[index]:release_abandoned()
@@ -93,7 +93,7 @@ end
 -- @return Runtime-owned loop; valid from Tasks, registration, and loop callbacks.
 -- @usage async-io.md
 function current_loop(): uv.loop_t
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
   return runtime.backend.loop
 end
@@ -105,7 +105,7 @@ local function arm_ready(runtime: Runtime)
 end
 
 local function ready_tick(timer: uv.timer_t)
-  local runtime: Runtime = uv.timer_get_data(timer)
+  const runtime: Runtime = uv.timer_get_data(timer)
   runtime.wake_armed = false
   local failed = false
   do drain_ready(runtime, runtime.ready_count)
@@ -116,11 +116,10 @@ local function ready_tick(timer: uv.timer_t)
   -- Undispatched entries remain linked and rooted even after delivery fails.
   -- Preserve the first error if the replacement wake also fails.
   if runtime.ready_head ~= nil and not runtime.wake_armed then
-    do arm_ready(runtime)
-    catch
-      failed = true
-      fail_runtime(runtime, error, traceback)
-    end
+    arm_ready(runtime)
+  catch
+    failed = true
+    fail_runtime(runtime, error, traceback)
   end
   if failed then runtime.failure:raise() end
 end
@@ -157,7 +156,7 @@ function await_cancellable_with<|C, T, E|>(context: C, start: function (Completi
 end
 
 local function old_start<|T, E|>(done: Completion<|function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?), T, E|>, number: integer): uv.req_t?
-  local op = done:context(number)
+  const op = done:context(number)
   return op(function (result: T) legacy_settle(done as Wait, number, OUTCOME_SUCCESS, result) end,
       function (error: E) legacy_settle(done as Wait, number, OUTCOME_ERROR, error) end,
       function (error: value, trace: string) done:fatal(number, error, trace) end)
@@ -172,7 +171,7 @@ function await_cancellable<|T, E|>(op: function (function (T): (), function (E):
 end
 
 local function close_handles(runtime: Runtime)
-  local external? = runtime.backend.external
+  const external? = runtime.backend.external
   if external ~= nil then external:close() end
   uv.walk(runtime.backend.loop, function (handle: uv.handle_t, _: value)
     if not uv.is_closing(handle) then
@@ -182,7 +181,7 @@ local function close_handles(runtime: Runtime)
         else uv.close(handle) end
       when async() then
         defer uv.close(handle)
-        local data = uv.handle_get_data(handle)
+        const data = uv.handle_get_data(handle)
         if data is Receiver then (data as Receiver):disable() end
       else uv.close(handle)
       end
@@ -195,7 +194,7 @@ end
 function loop()
   -- Implementation notes: doc/implementation/libuv-runtime.md#explicit-negative-status-retry
   require_main_thread()
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime == nil then return end
   if runtime.current_task ~= nil then raise "async.loop must be driven from the Lua main thread" end
   if runtime.driving then raise "async.loop is already being driven" end
@@ -205,9 +204,9 @@ function loop()
   -- owner intact. Only an explicit new loop() invocation retries those calls.
   runtime.retirement_error = nil
   for index = 1, runtime.next_task - 1 do
-    local task? = runtime.tasks[index]
+    const task? = runtime.tasks[index]
     if task ~= nil then
-      local barrier? = task.cleanup_wait
+      const barrier? = task.cleanup_wait
       if barrier ~= nil and barrier.native.status < 0 then barrier.native.status = 1 end
     end
   end
@@ -218,11 +217,11 @@ function loop()
       -- Emergency recovery uses the existing Task inventory, not a channel
       -- registry. It runs before blocking even when a native wait refs UV.
       for index = 1, runtime.next_task - 1 do
-        local task? = runtime.tasks[index]
+        const task? = runtime.tasks[index]
         if task ~= nil and recover_task(runtime, task) then recover_native = true end
       end
     end
-    local retirement_error? = runtime.retirement_error
+    const retirement_error? = runtime.retirement_error
     if retirement_error ~= nil then
       raise operation_error(retirement_error.native.status, "async.native_retirement.retire")
     end
@@ -270,12 +269,12 @@ function loop()
         -- retirement can reach this branch before the next outer iteration.
         do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
         if not uv.loop_alive(runtime.backend.loop) then
-          local status = uv.loop_close(runtime.backend.loop)
+          const status = uv.loop_close(runtime.backend.loop)
           if status == 0 then
             uv.timer_set_data(runtime.backend.wake, nil)
             notify_runtime_closed(runtime)
             active_runtime = nil
-            local failure? = runtime.failure
+            const failure? = runtime.failure
             if failure ~= nil then failure:raise() end
             return
           end
@@ -295,7 +294,7 @@ end
 
 -- Process setup run by the root initializer before the bootstrap registration.
 local function initialize_backend()
-  local native_error = ffi.titan_async_ignore_sigpipe_if_default()
+  const native_error = ffi.titan_async_ignore_sigpipe_if_default()
   if native_error ~= 0 then
     check_status(uv.translate_sys_error(native_error), "runtime.sigpipe")
   end

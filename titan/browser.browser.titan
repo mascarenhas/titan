@@ -29,7 +29,7 @@ foreign type CallSyncEntry =
 --- A state-owned reference to an arbitrary JavaScript value, including nil-like, falsy, and function values.
 -- @usage standard-library-browser.md#javascript-values
 record BrowserHandle
-  local state: foreign uint32_t
+  local const state: foreign uint32_t
   local slot: foreign uint32_t
   local generation: foreign uint32_t
 end
@@ -37,16 +37,16 @@ end
 --- One host request or listener; cancellation is not physical retirement.
 -- @usage standard-library-browser.md#requests-and-listeners
 record BrowserRequest
-  local state: foreign uint32_t
+  local const state: foreign uint32_t
   local slot: foreign uint32_t
   local generation: foreign uint32_t
-  local holds: RequestHolds
+  local const holds: RequestHolds
 end
 
 --- An open hold on a pinned callable, whose identity C keeps as callback user data.
 -- @usage standard-library-browser.md#synchronous-c-callbacks
 record BrowserPin
-  local state: foreign uint32_t
+  local const state: foreign uint32_t
   local slot: foreign uint32_t
   local generation: foreign uint32_t
 end
@@ -76,9 +76,9 @@ end
 local type Callable = function (...: BrowserValue): BrowserValue
 
 local record Pin
-  slot: integer
-  generation: integer
-  callback: Callable
+  const slot: integer
+  const generation: integer
+  const callback: Callable
   wrapper_live: boolean
   holds: integer
   -- A one-shot request's closure pin names the request's holds.
@@ -122,8 +122,8 @@ local call_sync_handler: (function (foreign const *titan_browser_identity, forei
 -- One callback thread per nesting depth, made once and reused in LIFO order;
 -- the record keeps the thread rooted and its lua_State for the C entries.
 local record CallbackThread
-  thread: value
-  L: foreign *lua_State
+  const thread: value
+  const L: foreign *lua_State
 end
 
 local callback_threads: {CallbackThread} = {}
@@ -152,18 +152,18 @@ local foreign function mark_closing(state: *titan_browser_state_record)
 end
 
 local function state_finalize(candidate: value)
-  local state: owned *titan_browser_state_record = candidate
+  const state: owned *titan_browser_state_record = candidate
   if state.token == 0 then
     return
   end
-  local token = state.token
+  const token = state.token
   mark_closing(state)
   state.token = 0
   ffi.titan_browser_host_state_closed(token)
 end
 
 local function state_closing(): boolean
-  local current: foreign *titan_browser_state_record = state_record
+  const current: foreign *titan_browser_state_record = state_record
   if current.token == 0 then
     return true
   end
@@ -174,7 +174,7 @@ local function state_closing(): boolean
 end
 
 local function current_state(): foreign uint32_t
-  local current: foreign *titan_browser_state_record = state_record
+  const current: foreign *titan_browser_state_record = state_record
   if current.token == 0 then
     raise "browser state is closed"
   end
@@ -203,7 +203,7 @@ local function response_dispose(response: foreign *titan_browser_response)
 end
 
 function BrowserHandle:close()
-  local slot = self.slot
+  const slot = self.slot
   if slot ~= 0 then
     if state_record.token == 0 and state_record.closing ~= 0 then
       self.slot = 0
@@ -217,7 +217,7 @@ function BrowserHandle:close()
 end
 
 local function handle_finalize(candidate: value)
-  local self: BrowserHandle = candidate
+  const self: BrowserHandle = candidate
   self:close()
 end
 
@@ -227,8 +227,8 @@ end
 -- or collecting this owner never retires the caller's slot.
 local function new_handle(slot: integer, generation: integer, borrowed: boolean?): BrowserHandle
   if slot == 0 or generation == 0 then raise "browser handle identity is absent" end
-  local state = current_state()
-  local owner = BrowserHandle { state = state, slot = 0, generation = 0 }
+  const state = current_state()
+  const owner = BrowserHandle { state = state, slot = 0, generation = 0 }
   gc.finalizable<|value|>(owner, handle_finalize)
   if ffi.titan_browser_host_identity_live(state, slot, generation,
       ffi.TITAN_BROWSER_HANDLE as foreign uint32_t) == 0 then
@@ -245,7 +245,7 @@ local function new_handle(slot: integer, generation: integer, borrowed: boolean?
 end
 
 function BrowserRequest:close()
-  local slot = self.slot
+  const slot = self.slot
   if slot ~= 0 then
     if state_record.token == 0 and state_record.closing ~= 0 then
       self.slot = 0
@@ -278,12 +278,12 @@ function failure_text(message: BrowserValue, thrown: BrowserValue): string?
 end
 
 local function check_utf8(text: string)
-  local input = text as foreign const *unsigned char
+  const input = text as foreign const *unsigned char
   local remaining = 0
   local lower = 128
   local upper = 191
   for index = 0, #text - 1 do
-    local byte: integer = input[index]
+    const byte: integer = input[index]
     if remaining > 0 then
       if byte < lower or byte > upper then raise "browser string is not valid UTF-8" end
       remaining = remaining - 1
@@ -313,8 +313,8 @@ local function allocate_pin(callback: Callable): Pin
   local generation = 0
   local free_index = #free_slots
   while free_index > 0 do
-    local candidate = free_slots[free_index]
-    local previous = slot_generations[candidate]
+    const candidate = free_slots[free_index]
+    const previous = slot_generations[candidate]
     if previous < 0xffffffff then
       slot = candidate
       generation = previous + 1
@@ -328,7 +328,7 @@ local function allocate_pin(callback: Callable): Pin
     slot = next_slot
     generation = 1
   end
-  local pin = Pin {
+  const pin = Pin {
     slot = slot,
     generation = generation,
     callback = callback,
@@ -370,13 +370,13 @@ local function Pin:retire_if_unused()
 end
 
 local function RequestHolds:drop()
-  local completion? = self.completion
+  const completion? = self.completion
   self.completion = nil
   if completion ~= nil then
     completion.holds = completion.holds - 1
     completion:retire_if_unused()
   end
-  local failure? = self.failure
+  const failure? = self.failure
   self.failure = nil
   if failure ~= nil then
     failure.holds = failure.holds - 1
@@ -388,14 +388,14 @@ local function pin_wrapper(callback: Callable, state: foreign uint32_t,
                            provisioned: {ProvisionalPin},
                            reusable_entry: ProvisionalPin?): Pin
   if state_closing() then raise "browser state is closing" end
-  local entry = reusable_entry or ProvisionalPin { pin = nil, wrapper = true }
+  const entry = reusable_entry or ProvisionalPin { pin = nil, wrapper = true }
   entry.pin = nil
   entry.wrapper = true
-  local index = #provisioned + 1
+  const index = #provisioned + 1
   provisioned[index] = entry
-  local existing? = pins_by_fn[callback]
-  local pin: Pin = existing or allocate_pin(callback)
-  local created = ffi.titan_browser_host_callable(state, pin.slot, pin.generation) ~= 0
+  const existing? = pins_by_fn[callback]
+  const pin: Pin = existing or allocate_pin(callback)
+  const created = ffi.titan_browser_host_callable(state, pin.slot, pin.generation) ~= 0
   if not pin.wrapper_live or created then
     entry.pin = pin
     pin.wrapper_live = true
@@ -407,11 +407,11 @@ end
 
 local function pin_request_hold(callback: Callable,
                                 provisioned: {ProvisionalPin}): Pin
-  local entry = ProvisionalPin { pin = nil, wrapper = false }
-  local index = #provisioned + 1
+  const entry = ProvisionalPin { pin = nil, wrapper = false }
+  const index = #provisioned + 1
   provisioned[index] = entry
-  local existing? = pins_by_fn[callback]
-  local pin: Pin = existing or allocate_pin(callback)
+  const existing? = pins_by_fn[callback]
+  const pin: Pin = existing or allocate_pin(callback)
   entry.pin = pin
   pin.holds = pin.holds + 1
   return pin
@@ -420,9 +420,9 @@ end
 local function rollback_provisioned(state: foreign uint32_t,
                                     provisioned: {ProvisionalPin})
   for index = #provisioned, 1, -1 do
-    local item = provisioned[index]
+    const item = provisioned[index]
     provisioned[index] = nil
-    local pin? = item.pin
+    const pin? = item.pin
     if pin ~= nil then
       item.pin = nil
       if item.wrapper then
@@ -439,7 +439,7 @@ end
 
 local function check_response(response: foreign *titan_browser_response)
   if response.status ~= ffi.TITAN_BROWSER_OK then
-    local message = response.message as string(response.message_length)
+    const message = response.message as string(response.message_length)
     if response.thrown_slot == 0 or response.thrown_generation == 0 then
       if message == "" then
         if response.status == ffi.TITAN_BROWSER_MEMORY then
@@ -449,7 +449,7 @@ local function check_response(response: foreign *titan_browser_response)
       end
       raise message
     end
-    local thrown = new_handle(response.thrown_slot, response.thrown_generation)
+    const thrown = new_handle(response.thrown_slot, response.thrown_generation)
     response.thrown_slot = 0
     response.thrown_generation = 0
     raise BrowserError(message, thrown)
@@ -457,14 +457,14 @@ local function check_response(response: foreign *titan_browser_response)
 end
 
 local function adopt_handle(response: foreign *titan_browser_response): BrowserHandle
-  local owner = new_handle(response.value.slot, response.value.generation)
+  const owner = new_handle(response.value.slot, response.value.generation)
   response.value.slot = 0
   return owner
 end
 
 local function BrowserHandle:checked_state(): foreign uint32_t
   if self.slot == 0 then raise "browser handle is closed" end
-  local state = current_state()
+  const state = current_state()
   if self.state ~= state then raise "browser handle belongs to another state" end
   return state
 end
@@ -503,7 +503,7 @@ local function encode_value(item: BrowserValue, state: foreign uint32_t,
     slot.slot = handle.slot
     slot.generation = handle.generation
   when is_callable(callback) then
-    local pin = pin_wrapper(callback, state, provisioned, reusable_entry)
+    const pin = pin_wrapper(callback, state, provisioned, reusable_entry)
     slot.kind = ffi.TITAN_BROWSER_CALLABLE as foreign uint32_t
     slot.state = state
     slot.slot = pin.slot
@@ -516,7 +516,7 @@ end
 local function decode_value(raw: foreign const *titan_browser_value,
                             state: foreign uint32_t,
                             borrowed: boolean?): BrowserValue
-  local kind = raw.kind
+  const kind = raw.kind
   if kind == ffi.TITAN_BROWSER_NIL then
     return BrowserValue.is_nil()
   elseif kind == ffi.TITAN_BROWSER_BOOLEAN then
@@ -532,7 +532,7 @@ local function decode_value(raw: foreign const *titan_browser_value,
     if raw.length ~= 0 and raw.bytes == nil then
       raise "browser byte argument has no storage"
     end
-    local bytes = raw.bytes as string(raw.length)
+    const bytes = raw.bytes as string(raw.length)
     if kind == ffi.TITAN_BROWSER_STRING then
       return BrowserValue.is_string(bytes)
     end
@@ -546,7 +546,7 @@ local function decode_value(raw: foreign const *titan_browser_value,
     if raw.state ~= state or raw.slot == 0 or raw.generation == 0 then
       raise "browser callable belongs to another or retired state"
     end
-    local pin? = pins_by_slot[raw.slot]
+    const pin? = pins_by_slot[raw.slot]
     if pin == nil or pin.generation ~= raw.generation then
       raise "browser callable is released"
     end
@@ -562,11 +562,11 @@ local function error_message(err: value): string
   do
     -- The converter consumes an indexed Lua value, not a C/Titan parameter.
     -- Its result enters this traced local before the saved top is restored.
-    local top = ffi.lua_gettop(L)
+    const top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
     if ffi.lua_checkstack(L, 4) == 0 then raise "cannot reserve browser error stack" end
     ffi.lua_pushtvalue(L, err)
-    local result: value = ffi.titan_entry_error_message(L, top + 1)
+    const result: value = ffi.titan_entry_error_message(L, top + 1)
     ffi.titan_unwind_clear_trace(L)
     return result
   catch
@@ -579,7 +579,7 @@ local function complete_titan_failure(operation_id: foreign uint64_t,
                                       err: value,
                                       trace: string,
                                       queued: boolean)
-  local message = error_message(err)
+  const message = error_message(err)
   local completion = foreign titan_browser_completion.new()
   completion.operation_id = operation_id
   completion.operation = operation
@@ -606,73 +606,71 @@ local function invoke_work(
     argc: foreign uint32_t,
     args: foreign const *titan_browser_value,
     queued: boolean)
-  do
-    local pin? = pins_by_slot[slot]
-    if pin == nil or pin.generation ~= generation then
-      raise "browser callable is released"
-    end
-    local count: integer = argc
-    local decoded: {BrowserValue} = {}
-    for index = 0, count - 1 do
-      decoded[index + 1] = decode_value(args + index, state)
-    end
-    for index = 0, count - 1 do
-      local item = args + index
-      if (item.kind == ffi.TITAN_BROWSER_HANDLE or
-          item.kind == ffi.TITAN_BROWSER_CALLABLE) and
-         ffi.titan_browser_host_identity_live(
-             item.state, item.slot, item.generation, item.kind) == 0 then
-        raise "browser identity is released or belongs to a closed state"
-      end
-    end
-    local result = pin.callback(...decoded)
-    local encoded = foreign titan_browser_value.new()
-    encode_value(result, state, encoded, invoke_provisioned, invoke_provisional_item)
-    -- Observe any close/GC triggered before completion (e.g. identity_gc).
-    current_state()
-    if (encoded.kind == ffi.TITAN_BROWSER_HANDLE or
-        encoded.kind == ffi.TITAN_BROWSER_CALLABLE) and
+  const pin? = pins_by_slot[slot]
+  if pin == nil or pin.generation ~= generation then
+    raise "browser callable is released"
+  end
+  const count: integer = argc
+  const decoded: {BrowserValue} = {}
+  for index = 0, count - 1 do
+    decoded[index + 1] = decode_value(args + index, state)
+  end
+  for index = 0, count - 1 do
+    const item = args + index
+    if (item.kind == ffi.TITAN_BROWSER_HANDLE or
+        item.kind == ffi.TITAN_BROWSER_CALLABLE) and
        ffi.titan_browser_host_identity_live(
-           encoded.state, encoded.slot, encoded.generation, encoded.kind) == 0 then
+           item.state, item.slot, item.generation, item.kind) == 0 then
       raise "browser identity is released or belongs to a closed state"
     end
-    local completion = foreign titan_browser_completion.new()
-    completion.operation_id = operation_id
-    completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
-    completion.result_count = 1
-    completion.results = encoded
-    ffi.fflush(ffi.stdout)
-    ffi.fflush(ffi.stderr)
-    if queued then
-      ffi.titan_browser_host_settle(completion)
-    else
-      ffi.titan_browser_complete(completion)
-    end
+  end
+  const result = pin.callback(...decoded)
+  local encoded = foreign titan_browser_value.new()
+  encode_value(result, state, encoded, invoke_provisioned, invoke_provisional_item)
+  -- Observe any close/GC triggered before completion (e.g. identity_gc).
+  current_state()
+  if (encoded.kind == ffi.TITAN_BROWSER_HANDLE or
+      encoded.kind == ffi.TITAN_BROWSER_CALLABLE) and
+     ffi.titan_browser_host_identity_live(
+         encoded.state, encoded.slot, encoded.generation, encoded.kind) == 0 then
+    raise "browser identity is released or belongs to a closed state"
+  end
+  local completion = foreign titan_browser_completion.new()
+  completion.operation_id = operation_id
+  completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
+  completion.result_count = 1
+  completion.results = encoded
+  ffi.fflush(ffi.stdout)
+  ffi.fflush(ffi.stderr)
+  if queued then
+    ffi.titan_browser_host_settle(completion)
+  else
+    ffi.titan_browser_complete(completion)
+  end
+  invoke_provisional_item.pin = nil
+  invoke_provisioned[1] = nil
+catch
+  const trace = traceback
+  -- Stay helper-free and non-raising so rollback finishes before error reporting.
+  const prov_pin? = invoke_provisional_item.pin
+  if prov_pin ~= nil then
     invoke_provisional_item.pin = nil
     invoke_provisioned[1] = nil
-  catch
-    local trace = traceback
-    -- Stay helper-free and non-raising so rollback finishes before error reporting.
-    local prov_pin? = invoke_provisional_item.pin
-    if prov_pin ~= nil then
-      invoke_provisional_item.pin = nil
-      invoke_provisioned[1] = nil
-      if ffi.titan_browser_host_callable_closed(
-             state, prov_pin.slot, prov_pin.generation) ~= 0 then
-        prov_pin.wrapper_live = false
-      end
-      if not prov_pin.wrapper_live and prov_pin.holds <= 0 then
-        if pins_by_slot[prov_pin.slot] == prov_pin then
-          pins_by_slot[prov_pin.slot] = nil
-          pins_by_fn[prov_pin.callback] = nil
-          free_slots[#free_slots + 1] = prov_pin.slot
-        end
+    if ffi.titan_browser_host_callable_closed(
+           state, prov_pin.slot, prov_pin.generation) ~= 0 then
+      prov_pin.wrapper_live = false
+    end
+    if not prov_pin.wrapper_live and prov_pin.holds <= 0 then
+      if pins_by_slot[prov_pin.slot] == prov_pin then
+        pins_by_slot[prov_pin.slot] = nil
+        pins_by_fn[prov_pin.callback] = nil
+        free_slots[#free_slots + 1] = prov_pin.slot
       end
     end
-    complete_titan_failure(
-        operation_id, ffi.TITAN_BROWSER_INVOKE as foreign uint32_t,
-        error, trace, queued)
   end
+  complete_titan_failure(
+      operation_id, ffi.TITAN_BROWSER_INVOKE as foreign uint32_t,
+      error, trace, queued)
 end
 
 local function invoke_entry(
@@ -685,9 +683,9 @@ local function invoke_entry(
   invoke_work(operation_id, state, slot, generation, argc, args, false)
 catch
   -- No allocating Titan helper entry may run outside this catch boundary.
-  local trace = traceback
-  local message = fallback_message
-  local completion: foreign *titan_browser_completion = fallback_completion
+  const trace = traceback
+  const message = fallback_message
+  const completion: foreign *titan_browser_completion = fallback_completion
   completion.operation_id = operation_id
   completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
   completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
@@ -707,7 +705,7 @@ end
 -- holds it. It allocates nothing (allocate_pin reserved free_slots' capacity)
 -- and inlines Pin:retire_if_unused, so no helper entry can raise half way.
 local function apply_release(slot: foreign uint32_t, generation: foreign uint32_t)
-  local pin? = pins_by_slot[slot]
+  const pin? = pins_by_slot[slot]
   if pin ~= nil and pin.generation == generation then
     pin.wrapper_live = false
     if pin.holds <= 0 then
@@ -832,7 +830,7 @@ end
 
 --- Look up an explicitly supplied create({bindings}) name, never a global or eval expression.
 function binding(name: string): BrowserHandle
-  local state = current_state()
+  const state = current_state()
   local response = foreign titan_browser_response.new()
   defer response_dispose(response)
   ffi.titan_browser_host_binding(
@@ -843,18 +841,18 @@ end
 
 --- Call a JavaScript binding and marshal its single result by runtime type.
 function BrowserHandle:call(...: BrowserValue): BrowserValue
-  local state = self:checked_state()
-  local count = #...
+  const state = self:checked_state()
+  const count = #...
   local small = foreign titan_browser_value.new_array(8)
   local slots: foreign *titan_browser_value = small
   local extra: (owned titan_browser_value[])?
   if count > 8 then
-    local buffer: owned titan_browser_value[] =
+    const buffer: owned titan_browser_value[] =
         foreign titan_browser_value.new_array(count)
     extra = buffer
     slots = buffer
   end
-  local provisioned: {ProvisionalPin} = {}
+  const provisioned: {ProvisionalPin} = {}
   do
     for index = 1, count do
       encode_value(...[index], state, slots + (index - 1), provisioned, nil)
@@ -871,7 +869,7 @@ function BrowserHandle:call(...: BrowserValue): BrowserValue
     rollback_provisioned(state, provisioned)
     check_response(response)
   end
-  local result = decode_value(response.value, state)
+  const result = decode_value(response.value, state)
   if response.value.kind == ffi.TITAN_BROWSER_HANDLE then
     response.value.slot = 0
   end
@@ -893,23 +891,23 @@ local function BrowserHandle:request(
     completion: Callable,
     failure: Callable,
     ...: BrowserValue): BrowserRequest
-  local state = self:checked_state()
+  const state = self:checked_state()
   if state_closing() then raise "browser state is closing" end
-  local holds = RequestHolds { completion = nil, failure = nil }
-  local owner = BrowserRequest {
+  const holds = RequestHolds { completion = nil, failure = nil }
+  const owner = BrowserRequest {
     state = state, slot = 0, generation = 0, holds = holds,
   }
-  local count = #...
+  const count = #...
   local small = foreign titan_browser_value.new_array(8)
   local slots: foreign *titan_browser_value = small
   local extra: (owned titan_browser_value[])?
   if count > 8 then
-    local buffer: owned titan_browser_value[] =
+    const buffer: owned titan_browser_value[] =
         foreign titan_browser_value.new_array(count)
     extra = buffer
     slots = buffer
   end
-  local provisioned: {ProvisionalPin} = {}
+  const provisioned: {ProvisionalPin} = {}
   local completion_pin: Pin?
   local failure_pin: Pin?
   do
@@ -1022,7 +1020,7 @@ function drive_end(exit_code: integer?)
     status = exit_code & 0xffffffff
     if status > 0x7fffffff then status = status - 0x100000000 end
   end
-  local token = state_record.token
+  const token = state_record.token
   if token ~= 0 then
     ffi.titan_browser_host_drive_end(token, status, exit_code ~= nil and 1 or 0)
   end
@@ -1032,7 +1030,7 @@ end
 -- @usage standard-library-browser.md#driver-interface-low-level
 function main_failed(message: string, trace: string)
   if not owner_state then raise "browser main_failed requires the instance owner state" end
-  local token = state_record.token
+  const token = state_record.token
   if token ~= 0 then
     ffi.titan_browser_host_main_failed(token, message, #message, trace, #trace)
   end
@@ -1060,9 +1058,9 @@ end
 -- event. A one-shot can deliver nothing more, so its holds drop. A listener's
 -- pin names no RequestHolds, so its holds stay.
 local function drop_undelivered(slot: foreign uint32_t, generation: foreign uint32_t)
-  local pin? = pins_by_slot[slot]
+  const pin? = pins_by_slot[slot]
   if pin ~= nil and pin.generation == generation then
-    local request? = pin.request
+    const request? = pin.request
     if request ~= nil then request:drop() end
   end
 end
@@ -1071,27 +1069,25 @@ end
 -- @usage standard-library-browser.md#driver-interface-low-level
 function deliver()
   require_drive("browser delivery requires the driving owner's main thread outside delivery")
-  local token = state_record.token
+  const token = state_record.token
   delivering = true
   defer delivering = false
   local item = foreign titan_browser_delivery.new()
-  local count: integer = ffi.titan_browser_host_batch(token)
+  const count: integer = ffi.titan_browser_host_batch(token)
   for _ = 1, count do
     if ffi.titan_browser_host_item(token, item) == 0 then break end
     if item.kind == ffi.TITAN_BROWSER_DELIVER_UNDELIVERED then
-      do
-        drop_undelivered(item.slot, item.generation)
-      catch
-        -- No callback ran and there is no settlement or item_done.
-      end
+      drop_undelivered(item.slot, item.generation)
+    catch
+      -- No callback ran and there is no settlement or item_done.
     else
       do
         invoke_work(item.id, token, item.slot, item.generation, item.argc, item.args, true)
       catch
         -- No allocating Titan helper entry may run outside this catch boundary.
-        local trace = traceback
-        local message = fallback_message
-        local completion: foreign *titan_browser_completion = fallback_completion
+        const trace = traceback
+        const message = fallback_message
+        const completion: foreign *titan_browser_completion = fallback_completion
         completion.operation_id = item.id
         completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
         completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
@@ -1114,12 +1110,12 @@ end
 --- Wake a relinquished drive of this instance; harmless from any state, thread or delivery.
 -- @usage standard-library-browser.md#driver-interface-low-level
 function wake()
-  local token = state_record.token
+  const token = state_record.token
   if token ~= 0 then ffi.titan_browser_host_wake(token) end
 end
 
 local function pin_finalize(candidate: value)
-  local self: BrowserPin = candidate
+  const self: BrowserPin = candidate
   self:close()
 end
 
@@ -1127,11 +1123,11 @@ end
 -- @usage standard-library-browser.md#synchronous-c-callbacks
 function pin(callback: Callable): BrowserPin
   if state_closing() then raise "browser state is closing" end
-  local state = current_state()
-  local owner = BrowserPin { state = state, slot = 0, generation = 0 }
+  const state = current_state()
+  const owner = BrowserPin { state = state, slot = 0, generation = 0 }
   gc.finalizable<|value|>(owner, pin_finalize)
-  local existing? = pins_by_fn[callback]
-  local entry = existing or allocate_pin(callback)
+  const existing? = pins_by_fn[callback]
+  const entry = existing or allocate_pin(callback)
   entry.holds = entry.holds + 1
   owner.slot = entry.slot
   owner.generation = entry.generation
@@ -1148,10 +1144,10 @@ end
 --- Drop the hold; unregister the C callback first. Closing again does nothing.
 -- @usage standard-library-browser.md#synchronous-c-callbacks
 function BrowserPin:close()
-  local slot = self.slot
+  const slot = self.slot
   if slot == 0 then return end
   self.slot = 0
-  local entry? = pins_by_slot[slot]
+  const entry? = pins_by_slot[slot]
   if entry ~= nil and entry.generation == self.generation then
     if entry.holds > 0 then entry.holds = entry.holds - 1 end
     entry:retire_if_unused()
@@ -1163,14 +1159,14 @@ end
 -- Audited stack transaction: makes the next nesting level's callback thread,
 -- once per depth, and publishes it for a nested callback.
 local function prepare_callback_thread()
-  local current: foreign *titan_browser_state_record = state_record
-  local depth: integer = current.callback_depth
+  const current: foreign *titan_browser_state_record = state_record
+  const depth: integer = current.callback_depth
   local level? = callback_threads[depth + 1]
   if level == nil then
-    local top = ffi.lua_gettop(L)
+    const top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
     if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve a browser callback thread" end
-    local thread = ffi.titan_newthread(L)
+    const thread = ffi.titan_newthread(L)
     level = CallbackThread { thread = ffi.lua_totvalue(L, -1), L = thread }
     callback_threads[depth + 1] = level
   end
@@ -1181,7 +1177,7 @@ end
 -- text is empty or malloc fails.
 local function malloc_copy(text: string): foreign *unsigned char
   if #text == 0 then return nil end
-  local buffer = ffi.malloc(#text) as foreign *unsigned char
+  const buffer = ffi.malloc(#text) as foreign *unsigned char
   if buffer ~= nil then ffi.memcpy(buffer, text, #text) end
   return buffer
 end
@@ -1200,10 +1196,10 @@ local function encode_sync_result(item: BrowserValue, state: foreign uint32_t,
          encoded.state, encoded.slot, encoded.generation, encoded.kind) == 0 then
     raise "browser identity is released or belongs to a closed state"
   end
-  local length: integer = encoded.length
+  const length: integer = encoded.length
   if (encoded.kind == ffi.TITAN_BROWSER_STRING or encoded.kind == ffi.TITAN_BROWSER_BYTES) and
      length > 0 then
-    local bytes = ffi.malloc(length) as foreign *unsigned char
+    const bytes = ffi.malloc(length) as foreign *unsigned char
     if bytes == nil then return false end
     ffi.memcpy(bytes, encoded.bytes, length)
     result.value.bytes = bytes
@@ -1235,23 +1231,23 @@ local function call_sync_work(identity: foreign const *titan_browser_identity,
                               argc: foreign uint32_t,
                               args: foreign const *titan_browser_value,
                               result: foreign *titan_browser_sync_result)
-  local state = identity.state
+  const state = identity.state
   -- The handler rolls back `provisioned`, so it lives outside the protected
   -- block: a body and its catch are sibling scopes.
-  local provisioned: {ProvisionalPin} = {}
+  const provisioned: {ProvisionalPin} = {}
   do
-    local pin? = pins_by_slot[identity.slot]
+    const pin? = pins_by_slot[identity.slot]
     if pin == nil or pin.generation ~= identity.generation then
       raise "browser callable is released"
     end
-    local count: integer = argc
+    const count: integer = argc
     if count > 0 and args == nil then raise "browser callback arguments have no storage" end
-    local decoded: {BrowserValue} = {}
+    const decoded: {BrowserValue} = {}
     for index = 0, count - 1 do
       decoded[index + 1] = decode_value(args + index, state, true)
     end
     for index = 0, count - 1 do
-      local item = args + index
+      const item = args + index
       if (item.kind == ffi.TITAN_BROWSER_HANDLE or
           item.kind == ffi.TITAN_BROWSER_CALLABLE) and
          ffi.titan_browser_host_identity_live(
@@ -1259,8 +1255,8 @@ local function call_sync_work(identity: foreign const *titan_browser_identity,
         raise "browser identity is released or belongs to a closed state"
       end
     end
-    local value = pin.callback(...decoded)
-    local copied = encode_sync_result(value, state, result, provisioned)
+    const value = pin.callback(...decoded)
+    const copied = encode_sync_result(value, state, result, provisioned)
     -- No JavaScript wrapper will hold a returned callable: C's copy stays
     -- valid only while a BrowserPin or a live wrapper holds the function.
     rollback_provisioned(state, provisioned)
@@ -1270,12 +1266,12 @@ local function call_sync_work(identity: foreign const *titan_browser_identity,
       result.status = ffi.TITAN_BROWSER_MEMORY as foreign uint32_t
     end
   catch
-    local trace = traceback
+    const trace = traceback
     rollback_provisioned(state, provisioned)
     clear_sync_value(result)
     -- Both copies or MEMORY: never an error with its data missing.
-    local message = error_message(error)
-    local message_copy = malloc_copy(message)
+    const message = error_message(error)
+    const message_copy = malloc_copy(message)
     local trace_copy: foreign *unsigned char = nil
     if #message == 0 or message_copy ~= nil then trace_copy = malloc_copy(trace) end
     if (#message > 0 and message_copy == nil) or (#trace > 0 and trace_copy == nil) then
@@ -1492,7 +1488,7 @@ foreign function callback_leave(raw_frame: *void)
 end
 
 do
-  local current = state_record
+  const current = state_record
   gc.finalizable<|value|>(current, state_finalize)
   current.L = ffi.lmacro_mainthread(L)
   -- Clear the reservation sentinels without shrinking rollback storage.
@@ -1500,15 +1496,15 @@ do
     free_slots[index] = nil
   end
   invoke_provisioned[1] = nil
-  local inv = invoke_entry
-  local rel = release_entry
+  const inv = invoke_entry
+  const rel = release_entry
   invoke_handler = inv
   release_handler = rel
   current.invoke_handler = inv
   current.release_handler = rel
   current.fallback = fallback_completion
-  local sync = call_sync_entry
-  local bracket = callback_entry
+  const sync = call_sync_entry
+  const bracket = callback_entry
   call_sync_handler = sync
   callback_handler = bracket
   current.call_sync_handler = sync
@@ -1516,7 +1512,7 @@ do
   current.callback_depth = 0
   prepare_callback_thread()
   current.configured = 1
-  local token = ffi.titan_browser_host_state_open(current)
+  const token = ffi.titan_browser_host_state_open(current)
   if token == 0 then raise "browser state identity exhausted" end
   current.token = token
   -- Only the launcher's owner state drives; a C-created state never does.

@@ -42,7 +42,7 @@ local function function_type(candidate: value): reflect.FunctionType
 end
 
 local function required_record(name: string): reflect.RecordType
-  local found: reflect.NominalType? = reflect.find_nominal(name)
+  const found: reflect.NominalType? = reflect.find_nominal(name)
   test.assert(found ~= nil, "record should be registered: " .. name)
   case found as reflect.NominalType
   when is_record(rec) then return rec
@@ -51,7 +51,7 @@ local function required_record(name: string): reflect.RecordType
 end
 
 local function required_union(name: string): reflect.UnionType
-  local found: reflect.NominalType? = reflect.find_nominal(name)
+  const found: reflect.NominalType? = reflect.find_nominal(name)
   test.assert(found ~= nil, "union should be registered: " .. name)
   case found as reflect.NominalType
   when is_union(un) then return un
@@ -60,7 +60,7 @@ local function required_union(name: string): reflect.UnionType
 end
 
 local function required_interface(name: string): reflect.InterfaceType
-  local found: reflect.NominalType? = reflect.find_nominal(name)
+  const found: reflect.NominalType? = reflect.find_nominal(name)
   test.assert(found ~= nil, "interface should be registered: " .. name)
   case found as reflect.NominalType
   when is_interface(iface) then return iface
@@ -135,7 +135,7 @@ function GreeterImpl:greet(): string
 end
 
 function test_inspect_primitives(_context: test.Context)
-  local v_nil = reflect.inspect(nil)
+  const v_nil = reflect.inspect(nil)
   case v_nil
   when is_nil() then
     test.assert(true)
@@ -143,7 +143,7 @@ function test_inspect_primitives(_context: test.Context)
     test.assert(false, "expected is_nil")
   end
 
-  local v_true = reflect.inspect(true)
+  const v_true = reflect.inspect(true)
   case v_true
   when is_boolean(b) then
     test.assert(b == true)
@@ -151,7 +151,7 @@ function test_inspect_primitives(_context: test.Context)
     test.assert(false, "expected is_boolean")
   end
 
-  local v_false = reflect.inspect(false)
+  const v_false = reflect.inspect(false)
   case v_false
   when is_boolean(b) then
     test.assert(b == false)
@@ -159,7 +159,7 @@ function test_inspect_primitives(_context: test.Context)
     test.assert(false, "expected is_boolean")
   end
 
-  local v_int = reflect.inspect(42)
+  const v_int = reflect.inspect(42)
   case v_int
   when is_integer(n) then
     test.assert(n == 42)
@@ -167,7 +167,7 @@ function test_inspect_primitives(_context: test.Context)
     test.assert(false, "expected is_integer")
   end
 
-  local v_neg = reflect.inspect(-100)
+  const v_neg = reflect.inspect(-100)
   case v_neg
   when is_integer(n) then
     test.assert(n == -100)
@@ -175,7 +175,7 @@ function test_inspect_primitives(_context: test.Context)
     test.assert(false, "expected is_integer")
   end
 
-  local v_float = reflect.inspect(3.14)
+  const v_float = reflect.inspect(3.14)
   case v_float
   when is_float(f) then
     test.assert(f == 3.14)
@@ -183,7 +183,7 @@ function test_inspect_primitives(_context: test.Context)
     test.assert(false, "expected is_float")
   end
 
-  local v_str = reflect.inspect("hello world")
+  const v_str = reflect.inspect("hello world")
   case v_str
   when is_string(s) then
     test.assert(s == "hello world")
@@ -193,11 +193,11 @@ function test_inspect_primitives(_context: test.Context)
 end
 
 function test_inspect_arrays(_context: test.Context)
-  local arr: {integer} = {10, 20, 30}
-  local v = reflect.inspect(arr)
+  const arr: {integer} = {10, 20, 30}
+  const v = reflect.inspect(arr)
   case v
   when is_array{av_value = value} then
-    local elements = av_value
+    const elements = av_value
     test.assert(#elements == 3)
     test.assert(elements[1] as integer == 10)
     test.assert(elements[2] as integer == 20)
@@ -208,11 +208,11 @@ function test_inspect_arrays(_context: test.Context)
 end
 
 function test_inspect_maps(_context: test.Context)
-  local m: {string: integer} = { ["alpha"] = 1, ["beta"] = 2 }
-  local v = reflect.inspect(m)
+  const m: {string: integer} = { ["alpha"] = 1, ["beta"] = 2 }
+  const v = reflect.inspect(m)
   case v
   when is_map{mv_value = value} then
-    local map_val = mv_value
+    const map_val = mv_value
     test.assert(map_val["alpha"] as integer == 1)
     test.assert(map_val["beta"] as integer == 2)
   else
@@ -221,8 +221,8 @@ function test_inspect_maps(_context: test.Context)
 end
 
 function test_inspect_records(_context: test.Context)
-  local r: SimpleRecord = { x = 10, y = 20 }
-  local v = reflect.inspect(r)
+  const r: SimpleRecord = { x = 10, y = 20 }
+  const v = reflect.inspect(r)
   case v
   when is_record(rv) then
     test.assert(rv.n_fields == 2)
@@ -264,8 +264,8 @@ end
 
 
 function test_inspect_record_const_and_barrier(_context: test.Context)
-  local p: PersonRecord = { id = 7, name = "initial", items = {"item1"} }
-  local v = reflect.inspect(p)
+  const p: PersonRecord = { id = 7, name = "initial", items = {"item1"} }
+  const v = reflect.inspect(p)
   case v
   when is_record(rv) then
     test.assert(rv.n_fields == 3)
@@ -282,7 +282,7 @@ function test_inspect_record_const_and_barrier(_context: test.Context)
     test.assert(had_const_err, "setting const field should error")
 
     -- Setting mutable field and verifying GC write barrier
-    local new_str = "allocated_" .. "string_value"
+    const new_str = "allocated_" .. "string_value"
     rv:set(2, new_str)
     gc.collect()
     test.assert(rv:get(2) as string == "allocated_string_value")
@@ -293,8 +293,8 @@ function test_inspect_record_const_and_barrier(_context: test.Context)
 end
 
 function test_inspect_unions(_context: test.Context)
-  local c = TestShape.circle(42)
-  local v = reflect.inspect(c)
+  const c = TestShape.circle(42)
+  const v = reflect.inspect(c)
   case v
   when is_union(uv) then
     test.assert(uv.tag == 0)
@@ -305,8 +305,8 @@ function test_inspect_unions(_context: test.Context)
     test.assert(false, "expected is_union")
   end
 
-  local e = TestShape.empty()
-  local ve = reflect.inspect(e)
+  const e = TestShape.empty()
+  const ve = reflect.inspect(e)
   case ve
   when is_union(uve) then
     test.assert(uve.tag == 2)
@@ -319,9 +319,9 @@ function test_inspect_unions(_context: test.Context)
 end
 
 function test_inspect_interfaces(_context: test.Context)
-  local impl: GreeterImpl = { prefix = "hello" }
-  local g: Greeter = impl
-  local v = reflect.inspect(g)
+  const impl: GreeterImpl = { prefix = "hello" }
+  const g: Greeter = impl
+  const v = reflect.inspect(g)
   case v
   when is_interface(iv) then
     test.assert(iv.type.name ~= "")
@@ -341,7 +341,7 @@ function test_inspect_interfaces(_context: test.Context)
 end
 
 function test_inspect_functions(_context: test.Context)
-  local v = reflect.inspect(test_inspect_primitives)
+  const v = reflect.inspect(test_inspect_primitives)
   case v
   when is_titan_function{tf_native_entry = native_entry, tf_lua_entry = lua_entry, tf_type = type} then
     test.assert(tf_native_entry ~= nil)
@@ -353,20 +353,20 @@ function test_inspect_functions(_context: test.Context)
 end
 
 function test_nominal_descriptors(_context: test.Context)
-  local rt = required_record("reflect.tests.SimpleRecord")
+  const rt = required_record("reflect.tests.SimpleRecord")
   test.assert(rt.name == "reflect.tests.SimpleRecord")
   test.assert(#rt.fields == 2)
   test.assert(rt.fields[1].name == "x")
   test.assert(rt.fields[2].name == "y")
   assert_integer_type(rt.fields[1].type)
 
-  local ut = required_union("reflect.tests.TestShape")
+  const ut = required_union("reflect.tests.TestShape")
   test.assert(ut.name == "reflect.tests.TestShape")
   test.assert(#ut.variants == 3)
   test.assert(ut.variants[1].name == "circle")
   test.assert(#ut.variants[3].parts == 0)
 
-  local ift = required_interface("reflect.tests.Greeter")
+  const ift = required_interface("reflect.tests.Greeter")
   test.assert(ift.name == "reflect.tests.Greeter")
   test.assert(#ift.fields == 1)
   test.assert(#ift.methods == 1)
@@ -382,8 +382,8 @@ function test_nominal_descriptors(_context: test.Context)
 end
 
 function test_named_type_resolve(_context: test.Context)
-  local ut = required_union("reflect.tests.TestShape")
-  local payload = ut.variants[2].parts[1].type as reflect.Type
+  const ut = required_union("reflect.tests.TestShape")
+  const payload = ut.variants[2].parts[1].type as reflect.Type
   case payload
   when is_named(named) then
     test.assert(named.name == "reflect.tests.SimpleRecord")
@@ -398,13 +398,13 @@ function test_named_type_resolve(_context: test.Context)
   when is_record(resolved) then test.assert(#resolved.fields == 2)
   else raise "Type:resolve should follow a named descriptor"
   end
-  local primitive = reflect.Type.is_integer()
+  const primitive = reflect.Type.is_integer()
   test.assert(primitive:resolve() == primitive)
 end
 
 function test_named_type_resolve_unknown(_context: test.Context)
-  local unk_named = reflect.NamedType.new("nonexistent.Nominal")
-  local unk_res = unk_named:resolve()
+  const unk_named = reflect.NamedType("nonexistent.Nominal")
+  const unk_res = unk_named:resolve()
   case unk_res
   when is_value() then
     test.assert(true)
@@ -430,18 +430,18 @@ end
 -- contract), so repeated resolutions are checked by what they describe.
 function test_named_type_resolve_repeats_registered_resolutions(_context: test.Context)
   for round = 1, 3 do
-    local record_type = reflect.NamedType("reflect.tests.SimpleRecord"):resolve()
+    const record_type = reflect.NamedType("reflect.tests.SimpleRecord"):resolve()
     test.assert(describe_resolved(record_type) == "record reflect.tests.SimpleRecord/2",
                 "record resolution changed in round " .. round)
-    local union_type =
+    const union_type =
       reflect.Type.is_named(reflect.NamedType("reflect.tests.TestShape")):resolve()
     test.assert(describe_resolved(union_type) == "union reflect.tests.TestShape/3",
                 "union resolution changed in round " .. round)
-    local interface_type = reflect.NamedType.new("reflect.tests.Greeter"):resolve()
+    const interface_type = reflect.NamedType("reflect.tests.Greeter"):resolve()
     test.assert(describe_resolved(interface_type) == "interface reflect.tests.Greeter/1",
                 "interface resolution changed in round " .. round)
     -- Unknown names are never cached; each lookup consults the registry again.
-    local missing = reflect.NamedType("nonexistent.CachedNominal"):resolve()
+    const missing = reflect.NamedType("nonexistent.CachedNominal"):resolve()
     test.assert(describe_resolved(missing) == "value",
                 "unknown name resolution changed in round " .. round)
   end
@@ -449,9 +449,9 @@ function test_named_type_resolve_repeats_registered_resolutions(_context: test.C
 end
 
 record AccessRecord
-  local hidden_first: string
+  local const hidden_first: string
   number: integer
-  local hidden_middle: integer
+  local const hidden_middle: integer
   const fixed: integer
   items: {integer}
   frozen: const {integer}
@@ -465,9 +465,9 @@ end
 local function plus_one(n: integer): integer return n + 1 end
 
 local function access_record(): AccessRecord
-  local immutable: {integer} = {7, 8}
-  local impl: GreeterImpl = {prefix = "fixture"}
-  local iface: Greeter = impl
+  const immutable: {integer} = {7, 8}
+  const impl: GreeterImpl = {prefix = "fixture"}
+  const iface: Greeter = impl
   return {
     hidden_first = "private", number = 11, hidden_middle = 99, fixed = 12,
     items = {1, 2}, frozen = immutable as const {integer}, optional = false,
@@ -477,8 +477,8 @@ local function access_record(): AccessRecord
 end
 
 function test_record_field_casts_and_private_gaps(_context: test.Context)
-  local candidate = access_record()
-  local rv = record_value(candidate)
+  const candidate = access_record()
+  const rv = record_value(candidate)
   test.assert(rv.n_fields == 9)
   test.assert(rv.type.fields[1].name == "number")
   test.assert(rv.type.fields[1].index == 1)
@@ -506,7 +506,7 @@ function test_record_field_casts_and_private_gaps(_context: test.Context)
   test.assert(candidate.number == 45)
   test.assert(candidate.fixed == 12)
 
-  local optional = field_index(rv.type, "optional")
+  const optional = field_index(rv.type, "optional")
   test.assert(rv:get(optional) == false)
   rv:set(optional, nil)
   test.assert(candidate.optional == nil)
@@ -519,16 +519,16 @@ function test_record_field_casts_and_private_gaps(_context: test.Context)
 end
 
 function test_record_container_and_nominal_accessors(_context: test.Context)
-  local candidate = access_record()
-  local rv = record_value(candidate)
-  local items = field_index(rv.type, "items")
-  local frozen = field_index(rv.type, "frozen")
+  const candidate = access_record()
+  const rv = record_value(candidate)
+  const items = field_index(rv.type, "items")
+  const frozen = field_index(rv.type, "frozen")
   test.assert(rv:get(items) == candidate.items as value)
   test.assert(rv:get(frozen) == candidate.frozen as value)
-  local replacement: {integer} = {10, 20, 30}
+  const replacement: {integer} = {10, 20, 30}
   rv:set(items, replacement)
   test.assert(candidate.items == replacement)
-  local roundtrip = rv:get(items) as {integer}
+  const roundtrip = rv:get(items) as {integer}
   roundtrip[2] = 70
   test.assert(candidate.items[2] == 70)
   expect_failure(function() rv:set(items, candidate.frozen) end)
@@ -536,8 +536,8 @@ function test_record_container_and_nominal_accessors(_context: test.Context)
   expect_failure(function() rv:set(items, "not an Array") end)
   test.assert(candidate.items == replacement)
 
-  local child = field_index(rv.type, "child")
-  local point: SimpleRecord = {x = 6, y = 9}
+  const child = field_index(rv.type, "child")
+  const point: SimpleRecord = {x = 6, y = 9}
   rv:set(child, point)
   test.assert(rv:get(child) == point as value)
   test.assert(candidate.child == point)
@@ -546,25 +546,25 @@ function test_record_container_and_nominal_accessors(_context: test.Context)
   rv:set(child, nil)
   test.assert(candidate.child == nil)
 
-  local choice = field_index(rv.type, "choice")
-  local shape = TestShape.circle(31)
+  const choice = field_index(rv.type, "choice")
+  const shape = TestShape.circle(31)
   rv:set(choice, shape)
   test.assert(rv:get(choice) == shape as value)
   expect_failure(function() rv:set(choice, point) end)
   test.assert(candidate.choice == shape)
 
-  local greeter = field_index(rv.type, "greeter")
-  local impl: GreeterImpl = {prefix = "new"}
-  local iface: Greeter = impl
+  const greeter = field_index(rv.type, "greeter")
+  const impl: GreeterImpl = {prefix = "new"}
+  const iface: Greeter = impl
   rv:set(greeter, iface)
   test.assert(rv:get(greeter) == iface as value)
   test.assert(candidate.greeter:greet() == "new world")
   expect_failure(function() rv:set(greeter, point) end)
 
-  local callback = field_index(rv.type, "callback")
-  local from_field = rv:get(callback) as function (integer): (integer)
+  const callback = field_index(rv.type, "callback")
+  const from_field = rv:get(callback) as function (integer): (integer)
   test.assert(from_field(4) == 5)
-  local double = function(n: integer): integer return n * 2 end
+  const double = function(n: integer): integer return n * 2 end
   rv:set(callback, double)
   test.assert(candidate.callback(4) == 8)
   -- Dynamic function conversion stores the value and defers callability.
@@ -576,27 +576,27 @@ function test_record_container_and_nominal_accessors(_context: test.Context)
 end
 
 local function retained_record_view(): reflect.RecordValue
-  local candidate = access_record()
+  const candidate = access_record()
   return record_value(candidate)
 end
 
 local function store_fresh_values(rv: reflect.RecordValue, child: integer,
                                   items: integer, i: integer)
-  local point: SimpleRecord = {x = i, y = i + 1}
-  local numbers: {integer} = {i, i + 2}
+  const point: SimpleRecord = {x = i, y = i + 1}
+  const numbers: {integer} = {i, i + 2}
   rv:set(child, point)
   rv:set(items, numbers)
 end
 
 function test_record_accessors_keep_owner_and_new_values_alive(_context: test.Context)
-  local was_generational = gc.generational()
+  const was_generational = gc.generational()
   defer do
     if not was_generational then gc.incremental() end
   end
-  local rv = retained_record_view()
+  const rv = retained_record_view()
   gc.collect()
-  local child = field_index(rv.type, "child")
-  local items = field_index(rv.type, "items")
+  const child = field_index(rv.type, "child")
+  const items = field_index(rv.type, "items")
   for i = 1, 32 do
     -- The helper frame is gone before collection; only the old record keeps
     -- either newly allocated payload alive.
@@ -604,9 +604,9 @@ function test_record_accessors_keep_owner_and_new_values_alive(_context: test.Co
     gc.step(1)
   end
   gc.collect()
-  local point = rv:get(child) as SimpleRecord
+  const point = rv:get(child) as SimpleRecord
   test.assert(point.x == 32 and point.y == 33)
-  local restored = rv:get(items) as {integer}
+  const restored = rv:get(items) as {integer}
   test.assert(restored[1] == 32 and restored[2] == 34)
 end
 
@@ -624,14 +624,14 @@ function SnapshotImpl:zeta(n: integer): integer return self.values[1] + n end
 function SnapshotImpl:alpha(): integer return #self.values end
 
 function test_interface_field_boxing_and_ordered_methods(_context: test.Context)
-  local values: {integer} = {3, 4}
-  local candidate: SnapshotImpl = {values = values}
-  local iface: ArraySnapshot = candidate
-  local iv = interface_value(iface)
+  const values: {integer} = {3, 4}
+  const candidate: SnapshotImpl = {values = values}
+  const iface: ArraySnapshot = candidate
+  const iv = interface_value(iface)
   test.assert(iv.value == iface as value)
   test.assert(iv.wrapped == candidate as value)
   test.assert(iv:get(1) == values as value)
-  local array = iv:get(1) as {integer}
+  const array = iv:get(1) as {integer}
   array[1] = 30
   test.assert(candidate.values[1] == 30)
   test.assert(iv.type.fields[1].is_const)
@@ -639,9 +639,9 @@ function test_interface_field_boxing_and_ordered_methods(_context: test.Context)
   test.assert(iv.type.methods[1].name == "zeta")
   test.assert(iv.type.methods[2].name == "alpha")
   test.assert(iv.type.methods[1].param_names[1] == "n")
-  local added: value = iv.type.methods[1].callable(iv.value, 7)
+  const added: value = iv.type.methods[1].callable(iv.value, 7)
   test.assert(added as integer == 37)
-  local count: value = iv.type.methods[2].callable(iv.value)
+  const count: value = iv.type.methods[2].callable(iv.value)
   test.assert(count as integer == 2)
   expect_failure(function() local _ = iv:get(0) end)
   expect_failure(function() local _ = iv:get(2) end)
@@ -670,7 +670,7 @@ end
 
 function test_empty_callable_metadata_has_no_fixed_parameters_results_or_tails(
     _context: test.Context)
-  local descriptor = function_type(empty_signature)
+  const descriptor = function_type(empty_signature)
   test.assert(#descriptor.param_descriptors == 0)
   test.assert(#descriptor.return_descriptors == 0,
               "zero results became an optional nil result")
@@ -685,10 +685,10 @@ end
 
 function test_nullable_boolean_callable_metadata_preserves_false(
     _context: test.Context)
-  local descriptor = function_type(optional_boolean_echo)
+  const descriptor = function_type(optional_boolean_echo)
   test.assert(#descriptor.param_descriptors == 1 and
               #descriptor.return_descriptors == 1)
-  local positions = {descriptor.param_descriptors[1], descriptor.return_descriptors[1]}
+  const positions = {descriptor.param_descriptors[1], descriptor.return_descriptors[1]}
   for index = 1, #positions do
     case positions[index]
     when is_option(base) then
@@ -703,8 +703,8 @@ function test_nullable_boolean_callable_metadata_preserves_false(
               descriptor.flexret_descriptor == nil)
   case reflect.inspect(optional_boolean_echo)
   when is_titan_function{callable = value} then
-    local present: value = callable(false)
-    local absent: value = callable(nil)
+    const present: value = callable(false)
+    const absent: value = callable(nil)
     test.assert(present == false and absent == nil,
                 "reflected optional boolean conflated false with absence")
   else raise "expected a reflected Titan function"
@@ -712,7 +712,7 @@ function test_nullable_boolean_callable_metadata_preserves_false(
 end
 
 function test_callable_descriptors_and_invocation(_context: test.Context)
-  local desc = required_record("reflect.tests.CallableRecord")
+  const desc = required_record("reflect.tests.CallableRecord")
   test.assert(#desc.methods == 1)
   test.assert(desc.methods[1].name == "add")
   test.assert(desc.methods[1].param_names[1] == "amount")
@@ -730,14 +730,14 @@ function test_callable_descriptors_and_invocation(_context: test.Context)
               #desc.statics[3].param_descriptors == 0 and
               desc.statics[3].vararg_descriptor == nil and
               desc.statics[3].flexret_descriptor == nil)
-  local alpha: value = desc.statics[1].callable(8)
+  const alpha: value = desc.statics[1].callable(8)
   test.assert(alpha as integer == 18)
-  local made: value = desc.statics[3].callable()
-  local candidate = made as CallableRecord
-  local result: value = desc.methods[1].callable(candidate, 17)
+  const made: value = desc.statics[3].callable()
+  const candidate = made as CallableRecord
+  const result: value = desc.methods[1].callable(candidate, 17)
   test.assert(result as integer == 17 and candidate.total == 17)
 
-  local ft = function_type(variadic_echo)
+  const ft = function_type(variadic_echo)
   test.assert(#ft.param_descriptors == 1)
   test.assert(#ft.return_descriptors == 1)
   assert_integer_type(ft.param_descriptors[1])
@@ -780,12 +780,12 @@ local function generic_echo<|T|>(head: T, ...: T): (T, ...: T)
 end
 
 function test_unconstrained_generic_descriptors(_context: test.Context)
-  local rec: GenericRecord<|integer|> = {
+  const rec: GenericRecord<|integer|> = {
     item = 5, items = {6}, by_name = {["key"] = 7},
     callback = plus_one, optional = nil
   }
-  local rv = record_value(rec)
-  local desc = rv.type
+  const rv = record_value(rec)
+  const desc = rv.type
   assert_value_type(field_type(desc, "item"))
   assert_value_type(field_type(desc, "optional"))
   case field_type(desc, "items")
@@ -818,17 +818,17 @@ function test_unconstrained_generic_descriptors(_context: test.Context)
   test.assert(answer == "generic")
 
   -- Generic nominal applications share the owner descriptor at runtime.
-  local other: GenericRecord<|string|> = {
+  const other: GenericRecord<|string|> = {
     item = "text", items = {}, by_name = {}, optional = nil,
     callback = function(item: string): string return item end
   }
   test.assert(record_value(other).type == desc)
-  local un = GenericUnion<|integer|>.item(19)
+  const un = GenericUnion<|integer|>.item(19)
   case reflect.inspect(un)
   when is_union(uv) then
     assert_value_type(uv.type.variants[1].parts[1].type as reflect.Type)
     test.assert(uv:get(1) as integer == 19)
-    local made: value = uv.type.variants[1].callable(false)
+    const made: value = uv.type.variants[1].callable(false)
     case reflect.inspect(made)
     when is_union(created) then test.assert(created:get(1) == false)
     else raise "expected reflected variant constructor result"
@@ -836,8 +836,8 @@ function test_unconstrained_generic_descriptors(_context: test.Context)
   else raise "expected generic union"
   end
 
-  local instantiated = generic_echo
-  local ft = function_type(instantiated)
+  const instantiated = generic_echo
+  const ft = function_type(instantiated)
   assert_value_type(ft.param_descriptors[1])
   assert_value_type(ft.return_descriptors[1])
   assert_value_type(ft.vararg_descriptor as reflect.Type)
@@ -869,10 +869,10 @@ end
 function RecursiveMarker:get(): RecursiveMarker return self end
 
 function test_constrained_descriptors_keep_outer_nominal_identity(_context: test.Context)
-  local item: IntegerGetter = {item = 41}
-  local candidate: ConstrainedRecord<|IntegerGetter|> = {item = item}
-  local rv = record_value(candidate)
-  local carrier = field_type(rv.type, "item")
+  const item: IntegerGetter = {item = 41}
+  const candidate: ConstrainedRecord<|IntegerGetter|> = {item = item}
+  const rv = record_value(candidate)
+  const carrier = field_type(rv.type, "item")
   assert_interface_type(carrier, "reflect.tests.GenericGetter")
   case carrier:resolve()
   when is_interface(iface) then
@@ -880,13 +880,13 @@ function test_constrained_descriptors_keep_outer_nominal_identity(_context: test
     assert_value_type(iface.methods[1].return_descriptors[1])
   else raise "expected generic constraint owner"
   end
-  local identity = constrained_identity
-  local ft = function_type(identity)
+  const identity = constrained_identity
+  const ft = function_type(identity)
   assert_interface_type(ft.param_descriptors[1], "reflect.tests.GenericGetter")
   assert_interface_type(ft.return_descriptors[1], "reflect.tests.GenericGetter")
 
-  local recursive = required_interface("reflect.tests.RecursiveConstraint")
-  local result = recursive.methods[1].return_descriptors[1]
+  const recursive = required_interface("reflect.tests.RecursiveConstraint")
+  const result = recursive.methods[1].return_descriptors[1]
   case result
   when is_named(named) then
     test.assert(named.name == recursive.name)
@@ -900,8 +900,8 @@ end
 
 
 function test_const_arrays_preserve_identity_and_values(_context: test.Context)
-  local source: {integer} = {2, 4, 6}
-  local frozen = source as const {integer}
+  const source: {integer} = {2, 4, 6}
+  const frozen = source as const {integer}
   case reflect.inspect(frozen)
   when is_const_array{arr_value = value} then
     test.assert(arr_value as value == frozen as value)
@@ -916,7 +916,7 @@ function test_const_arrays_preserve_identity_and_values(_context: test.Context)
 end
 
 local function plain_lua_userdata(): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve test stack" end
   ffi.lua_newuserdatauv(L, 1, 0)
@@ -925,14 +925,14 @@ end
 
 
 function test_userdata_and_raw_pointer_variants(_context: test.Context)
-  local candidate = plain_lua_userdata()
+  const candidate = plain_lua_userdata()
   case reflect.inspect(candidate)
   when is_lua_userdata{udata_value = value} then test.assert(udata_value == candidate)
   else raise "expected unbranded Lua userdata"
   end
   local storage = foreign char.new_array(1)
   storage[0] = 37 as foreign char
-  local pointer: foreign *void = storage as foreign *char
+  const pointer: foreign *void = storage as foreign *char
   case reflect.inspect(pointer)
   when is_raw_pointer(raw) then test.assert(raw == pointer)
   else raise "expected raw object pointer"
@@ -952,8 +952,8 @@ local function without_typedef(descriptor: reflect.Type): reflect.Type
 end
 
 function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
-  local owner: owned *double = foreign double.new()
-  local owned_storage: foreign *double = owner
+  const owner: owned *double = foreign double.new()
+  const owned_storage: foreign *double = owner
   owned_storage[0] = 2.5
   case reflect.inspect(owner)
   when is_owned_foreign_pointer{pointer_value = value, pointer_payload = payload, pointer_size = size, pointer_type = type} then
@@ -965,12 +965,12 @@ function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
     else raise "expected owned double descriptor"
     end
     gc.collect()
-    local storage = pointer_payload as foreign *double
+    const storage = pointer_payload as foreign *double
     test.assert(storage[0] as float == 2.5)
   else raise "expected owned foreign pointer"
   end
 
-  local numbers: owned int[] = foreign int.new_array(3)
+  const numbers: owned int[] = foreign int.new_array(3)
   numbers[1] = 42
   case reflect.inspect(numbers)
   when is_owned_foreign_array{arr_value = value, arr_payload = payload, arr_size = size, arr_count = count, arr_type = type} then
@@ -986,12 +986,12 @@ function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
     else raise "expected owned int Array descriptor"
     end
     gc.collect()
-    local storage = arr_payload as foreign *int
+    const storage = arr_payload as foreign *int
     test.assert(storage[1] as integer == 42)
   else raise "expected owned foreign Array"
   end
 
-  local empty: owned int[] = foreign int.new_array(0)
+  const empty: owned int[] = foreign int.new_array(0)
   case reflect.inspect(empty)
   when is_owned_foreign_array{arr_size = size, arr_count = count} then
     test.assert(arr_count == 0)
@@ -1001,7 +1001,7 @@ function test_owned_foreign_scalar_and_array_descriptors(_context: test.Context)
 end
 
 function test_owned_struct_describes_public_c_fields(_context: test.Context)
-  local owner: owned *div_t = foreign div_t.new()
+  const owner: owned *div_t = foreign div_t.new()
   owner.quot = 7
   owner.rem = 2
   case reflect.inspect(owner)
@@ -1030,15 +1030,15 @@ function test_owned_struct_describes_public_c_fields(_context: test.Context)
 end
 
 local record NestedDescriptors
-  mutable: {integer}
-  immutable: const {string}
-  either: const? {boolean}
-  optional: string?
-  callback: function ({integer}, ...: string): (boolean, ...: float)
+  const mutable: {integer}
+  const immutable: const {string}
+  const either: const? {boolean}
+  const optional: string?
+  const callback: function ({integer}, ...: string): (boolean, ...: float)
 end
 
 function test_nested_container_qualifiers_and_optional_descriptors(_context: test.Context)
-  local desc = required_record("reflect.tests.NestedDescriptors")
+  const desc = required_record("reflect.tests.NestedDescriptors")
   case field_type(desc, "mutable")
   when is_array{arr_is_const = is_const, arr_elem_descriptor = elem_descriptor} then
     assert_integer_type(arr_elem_descriptor)
@@ -1126,14 +1126,14 @@ function test_private_union_native_parts_project_borrowed_interior_addresses(_co
   row[0] = 5
   row[1] = 7
   row[2] = 11
-  local owner = NativeAggregatePayloads.hidden(pair, row)
-  local inspected = union_value(owner)
+  const owner = NativeAggregatePayloads.hidden(pair, row)
+  const inspected = union_value(owner)
   test.assert(inspected.tag == 1 and inspected.n_parts == 2)
   test.assert(#inspected.type.variants == 1)
   test.assert(inspected.type.variants[1].name == "empty")
   test.assert(inspected.type.variants[1].tag == 0)
-  local pair_pointer = inspected:get(1) as foreign *titan_reflect_pair
-  local row_pointer = inspected:get(2) as foreign *int
+  const pair_pointer = inspected:get(1) as foreign *titan_reflect_pair
+  const row_pointer = inspected:get(2) as foreign *int
   case owner
   when hidden(actual_pair, actual_row) then
     test.assert(pair_pointer == actual_pair as foreign *titan_reflect_pair)
@@ -1161,11 +1161,11 @@ function test_private_union_native_parts_project_borrowed_interior_addresses(_co
 end
 
 function test_union_payload_readers_box_arrays_and_preserve_public_first_tags(_context: test.Context)
-  local values: {integer} = {21, 34}
-  local mutable = union_value(ArrayPayloads.mutable(values))
+  const values: {integer} = {21, 34}
+  const mutable = union_value(ArrayPayloads.mutable(values))
   test.assert(mutable.tag == 0)
   test.assert(mutable:get(1) == values as value)
-  local roundtrip = mutable:get(1) as {integer}
+  const roundtrip = mutable:get(1) as {integer}
   roundtrip[1] = 55
   test.assert(values[1] == 55)
   test.assert(#mutable.type.variants == 4)
@@ -1174,12 +1174,12 @@ function test_union_payload_readers_box_arrays_and_preserve_public_first_tags(_c
   test.assert(mutable.type.variants[4].name == "empty")
   test.assert(mutable.type.variants[4].tag == 3)
 
-  local present = union_value(ArrayPayloads.optional(values))
+  const present = union_value(ArrayPayloads.optional(values))
   test.assert(present:get(1) == values as value)
-  local absent = union_value(ArrayPayloads.optional(nil))
+  const absent = union_value(ArrayPayloads.optional(nil))
   test.assert(absent:get(1) == nil and absent.tag == 1)
-  local snapshot = values as const {integer}
-  local frozen = union_value(ArrayPayloads.frozen(snapshot))
+  const snapshot = values as const {integer}
+  const frozen = union_value(ArrayPayloads.frozen(snapshot))
   test.assert(frozen:get(1) == snapshot as value)
   case reflect.inspect(frozen:get(1))
   when is_const_array{arr_value = value} then test.assert(arr_value[2] as integer == 34)
@@ -1188,11 +1188,11 @@ function test_union_payload_readers_box_arrays_and_preserve_public_first_tags(_c
 
   -- Value inspection still reports a private active payload, while the public
   -- declaration projection retains only visible variants and their real tags.
-  local hidden = union_value(ArrayPayloads.private_array(values))
+  const hidden = union_value(ArrayPayloads.private_array(values))
   test.assert(hidden.tag == 4)
   test.assert(hidden:get(1) == values as value)
   test.assert(hidden.type == mutable.type)
-  local generic = union_value(GenericUnion<|{integer}|>.item(values))
+  const generic = union_value(GenericUnion<|{integer}|>.item(values))
   test.assert(generic:get(1) == values as value)
   gc.collect()
   test.assert((hidden:get(1) as {integer})[1] == 55)
@@ -1214,9 +1214,9 @@ record QualifiedSnapshotImpl
 end
 
 function test_optional_and_const_array_field_readers(_context: test.Context)
-  local values: {integer} = {8, 13}
-  local candidate: OptionalArrayField = {values = nil}
-  local rv = record_value(candidate)
+  const values: {integer} = {8, 13}
+  const candidate: OptionalArrayField = {values = nil}
+  const rv = record_value(candidate)
   test.assert(rv:get(1) == nil)
   rv:set(1, values)
   test.assert(rv:get(1) == values as value)
@@ -1224,14 +1224,14 @@ function test_optional_and_const_array_field_readers(_context: test.Context)
   rv:set(1, nil)
   test.assert(rv:get(1) == nil)
 
-  local frozen = values as const {integer}
-  local source: QualifiedSnapshotImpl = {frozen = frozen, optional = values}
-  local iface: QualifiedSnapshot = source
-  local iv = interface_value(iface)
+  const frozen = values as const {integer}
+  const source: QualifiedSnapshotImpl = {frozen = frozen, optional = values}
+  const iface: QualifiedSnapshot = source
+  const iv = interface_value(iface)
   test.assert(iv:get(1) == frozen as value)
   test.assert(iv:get(2) == values as value)
-  local nil_source: QualifiedSnapshotImpl = {frozen = frozen, optional = nil}
-  local nil_iface: QualifiedSnapshot = nil_source
+  const nil_source: QualifiedSnapshotImpl = {frozen = frozen, optional = nil}
+  const nil_iface: QualifiedSnapshot = nil_source
   test.assert(interface_value(nil_iface):get(2) == nil)
 end
 
@@ -1262,8 +1262,8 @@ local function expect_native_number_boxing_failure(action: function (): ())
 end
 
 function test_native_numbers_are_checked_only_when_reflection_boxes_them(_context: test.Context)
-  local candidate = NativeNumberFields.new(ffi.ULLONG_MAX, ffi.ULLONG_MAX, "retained")
-  local rv = record_value(candidate)
+  const candidate = NativeNumberFields(ffi.ULLONG_MAX, ffi.ULLONG_MAX, "retained")
+  const rv = record_value(candidate)
   test.assert(rv.n_fields == 3)
   gc.collect()
   test.assert(rv:get(3) == "retained")
@@ -1284,13 +1284,13 @@ function test_native_numbers_are_checked_only_when_reflection_boxes_them(_contex
 end
 
 function test_foreign_field_accessors_check_and_box_values(_context: test.Context)
-  local storage: owned int[] = foreign int.new_array(2)
+  const storage: owned int[] = foreign int.new_array(2)
   storage[0] = 19
-  local pointer: foreign *int = storage
-  local candidate: ForeignFields = {
+  const pointer: foreign *int = storage
+  const candidate: ForeignFields = {
     count = 2, ratio = 1.25, pointer = pointer, storage = storage
   }
-  local rv = record_value(candidate)
+  const rv = record_value(candidate)
   test.assert(rv:get(1) as integer == 2)
   test.assert(rv:get(2) as float == 1.25)
   test.assert(rv:get(3) as foreign *int == pointer)
@@ -1308,7 +1308,7 @@ function test_foreign_field_accessors_check_and_box_values(_context: test.Contex
   expect_failure(function() rv:set(3, nil) end)
   expect_failure(function() rv:set(3, pointer) end)
   test.assert(candidate.pointer[0] as integer == 19)
-  local replacement: owned int[] = foreign int.new_array(1)
+  const replacement: owned int[] = foreign int.new_array(1)
   replacement[0] = 23
   rv:set(4, replacement)
   test.assert(candidate.storage == replacement)
@@ -1327,12 +1327,12 @@ function test_foreign_field_accessors_check_and_box_values(_context: test.Contex
 end
 
 record PrivateOnly
-  local hidden: integer
+  local const hidden: integer
 end
 
 function test_record_without_public_fields(_context: test.Context)
-  local candidate: PrivateOnly = {hidden = 91}
-  local rv = record_value(candidate)
+  const candidate: PrivateOnly = {hidden = 91}
+  const rv = record_value(candidate)
   test.assert(rv.n_fields == 0)
   test.assert(#rv.type.fields == 0)
   expect_failure(function() local _ = rv:get(1) end)
@@ -1362,12 +1362,12 @@ local function foreign_pointee(descriptor: reflect.Type): reflect.Type
 end
 
 function test_recursive_foreign_descriptors_resolve_with_retained_context(_context: test.Context)
-  local self_owner: owned *titan_reflect_self = foreign titan_reflect_self.new()
-  local self_type = foreign_struct(owned_pointee(self_owner))
+  const self_owner: owned *titan_reflect_self = foreign titan_reflect_self.new()
+  const self_type = foreign_struct(owned_pointee(self_owner))
   test.assert(#self_type.fields == 2)
   test.assert(self_type.fields[1].name == "marker")
   test.assert(self_type.fields[2].name == "next")
-  local back_reference = foreign_pointee(self_type.fields[2].type)
+  const back_reference = foreign_pointee(self_type.fields[2].type)
   case back_reference
   when is_foreign_named(named) then
     test.assert(named.name ~= "")
@@ -1376,10 +1376,10 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
 
   -- Resolve only after another owner has created an independent hydration
   -- context. The original declaration map must remain available to the link.
-  local unrelated: owned *div_t = foreign div_t.new()
+  const unrelated: owned *div_t = foreign div_t.new()
   test.assert(#foreign_struct(owned_pointee(unrelated)).fields == 2)
   gc.collect()
-  local resolved_self = foreign_struct(back_reference:resolve())
+  const resolved_self = foreign_struct(back_reference:resolve())
   test.assert(resolved_self == self_type)
   test.assert(resolved_self.fields[1].name == "marker")
   case back_reference
@@ -1388,17 +1388,17 @@ function test_recursive_foreign_descriptors_resolve_with_retained_context(_conte
   else raise "expected a foreign named descriptor"
   end
 
-  local left_owner: owned *titan_reflect_left = foreign titan_reflect_left.new()
-  local left_type = foreign_struct(owned_pointee(left_owner))
+  const left_owner: owned *titan_reflect_left = foreign titan_reflect_left.new()
+  const left_type = foreign_struct(owned_pointee(left_owner))
   test.assert(#left_type.fields == 1 and left_type.fields[1].name == "right")
-  local right_type = foreign_struct(foreign_pointee(left_type.fields[1].type))
+  const right_type = foreign_struct(foreign_pointee(left_type.fields[1].type))
   test.assert(#right_type.fields == 1 and right_type.fields[1].name == "left")
-  local left_reference = foreign_pointee(right_type.fields[1].type)
+  const left_reference = foreign_pointee(right_type.fields[1].type)
   case left_reference
   when is_foreign_named() then
   else raise "mutually recursive C structs should close with a named link"
   end
-  local resolved_left = foreign_struct(left_reference:resolve())
+  const resolved_left = foreign_struct(left_reference:resolve())
   test.assert(resolved_left == left_type)
   test.assert(foreign_struct(back_reference:resolve()) == self_type)
 end
@@ -1417,15 +1417,15 @@ function NamedPayloads.private_value(items: {T}): NamedPayloads<|T|>
 end
 
 function test_named_union_parts_descriptors_access_and_construction(_context: test.Context)
-  local items = {17, 23}
-  local original = NamedPayloads<|integer|>.pieces{count = 2, type = "numbers", values = items}
-  local inspected = union_value(original)
+  const items = {17, 23}
+  const original = NamedPayloads<|integer|>.pieces{count = 2, type = "numbers", values = items}
+  const inspected = union_value(original)
   test.assert(inspected.tag == 2 and inspected.n_parts == 4)
-  local variants = inspected.type.variants
+  const variants = inspected.type.variants
   test.assert(#variants == 3 and variants[1].tag == 0)
   test.assert(#variants[1].parts == 0)
   test.assert(variants[2].parts[1].name == "value")
-  local variant = variants[3]
+  const variant = variants[3]
   test.assert(#variant.parts == 4)
   test.assert(variant.parts[1].name == "count")
   test.assert(variant.parts[2].name == "type")
@@ -1441,14 +1441,14 @@ function test_named_union_parts_descriptors_access_and_construction(_context: te
   test.assert(inspected:get(3) == items as value and inspected:get(4) == nil)
   expect_failure(function() inspected:get(0) end)
   expect_failure(function() inspected:get(5) end)
-  local created: NamedPayloads<|integer|> = variant.callable(3, "made", items, nil)
+  const created: NamedPayloads<|integer|> = variant.callable(3, "made", items, nil)
   case created
   when pieces{label = type, count, last, values} then
     test.assert(label == "made" and count == 3 and last == nil and values == items)
   else raise "expected reflected constructor result"
   end
   expect_failure(function() variant.callable("bad", "made", items, nil) end)
-  local hidden = union_value(NamedPayloads<|integer|>.private_value(items))
+  const hidden = union_value(NamedPayloads<|integer|>.private_value(items))
   test.assert(hidden.tag == 3 and hidden.n_parts == 2)
   gc.collect()
   test.assert(hidden:get(1) == "hidden")
@@ -1472,20 +1472,20 @@ function ProjectedRecord.new(number: integer): ProjectedRecord
 end
 
 local record LocalProjectedRecord
-  number: integer
+  const number: integer
 end
 
 local function constructed_projected_record(index: integer): ProjectedRecord
-  local child = SimpleRecord(index, index + 1)
-  local items: const {integer} = {index, index + 2}
-  local fields: const {value} = {index, "fresh projection " .. index, child, items, nil}
+  const child = SimpleRecord(index, index + 1)
+  const items: const {integer} = {index, index + 2}
+  const fields: const {value} = {index, "fresh projection " .. index, child, items, nil}
   return required_record("reflect.tests.ProjectedRecord"):construct(fields)
 end
 
 function test_default_reflected_construction_bypasses_new_and_retains_values(_context: test.Context)
-  local was_generational = gc.generational()
+  const was_generational = gc.generational()
   defer do if not was_generational then gc.incremental() end end
-  local before = projected_new_calls
+  const before = projected_new_calls
   local result = constructed_projected_record(1)
   for i = 2, 32 do
     result = constructed_projected_record(i)
@@ -1496,16 +1496,16 @@ function test_default_reflected_construction_bypasses_new_and_retains_values(_co
   test.assert(result.number == 32 and result.text == "fresh projection 32")
   test.assert(result.child.x == 32 and result.child.y == 33)
   test.assert(result.items[1] == 32 and result.items[2] == 34 and result.last == nil)
-  local viewed = record_value(result)
+  const viewed = record_value(result)
   test.assert(viewed.type.is_public and viewed.type.all_public)
   test.assert(viewed:project(1) == 32 and viewed:project(5) == nil)
   expect_failure(function() viewed:set(1, 7) end)
   expect_failure(function() viewed:project(0) end)
   expect_failure(function() viewed.type:construct({"wrong", "text", result.child, result.items}) end)
   expect_failure(function() viewed.type:construct({32, "text", result.child, result.items, nil, 7}) end)
-  local local_value = record_value(LocalProjectedRecord(9))
+  const local_value = record_value(LocalProjectedRecord(9))
   test.assert(not local_value.type.is_public and local_value.type.all_public)
-  test.assert(not record_value(PrivateOnly.new(1)).type.all_public)
+  test.assert(not record_value(PrivateOnly(1)).type.all_public)
 end
 
 record ProjectedNumbers
@@ -1516,19 +1516,19 @@ record ProjectedNumbers
 end
 
 function test_native_projection_preserves_unsigned_long_double_and_null(_context: test.Context)
-  local original = ProjectedNumbers(ffi.ULLONG_MAX, ffi.ULLONG_MAX, ffi.LDBL_MAX, nil)
-  local inspected = record_value(original)
-  local unsigned: integer = inspected:project(1)
+  const original = ProjectedNumbers(ffi.ULLONG_MAX, ffi.ULLONG_MAX, ffi.LDBL_MAX, nil)
+  const inspected = record_value(original)
+  const unsigned: integer = inspected:project(1)
   test.assert(unsigned == -1 and inspected:project(2) == -1)
   test.assert(inspected:project(3) is string)
   case reflect.inspect(inspected:project(4))
   when is_raw_pointer(pointer) then test.assert(pointer == nil)
   else raise "NULL projection must remain raw pointer data"
   end
-  local fields: const {value} = {
+  const fields: const {value} = {
     inspected:project(1), inspected:project(2), inspected:project(3), inspected:project(4)
   }
-  local restored: ProjectedNumbers = inspected.type:construct(fields)
+  const restored: ProjectedNumbers = inspected.type:construct(fields)
   gc.collect()
   test.assert(restored.unsigned == ffi.ULLONG_MAX)
   test.assert((restored.optional as foreign unsigned long long) == ffi.ULLONG_MAX)
@@ -1537,9 +1537,9 @@ function test_native_projection_preserves_unsigned_long_double_and_null(_context
 end
 
 function test_native_long_double_projection_preserves_extra_precision(_context: test.Context)
-  local precise = ffi.titan_reflect_precise_long_double()
-  local inspected = record_value(ProjectedNumbers(0, nil, precise, nil))
-  local restored: ProjectedNumbers = inspected.type:construct({
+  const precise = ffi.titan_reflect_precise_long_double()
+  const inspected = record_value(ProjectedNumbers(0, nil, precise, nil))
+  const restored: ProjectedNumbers = inspected.type:construct({
     inspected:project(1), nil, inspected:project(3), inspected:project(4)
   })
   test.assert(restored.wide == precise)
@@ -1556,13 +1556,13 @@ record ProjectedOwners
 end
 
 function test_reflected_construction_retains_owned_values_and_optional_absence(_context: test.Context)
-  local owner: owned int[] = foreign int.new_array(1)
+  const owner: owned int[] = foreign int.new_array(1)
   owner[0] = 47
-  local inspected = record_value(ProjectedOwners(owner, owner))
-  local restored: ProjectedOwners = inspected.type:construct({
+  const inspected = record_value(ProjectedOwners(owner, owner))
+  const restored: ProjectedOwners = inspected.type:construct({
     inspected:project(1), inspected:project(2)
   })
-  local absent: ProjectedOwners = inspected.type:construct({inspected:project(1), nil})
+  const absent: ProjectedOwners = inspected.type:construct({inspected:project(1), nil})
   gc.collect()
   test.assert(restored.owner == owner and restored.owner[0] == 47)
   test.assert(restored.optional == owner and absent.optional == nil)
@@ -1574,13 +1574,13 @@ function test_native_aggregate_projection_copies_fields_without_padding(_context
   pair.quot, pair.rem = 17, -3
   local row = foreign int.new_array(3)
   row[0], row[1], row[2] = 5, 7, 11
-  local original = ProjectedAggregate(pair, row)
-  local inspected = record_value(original)
-  local pair_projection: const {value} = inspected:project(1)
-  local row_projection: const {value} = inspected:project(2)
+  const original = ProjectedAggregate(pair, row)
+  const inspected = record_value(original)
+  const pair_projection: const {value} = inspected:project(1)
+  const row_projection: const {value} = inspected:project(2)
   test.assert(pair_projection[1] == 17 and pair_projection[2] == -3)
   test.assert(#row_projection == 3 and row_projection[3] == 11)
-  local restored: ProjectedAggregate = inspected.type:construct({pair_projection, row_projection})
+  const restored: ProjectedAggregate = inspected.type:construct({pair_projection, row_projection})
   gc.collect()
   test.assert(restored.pair.quot == 17 and restored.pair.rem == -3)
   test.assert(restored.row[0] == 5 and restored.row[2] == 11)
@@ -1594,10 +1594,10 @@ union ProjectedUnion
 end
 
 function test_default_union_construction_accepts_nil_tail_and_native_bits(_context: test.Context)
-  local original = ProjectedUnion.parts(ffi.ULLONG_MAX, "parts", nil)
-  local inspected = union_value(original)
+  const original = ProjectedUnion.parts(ffi.ULLONG_MAX, "parts", nil)
+  const inspected = union_value(original)
   test.assert(inspected.type.is_public and inspected.type.all_public)
-  local restored: ProjectedUnion = inspected.type:construct(inspected.tag,
+  const restored: ProjectedUnion = inspected.type:construct(inspected.tag,
     {inspected:project(1), inspected:project(2), inspected:project(3)})
   gc.collect()
   case restored
@@ -1605,7 +1605,7 @@ function test_default_union_construction_accepts_nil_tail_and_native_bits(_conte
     test.assert(number == ffi.ULLONG_MAX and label == "parts" and last == nil)
   else raise "expected reconstructed parts"
   end
-  local empty: ProjectedUnion = inspected.type:construct(0, {})
+  const empty: ProjectedUnion = inspected.type:construct(0, {})
   test.assert(union_value(empty).n_parts == 0)
   expect_failure(function() inspected.type:construct(8, {}) end)
 end
@@ -1616,12 +1616,12 @@ record ProjectedQualified
 end
 
 function test_qualified_native_projection_preserves_adjacent_bitfields_and_siblings(_context: test.Context)
-  local original = ProjectedQualified(nil, ffi.titan_reflect_make_qualified())
-  local inspected = record_value(original)
-  local projected: const {value} = inspected:project(2)
+  const original = ProjectedQualified(nil, ffi.titan_reflect_make_qualified())
+  const inspected = record_value(original)
+  const projected: const {value} = inspected:project(2)
   test.assert(projected[1] == 23 and projected[2] == 5 and projected[3] == -3)
   test.assert(projected[4] == 19 and projected[5] == 29)
-  local restored: ProjectedQualified = inspected.type:construct({inspected:project(1), projected})
+  const restored: ProjectedQualified = inspected.type:construct({inspected:project(1), projected})
   gc.collect()
   test.assert(restored.pointer == nil and restored.data.pointer == nil)
   test.assert(restored.data.before == 23 and restored.data.after == 29)
@@ -1639,7 +1639,7 @@ local public_constructor_calls = 0
 
 record PublicConstructorRecord
   number: integer
-  local secret: boolean
+  local const secret: boolean
 end
 
 function PublicConstructorRecord.new(source: integer): PublicConstructorRecord
@@ -1655,21 +1655,21 @@ function WrongConstructorResult.new(): integer
 end
 
 function test_public_constructor_finds_compatible_public_new_without_invoking_it(_: test.Context)
-  local descriptor = required_record("reflect.tests.PublicConstructorRecord")
+  const descriptor = required_record("reflect.tests.PublicConstructorRecord")
   public_constructor_calls = 0
-  local constructor? = descriptor:public_constructor()
+  const constructor? = descriptor:public_constructor()
   test.assert(constructor ~= nil and constructor.name == "new")
   test.assert(constructor.param_names[1] == "source" and public_constructor_calls == 0)
-  local restored: PublicConstructorRecord = constructor.callable(17)
+  const restored: PublicConstructorRecord = constructor.callable(17)
   test.assert(restored.number == 17 and restored.secret and public_constructor_calls == 1)
-  local default? = required_record("reflect.tests.CallableRecord"):public_constructor()
+  const default? = required_record("reflect.tests.CallableRecord"):public_constructor()
   test.assert(default ~= nil)
-  local ordinary: CallableRecord = default.callable(23)
+  const ordinary: CallableRecord = default.callable(23)
   test.assert(ordinary.total == 23)
 end
 
 function test_public_constructor_rejects_private_new_and_another_result_type(_: test.Context)
-  local descriptor = record_value(LocalProjectedRecord(1)).type
+  const descriptor = record_value(LocalProjectedRecord(1)).type
   test.assert(descriptor:public_constructor() == nil)
   test.assert(required_record("reflect.tests.WrongConstructorResult"):public_constructor() == nil)
 end

@@ -4,7 +4,7 @@ local support = import "support.common.titan"
 foreign import "lua.h"
 
 local record FinalizableProbe
-  marker: integer
+  const marker: integer
 end
 
 local type FinalizableMap = {string: value}
@@ -17,14 +17,14 @@ local type ModeSelector = function (): (boolean)
 
 local function finalizable_stack_delta<|T|>(candidate: T,
                                           callback: function (T): ()): integer
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   gclib.finalizable<|T|>(candidate, callback)
   return ffi.lua_gettop(L) - top
 end
 
 local function rejected_stack_delta<|T|>(candidate: T,
                                        callback: function (T): ()): integer
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   do
     gclib.finalizable<|T|>(candidate, callback)
   catch
@@ -34,9 +34,9 @@ local function rejected_stack_delta<|T|>(candidate: T,
 end
 
 function test_gc_weak_maps_preserve_metatables(_context: test.Context)
-  local first: {value: value} = {}
-  local second: {value: value} = {}
-  local setup = support.lua_helper([[
+  const first: {value: value} = {}
+  const second: {value: value} = {}
+  const setup = support.lua_helper([[
 return function(first, second)
   local marker = {}
   local metatable = { marker = marker }
@@ -49,10 +49,10 @@ return function(first, second)
 end
 ]]) as function (value, value): (value, value)
   local metatable, marker = setup(first, second)
-  local get_metatable = support.lua_helper([[
+  const get_metatable = support.lua_helper([[
 return function(candidate) return getmetatable(candidate) end
 ]]) as function (value): (value)
-  local raw_get = support.lua_helper([[
+  const raw_get = support.lua_helper([[
 return function(candidate, key) return rawget(candidate, key) end
 ]]) as function (value, string): (value)
 
@@ -62,7 +62,7 @@ return function(candidate, key) return rawget(candidate, key) end
   test.assert(raw_get(metatable, "__mode") == "v")
   test.assert(get_metatable(second) == metatable)
 
-  local install_ephemeral = support.lua_helper([[
+  const install_ephemeral = support.lua_helper([[
 return function(map) map.object = {} end
 ]]) as function (value): ()
   install_ephemeral(first)
@@ -72,14 +72,14 @@ return function(map) map.object = {} end
 end
 
 function test_gc_ephemeron_collects_cycles(_context: test.Context)
-  local map: {value: value} = {}
+  const map: {value: value} = {}
   gclib.ephemeron(map)
-  local mode = support.lua_helper([[
+  const mode = support.lua_helper([[
 return function(candidate) return getmetatable(candidate).__mode end
 ]]) as function (value): (string)
   test.assert(mode(map) == "k")
 
-  local install_cycle = support.lua_helper([[
+  const install_cycle = support.lua_helper([[
 return function(candidate)
   local key = {}
   candidate[key] = { owner = key }
@@ -88,7 +88,7 @@ end
   install_cycle(map)
   gclib.collect()
   gclib.collect()
-  local empty = support.lua_helper([[
+  const empty = support.lua_helper([[
 return function(candidate) return next(candidate) == nil end
 ]]) as function (value): (boolean)
   test.assert(empty(map))
@@ -97,9 +97,9 @@ end
 local function prepare_shared_table_finalizers(
     first_callback: MapFinalizer, current_callback: MapFinalizer):
     (value, value, value, value)
-  local first: FinalizableMap = { ["kind"] = "explicit" }
-  local preexisting: FinalizableMap = { ["kind"] = "preexisting" }
-  local setup = support.lua_helper([[
+  const first: FinalizableMap = { ["kind"] = "explicit" }
+  const preexisting: FinalizableMap = { ["kind"] = "preexisting" }
+  const setup = support.lua_helper([[
 return function(first, preexisting)
   local marker = {}
   local protection = {}
@@ -113,28 +113,28 @@ return function(first, preexisting)
 end
 ]]) as function (value, value): (value, value, value)
   local metatable, marker, protection = setup(first, preexisting)
-  local set_metatable = support.lua_helper([[
+  const set_metatable = support.lua_helper([[
 return function(candidate, metatable) setmetatable(candidate, metatable) end
 ]]) as function (value, value): ()
-  local get_metatable = support.lua_helper([[
+  const get_metatable = support.lua_helper([[
 return function(candidate) return getmetatable(candidate) end
 ]]) as function (value): (value)
-  local debug_metatable = support.lua_helper([[
+  const debug_metatable = support.lua_helper([[
 return function(candidate) return debug.getmetatable(candidate) end
 ]]) as function (value): (value)
-  local raw_get = support.lua_helper([[
+  const raw_get = support.lua_helper([[
 return function(candidate, key) return rawget(candidate, key) end
 ]]) as function (value, string): (value)
 
   gclib.finalizable<|FinalizableMap|>(first, first_callback)
-  local future: FinalizableMap = { ["kind"] = "future" }
+  const future: FinalizableMap = { ["kind"] = "future" }
   set_metatable(future, metatable)
   gclib.finalizable<|FinalizableMap|>(first, current_callback)
 
   test.assert(get_metatable(first) == protection)
   test.assert(debug_metatable(first) == metatable)
   test.assert(raw_get(metatable, "marker") == marker)
-  local installed = raw_get(metatable, "__gc")
+  const installed = raw_get(metatable, "__gc")
   test.assert(installed ~= nil)
   -- first and future become unreachable when this helper frame returns.
   -- preexisting received the metatable before __gc existed and is unmarked.
@@ -142,16 +142,16 @@ return function(candidate, key) return rawget(candidate, key) end
 end
 
 local function prepare_plain_table_finalizer(callback: MapFinalizer): value
-  local candidate: FinalizableMap = {}
-  local debug_metatable = support.lua_helper([[
+  const candidate: FinalizableMap = {}
+  const debug_metatable = support.lua_helper([[
 return function(value) return debug.getmetatable(value) end
 ]]) as function (value): (value)
-  local raw_get = support.lua_helper([[
+  const raw_get = support.lua_helper([[
 return function(value, key) return rawget(value, key) end
 ]]) as function (value, string): (value)
   test.assert(debug_metatable(candidate) == nil)
   gclib.finalizable<|FinalizableMap|>(candidate, callback)
-  local metatable = debug_metatable(candidate)
+  const metatable = debug_metatable(candidate)
   test.assert(metatable is {value: value})
   test.assert(raw_get(metatable, "__gc") ~= nil)
   return metatable
@@ -160,25 +160,25 @@ end
 function test_gc_finalizes_tables_and_preserves_metatables(
     _context: test.Context)
   local first_callback_calls = 0
-  local first_callback: MapFinalizer = function(_: FinalizableMap)
+  const first_callback: MapFinalizer = function(_: FinalizableMap)
     first_callback_calls = first_callback_calls + 1
   end
   local finalized: {FinalizableMap} = {}
-  local current_callback: MapFinalizer = function(candidate: FinalizableMap)
+  const current_callback: MapFinalizer = function(candidate: FinalizableMap)
     finalized[#finalized + 1] = candidate
   end
   local metatable, _, protection, erased_callback =
     prepare_shared_table_finalizers(first_callback, current_callback)
-  local get_metatable = support.lua_helper([[
+  const get_metatable = support.lua_helper([[
 return function(candidate) return getmetatable(candidate) end
 ]]) as function (value): (value)
-  local debug_metatable = support.lua_helper([[
+  const debug_metatable = support.lua_helper([[
 return function(candidate) return debug.getmetatable(candidate) end
 ]]) as function (value): (value)
-  local invoke_from_lua = support.lua_helper([[
+  const invoke_from_lua = support.lua_helper([[
 return function(callback, candidate) callback(candidate) end
 ]]) as function (value, value): ()
-  local invoked: FinalizableMap = { ["kind"] = "lua-erased" }
+  const invoked: FinalizableMap = { ["kind"] = "lua-erased" }
   invoke_from_lua(erased_callback, invoked)
   test.assert(#finalized == 1 and finalized[1] == invoked)
   finalized = {}
@@ -191,7 +191,7 @@ return function(callback, candidate) callback(candidate) end
   local future_seen = false
   local index = 1
   while index <= #finalized do
-    local candidate = finalized[index]
+    const candidate = finalized[index]
     if candidate["kind"] == "explicit" then explicit_seen = true end
     if candidate["kind"] == "future" then future_seen = true end
     test.assert(get_metatable(candidate) == protection)
@@ -202,11 +202,11 @@ return function(callback, candidate) callback(candidate) end
   finalized = {}
 
   local created_calls = 0
-  local created_callback: MapFinalizer =
+  const created_callback: MapFinalizer =
       function(_: FinalizableMap)
     created_calls = created_calls + 1
   end
-  local _created_metatable = prepare_plain_table_finalizer(created_callback)
+  local _ = prepare_plain_table_finalizer(created_callback)
   gclib.collect()
   gclib.collect()
   test.assert(created_calls == 1)
@@ -221,11 +221,11 @@ end
 
 local function prepare_typed_userdata_finalizer(
     callback: ProbeFinalizer): value
-  local candidate = FinalizableProbe.new(17)
-  local debug_metatable = support.lua_helper([[
+  const candidate = FinalizableProbe(17)
+  const debug_metatable = support.lua_helper([[
 return function(value) return debug.getmetatable(value) end
 ]]) as function (value): (value)
-  local nominal_metatable = debug_metatable(candidate)
+  const nominal_metatable = debug_metatable(candidate)
   test.assert(finalizable_stack_delta<|FinalizableProbe|>(
       candidate, callback) == 0)
   test.assert(debug_metatable(candidate) == nominal_metatable)
@@ -235,28 +235,28 @@ end
 local function prepare_custom_userdata_finalizer(
     state: UserdataFinalizerState):
     (value, value, value, {value: value})
-  local debug_metatable = support.lua_helper([[
+  const debug_metatable = support.lua_helper([[
 return function(candidate) return debug.getmetatable(candidate) end
 ]]) as function (value): (value)
-  local get_metatable = support.lua_helper([[
+  const get_metatable = support.lua_helper([[
 return function(candidate) return getmetatable(candidate) end
 ]]) as function (value): (value)
-  local raw_get = support.lua_helper([[
+  const raw_get = support.lua_helper([[
 return function(candidate, key) return rawget(candidate, key) end
 ]]) as function (value, string): (value)
-  local debug_set_metatable = support.lua_helper([[
+  const debug_set_metatable = support.lua_helper([[
 return function(candidate, metatable)
   debug.setmetatable(candidate, metatable)
 end
 ]]) as function (value, value): ()
-  local new_table = support.lua_helper([[
+  const new_table = support.lua_helper([[
 return function() return {} end
 ]]) as function (): (value)
 
-  local candidate: value = FinalizableProbe.new(23)
-  local marker = new_table()
-  local protection = new_table()
-  local metatable_maker = support.lua_helper([[
+  const candidate: value = FinalizableProbe(23)
+  const marker = new_table()
+  const protection = new_table()
+  const metatable_maker = support.lua_helper([[
 return function(marker, protection)
   local metatable = { marker = marker, __metatable = protection }
   setmetatable(metatable, {
@@ -265,20 +265,20 @@ return function(marker, protection)
   return metatable
 end
 ]]) as function (value, value): (value)
-  local metatable = metatable_maker(marker, protection)
+  const metatable = metatable_maker(marker, protection)
   debug_set_metatable(candidate, metatable)
 
-  local first_callback: Finalizer = function(_: value)
+  const first_callback: Finalizer = function(_: value)
     state.first_calls = state.first_calls + 1
   end
   test.assert(finalizable_stack_delta<|value|>(
       candidate, first_callback) == 0)
 
-  local weak_capture: {value: value} = {}
+  const weak_capture: {value: value} = {}
   gclib.weak(weak_capture)
   local current_callback: Finalizer = function(_: value) end
   do
-    local captured = new_table()
+    const captured = new_table()
     weak_capture[1] = captured
     current_callback = function(finalized_value: value)
       state.current_calls = state.current_calls + 1
@@ -296,23 +296,23 @@ end
 end
 
 local function prepare_unmetad_userdata_finalizer(callback: Finalizer): value
-  local debug_metatable = support.lua_helper([[
+  const debug_metatable = support.lua_helper([[
 return function(candidate) return debug.getmetatable(candidate) end
 ]]) as function (value): (value)
-  local debug_set_metatable = support.lua_helper([[
+  const debug_set_metatable = support.lua_helper([[
 return function(candidate, metatable)
   debug.setmetatable(candidate, metatable)
 end
 ]]) as function (value, value): ()
-  local raw_get = support.lua_helper([[
+  const raw_get = support.lua_helper([[
 return function(candidate, key) return rawget(candidate, key) end
 ]]) as function (value, string): (value)
 
-  local candidate: value = FinalizableProbe.new(31)
+  const candidate: value = FinalizableProbe(31)
   debug_set_metatable(candidate, nil)
   test.assert(debug_metatable(candidate) == nil)
   test.assert(finalizable_stack_delta<|value|>(candidate, callback) == 0)
-  local created = debug_metatable(candidate)
+  const created = debug_metatable(candidate)
   test.assert(created is {value: value})
   test.assert(raw_get(created, "__gc") == callback)
   return created
@@ -321,26 +321,26 @@ end
 function test_gc_finalizes_userdata_and_preserves_metatables(
     _context: test.Context)
   local finalized_marker = 0
-  local finalize_typed: ProbeFinalizer =
+  const finalize_typed: ProbeFinalizer =
       function(candidate: FinalizableProbe)
     finalized_marker = candidate.marker
   end
-  local _nominal_metatable = prepare_typed_userdata_finalizer(finalize_typed)
+  local _ = prepare_typed_userdata_finalizer(finalize_typed)
   gclib.collect()
   gclib.collect()
   test.assert(finalized_marker == 17,
               "marker " .. support.error_text(finalized_marker))
 
-  local state = UserdataFinalizerState.new(nil, nil, 0, 0)
+  const state = UserdataFinalizerState(nil, nil, 0, 0)
   local metatable, _, protection, weak_capture =
     prepare_custom_userdata_finalizer(state)
-  local get_metatable = support.lua_helper([[
+  const get_metatable = support.lua_helper([[
 return function(candidate) return getmetatable(candidate) end
 ]]) as function (value): (value)
-  local debug_metatable = support.lua_helper([[
+  const debug_metatable = support.lua_helper([[
 return function(candidate) return debug.getmetatable(candidate) end
 ]]) as function (value): (value)
-  local is_userdata = support.lua_helper([[
+  const is_userdata = support.lua_helper([[
 return function(candidate) return type(candidate) == "userdata" end
 ]]) as function (value): (boolean)
 
@@ -355,10 +355,10 @@ return function(candidate) return type(candidate) == "userdata" end
   state.finalized = nil
 
   local created_calls = 0
-  local created_callback: Finalizer = function(_: value)
+  const created_callback: Finalizer = function(_: value)
     created_calls = created_calls + 1
   end
-  local _created_metatable =
+  local _ =
     prepare_unmetad_userdata_finalizer(created_callback)
   gclib.collect()
   gclib.collect()
@@ -374,22 +374,22 @@ end
 
 function test_gc_rejects_noncollectable_finalizer_values(
     _context: test.Context)
-  local integer_callback: IntegerFinalizer =
+  const integer_callback: IntegerFinalizer =
       function(_: integer) end
   test.assert(rejected_stack_delta<|integer|>(17, integer_callback) == 0)
   assert_finalizable_rejected<|integer|>(17, integer_callback)
 
-  local callback: Finalizer = function(_: value) end
+  const callback: Finalizer = function(_: value) end
   assert_finalizable_rejected<|value|>(nil, callback)
 
-  local rejected: {value} = {
+  const rejected: {value} = {
     false,
     17,
     3.5,
     "text",
     function() end,
   }
-  local make_special = support.lua_helper([[
+  const make_special = support.lua_helper([[
 return function()
   local captured = true
   local function with_upvalue() return captured end
@@ -409,8 +409,8 @@ end
 
 function test_gc_controls_state_modes_steps_and_counts(
     _context: test.Context)
-  local originally_paused = gclib.paused()
-  local originally_incremental = gclib.incremental()
+  const originally_paused = gclib.paused()
+  const originally_incremental = gclib.incremental()
   if not originally_incremental then gclib.generational() end
   defer do
     if originally_incremental then
@@ -444,7 +444,7 @@ end
 -- run `times` times; returned through `runs.count` only, so the probe itself
 -- is unreachable once this frame returns.
 local function rearming_probe(times: integer): {string: integer}
-  local arm = support.lua_helper([[
+  const arm = support.lua_helper([[
 return function(candidate, times)
   local runs = {count = 0}
   local metatable = {}
@@ -456,7 +456,7 @@ return function(candidate, times)
   return runs
 end
 ]]) as function (value, integer): ({string: integer})
-  return arm(FinalizableProbe.new(times), times)
+  return arm(FinalizableProbe(times), times)
 end
 
 -- Setting an object's metatable again inside its finalizer marks it for
@@ -466,13 +466,13 @@ end
 -- re-arming.
 function test_gc_finalizer_rearms_by_setting_its_metatable_again(
     _context: test.Context)
-  local originally_incremental = gclib.incremental()
+  const originally_incremental = gclib.incremental()
   defer do
     if originally_incremental then gclib.incremental() else gclib.generational() end
   end
   for mode = 1, 2 do
     if mode == 1 then gclib.incremental() else gclib.generational() end
-    local runs = rearming_probe(3)
+    const runs = rearming_probe(3)
     for cycle = 1, 3 do
       gclib.collect()
       test.assert(runs["count"] == cycle, "collection " .. cycle .. " in mode " .. mode ..
@@ -489,8 +489,8 @@ local function round_trip_parameters(select_mode: ModeSelector,
   select_mode()
   local index = 1
   while index <= #accessors do
-    local accessor = accessors[index]
-    local original = originals[index]
+    const accessor = accessors[index]
+    const original = originals[index]
     local replacement = 100
     if original == 100 then replacement = 200 end
     test.assert(accessor(replacement) == original)
@@ -502,7 +502,7 @@ local function round_trip_parameters(select_mode: ModeSelector,
 end
 
 function test_gc_parameters_round_trip_and_validate(_context: test.Context)
-  local accessors: {ParameterAccessor} = {
+  const accessors: {ParameterAccessor} = {
     gclib.minormul,
     gclib.majorminor,
     gclib.minormajor,
@@ -510,8 +510,8 @@ function test_gc_parameters_round_trip_and_validate(_context: test.Context)
     gclib.stepmul,
     gclib.stepsize,
   }
-  local originally_incremental = gclib.incremental()
-  local originals: {integer} = {}
+  const originally_incremental = gclib.incremental()
+  const originals: {integer} = {}
   local index = 1
   while index <= #accessors do
     originals[index] = accessors[index]()

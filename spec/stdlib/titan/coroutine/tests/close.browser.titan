@@ -6,7 +6,7 @@ local browser_close_owners: {coroutine.Coroutine} = {}
 -- The helper snapshots actual production preload descriptors from its parent;
 -- this is the ordinary module provider path, not hand-authored preloading.
 function browser_retained_close()
-  local inner = coroutine.create(function(_: value): value
+  const inner = coroutine.create(function(_: value): value
     defer ffi.browser_close_record(1)
     do
       coroutine.yield("retained", "close-outer")
@@ -16,7 +16,7 @@ function browser_retained_close()
     end
     return nil
   end, "close-inner")
-  local outer = coroutine.create(function(_: value): value
+  const outer = coroutine.create(function(_: value): value
     defer ffi.browser_close_record(0)
     do
       inner:resume(nil)

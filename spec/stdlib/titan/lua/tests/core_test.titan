@@ -1,5 +1,5 @@
 local record TrackingReader
-  local chunks: {string}
+  local const chunks: {string}
   local index: integer
   local closed: boolean
 end
@@ -20,38 +20,38 @@ end
 
 function test_lua_load_chunks_arguments_and_environments(_context: test.Context)
   runtime_test.run(function ()
-    local passthrough = tlua.load("return ...", "=passthrough", nil)
+    const passthrough = tlua.load("return ...", "=passthrough", nil)
     local values: {value} = { passthrough(1, nil, 3) }
     test.assert(#values == 3)
     test.assert(values[1] == 1 and values[2] == nil and values[3] == 3)
 
-    local binary = tlua.load([[return "a\0b"]], "=binary", nil)
-    local binary_result: value = binary()
+    const binary = tlua.load([[return "a\0b"]], "=binary", nil)
+    const binary_result: value = binary()
     test.assert(binary_result == "a\0b")
 
     common.assert_raises_contains(function()
       tlua.load("return 1\0return 2", "=embedded-nul", nil)
     end, "embedded-nul")
 
-    local dump = common.lua_helper([[
+    const dump = common.lua_helper([[
   return function()
     local source = function(...) return ... end
     return string.dump(source)
   end
   ]]) as function (): (string)
-    local dumped = tlua.load(dump(), "=dumped", { ["ignored"] = true })
+    const dumped = tlua.load(dump(), "=dumped", { ["ignored"] = true })
     values = { dumped(7, nil, 9) }
     test.assert(#values == 3)
     test.assert(values[1] == 7 and values[2] == nil and values[3] == 9)
 
-    local environment: {string: value} = { ["answer"] = 42 }
-    local scoped = tlua.load("return answer, _G", "=environment", environment)
-    local scoped_values: {value} = { scoped() }
+    const environment: {string: value} = { ["answer"] = 42 }
+    const scoped = tlua.load("return answer, _G", "=environment", environment)
+    const scoped_values: {value} = { scoped() }
     test.assert(scoped_values[1] == 42 and scoped_values[2] == nil)
 
-    local global_chunk = tlua.load("return _G", nil, nil)
-    local actual_global: value = global_chunk()
-    local global_value = common.lua_helper([[
+    const global_chunk = tlua.load("return _G", nil, nil)
+    const actual_global: value = global_chunk()
+    const global_value = common.lua_helper([[
   return function() return _G end
   ]]) as function (): (value)
     test.assert(actual_global == global_value())
@@ -64,22 +64,22 @@ end
 
 function test_lua_load_from_reader_without_closing(_context: test.Context)
   runtime_test.run(function ()
-    local reader = TrackingReader.new({
+    const reader = TrackingReader({
       "return 'left', nil, ",
       "'right'",
     }, 0, false)
-    local chunk = tlua.load_from_reader(reader, "=reader", nil)
+    const chunk = tlua.load_from_reader(reader, "=reader", nil)
     test.assert(not reader.closed, "load_from_reader closed its reader")
-    local values: {value} = { chunk() }
+    const values: {value} = { chunk() }
     test.assert(#values == 3)
     test.assert(values[1] == "left" and values[2] == nil and
                 values[3] == "right")
 
-    local empty_reader = TrackingReader.new({
+    const empty_reader = TrackingReader({
       "", "return ", "", "'empty-chunks-ok'", "",
     }, 0, false)
-    local empty_chunk = tlua.load_from_reader(empty_reader, "=empty-reader", nil)
-    local empty_result: value = empty_chunk()
+    const empty_chunk = tlua.load_from_reader(empty_reader, "=empty-reader", nil)
+    const empty_result: value = empty_chunk()
     test.assert(empty_result == "empty-chunks-ok")
     test.assert(not empty_reader.closed)
   end)
@@ -87,16 +87,16 @@ end
 
 function test_lua_require_preload_cache_and_fallback(_context: test.Context)
   runtime_test.run(function ()
-    local cleanup = common.lua_helper([[
+    const cleanup = common.lua_helper([[
   return function(name)
     package.preload[name] = nil
     package.loaded[name] = nil
   end
   ]]) as function (string): ()
 
-    local preload_name = "lua.tests.preloaded"
+    const preload_name = "lua.tests.preloaded"
     defer cleanup(preload_name)
-    local setup_preload = common.lua_helper([[
+    const setup_preload = common.lua_helper([[
   return function(name)
     package.loaded[name] = nil
     local state = { calls = 0 }
@@ -108,18 +108,18 @@ function test_lua_require_preload_cache_and_fallback(_context: test.Context)
     return state
   end
   ]]) as function (string): ({string: value})
-    local preload_state = setup_preload(preload_name)
-    local first: value = tlua.require(preload_name)
+    const preload_state = setup_preload(preload_name)
+    const first: value = tlua.require(preload_name)
     test.assert(first is {string: value})
-    local first_map = first as {string: value}
+    const first_map = first as {string: value}
     test.assert(first_map["calls"] == 1)
-    local second: value = tlua.require(preload_name)
+    const second: value = tlua.require(preload_name)
     test.assert(second == first)
     test.assert(preload_state["calls"] == 1)
 
-    local fallback_name = "lua.tests.fallback"
+    const fallback_name = "lua.tests.fallback"
     defer cleanup(fallback_name)
-    local setup_fallback = common.lua_helper([[
+    const setup_fallback = common.lua_helper([[
   return function(name)
     package.loaded[name] = nil
     package.preload[name] = function() end
@@ -127,14 +127,14 @@ function test_lua_require_preload_cache_and_fallback(_context: test.Context)
   ]]) as function (string): ()
     setup_fallback(fallback_name)
     test.assert(tlua.require(fallback_name) == true)
-    local loaded = common.lua_helper([[
+    const loaded = common.lua_helper([[
   return function(name) return package.loaded[name] end
   ]]) as function (string): (value)
     test.assert(loaded(fallback_name) == true)
 
-    local false_name = "lua.tests.false"
+    const false_name = "lua.tests.false"
     defer cleanup(false_name)
-    local setup_false = common.lua_helper([[
+    const setup_false = common.lua_helper([[
   return function(name)
     package.loaded[name] = nil
     local state = { calls = 0 }
@@ -145,7 +145,7 @@ function test_lua_require_preload_cache_and_fallback(_context: test.Context)
     return state
   end
   ]]) as function (string): ({string: value})
-    local false_state = setup_false(false_name)
+    const false_state = setup_false(false_name)
     test.assert(tlua.require(false_name) == false)
     test.assert(tlua.require(false_name) == false)
     test.assert(false_state["calls"] == 2)

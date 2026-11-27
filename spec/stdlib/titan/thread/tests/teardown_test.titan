@@ -96,7 +96,7 @@ function thread_teardown_park_join(host: value)
   local gate_tx, gate_rx = thread.channel<|boolean|>(1)
   local done_tx, done_rx = thread.channel<|boolean|>(1)
   async.send(host as foreign *void, ThreadTeardownJoinProbe(gate_tx, done_rx))
-  local worker = thread.spawn_two(function (gate: thread.Receiver<|boolean|>,
+  const worker = thread.spawn_two(function (gate: thread.Receiver<|boolean|>,
       done: thread.Sender<|boolean|>): boolean
     gate:receive_result()
     return done:is_closed()
@@ -123,7 +123,7 @@ function thread_teardown_park_proxy(host: value)
   local gate_tx, gate_rx = thread.channel<|boolean|>(1)
   local report_tx, report_rx = thread.channel<|string|>(1)
   async.send(host as foreign *void, ThreadTeardownProxyProbe(gate_tx, report_rx))
-  local worker = thread.spawn_two(function (gate: thread.Receiver<|boolean|>,
+  const worker = thread.spawn_two(function (gate: thread.Receiver<|boolean|>,
       report: thread.Sender<|string|>): boolean
     report:try_send("started")
     local reason = "not cancelled"
@@ -146,7 +146,7 @@ function thread_teardown_park_proxy(host: value)
 end
 
 local function thread_teardown_close(code: string, chunk: string)
-  local state = lua.new()
+  const state = lua.new()
   defer state:close()
   state:run(code, chunk)
   state:close()
@@ -166,7 +166,7 @@ local function thread_teardown_park_shared(state: lua.Lua, inbox: async.Receiver
 end
 
 local function thread_teardown_worker_has_finished(state: lua.Lua): boolean
-  local result: async.TransferValue = state:run([[
+  const result: async.TransferValue = state:run([[
     package.path, package.cpath = '', ''
     return require('thread.tests').thread_teardown_worker_finished()
   ]], "=thread-teardown-worker-finished")
@@ -192,11 +192,11 @@ end
 
 function test_lua_close_disposes_packet_of_withdrawn_send(_: test.Context)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local state = lua.new()
+    const state = lua.new()
     defer state:close()
-    local probe: thread.Receiver<|boolean|> = thread_teardown_park_shared(
+    const probe: thread.Receiver<|boolean|> = thread_teardown_park_shared(
       state, inbox, "thread_teardown_park_send_carrying_endpoint")
     defer probe:close()
     test.assert(not probe:is_closed(), "the probe channel closed before lua_close")
@@ -223,11 +223,11 @@ end
 
 function test_lua_close_withdraws_receive_shared_with_another_state(_: test.Context)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local state = lua.new()
+    const state = lua.new()
     defer state:close()
-    local clones: ThreadTeardownClones =
+    const clones: ThreadTeardownClones =
       thread_teardown_park_shared(state, inbox, "thread_teardown_park_receive")
     defer clones.receiver:close()
     state:close()
@@ -241,11 +241,11 @@ end
 
 function test_lua_close_withdraws_woken_receive_shared_with_another_state(_: test.Context)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local state = lua.new()
+    const state = lua.new()
     defer state:close()
-    local clones: ThreadTeardownClones =
+    const clones: ThreadTeardownClones =
       thread_teardown_park_shared(state, inbox, "thread_teardown_park_receive")
     defer clones.receiver:close()
     -- Wake the parked receive. Its state never drives its loop again, so the
@@ -260,11 +260,11 @@ end
 
 function test_lua_close_withdraws_join_of_running_thread(_: test.Context)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local state = lua.new()
+    const state = lua.new()
     defer state:close()
-    local probe: ThreadTeardownJoinProbe =
+    const probe: ThreadTeardownJoinProbe =
       thread_teardown_park_shared(state, inbox, "thread_teardown_park_join")
     defer probe.done:close()
     defer probe.gate:close()
@@ -281,18 +281,18 @@ end
 
 function test_lua_close_withdraws_woken_join(_: test.Context)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local state = lua.new()
+    const state = lua.new()
     defer state:close()
-    local probe: ThreadTeardownJoinProbe =
+    const probe: ThreadTeardownJoinProbe =
       thread_teardown_park_shared(state, inbox, "thread_teardown_park_join")
     defer probe.done:close()
     defer probe.gate:close()
     -- Let the worker finish and wake the parked join while its state never
     -- drives its loop, so the wake is unacknowledged when the state closes.
     probe.gate:send(true)
-    local deadline = poll_deadline()
+    const deadline = poll_deadline()
     while not thread_teardown_worker_has_finished(state) do
       check_poll_deadline(deadline, "the joined worker finishing")
       timer.sleep(1)
@@ -306,11 +306,11 @@ end
 -- would wait for the gate, which the host releases only after a bounded wait.
 function test_lua_close_cancels_thread_of_unfinished_proxy(_: test.Context)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local state = lua.new()
+    const state = lua.new()
     defer state:close()
-    local probe: ThreadTeardownProxyProbe =
+    const probe: ThreadTeardownProxyProbe =
       thread_teardown_park_shared(state, inbox, "thread_teardown_park_proxy")
     defer probe.report:close()
     defer probe.gate:close()
@@ -348,16 +348,16 @@ record ThreadTeardownFinalizedHolder
 end
 
 local function thread_teardown_resurrect(candidate: value)
-  local holder: ThreadTeardownFinalizedHolder = candidate
+  const holder: ThreadTeardownFinalizedHolder = candidate
   holder.kept[#holder.kept + 1] = holder.handle as thread.Thread<|integer|>
 end
 
 local function thread_teardown_drop_handle(kept: {thread.Thread<|integer|>}, joined: boolean)
-  local holder = ThreadTeardownFinalizedHolder(kept, nil)
+  const holder = ThreadTeardownFinalizedHolder(kept, nil)
   gc.finalizable<|value|>(holder, thread_teardown_resurrect)
   local done_tx, done_rx = thread.channel<|boolean|>(1)
   defer done_rx:close()
-  local worker = thread.spawn_one(function (done: thread.Sender<|boolean|>): integer
+  const worker = thread.spawn_one(function (done: thread.Sender<|boolean|>): integer
     done:send(true)
     return 1
   end, done_tx)
@@ -374,7 +374,7 @@ local function thread_teardown_drop_handle(kept: {thread.Thread<|integer|>}, joi
 end
 
 local function thread_teardown_finalized_handle(joined: boolean): thread.Thread<|integer|>
-  local kept: {thread.Thread<|integer|>} = {}
+  const kept: {thread.Thread<|integer|>} = {}
   thread_teardown_drop_handle(kept, joined)
   for _ = 1, 4 do gc.collect() end
   test.assert(#kept == 1, "the holder did not resurrect the finalized handle")
@@ -384,7 +384,7 @@ end
 function test_finalized_thread_handle_raises(context: test.Context)
   context:run("joined", function (_: test.Context)
     runtime_test.run(function ()
-      local handle = thread_teardown_finalized_handle(true)
+      const handle = thread_teardown_finalized_handle(true)
       -- The cached terminal status survives finalization.
       test.assert(handle:status():has_finished(), "the cached status was lost")
       thread_fault_common.assert_raises_contains(function () handle:join() end,
@@ -395,7 +395,7 @@ function test_finalized_thread_handle_raises(context: test.Context)
   end)
   context:run("unobserved", function (_: test.Context)
     runtime_test.run(function ()
-      local handle = thread_teardown_finalized_handle(false)
+      const handle = thread_teardown_finalized_handle(false)
       thread_fault_common.assert_raises_contains(function () handle:status() end,
         "thread handle was finalized")
       thread_fault_common.assert_raises_contains(function () handle:join() end,
@@ -423,7 +423,7 @@ function thread_teardown_park_stacked_receive(host: value)
   async.send(host as foreign *void,
     ThreadTeardownStackedProbe(tx:clone(), rx:clone(), unwound_rx))
   thread_teardown_park(async.run<|integer, value|>(function (): integer
-    local generator = thread_teardown_coroutine.create(function (_: value): value
+    const generator = thread_teardown_coroutine.create(function (_: value): value
       defer unwound_tx:try_send(true)
       return rx:receive()
     end, "thread-teardown-generator")
@@ -433,11 +433,11 @@ end
 
 function test_lua_close_withdraws_wait_parked_on_stacked_coroutine(_: test.Context)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local state = lua.new()
+    const state = lua.new()
     defer state:close()
-    local probe: ThreadTeardownStackedProbe =
+    const probe: ThreadTeardownStackedProbe =
       thread_teardown_park_shared(state, inbox, "thread_teardown_park_stacked_receive")
     defer probe.receiver:close()
     defer probe.unwound:close()
@@ -491,13 +491,13 @@ end
 function thread_teardown_park_group(host: value, running_member: boolean)
   local limit = 1
   if running_member then limit = 2 end
-  local group = thread.group(limit, false)
+  const group = thread.group(limit, false)
   local release_tx, release_rx = thread.channel<|boolean|>(1)
   local started_tx, started_rx = thread.channel<|string|>(1)
   local gate_tx, gate_rx = thread.channel<|boolean|>(1)
   local done_tx, done_rx = thread.channel<|boolean|>(1)
   async.send(host as foreign *void, ThreadTeardownGroupProbe(gate_tx, done_rx, started_rx))
-  local admit = async.run<|value, value|>(function (): value
+  const admit = async.run<|value, value|>(function (): value
     group:spawn_one(function (release: thread.Receiver<|boolean|>)
       release:receive_result()
     end, release_rx)
@@ -518,11 +518,11 @@ function thread_teardown_park_group(host: value, running_member: boolean)
   -- in the reverse of the order they should withdraw: the granted admission,
   -- then the queued one, then the completion waiter. Yields put the
   -- admissions in the queue after the spawner in the opposite order.
-  local completion = async.run<|value, value|>(function (): value
+  const completion = async.run<|value, value|>(function (): value
     group:wait()
     return nil
   end)
-  local queued = async.run<|value, value|>(function (): value
+  const queued = async.run<|value, value|>(function (): value
     async.yield()
     async.yield()
     group:spawn_one(function (started: thread.Sender<|string|>)
@@ -530,16 +530,16 @@ function thread_teardown_park_group(host: value, running_member: boolean)
     end, started_tx)
     return nil
   end)
-  local granted = async.run<|value, value|>(function (): value
+  const granted = async.run<|value, value|>(function (): value
     async.yield()
     group:spawn_one(function (started: thread.Sender<|string|>)
       started:send("granted")
     end, started_tx)
     return nil
   end)
-  local spawner = async.run<|value, value|>(function (): value
+  const spawner = async.run<|value, value|>(function (): value
     expect_error(function ()
-      group:spawn_one(function (_x: PrivateNonTransferable) end, PrivateNonTransferable(7))
+      group:spawn_one(function (_: PrivateNonTransferable) end, PrivateNonTransferable(7))
     end, "record must be public with only public fields")
     return true
   end)
@@ -557,7 +557,7 @@ end
 -- whose wake stays queued because nothing drives the loop again.
 function thread_teardown_step_group(): boolean
   uv.run(async.current_loop(), uv.RUN_NOWAIT)
-  local spawner = thread_teardown_group_spawner
+  const spawner = thread_teardown_group_spawner
   if not spawner:status():has_finished() then return false end
   local succeeded, result? = spawner:status():has_succeeded()
   test.assert(succeeded and result == true, "the failing spawner ended " .. spawner:status():as_string())
@@ -567,7 +567,7 @@ function thread_teardown_step_group(): boolean
 end
 
 local function thread_teardown_group_step(state: lua.Lua): boolean
-  local result: async.TransferValue = state:run([[
+  const result: async.TransferValue = state:run([[
     package.path, package.cpath = '', ''
     return require('thread.tests').thread_teardown_step_group()
   ]], "=thread-teardown-group-step")
@@ -586,10 +586,10 @@ end
 -- its thread, which exits although its OS thread is not joined.
 local function thread_teardown_close_group(running_member: boolean)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local warnings: owned char[] = foreign char.new_array(thread_teardown_unwind.UNWIND_BUFFER_SIZE)
-    local state = lua.new()
+    const warnings: owned char[] = foreign char.new_array(thread_teardown_unwind.UNWIND_BUFFER_SIZE)
+    const state = lua.new()
     defer state:close()
     state:run([[
       package.path, package.cpath = '', ''
@@ -599,7 +599,7 @@ local function thread_teardown_close_group(running_member: boolean)
     ]], "=thread-teardown-group", async.TransferValue.is_pointer(inbox:handle()),
       async.TransferValue.is_pointer(warnings as foreign *void),
       async.TransferValue.is_boolean(running_member))
-    local probe: ThreadTeardownGroupProbe = inbox:wait()
+    const probe: ThreadTeardownGroupProbe = inbox:wait()
     defer probe.started:close()
     defer probe.done:close()
     defer probe.gate:close()
@@ -609,7 +609,7 @@ local function thread_teardown_close_group(running_member: boolean)
       timer.sleep(1)
     end
     state:close()
-    local recorded = (warnings as foreign *char) as string
+    const recorded = (warnings as foreign *char) as string
     test.assert(recorded == "", "closing the state reported cleanup errors:\n" .. recorded)
     case probe.started:receive_result()
     when closed() then
@@ -621,7 +621,7 @@ local function thread_teardown_close_group(running_member: boolean)
       check_poll_deadline(deadline, "the running member exiting")
       timer.sleep(1)
     end
-    local reported, _flag? = probe.done:try_receive()
+    local reported, _? = probe.done:try_receive()
     test.assert(not reported, "the running member was not cancelled")
   end)
 end

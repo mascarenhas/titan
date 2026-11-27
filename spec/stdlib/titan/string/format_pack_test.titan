@@ -6,8 +6,8 @@ foreign import "locale.h"
 local observed = ""
 
 local record ConversionSample
-  code: string
-  operand: value
+  const code: string
+  const operand: value
 end
 
 local function mark(text: string): value
@@ -33,8 +33,8 @@ local function assert_format_parity(format_string: string, operand: value)
 end
 
 local function assert_unpack_parity(format_string: string, data: string)
-  local actual: {value} = {string.unpack(format_string, data, nil)}
-  local expected: {value} = {
+  const actual: {value} = {string.unpack(format_string, data, nil)}
+  const expected: {value} = {
     support.lua_unpack(format_string, data, nil)
   }
   support.assert_value_arrays_equal(
@@ -49,13 +49,13 @@ local function assert_same_success(titan_call: function (): (),
 end
 
 function test_format_lua_compatibility(context: test.Context)
-  local previous_locale? = support.set_c_locale()
+  const previous_locale? = support.set_c_locale()
   test.assert(previous_locale ~= nil, "could not select the C locale")
   defer support.restore_locale(previous_locale as string)
-  local minimum = -9223372036854775807 - 1
-  local infinity = 1.0 / 0.0
-  local nan = 0.0 / 0.0
-  local pointer_object: {string: string} = {["kind"] = "pointer"}
+  const minimum = -9223372036854775807 - 1
+  const infinity = 1.0 / 0.0
+  const nan = 0.0 / 0.0
+  const pointer_object: {string: string} = {["kind"] = "pointer"}
 
   test.assert(string.format("literal %% tail") ==
               support.lua_format("literal %% tail"))
@@ -88,7 +88,7 @@ function test_format_lua_compatibility(context: test.Context)
 
   -- The linked Lua configuration selects either native C99 hexadecimal
   -- formatting or Lua's own fallback, including its modifier restrictions.
-  local hexadecimal_values: {float} = {
+  const hexadecimal_values: {float} = {
     0.0, -0.0, 1.5, -1.5, 1.0 / 3.0,
     4.9406564584124654e-324, 2.2250738585072014e-308,
     1.7976931348623157e308, infinity, -infinity, nan,
@@ -109,9 +109,9 @@ function test_format_lua_compatibility(context: test.Context)
   support.expect_error(function() string.format("%1a") end,
                        "no value for format conversion")
 
-  local binary_format =
+  const binary_format =
     "\0A%%B%+05d\0C%%%#06x\0D%%E%.2f\0F%s\0tail%%\0"
-  local binary_actual =
+  const binary_actual =
     string.format(binary_format, 12, 255, 1.0 / 3.0, "x\0y")
   test.assert(binary_actual ==
               support.lua_format(
@@ -136,7 +136,7 @@ function test_format_lua_compatibility(context: test.Context)
     string.format("%d", 1.5)
   end, nil)
 
-  local qualified = "%+05d|%-6i|%#08x|%#6o|%.3f|%8.2e|%-7.3s"
+  const qualified = "%+05d|%-6i|%#08x|%#6o|%.3f|%8.2e|%-7.3s"
   test.assert(string.format(
                 qualified, 12, 13, 255, 10,
                 1.0 / 3.0, 1.0 / 3.0, "abcdef") ==
@@ -144,36 +144,36 @@ function test_format_lua_compatibility(context: test.Context)
                 qualified, 12, 13, 255, 10,
                 1.0 / 3.0, 1.0 / 3.0, "abcdef"))
 
-  local modifiers: {string} = {
+  const modifiers: {string} = {
     "", "-", "--", "0", "00", "+", " ", "#",
     "-0", "+0", " #0", "1", "01", "09", "10", "99",
     ".", ".0", ".00", ".01", ".99",
     "-.", "-1", "-1.", "-1.2", "-99.99",
     "+05.2", "#08.3", "100", ".100", "-100.100",
   }
-  local conversions: {ConversionSample} = {
-    ConversionSample.new("c", 65),
-    ConversionSample.new("d", -42),
-    ConversionSample.new("i", -42),
-    ConversionSample.new("u", -42),
-    ConversionSample.new("o", 42),
-    ConversionSample.new("x", 42),
-    ConversionSample.new("X", 42),
-    ConversionSample.new("a", 1.0 / 3.0),
-    ConversionSample.new("A", 1.0 / 3.0),
-    ConversionSample.new("e", 1.0 / 3.0),
-    ConversionSample.new("E", 1.0 / 3.0),
-    ConversionSample.new("f", 1.0 / 3.0),
-    ConversionSample.new("g", 1.0 / 3.0),
-    ConversionSample.new("G", 1.0 / 3.0),
-    ConversionSample.new("p", pointer_object),
-    ConversionSample.new("q", "a\0b"),
-    ConversionSample.new("s", "abcdef"),
+  const conversions: {ConversionSample} = {
+    ConversionSample("c", 65),
+    ConversionSample("d", -42),
+    ConversionSample("i", -42),
+    ConversionSample("u", -42),
+    ConversionSample("o", 42),
+    ConversionSample("x", 42),
+    ConversionSample("X", 42),
+    ConversionSample("a", 1.0 / 3.0),
+    ConversionSample("A", 1.0 / 3.0),
+    ConversionSample("e", 1.0 / 3.0),
+    ConversionSample("E", 1.0 / 3.0),
+    ConversionSample("f", 1.0 / 3.0),
+    ConversionSample("g", 1.0 / 3.0),
+    ConversionSample("G", 1.0 / 3.0),
+    ConversionSample("p", pointer_object),
+    ConversionSample("q", "a\0b"),
+    ConversionSample("s", "abcdef"),
   }
   for conversion_index = 1, #conversions do
-    local conversion = conversions[conversion_index]
+    const conversion = conversions[conversion_index]
     for modifier_index = 1, #modifiers do
-      local form = "%" .. modifiers[modifier_index] .. conversion.code
+      const form = "%" .. modifiers[modifier_index] .. conversion.code
       assert_format_parity(form, conversion.operand)
     end
   end
@@ -186,15 +186,15 @@ function test_format_lua_compatibility(context: test.Context)
               support.lua_format("%99.99f", 1.0 / 3.0))
   test.assert(string.format("%-99.99s", "abc") ==
               support.lua_format("%-99.99s", "abc"))
-  local many_flags = "%" .. string.rep("-", 20) .. "d"
+  const many_flags = "%" .. string.rep("-", 20) .. "d"
   test.assert(string.format(many_flags, 1) ==
               support.lua_format(many_flags, 1))
 end
 
 function test_format_numeric_locale_parity(_context: test.Context)
-  local original = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
+  const original = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
   defer ffi.setlocale(ffi.LC_NUMERIC, original)
-  local candidates: {string} = {
+  const candidates: {string} = {
     "de_DE.UTF-8", "fr_FR.UTF-8", "pt_BR.UTF-8",
     "de_DE.utf8", "fr_FR.utf8", "French_France.1252",
   }
@@ -209,7 +209,7 @@ function test_format_numeric_locale_parity(_context: test.Context)
   if not changed then
     test.skip("capability: no alternate numeric locale installed for formatting")
   end
-  local selected = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
+  const selected = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
   assert_format_parity("%a", 1.5)
   assert_format_parity("%A", 1.0 / 3.0)
   assert_format_parity("%q", 1.5)
@@ -225,7 +225,7 @@ function test_format_accounting_and_recovery(context: test.Context)
   test.assert(string.format("%%:%d:%%:%s:%%", 7, "x", "surplus") ==
               "%:7:%:x:%")
   observed = ""
-  local rendered = string.format("%%:%s", mark("used"), mark("extra"))
+  const rendered = string.format("%%:%s", mark("used"), mark("extra"))
   test.assert(rendered == "%:used" and observed == "usedextra")
   support.expect_error(function()
     string.format("%%:%d:%%:%s:%%", 7)
@@ -249,7 +249,7 @@ function test_format_accounting_and_recovery(context: test.Context)
   support.expect_error(function()
     string.format("%y", nil)
   end, "invalid conversion to 'format'")
-  local too_long = "%" .. string.rep("-", 21) .. "d"
+  const too_long = "%" .. string.rep("-", 21) .. "d"
   support.expect_error(function()
     string.format(too_long)
   end, "no value for format conversion")
@@ -257,10 +257,10 @@ function test_format_accounting_and_recovery(context: test.Context)
     string.format(too_long, nil)
   end, "invalid format (too long)")
 
-  local object = support.custom_tostring_value("custom\0text")
+  const object = support.custom_tostring_value("custom\0text")
   test.assert(string.format("%s", object) ==
               support.lua_format("%s", object))
-  local bad = support.failing_tostring_value("format conversion failed")
+  const bad = support.failing_tostring_value("format conversion failed")
   support.expect_error(function()
     string.format("%s", bad)
   end, "format conversion failed")
@@ -290,13 +290,13 @@ function test_format_accounting_and_recovery(context: test.Context)
 end
 
 local function pointer_object_for_failure(): value
-  local object: {string: string} = {["not"] = "quotable"}
+  const object: {string: string} = {["not"] = "quotable"}
   return object
 end
 
 function test_target_native_pack_and_unpack(context: test.Context)
-  local minimum = -9223372036854775807 - 1
-  local maximum = 9223372036854775807
+  const minimum = -9223372036854775807 - 1
+  const maximum = 9223372036854775807
   local packed = string.pack("bBhH", -128, 255, -32768, 65535)
   test.assert(packed == support.lua_pack(
     "bBhH", -128, 255, -32768, 65535))
@@ -304,7 +304,7 @@ function test_target_native_pack_and_unpack(context: test.Context)
 
   -- Native C long is 32 bits on Windows LLP64 and 64 bits on Unix LP64.
   -- Keep the full target range while Lua integer formats retain their 64 bits.
-  local long_size = support.lua_packsize("l")
+  const long_size = support.lua_packsize("l")
   local long_minimum = minimum
   local unsigned_long_maximum = -1
   if long_size < support.lua_packsize("j") then
@@ -382,25 +382,25 @@ function test_target_native_pack_and_unpack(context: test.Context)
   support.expect_error(function() string.pack("z", 42) end, nil)
   support.expect_error(function() string.pack("i4", 1.5) end, nil)
 
-  local empty: {value} = {string.unpack("", "", nil)}
+  const empty: {value} = {string.unpack("", "", nil)}
   test.assert(#empty == 1 and (empty[1] as integer) == 1)
 
-  local fixed: {string} = {
+  const fixed: {string} = {
     "", "bBhHlLjJTfnd", "i1i2i4i8i16I1I16", "c0c3x",
     "!4bXi4i4", "!8bXd d", "!bXi16i16", "<i2I4", ">i2I4", "i2\0?",
   }
   for format_index = 1, #fixed do
-    local format_string = fixed[format_index]
+    const format_string = fixed[format_index]
     test.assert(string.packsize(format_string) ==
                 support.lua_packsize(format_string))
   end
 
-  local data = support.lua_pack("i2", 42) .. "x"
-  local positions: {integer} = {
+  const data = support.lua_pack("i2", 42) .. "x"
+  const positions: {integer} = {
     minimum, -100, -1, 0, 1, 2, 4, 5, 100, maximum,
   }
   for position_index = 1, #positions do
-    local position = positions[position_index]
+    const position = positions[position_index]
     assert_same_success(
       function() string.unpack("i2", data, position) end,
       function() support.lua_unpack("i2", data, position) end,
@@ -408,8 +408,8 @@ function test_target_native_pack_and_unpack(context: test.Context)
     if support.succeeds(function()
          string.unpack("i2", data, position)
        end) then
-      local actual: {value} = {string.unpack("i2", data, position)}
-      local expected: {value} = {
+      const actual: {value} = {string.unpack("i2", data, position)}
+      const expected: {value} = {
         support.lua_unpack("i2", data, position)
       }
       support.assert_value_arrays_equal(actual, expected, nil)
@@ -445,7 +445,7 @@ function test_pack_failures_and_value_bounds(context: test.Context)
   assert_same_success(
     function() string.pack("i1", -129) end,
     function() support.lua_pack("i1", -129) end, "i1 low differs")
-  local long_string = string.rep("x", 256)
+  const long_string = string.rep("x", 256)
   assert_same_success(
     function() string.pack("s1", long_string) end,
     function() support.lua_pack("s1", long_string) end,
@@ -469,18 +469,18 @@ function test_pack_failures_and_value_bounds(context: test.Context)
     function() string.pack("i4") end,
     function() support.lua_pack("i4") end, "missing pack arg differs")
 
-  local variable_formats: {string} = {
+  const variable_formats: {string} = {
     "s", "z", "i0", "i17", "c", "X", "Xc2", "!3i4", "?",
   }
   for format_index = 1, #variable_formats do
-    local format_string = variable_formats[format_index]
+    const format_string = variable_formats[format_index]
     assert_same_success(
       function() string.packsize(format_string) end,
       function() support.lua_packsize(format_string) end,
       "packsize acceptance differs")
   end
 
-  local too_short_i4 = "\0"
+  const too_short_i4 = "\0"
   assert_same_success(
     function() string.unpack("i4", too_short_i4, nil) end,
     function() support.lua_unpack("i4", too_short_i4, nil) end,
@@ -493,12 +493,12 @@ function test_pack_failures_and_value_bounds(context: test.Context)
     function() string.unpack("s1", "\5abc", nil) end,
     function() support.lua_unpack("s1", "\5abc", nil) end,
     "short s1 unpack differs")
-  local all_ff = string.rep("\255", 16)
+  const all_ff = string.rep("\255", 16)
   assert_same_success(
     function() string.unpack("I16", all_ff, nil) end,
     function() support.lua_unpack("I16", all_ff, nil) end,
     "wide unsigned unpack differs")
-  local wide_signed = string.rep("\0", 8) .. string.rep("\1", 8)
+  const wide_signed = string.rep("\0", 8) .. string.rep("\1", 8)
   assert_same_success(
     function() string.unpack("i16", wide_signed, nil) end,
     function() support.lua_unpack("i16", wide_signed, nil) end,
@@ -512,8 +512,8 @@ function test_pack_failures_and_value_bounds(context: test.Context)
     function() support.lua_unpack("X", "", nil) end,
     "invalid unpack alignment differs")
 
-  local octets = string.rep("\1", 200)
-  local format200 = string.rep("%d", 200) .. "\0%%tail"
+  const octets = string.rep("\1", 200)
+  const format200 = string.rep("%d", 200) .. "\0%%tail"
   test.assert(string.format(
                 format200, support.lua_byte(octets, 1, 200)) ==
               support.lua_format(
@@ -522,9 +522,9 @@ function test_pack_failures_and_value_bounds(context: test.Context)
                 string.rep("B", 200),
                 support.lua_byte(octets, 1, 200)) == 200)
 
-  local format199 = string.rep("B", 199)
-  local packed199 = string.rep("\1", 199)
-  local returned: {value} = {string.unpack(format199, packed199, nil)}
+  const format199 = string.rep("B", 199)
+  const packed199 = string.rep("\1", 199)
+  const returned: {value} = {string.unpack(format199, packed199, nil)}
   test.assert(#returned == 200)
   test.assert((returned[200] as integer) == 200)
   support.expect_error(function()

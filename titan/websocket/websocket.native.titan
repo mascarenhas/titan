@@ -26,10 +26,10 @@ local const FRAME_BUDGET = 32
 --- Validated copied server-opening, Origin, and subprotocol options.
 -- @usage standard-library-websocket.md#public-interface
 record AcceptOptions
-  local protocols: {string}
-  local origins: {string}
-  local limit: integer
-  local timeout: integer
+  local const protocols: {string}
+  local const origins: {string}
+  local const limit: integer
+  local const timeout: integer
 end
 
 --- Validate and snapshot server protocols, allowed origins, and opening limits.

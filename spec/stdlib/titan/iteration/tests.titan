@@ -6,24 +6,24 @@ local support = import "support.common.titan"
 -- carrier. These helpers deliberately leave a bad value in otherwise precise
 -- storage so the iterator result's closed projection can be tested.
 local function pollute_map<|K, V|>(map: {K: V}, key: K, item: value)
-  local generic_item: V = item
+  const generic_item: V = item
   map[key] = generic_item
 end
 
 local function pollute_array<|T|>(array: {T}, index: integer, item: value)
-  local generic_item: T = item
+  const generic_item: T = item
   array[index] = generic_item
 end
 
 function test_iteration_tuple_and_next(context: test.Context)
   test.assert(context:name() == "iteration.tests.test_iteration_tuple_and_next")
 
-  local empty: {string: integer} = {}
+  const empty: {string: integer} = {}
   local empty_key?, empty_item? =
     iteration.next<|string, integer|>(empty, nil)
   test.assert(empty_key == nil and empty_item == nil)
 
-  local map: {string: integer} = { ["answer"] = 42 }
+  const map: {string: integer} = { ["answer"] = 42 }
   local next_function, state, initial, close =
     iteration.pairs<|string, integer|>(map)
   test.assert(state == map)
@@ -34,9 +34,9 @@ function test_iteration_tuple_and_next(context: test.Context)
     next_function(state, key)
   test.assert(exhausted_key == nil and exhausted_item == nil)
 
-  local object_key: {value: value} = {}
-  local object_value: {value: value} = {}
-  local arbitrary: {{value: value}: {value: value}} = {
+  const object_key: {value: value} = {}
+  const object_value: {value: value} = {}
+  const arbitrary: {{value: value}: {value: value}} = {
     [object_key] = object_value,
   }
   local actual_key?, actual_value? =
@@ -46,7 +46,7 @@ end
 
 function test_iteration_infers_typed_maps_and_preserves_false(
     _context: test.Context)
-  local map: {string: integer} = {
+  const map: {string: integer} = {
     ["a"] = 10,
     ["b"] = 20,
     ["c"] = 12,
@@ -66,7 +66,7 @@ function test_iteration_infers_typed_maps_and_preserves_false(
   end
   test.assert(count == 3 and sum == 42)
 
-  local flags: {boolean: integer} = {
+  const flags: {boolean: integer} = {
     [false] = 17,
     [true] = 25,
   }
@@ -80,7 +80,7 @@ function test_iteration_infers_typed_maps_and_preserves_false(
 end
 
 function test_iteration_arrays_include_holes(_context: test.Context)
-  local array: {string} = { "first", "middle", "third" }
+  const array: {string} = { "first", "middle", "third" }
   array[2] = nil
 
   local step, state, initial, close = iteration.ipairs<|string|>(array)
@@ -102,7 +102,7 @@ function test_iteration_arrays_include_holes(_context: test.Context)
   test.assert(middle_is_nil)
   test.assert(saw_last)
 
-  local trailing: {string} = { "first", "second", "third" }
+  const trailing: {string} = { "first", "second", "third" }
   trailing[3] = nil
   count = 0
   for _, _ in iteration.ipairs(trailing) do
@@ -114,38 +114,38 @@ end
 function test_iteration_contextually_instantiates_next(_context: test.Context)
   -- Generic-inference coverage: a complete monomorphic function context
   -- instantiates the generic declaration without a written specialization.
-  local concrete_next:
+  const concrete_next:
       function ({string: integer}, string?): (string?, integer?) = iteration.next
-  local map: {string: integer} = { ["answer"] = 42 }
+  const map: {string: integer} = { ["answer"] = 42 }
   local key?, item? = concrete_next(map, nil)
   test.assert(key == "answer" and item == 42)
 end
 
 function test_iteration_polluted_container_projection_errors(
     _context: test.Context)
-  local map: {string: integer} = {}
+  const map: {string: integer} = {}
   pollute_map<|string, integer|>(map, "bad", "not an integer")
   support.assert_raises_contains(function()
     local _, item? =
       iteration.next<|string, integer|>(map, nil)
-    local number = item
+    const number = item
     test.assert(number == 0)
   end, "expected integer")
 
-  local array: {integer} = {}
+  const array: {integer} = {}
   pollute_array<|integer|>(array, 1, "not an integer")
   support.assert_raises_contains(function()
     local polluted_step, polluted_state, polluted_initial, _ =
       iteration.ipairs<|integer|>(array)
     local _, item? =
       polluted_step(polluted_state, polluted_initial)
-    local number = item
+    const number = item
     test.assert(number == 0)
   end, "expected integer")
 end
 
 function test_iteration_invalid_control_key(_context: test.Context)
-  local map: {value: integer} = { ["answer"] = 42 }
+  const map: {value: integer} = { ["answer"] = 42 }
   support.assert_raises_contains(function()
     iteration.next<|value, integer|>(map, {})
   end, "invalid key to 'next'")

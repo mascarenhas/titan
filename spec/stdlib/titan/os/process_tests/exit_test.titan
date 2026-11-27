@@ -1,7 +1,7 @@
 local type ExitFixtureCase = function (string): ()
 
 local function compile_exit_fixture(workspace: string)
-  local source = fs.read_file("spec/fixtures/stdlib/titan/os_exit_app.titan")
+  const source = fs.read_file("spec/fixtures/stdlib/titan/os_exit_app.titan")
   fs.write_file(workspace .. "/os_exit_app.titan", source)
   local output, why, code = command.compile(workspace, "os_exit_app")
   test.assert(why == "exit" and code == 0,
@@ -11,7 +11,7 @@ end
 
 local function run_exit_fixture(workspace: string, mode: string):
     (string, integer, string)
-  local marker = workspace .. "/" .. mode .. ".marker"
+  const marker = workspace .. "/" .. mode .. ".marker"
   local output, why, code = command.capture({
     command.program(workspace, "os_exit_app"), mode, marker,
   })
@@ -21,7 +21,7 @@ end
 
 local function with_exit_fixture(body: ExitFixtureCase)
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
@@ -52,7 +52,7 @@ function test_exit_child_task_replaces_completed_main_result(
   with_exit_fixture(function (workspace: string)
     local marker, code, output = run_exit_fixture(workspace, "child")
     test.assert(code == 29, "child os.exit failed: " .. output)
-    local contents = fs.read_file(marker)
+    const contents = fs.read_file(marker)
     test.assert(common.contains(contents, "main-defer;") and
                 common.contains(contents, "child-defer;") and
                 not common.contains(contents, "child-after;"),
@@ -75,7 +75,7 @@ function test_exit_first_code_wins_competing_request(
   with_exit_fixture(function (workspace: string)
     local marker, code, output = run_exit_fixture(workspace, "competing")
     test.assert(code == 41, "competing os.exit failed: " .. output)
-    local contents = fs.read_file(marker)
+    const contents = fs.read_file(marker)
     test.assert(common.contains(contents, "main-defer;") and
                 common.contains(contents, "child-caught;") and
                 common.contains(contents, "child-defer;") and

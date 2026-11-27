@@ -23,8 +23,8 @@ foreign import "external-wake-native.h"
 --- Owned cross-thread external wake bridge backed by an internal async handle and native waiter queue.
 -- @usage uv/types.md#external_wake_t
 record external_wake_t
-  local handle: async_t
-  local handle_view: handle_t
+  local const handle: async_t
+  local const handle_view: handle_t
   local core: foreign *titan_uv_external_wake_core
   local callback: (function (external_wake_t): ())?
 end
@@ -361,7 +361,7 @@ local foreign function external_wake_begin_close(
 end
 
 local function external_wake_finalize(owner: external_wake_t)
-  local core = owner.core
+  const core = owner.core
   owner.core = nil
   owner.callback = nil
   external_wake_detach(core)
@@ -371,15 +371,15 @@ end
 -- @return Native external_wake_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#external_wake_tnew
 function external_wake_t.new(): external_wake_t
-  local handle = async_t.new()
-  local owner: external_wake_t = {
+  const handle = async_t()
+  const owner: external_wake_t = {
     handle = handle,
     handle_view = handle:as_handle_t(),
     core = nil,
     callback = nil,
   }
   handle.callback = function (_: async_t)
-    local callback? = owner.callback
+    const callback? = owner.callback
     if callback ~= nil then callback(owner) end
   end
   handle.close_handler = function (closed: async_t, loop: loop_t)
@@ -410,7 +410,7 @@ function external_wake_init(loop: loop_t, owner: external_wake_t,
   if not loop.initialized or owner.handle.phase ~= HANDLE_FRESH then
     return ffi.UV_EINVAL
   end
-  local core = ffi.calloc(1, foreign titan_uv_external_wake_core.sizeof)
+  const core = ffi.calloc(1, foreign titan_uv_external_wake_core.sizeof)
     as foreign *titan_uv_external_wake_core
   if core == nil then return ffi.UV_ENOMEM end
   local status: integer = ffi.uv_mutex_init(core as foreign *uv_mutex_t)
@@ -438,7 +438,7 @@ function external_wake_t:reserve(identity: foreign unsigned long long):
     (integer, foreign *void)
   if self.core == nil then return ffi.UV_EINVAL, nil end
   local target: foreign *void = nil
-  local status: integer = external_wake_reserve_native(self.core, identity, target)
+  const status: integer = external_wake_reserve_native(self.core, identity, target)
   return status, target
 end
 
@@ -476,7 +476,7 @@ function external_wake_t:drain(output: foreign *unsigned long long,
     (integer, foreign unsigned int)
   if self.core == nil then return ffi.UV_EINVAL, 0 end
   local count: foreign unsigned int = 0
-  local status: integer = external_wake_drain_native(self.core, output, capacity, count)
+  const status: integer = external_wake_drain_native(self.core, output, capacity, count)
   return status, count
 end
 
@@ -485,7 +485,7 @@ end
 -- @usage uv/supplemental.md#external_wake_tclose
 function external_wake_t:close(): integer
   if self.core == nil then return 0 end
-  local status: integer = external_wake_begin_close(self.core)
+  const status: integer = external_wake_begin_close(self.core)
   if status < 0 then return status end
   if not is_closing(self.handle_view) then close(self.handle_view) end
   return 0

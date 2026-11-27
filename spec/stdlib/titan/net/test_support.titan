@@ -31,21 +31,19 @@ local function listen_available(first_port: integer, reuse_port: boolean?):
     (net.Server, integer)
   local port = first_port
   for _ = 1, 100 do
-    do
-      local server = net.listen("127.0.0.1", port, nil, reuse_port)
-      return server, port
-    catch
-      if error is async.OperationError then
-        local failure = error as async.OperationError
-        if failure.name == "EADDRINUSE" then
-          port = port + 1
-          if port > 60999 then port = 20000 end
-        else
-          raise
-        end
+    const server = net.listen("127.0.0.1", port, nil, reuse_port)
+    return server, port
+  catch
+    if error is async.OperationError then
+      const failure = error as async.OperationError
+      if failure.name == "EADDRINUSE" then
+        port = port + 1
+        if port > 60999 then port = 20000 end
       else
         raise
       end
+    else
+      raise
     end
   end
   raise "could not find an available loopback port"

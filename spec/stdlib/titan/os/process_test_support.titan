@@ -9,7 +9,7 @@ local task_support = import "support.async.titan"
 local type CheckedAction = function (): ()
 
 local function child_path(): string
-  local supplied? = system.getenv("TITAN_PROCESS_CHILD")
+  const supplied? = system.getenv("TITAN_PROCESS_CHILD")
   if supplied and #supplied > 0 then return supplied end
   test.assert(not common.is_windows(),
               "runner did not supply the native Windows process fixture")
@@ -64,11 +64,11 @@ local function assert_normal(status: system.ExitStatus, label: string)
 end
 
 local function close_process_streams(process: system.Process)
-  local input? = process.stdin
+  const input? = process.stdin
   if input then (input as system.OutputStream):close() end
-  local output? = process.stdout
+  const output? = process.stdout
   if output then (output as system.InputStream):close() end
-  local diagnostics? = process.stderr
+  const diagnostics? = process.stderr
   if diagnostics and diagnostics ~= output then
     (diagnostics as system.InputStream):close()
   end

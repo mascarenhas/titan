@@ -1,18 +1,17 @@
 local function listen_raw_tls(): (ssl.Server, integer)
   local port = 42500
   for _ = 1, 100 do
-    do return ssl.listen("127.0.0.1", port, CERTIFICATE, PRIVATE_KEY), port
-    catch
-      if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
-        port = port + 1
-      else raise end
-    end
+    return ssl.listen("127.0.0.1", port, CERTIFICATE, PRIVATE_KEY), port
+  catch
+    if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
+      port = port + 1
+    else raise end
   end
   raise "WebSocket backpressure TLS fixture exhausted loopback ports"
 end
 
 local function fixture_time_ms(): integer
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   uv.update_time(loop)
   return uv.now(loop)
 end
@@ -22,16 +21,16 @@ end
 -- Query with zero AFTER each setter: a setter's in/out argument is not evidence
 -- of the kernel's effective buffer, especially with platform socket minima.
 local function constrain_owned_sockets(receive: boolean, stop_reads: boolean): (integer, string)
-  local loop = async.current_loop()
-  local profile = string.writer()
-  local count = on_main(function (): integer
+  const loop = async.current_loop()
+  const profile = string.writer()
+  const count = on_main(function (): integer
     local count = 0
     uv.walk(loop, function (handle: uv.handle_t, _argument: value)
       case handle
       when tcp(owner) then
         if handle:is_initialized() and not uv.is_closing(handle) then
           local mss_profile = "unconnected"
-          local peer_status = uv.tcp_getpeername(owner)
+          const peer_status = uv.tcp_getpeername(owner)
           if peer_status >= 0 then
             -- Nagle's ACK-delayed tail is not a stopped-window pressure
             -- witness. Acknowledge this public setter on connected senders
@@ -40,7 +39,7 @@ local function constrain_owned_sockets(receive: boolean, stop_reads: boolean): (
                         "could not disable Nagle on a connected fixture-owned TCP socket")
             mss_profile = pressure_mss(owner) .. " nodelay=set"
           end
-          local send_set = uv.send_buffer_size(handle, 1024)
+          const send_set = uv.send_buffer_size(handle, 1024)
           local receive_set = 0
           if receive then receive_set = uv.recv_buffer_size(handle, 1024) end
           local send_status, send_size = uv.send_buffer_size(handle, 0)
@@ -64,9 +63,9 @@ end
 -- Public connected endpoint addresses identify a unique fixture-owned socket.
 -- A listening socket has no peer and cannot satisfy this lookup.
 local function owned_connected_socket(local_port: integer?, peer_port: integer?): uv.tcp_t
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   local selected: uv.tcp_t? = nil
-  local matches = on_main(function (): integer
+  const matches = on_main(function (): integer
     local count = 0
     uv.walk(loop, function (handle: uv.handle_t, _argument: value)
       case handle
@@ -89,7 +88,7 @@ local function owned_connected_socket(local_port: integer?, peer_port: integer?)
   test.assert(matches == 1,
     string.format("owned connected TCP lookup was ambiguous: local_port=%s peer_port=%s matches=%d",
       string.tostring(local_port), string.tostring(peer_port), matches))
-  local socket? = selected
+  const socket? = selected
   return socket
 end
 
@@ -102,20 +101,20 @@ end
 
 local function verified_small_window_tls_peer(port: integer,
     publish_abort: function (function (): ()): ()): (ssl.Connection, string)
-  local transport = net.Connection.new()
+  const transport = net.Connection()
   runtime_test.cleanup(function () transport:close() end)
   publish_abort(function () transport:close() end)
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   local profile = ""
   -- Only this newly constructed public Connection is unbound. Walk public
   -- TCP state in our isolated Runtime; do not inspect its opaque fields.
-  local fresh = on_main(function (): integer
+  const fresh = on_main(function (): integer
     local count = 0
     uv.walk(loop, function (handle: uv.handle_t, _argument: value)
       case handle
       when tcp(owner) then
         if handle:is_initialized() and not uv.is_closing(handle) then
-          local status = uv.tcp_getsockname(owner)
+          const status = uv.tcp_getsockname(owner)
           if status < 0 then
             profile = small_window_socket(owner)
             count = count + 1
@@ -131,7 +130,7 @@ local function verified_small_window_tls_peer(port: integer,
   test.assert(address_status >= 0)
   transport:connect_address(address)
   profile = profile .. " after_SYN=" .. pressure_mss(owned_connected_socket(nil, port))
-  local tls = ssl.client(transport, "localhost", TRUST_ROOT)
+  const tls = ssl.client(transport, "localhost", TRUST_ROOT)
   runtime_test.cleanup(function () tls:abort() end)
   publish_abort(function () tls:abort() end)
   tls:handshake()
@@ -148,7 +147,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
     backend_port = port
     close_listener = function () listener:close() end
     accept = function (): io.ReaderWriterCloser
-      local tls = listener:accept()
+      const tls = listener:accept()
       abort_backend = function () tls:abort() end
       tls:handshake()
       return tls
@@ -158,7 +157,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
     backend_port = port
     close_listener = function () listener:close() end
     accept = function (): io.ReaderWriterCloser
-      local tcp = listener:accept()
+      const tcp = listener:accept()
       abort_backend = function () tcp:close() end
       return tcp
     end
@@ -166,15 +165,15 @@ local function blocked_output_case(secure: boolean, trigger: string)
   runtime_test.cleanup(close_listener)
   local raw: Wire? = nil
   local acknowledged = false
-  local hold = async.ResumeToken("WebSocket stopped socket peer")
-  local peer = async.run<|value, value|>(function (): value
-    local stream = accept()
+  const hold = async.ResumeToken("WebSocket stopped socket peer")
+  const peer = async.run<|value, value|>(function (): value
+    const stream = accept()
     defer abort_backend()
-    local wire = Wire(stream, "", "")
+    const wire = Wire(stream, "", "")
     raw = wire
     wire:open_server()
     wire.stream:write(frame(9, "before-stop"))
-    local pong = wire:frame()
+    const pong = wire:frame()
     test.assert(pong.opcode == 10 and pong.masked and pong.payload == "before-stop",
                 "client receive admission was not acknowledged before stopping OS reads")
     acknowledged = true
@@ -182,7 +181,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
     if trigger == "close_overlap" then
       local fragments = 0
       while true do
-        local output = wire:frame()
+        const output = wire:frame()
         test.assert(output.masked, "client output behind blocked frame lost masking")
         if output.opcode == 8 then
           test.assert(string.sub(output.payload, 1, 2) == close_bytes(1000),
@@ -202,7 +201,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
     abort_backend()
     task_support.cancel_and_join_task(peer, "stopped socket peer cleanup")
   end)
-  local proxy = new_proxy(backend_port)
+  const proxy = new_proxy(backend_port)
   runtime_test.cleanup(function () proxy:close() end)
   local scheme = "ws"
   local options: websocket.DialOptions? = nil
@@ -210,11 +209,11 @@ local function blocked_output_case(secure: boolean, trigger: string)
     scheme = "wss"
     options = websocket.DialOptions { ca_file = TRUST_ROOT }
   end
-  local connection = websocket.connect(scheme .. "://localhost:" .. proxy.port .. "/blocked", options)
+  const connection = websocket.connect(scheme .. "://localhost:" .. proxy.port .. "/blocked", options)
   runtime_test.cleanup(function () connection:close() end)
-  local client_socket = owned_connected_socket(nil, proxy.port)
+  const client_socket = owned_connected_socket(nil, proxy.port)
   local read_failure: value = nil
-  local reader = async.run<|value, value|>(function (): value
+  const reader = async.run<|value, value|>(function (): value
     do connection:read() catch read_failure = error end
     return nil
   end)
@@ -226,10 +225,10 @@ local function blocked_output_case(secure: boolean, trigger: string)
   -- connection identity or production state is consulted.
   local sockets, socket_profile = constrain_owned_sockets(false, false)
   test.assert(sockets >= 6, "stopped-output fixture did not own both peer pairs and listeners")
-  local writer_started = fixture_time_ms()
+  const writer_started = fixture_time_ms()
   local write_returned = false
   local write_failure: value = nil
-  local writer = async.run<|value, value|>(function (): value
+  const writer = async.run<|value, value|>(function (): value
     do
       connection:write(websocket.BINARY, string.rep("blocked\0", 2 * 1024 * 1024))
       write_returned = true
@@ -245,7 +244,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
   -- kernel ACK. Let the writer keep filling the stopped receive window and
   -- require continuous native pressure across real loop/timer progress before
   -- any of the protocol-operation deadlines starts.
-  local pressure_started = fixture_time_ms()
+  const pressure_started = fixture_time_ms()
   local pressure_since = 0
   local pressure_samples = 0
   local admitted_pending = pending_output_bytes(client_socket)
@@ -279,9 +278,9 @@ local function blocked_output_case(secure: boolean, trigger: string)
       pressure_samples, socket_profile,
       proxy:diagnostic()))
   local watchdog_fired = false
-  local watchdog_started = fixture_time_ms()
+  const watchdog_started = fixture_time_ms()
   local drain_started = 0
-  local watchdog = async.run<|value, value|>(function (): value
+  const watchdog = async.run<|value, value|>(function (): value
     timer.sleep(8000)
     watchdog_fired = true
     proxy:close()
@@ -289,7 +288,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
     return nil
   end)
   task_support.cleanup_task(watchdog, "stalled-output watchdog cleanup")
-  local diagnostic = function (): string
+  const diagnostic = function (): string
     return string.format("trigger=%s elapsed_ms=%d admitted_queue=%d pressure_ms=%d pressure_samples=%d writer=%s returned=%s write_failure=%s reader=%s read_failure=%s watchdog=%s buffers=%s; %s",
       trigger, fixture_time_ms() - watchdog_started, admitted_pending,
       pressure_ms, pressure_samples,
@@ -305,13 +304,13 @@ local function blocked_output_case(secure: boolean, trigger: string)
       code, _reason = connection:close_status()
     end
     test.assert(code == 1000, "reader did not acknowledge peer Close behind blocked output; " .. diagnostic())
-    local held_pending = pending_output_bytes(client_socket)
+    const held_pending = pending_output_bytes(client_socket)
     test.assert(held_pending > 0 and not write_returned and writer:status():as_string() == "waiting",
       string.format("fixture lost the held native frame before overlapping shutdown: queue=%d; %s",
         held_pending, diagnostic()))
     local shutdown_failure: value = nil
     local shutdown_returned = false
-    local shutdown = async.run<|value, value|>(function (): value
+    const shutdown = async.run<|value, value|>(function (): value
       do connection:shutdown(1000, "local", 5000); shutdown_returned = true
       catch shutdown_failure = error end
       return nil
@@ -348,7 +347,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
     return
   end
   if trigger == "cancel_write" then
-    local reason = async.CancellationReason.simple("cancel native accepted WebSocket output")
+    const reason = async.CancellationReason.simple("cancel native accepted WebSocket output")
     writer:cancel(reason)
     async.join(writer)
     test.assert(writer:status():has_cancelled() and write_failure == reason,
@@ -356,12 +355,12 @@ local function blocked_output_case(secure: boolean, trigger: string)
   elseif trigger == "close" then
     connection:close()
   elseif trigger == "ping" then
-    local failure = expect_error(function () connection:ping(30) end)
+    const failure = expect_error(function () connection:ping(30) end)
     do assert_ws_error(failure, "timeout", "websocket.ping", nil)
     catch raise fixture_failure(error) .. "; " .. diagnostic() end
     timer.sleep(1); async.checkpoint()
   elseif trigger == "shutdown" then
-    local failure = expect_error(function () connection:shutdown(1000, "", 30) end)
+    const failure = expect_error(function () connection:shutdown(1000, "", 30) end)
     do assert_ws_error(failure, "timeout", "websocket.shutdown", nil)
     catch raise fixture_failure(error) .. "; " .. diagnostic() end
     timer.sleep(1); async.checkpoint()
@@ -381,7 +380,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
     -- Prove that held frame across real loop/timer progress before waiting
     -- for the unchanged control deadline. Losing it is fixture setup failure.
     local held_pending = pending_output_bytes(client_socket)
-    local held_started = fixture_time_ms()
+    const held_started = fixture_time_ms()
     local held_samples = 0
     while not watchdog_fired do
       test.assert(held_pending > 0 and not write_returned and write_failure == nil and
@@ -406,8 +405,9 @@ local function blocked_output_case(secure: boolean, trigger: string)
   test.assert(not write_returned and write_failure ~= nil and read_failure ~= nil and not watchdog_fired,
     "protocol operation drained blocked native output before abort or missed its deadline; " .. diagnostic())
   if trigger == "protocol_close" then
-    do assert_ws_error(read_failure, "protocol", "websocket.read", 1002)
-    catch raise fixture_failure(error) .. "; " .. diagnostic() end
+    assert_ws_error(read_failure, "protocol", "websocket.read", 1002)
+  catch
+    raise fixture_failure(error) .. "; " .. diagnostic()
   end
   watchdog:cancel(async.CancellationReason.simple("stopped-output test completed"))
   async.join(watchdog)
@@ -418,13 +418,13 @@ local function blocked_output_case(secure: boolean, trigger: string)
 end
 
 function test_stopped_socket_output_aborts_before_native_drain(context: test.Context)
-  local triggers: {string} = {"cancel_write", "close", "ping", "shutdown", "peer_close", "protocol_close", "close_overlap"}
+  const triggers: {string} = {"cancel_write", "close", "ping", "shutdown", "peer_close", "protocol_close", "close_overlap"}
   for index = 1, #triggers do
-    local trigger = triggers[index]
-    context:run("ws_" .. trigger, function (_child: test.Context)
+    const trigger = triggers[index]
+    context:run("ws_" .. trigger, function (_: test.Context)
       runtime_test.run(function () blocked_output_case(false, trigger) end)
     end)
-    context:run("wss_" .. trigger, function (_child: test.Context)
+    context:run("wss_" .. trigger, function (_: test.Context)
       runtime_test.run(function () blocked_output_case(true, trigger) end)
     end)
   end
@@ -461,8 +461,8 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local pending_at_ms = 0
   local cancel_at_ms = 0
   local finished_at_ms = 0
-  local preflight = async.ResumeToken("accepted HTTP opening preflight")
-  local handler: http.Handler = function (request: http.Request, response: http.Response)
+  const preflight = async.ResumeToken("accepted HTTP opening preflight")
+  const handler: http.Handler = function (request: http.Request, response: http.Response)
     handler_task = async.running()
     if request.target == "/pressure-prime" then
       -- A real keep-alive response consumes the previously advertised TCP
@@ -474,7 +474,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
       priming_profile = profile
       priming = true
       response:set_header("Connection", "keep-alive")
-      local chunk = string.rep("p", 4096)
+      const chunk = string.rep("p", 4096)
       do
         while not stop_priming do
           test.assert(priming_chunks < 2048,
@@ -498,7 +498,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
     accepting = true
     opening_started = fixture_time_ms()
     do
-      local connection = websocket.accept(request, response,
+      const connection = websocket.accept(request, response,
         websocket.AcceptOptions { handshake_timeout = opening_timeout })
       transferred = true
       connection:close()
@@ -512,17 +512,17 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local listener_sockets, listener_profile = constrain_owned_sockets(true, false)
   test.assert(listener_sockets == 1,
               "opening Runtime did not own exactly its listener before any TCP SYN; " .. listener_profile)
-  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  const serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
   runtime_test.cleanup(function ()
     listener:close()
     task_support.cancel_and_join_task(serving, "blocked opening listener cleanup")
   end)
-  local write_request: function (string): () = function (_bytes: string) raise "unset opening writer" end
+  local write_request: function (string): () = function (_: string) raise "unset opening writer" end
   local abort: function (): () = function () end
   local preconnect_profile = ""
   local setup_fired = false
-  local setup_started = fixture_time_ms()
-  local setup_watchdog = async.run<|value, value|>(function (): value
+  const setup_started = fixture_time_ms()
+  const setup_watchdog = async.run<|value, value|>(function (): value
     timer.sleep(OPENING_LIVENESS_MS)
     setup_fired = true
     abort()
@@ -535,7 +535,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   task_support.cleanup_task(setup_watchdog, "HTTP priming setup watchdog cleanup")
   -- Publish the current public abort capability before connect/handshake can
   -- suspend, so the setup watchdog also bounds those initial native waits.
-  local publish_abort = function (close: function (): ()) abort = close end
+  const publish_abort = function (close: function (): ()) abort = close end
   if secure then
     local tls, profile = verified_small_window_tls_peer(port, publish_abort)
     preconnect_profile = profile
@@ -551,7 +551,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
     abort()
     if handler_task then task_support.cancel_and_join_task(handler_task, "blocked opening handler cleanup") end
   end)
-  local peer_socket = owned_connected_socket(nil, port)
+  const peer_socket = owned_connected_socket(nil, port)
   -- Verified TLS is complete. Stop its native input before sending both
   -- requests; no TLS read is performed after any ciphertext is discarded.
   test.assert(uv.read_stop(peer_socket:as_stream_t()) >= 0)
@@ -560,8 +560,8 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   while not priming and not setup_fired do timer.sleep(1) end
   test.assert(priming and not setup_fired,
               "ordinary HTTP priming handler was not acknowledged within its finite setup budget")
-  local server_socket = owned_connected_socket(port, nil)
-  local setup_diagnostic = function (): string
+  const server_socket = owned_connected_socket(port, nil)
+  const setup_diagnostic = function (): string
     return string.format("elapsed_ms=%d chunks=%d completed_body=%d writing=%s closed=%s failure=%s handler=%s setup_watchdog=%s buffers=%s",
       fixture_time_ms() - setup_started, priming_chunks, priming_bytes,
       string.tostring(priming_writing), string.tostring(priming_closed), fixture_failure(priming_failure),
@@ -591,7 +591,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
     string.format("HTTP priming did not establish stable unresolved accepted output: queue=%d pressure_ms=%d; %s",
       priming_pending, priming_pressure_ms, setup_diagnostic()))
   stop_priming = true
-  local frozen_priming_chunks = priming_chunks
+  const frozen_priming_chunks = priming_chunks
   -- Free only small native receive steps to finish the already pending chunk
   -- and HTTP terminator. The next handler stays suspended at preflight, so
   -- these reads cannot consume any 101 output. Every step has its own 100 ms
@@ -605,9 +605,9 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   -- to 10 MiB + 64 KiB; the unchanged setup watchdog also bounds release time.
   local discarded = 0
   local discard_steps = 0
-  local discard_limit = frozen_priming_chunks * (4096 + 1024) + 64 * 1024
+  const discard_limit = frozen_priming_chunks * (4096 + 1024) + 64 * 1024
   while not entered and not setup_fired and priming_failure == nil do
-    local remaining = discard_limit - discarded
+    const remaining = discard_limit - discarded
     if remaining == 0 then
       -- The last permitted native read may have released the pending HTTP
       -- terminator, but its ACK/completion need not have run yet. Admit no
@@ -645,7 +645,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local stopped_sockets, stopped_profile = constrain_owned_sockets(true, true)
   test.assert(stopped_sockets >= 3, "stopped opening runtime lost owned TCP handles; " .. stopped_profile)
   local watchdog_fired = false
-  local watchdog = async.run<|value, value|>(function (): value
+  const watchdog = async.run<|value, value|>(function (): value
     timer.sleep(OPENING_LIVENESS_MS)
     watchdog_fired = true
     -- Closing this public peer forces native accepted output to retire before
@@ -671,9 +671,9 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   pending_at_ms = fixture_time_ms() - opening_started
   gc.collect()
   if cancel then
-    local reason = async.CancellationReason.simple("cancel accepted native 101 output")
+    const reason = async.CancellationReason.simple("cancel accepted native 101 output")
     cancel_at_ms = fixture_time_ms() - opening_started
-    local before_status = handler_task:status():as_string()
+    const before_status = handler_task:status():as_string()
     handler_task:cancel(reason)
     async.join(handler_task)
     test.assert(handler_task:status():has_cancelled() and failure == reason,
@@ -705,16 +705,16 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
 end
 
 function test_server_opening_aborts_pending_101_before_transfer(context: test.Context)
-  context:run("ws_timeout", function (_child: test.Context)
+  context:run("ws_timeout", function (_: test.Context)
     runtime_test.run(function () blocked_server_opening_case(false, false) end)
   end)
-  context:run("wss_timeout", function (_child: test.Context)
+  context:run("wss_timeout", function (_: test.Context)
     runtime_test.run(function () blocked_server_opening_case(true, false) end)
   end)
-  context:run("ws_cancel", function (_child: test.Context)
+  context:run("ws_cancel", function (_: test.Context)
     runtime_test.run(function () blocked_server_opening_case(false, true) end)
   end)
-  context:run("wss_cancel", function (_child: test.Context)
+  context:run("wss_cancel", function (_: test.Context)
     runtime_test.run(function () blocked_server_opening_case(true, true) end)
   end)
 end

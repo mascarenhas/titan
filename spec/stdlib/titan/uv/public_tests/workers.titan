@@ -10,14 +10,14 @@ local foreign function increment_cell(argument: *void)
 end
 
 local function assert_cell(weak: {value: value}, key: value, expected: integer)
-  local cell: owned int[] = weak[key]
+  const cell: owned int[] = weak[key]
   test.assert(cell[0] == expected, "native completion did not publish worker writes")
 end
 
 local function start_thread(weak: {value: value})
-  local cell: owned int[] = foreign int.new_array(1)
+  const cell: owned int[] = foreign int.new_array(1)
   cell[0] = 41
-  local thread = uv.thread_t()
+  const thread = uv.thread_t()
   weak[1] = thread
   weak[2] = cell
   success(uv.thread_create(thread, increment_cell, cell, cell))
@@ -25,8 +25,8 @@ local function start_thread(weak: {value: value})
 end
 
 local function join_thread(weak: {value: value})
-  local thread: uv.thread_t = weak[1]
-  local cell: owned int[] = weak[2]
+  const thread: uv.thread_t = weak[1]
+  const cell: owned int[] = weak[2]
   success(uv.thread_join(thread))
   test.assert(cell[0] == 42)
   test.assert(uv.thread_join(thread) == uv.EINVAL)
@@ -37,7 +37,7 @@ local function join_thread(weak: {value: value})
 end
 
 function test_thread_roots_argument_graph_until_join_and_allows_reuse(_context: test.Context)
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   start_thread(weak)
   collect()
@@ -50,7 +50,7 @@ end
 
 local function resubmit_work(loop: uv.loop_t, request: uv.work_t, weak: {value: value},
                             delivered: function (): ())
-  local cell: owned int[] = foreign int.new_array(1)
+  const cell: owned int[] = foreign int.new_array(1)
   cell[0] = 80
   weak[3] = cell
   success(uv.queue_work(loop, request, increment_cell, cell,
@@ -66,8 +66,8 @@ end
 
 local function submit_work(first: uv.loop_t, second: uv.loop_t,
                            weak: {value: value}, delivered: function (): ())
-  local request = uv.work_t()
-  local cell: owned int[] = foreign int.new_array(1)
+  const request = uv.work_t()
+  const cell: owned int[] = foreign int.new_array(1)
   cell[0] = 40
   weak[1] = request
   weak[2] = cell
@@ -86,14 +86,14 @@ local function submit_work(first: uv.loop_t, second: uv.loop_t,
 end
 
 function test_work_reuse_retains_both_arguments_and_reports_to_original_loop(_context: test.Context)
-  local first = new_loop()
+  const first = new_loop()
   local second: uv.loop_t? = nil
   defer do
     defer if second ~= nil then finish_loop(second) end
     finish_loop(first)
   end
   second = new_loop()
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   local calls = 0
   submit_work(first, second, weak, function () calls = calls + 1 end)
@@ -113,10 +113,10 @@ function test_work_reuse_retains_both_arguments_and_reports_to_original_loop(_co
 end
 
 function test_work_public_data_is_independent_of_native_callback_data(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local request = uv.work_t()
-  local cell: owned int[] = foreign int.new_array(1)
+  const request = uv.work_t()
+  const cell: owned int[] = foreign int.new_array(1)
   cell[0] = 40
   request:set_data("before submission")
   local calls = 0
@@ -134,9 +134,9 @@ function test_work_public_data_is_independent_of_native_callback_data(_context: 
 end
 
 function test_loop_abandon_finishes_native_work_without_after_work(_: test.Context)
-  local loop = new_loop()
-  local request = uv.work_t()
-  local cell: owned int[] = foreign int.new_array(1)
+  const loop = new_loop()
+  const request = uv.work_t()
+  const cell: owned int[] = foreign int.new_array(1)
   cell[0] = 40
   local calls = 0
   success(uv.queue_work(loop, request, increment_cell, cell,
@@ -148,27 +148,27 @@ function test_loop_abandon_finishes_native_work_without_after_work(_: test.Conte
 end
 
 local function start_rooted_sync_worker(weak: {value: value})
-  local mutex = uv.mutex_t()
+  const mutex = uv.mutex_t()
   success(uv.mutex_init(mutex))
-  local rwlock = uv.rwlock_t()
+  const rwlock = uv.rwlock_t()
   success(uv.rwlock_init(rwlock))
-  local sem = uv.sem_t()
+  const sem = uv.sem_t()
   success(uv.sem_init(sem, 0))
-  local cond = uv.cond_t()
+  const cond = uv.cond_t()
   success(uv.cond_init(cond))
-  local barrier = uv.barrier_t()
+  const barrier = uv.barrier_t()
   success(uv.barrier_init(barrier, 1))
-  local key = uv.key_t()
+  const key = uv.key_t()
   success(uv.key_create(key))
-  local once = uv.once_t()
-  local cell: owned int[] = foreign int.new_array(1)
+  const once = uv.once_t()
+  const cell: owned int[] = foreign int.new_array(1)
   cell[0] = 10
   test.assert(mutex:borrow() ~= nil and rwlock:borrow() ~= nil and
               sem:borrow() ~= nil and cond:borrow() ~= nil and
               barrier:borrow() ~= nil and key:borrow() ~= nil and
               once:borrow() ~= nil)
-  local thread = uv.thread_t()
-  local owners: {value} = {cell, mutex, rwlock, sem, cond, barrier, key, once}
+  const thread = uv.thread_t()
+  const owners: {value} = {cell, mutex, rwlock, sem, cond, barrier, key, once}
   weak[1] = thread
   weak[2] = mutex
   weak[3] = rwlock
@@ -181,13 +181,13 @@ local function start_rooted_sync_worker(weak: {value: value})
 end
 
 local function finish_rooted_sync_worker(weak: {value: value})
-  local thread: uv.thread_t = weak[1]
-  local mutex: uv.mutex_t = weak[2]
-  local rwlock: uv.rwlock_t = weak[3]
-  local sem: uv.sem_t = weak[4]
-  local cond: uv.cond_t = weak[5]
-  local barrier: uv.barrier_t = weak[6]
-  local key: uv.key_t = weak[7]
+  const thread: uv.thread_t = weak[1]
+  const mutex: uv.mutex_t = weak[2]
+  const rwlock: uv.rwlock_t = weak[3]
+  const sem: uv.sem_t = weak[4]
+  const cond: uv.cond_t = weak[5]
+  const barrier: uv.barrier_t = weak[6]
+  const key: uv.key_t = weak[7]
   success(uv.thread_join(thread))
   uv.mutex_destroy(mutex)
   uv.rwlock_destroy(rwlock)
@@ -199,7 +199,7 @@ end
 
 function test_sync_borrowed_owners_remain_rooted_across_gc_until_join_and_destroy(
     _context: test.Context)
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   start_rooted_sync_worker(weak)
   collect()
@@ -212,7 +212,7 @@ function test_sync_borrowed_owners_remain_rooted_across_gc_until_join_and_destro
 end
 
 function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context)
-  local barrier = uv.barrier_t()
+  const barrier = uv.barrier_t()
   expect_error(function () barrier:borrow() end,
                "uv.barrier: not initialized or already destroyed")
   test.assert(uv.barrier_init(barrier, 0) == uv.EINVAL)
@@ -226,7 +226,7 @@ function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context
   expect_error(function () uv.barrier_wait(barrier) end,
                "uv.barrier: not initialized or already destroyed")
 
-  local mutex = uv.mutex_t()
+  const mutex = uv.mutex_t()
   expect_error(function () mutex:borrow() end,
                "uv.mutex: not initialized or already destroyed")
   expect_error(function () uv.mutex_lock(mutex) end,
@@ -242,7 +242,7 @@ function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context
   expect_error(function () uv.mutex_destroy(mutex) end,
                "uv.mutex: not initialized or already destroyed")
 
-  local rwlock = uv.rwlock_t()
+  const rwlock = uv.rwlock_t()
   expect_error(function () rwlock:borrow() end,
                "uv.rwlock: not initialized or already destroyed")
   success(uv.rwlock_init(rwlock))
@@ -252,7 +252,7 @@ function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context
   expect_error(function () rwlock:borrow() end,
                "uv.rwlock: not initialized or already destroyed")
 
-  local semaphore = uv.sem_t()
+  const semaphore = uv.sem_t()
   expect_error(function () semaphore:borrow() end,
                "uv.sem: not initialized or already destroyed")
   success(uv.sem_init(semaphore, 0))
@@ -265,7 +265,7 @@ function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context
   expect_error(function () semaphore:borrow() end,
                "uv.sem: not initialized or already destroyed")
 
-  local cond = uv.cond_t()
+  const cond = uv.cond_t()
   expect_error(function () cond:borrow() end,
                "uv.cond: not initialized or already destroyed")
   success(uv.cond_init(cond))
@@ -275,7 +275,7 @@ function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context
   expect_error(function () cond:borrow() end,
                "uv.cond: not initialized or already destroyed")
 
-  local key = uv.key_t()
+  const key = uv.key_t()
   expect_error(function () key:borrow() end,
                "uv.key: not initialized or already destroyed")
   success(uv.key_create(key))
@@ -323,8 +323,8 @@ local foreign function native_token_self_join_worker(argument: *void)
 end
 
 function test_native_thread_tokens_reject_null_without_creating_ownership(_context: test.Context)
-  local join: foreign function(*void): int = uv.native_thread_join
-  local detach: foreign function(*void): int = uv.native_thread_detach
+  const join: foreign function(*void): int = uv.native_thread_join
+  const detach: foreign function(*void): int = uv.native_thread_detach
   local status, token = uv.create_native_thread(nil, nil)
   test.assert(status == uv.EINVAL and token == nil,
               "NULL native entry created a thread token")
@@ -335,18 +335,18 @@ function test_native_thread_tokens_reject_null_without_creating_ownership(_conte
 end
 
 function test_native_thread_join_retires_caller_owned_token_and_argument(_context: test.Context)
-  local go = uv.sem_t()
+  const go = uv.sem_t()
   success(uv.sem_init(go, 0))
   defer uv.sem_destroy(go)
-  local cell: owned int[] = foreign int.new_array(1)
+  const cell: owned int[] = foreign int.new_array(1)
   cell[0] = 40
-  local slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(2)
+  const slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(2)
   slots[0] = go:borrow()
   slots[1] = cell
   local token: foreign *void = nil
   defer if token ~= nil then
     uv.sem_post(go)
-    local result = uv.native_thread_join(token)
+    const result = uv.native_thread_join(token)
     if result == 0 then token = nil end
     success(result)
   end
@@ -359,8 +359,8 @@ function test_native_thread_join_retires_caller_owned_token_and_argument(_contex
   collect()
   test.assert(cell[0] == 40)
   uv.sem_post(go)
-  local join: foreign function(*void): int = uv.native_thread_join
-  local result = join(token)
+  const join: foreign function(*void): int = uv.native_thread_join
+  const result = join(token)
   if result == 0 then token = nil end
   success(result)
   test.assert(slots[1] == (cell as foreign *void),
@@ -370,18 +370,18 @@ function test_native_thread_join_retires_caller_owned_token_and_argument(_contex
 end
 
 function test_native_thread_detach_consumes_only_token_not_argument_lifetime(_context: test.Context)
-  local go = uv.sem_t()
+  const go = uv.sem_t()
   success(uv.sem_init(go, 0))
   defer uv.sem_destroy(go)
-  local done = uv.sem_t()
+  const done = uv.sem_t()
   success(uv.sem_init(done, 0))
   defer uv.sem_destroy(done)
-  local mutex = uv.mutex_t()
+  const mutex = uv.mutex_t()
   success(uv.mutex_init(mutex))
   defer uv.mutex_destroy(mutex)
-  local cell: owned int[] = foreign int.new_array(1)
+  const cell: owned int[] = foreign int.new_array(1)
   cell[0] = 40
-  local slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(4)
+  const slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(4)
   slots[0] = go:borrow()
   slots[1] = done:borrow()
   slots[2] = mutex:borrow()
@@ -391,7 +391,7 @@ function test_native_thread_detach_consumes_only_token_not_argument_lifetime(_co
   defer if accepted and not retired then
     uv.sem_post(go)
     if token ~= nil then
-      local result = uv.native_thread_join(token)
+      const result = uv.native_thread_join(token)
       if result == 0 then token = nil end
       success(result)
     else
@@ -404,8 +404,8 @@ function test_native_thread_detach_consumes_only_token_not_argument_lifetime(_co
   token = created
   accepted = status == 0
   success(status)
-  local detach: foreign function(*void): int = uv.native_thread_detach
-  local result = detach(token)
+  const detach: foreign function(*void): int = uv.native_thread_detach
+  const result = detach(token)
   if result == 0 then token = nil end
   success(result)
   test.assert(token == nil, "successful native detach did not consume its token")
@@ -426,21 +426,21 @@ function test_native_thread_failed_self_join_preserves_valid_token(_context: tes
   if native_thread_common.is_windows() then
     test.skip("platform: Windows native self-join blocks instead of returning a deadlock error")
   end
-  local go = uv.sem_t()
+  const go = uv.sem_t()
   success(uv.sem_init(go, 0))
   defer uv.sem_destroy(go)
-  local done = uv.sem_t()
+  const done = uv.sem_t()
   success(uv.sem_init(done, 0))
   defer uv.sem_destroy(done)
-  local result: owned int[] = foreign int.new_array(1)
-  local slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(4)
+  const result: owned int[] = foreign int.new_array(1)
+  const slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(4)
   slots[0] = go:borrow()
   slots[1] = done:borrow()
   slots[3] = result
   local token: foreign *void = nil
   defer if token ~= nil then
     uv.sem_post(go)
-    local status = uv.native_thread_join(token)
+    const status = uv.native_thread_join(token)
     if status == 0 then token = nil end
     success(status)
   end
@@ -453,7 +453,7 @@ function test_native_thread_failed_self_join_preserves_valid_token(_context: tes
   token = slots[2]
   test.assert((result[0] as integer) < 0 and token ~= nil,
               "native self-join did not return failure with valid ownership preserved")
-  local joined = uv.native_thread_join(token)
+  const joined = uv.native_thread_join(token)
   if joined == 0 then token = nil end
   success(joined)
   test.assert(token == nil,
@@ -461,13 +461,13 @@ function test_native_thread_failed_self_join_preserves_valid_token(_context: tes
 end
 
 function test_native_thread_retirement_errors_preserve_valid_tokens(context: test.Context)
-  local workspace = su_native_fault_workspace(context)
+  const workspace = su_native_fault_workspace(context)
   su_native_ownership_case(context, workspace, "thread-join-failure")
   su_native_ownership_case(context, workspace, "thread-detach-failure")
 end
 
 function test_native_thread_constructor_failure_returns_no_token(context: test.Context)
-  local workspace = su_native_fault_workspace(context)
+  const workspace = su_native_fault_workspace(context)
   su_native_ownership_case(context, workspace, "thread-token-allocation-failure")
   su_native_ownership_case(context, workspace, "thread-native-create-failure")
 end

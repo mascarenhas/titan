@@ -14,11 +14,11 @@ const TCP_REUSEPORT: integer?
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/functions/tcp.md#tcp_init_ex
 function tcp_init_ex(loop: loop_t, handle: tcp_t, flags: integer): integer
-  local native_flags = flags as foreign unsigned int
+  const native_flags = flags as foreign unsigned int
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
   handle.loop = loop
-  local status = ffi.uv_tcp_init_ex(loop.native, handle.native, native_flags) as integer
+  const status = ffi.uv_tcp_init_ex(loop.native, handle.native, native_flags) as integer
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -40,7 +40,7 @@ end
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/functions/tcp.md#tcp_open
 function tcp_open(handle: tcp_t, socket: os_sock_t): integer
-  local native_socket = socket.native
+  const native_socket = socket.native
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_open(handle.native, native_socket)
 end
@@ -51,7 +51,7 @@ end
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/functions/tcp.md#tcp_nodelay
 function tcp_nodelay(handle: tcp_t, enable: integer): integer
-  local native_enable = enable as foreign int
+  const native_enable = enable as foreign int
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_nodelay(handle.native, native_enable)
 end
@@ -63,8 +63,8 @@ end
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/functions/tcp.md#tcp_keepalive
 function tcp_keepalive(handle: tcp_t, enable: integer, delay: integer): integer
-  local native_enable = enable as foreign int
-  local native_delay = delay as foreign unsigned int
+  const native_enable = enable as foreign int
+  const native_delay = delay as foreign unsigned int
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_keepalive(handle.native, native_enable, native_delay)
 end
@@ -79,10 +79,10 @@ end
 -- @usage uv/functions/tcp.md#tcp_keepalive_ex
 function tcp_keepalive_ex(handle: tcp_t, on: integer, idle: integer,
                           intvl: integer, count: integer): integer
-  local native_on = on as foreign int
-  local native_idle = idle as foreign unsigned int
-  local native_interval = intvl as foreign unsigned int
-  local native_count = count as foreign unsigned int
+  const native_on = on as foreign int
+  const native_idle = idle as foreign unsigned int
+  const native_interval = intvl as foreign unsigned int
+  const native_count = count as foreign unsigned int
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_keepalive_ex(handle.native, native_on, native_idle,
                                  native_interval, native_count)
@@ -94,7 +94,7 @@ end
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/functions/tcp.md#tcp_simultaneous_accepts
 function tcp_simultaneous_accepts(handle: tcp_t, enable: integer): integer
-  local native_enable = enable as foreign int
+  const native_enable = enable as foreign int
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_simultaneous_accepts(handle.native, native_enable)
 end
@@ -106,8 +106,8 @@ end
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/functions/tcp.md#tcp_bind
 function tcp_bind(handle: tcp_t, addr: sockaddr_t, flags: integer): integer
-  local native_flags = flags as foreign unsigned int
-  local native_addr = addr:pointer()
+  const native_flags = flags as foreign unsigned int
+  const native_addr = addr:pointer()
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_bind(handle.native, native_addr, native_flags)
 end
@@ -123,7 +123,7 @@ function tcp_getsockname(handle: tcp_t): (integer, sockaddr_t?, integer)
   local native = foreign sockaddr_storage.new()
   local size = foreign int.new_array(1)
   size[0] = foreign sockaddr_storage.sizeof as foreign int
-  local status = ffi.uv_tcp_getsockname(handle.native, native as foreign *sockaddr, size) as integer
+  const status = ffi.uv_tcp_getsockname(handle.native, native as foreign *sockaddr, size) as integer
   if status < 0 then return status, nil, size[0] as integer end
   return status, sockaddr_copy_sized(native as foreign const *sockaddr, size[0] as integer), size[0] as integer
 end
@@ -139,7 +139,7 @@ function tcp_getpeername(handle: tcp_t): (integer, sockaddr_t?, integer)
   local native = foreign sockaddr_storage.new()
   local size = foreign int.new_array(1)
   size[0] = foreign sockaddr_storage.sizeof as foreign int
-  local status = ffi.uv_tcp_getpeername(handle.native, native as foreign *sockaddr, size) as integer
+  const status = ffi.uv_tcp_getpeername(handle.native, native as foreign *sockaddr, size) as integer
   if status < 0 then return status, nil, size[0] as integer end
   return status, sockaddr_copy_sized(native as foreign const *sockaddr, size[0] as integer), size[0] as integer
 end
@@ -151,9 +151,9 @@ end
 -- @usage uv/functions/tcp.md#tcp_close_reset
 function tcp_close_reset(handle: tcp_t, callback: (function (handle_t): ())?): integer
   if not handle:valid() then return ffi.UV_EINVAL end
-  local old_callback? = handle.close_callback
+  const old_callback? = handle.close_callback
   handle.close_callback = callback
-  local status = ffi.uv_tcp_close_reset(handle.native, tcp_close_callback) as integer
+  const status = ffi.uv_tcp_close_reset(handle.native, tcp_close_callback) as integer
   if status < 0 then handle.close_callback = old_callback end
   return status
 end
@@ -169,16 +169,16 @@ function tcp_connect(req: connect_t, handle: tcp_t, addr: sockaddr_t,
                        callback: connect_cb): integer
   if req.pending then return ffi.UV_EBUSY end
   if not handle:valid() then return ffi.UV_EINVAL end
-  local native_addr = addr:pointer()
-  local stream = handle:as_stream_t()
-  local loop = handle.loop
+  const native_addr = addr:pointer()
+  const stream = handle:as_stream_t()
+  const loop = handle.loop
   loop.requests[req] = true
   req.loop = loop
   req.pending = true
   req.stream = stream
   req.callback = callback
   ffi.uv_req_set_data(req.native as foreign *uv_req_t, req as foreign *void)
-  local status = ffi.uv_tcp_connect(req.native, handle.native, native_addr,
+  const status = ffi.uv_tcp_connect(req.native, handle.native, native_addr,
                                      network_connect_callback) as integer
   if status < 0 then
     loop.requests[req] = nil
@@ -204,10 +204,10 @@ function pipe_connect2(req: connect_t, handle: pipe_t, name: string,
   if req.pending then return ffi.UV_EBUSY end
   if not handle:valid() then return ffi.UV_EINVAL end
   if namelen < 0 or namelen > #name then return ffi.UV_EINVAL end
-  local native_length = namelen as foreign size_t
-  local native_flags = flags as foreign unsigned int
-  local stream = handle:as_stream_t()
-  local loop = handle.loop
+  const native_length = namelen as foreign size_t
+  const native_flags = flags as foreign unsigned int
+  const stream = handle:as_stream_t()
+  const loop = handle.loop
   loop.requests[req] = true
   req.loop = loop
   req.pending = true
@@ -215,7 +215,7 @@ function pipe_connect2(req: connect_t, handle: pipe_t, name: string,
   req.callback = callback
   ffi.uv_req_set_data(req.native as foreign *uv_req_t, req as foreign *void)
   handle.eligibility.available = 0
-  local status = ffi.uv_pipe_connect2(req.native, handle.native, name,
+  const status = ffi.uv_pipe_connect2(req.native, handle.native, name,
       native_length, native_flags, network_connect_callback) as integer
   if status < 0 then
     loop.requests[req] = nil
@@ -236,8 +236,8 @@ end
 function pipe_connect(req: connect_t, handle: pipe_t, name: string, callback: connect_cb)
   if req.pending then raise "connect request is pending" end
   if not handle:valid() then raise "pipe is not initialized" end
-  local stream = handle:as_stream_t()
-  local loop = handle.loop
+  const stream = handle:as_stream_t()
+  const loop = handle.loop
   loop.requests[req] = true
   req.loop = loop
   req.pending = true

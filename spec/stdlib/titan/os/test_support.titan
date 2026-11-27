@@ -12,13 +12,13 @@ local type CheckedAction = function (): ()
 
 local function error_text(failure: value): string
   local result = "<unprintable error>"
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
   if ffi.lua_checkstack(L, 3) ~= 0 then
     ffi.lua_pushtvalue(L, failure)
     ffi.luaL_tolstring(L, -1, nil)
-    local rendered: value = ffi.lua_totvalue(L, -1)
+    const rendered: value = ffi.lua_totvalue(L, -1)
     if rendered is string then result = rendered as string end
   end
   return result
@@ -30,13 +30,13 @@ end
 
 local function error_string_field(failure: value,
                                   name: string): string?
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 2) == 0 then return nil end
   ffi.lua_pushtvalue(L, failure)
-  local field_type = ffi.lua_getfield(L, -1, name)
+  const field_type = ffi.lua_getfield(L, -1, name)
   if field_type ~= ffi.LUA_TSTRING then return nil end
-  local field: value = ffi.lua_totvalue(L, -1)
+  const field: value = ffi.lua_totvalue(L, -1)
   if field is string then return field as string end
   return nil
 end
@@ -48,7 +48,7 @@ local function assert_raises_contains(action: CheckedAction,
     action()
   catch
     caught = true
-    local message = error_text(error)
+    const message = error_text(error)
     test.assert(contains(message, fragment),
                 "expected error containing '" .. fragment ..
                 "', got '" .. message .. "'")
@@ -63,7 +63,7 @@ local function assert_operation_error(action: CheckedAction,
     action()
   catch
     caught = true
-    local actual? = error_string_field(error, "operation")
+    const actual? = error_string_field(error, "operation")
     test.assert(actual == operation,
                 "expected operation '" .. operation ..
                 "', got '" .. (actual or "<missing>") .. "'")
@@ -87,7 +87,7 @@ local function restore_environment(name: string, original: string?)
 end
 
 local function refresh_local_timezone()
-  local zone? = system.getenv("TZ")
+  const zone? = system.getenv("TZ")
   local status = 0
   if zone then
     status = ffi.titan_spec_refresh_timezone(zone)
@@ -101,7 +101,7 @@ local function refresh_local_timezone()
 end
 
 local function install_test_timezone(): string?
-  local original: string? = system.getenv("TZ")
+  const original: string? = system.getenv("TZ")
   if common.is_windows() then
     -- UCRT accepts the standard/DST names and uses the US transition rules.
     system.setenv("TZ", "EST5EDT")
@@ -142,20 +142,20 @@ local function host_july_noon(isdst: foreign int): integer
   calendar.tm_mday = 1 as foreign int
   calendar.tm_hour = 12 as foreign int
   calendar.tm_isdst = isdst
-  local instant = ffi.mktime(calendar) as integer
+  const instant = ffi.mktime(calendar) as integer
   test.assert(instant ~= -1, "mktime could not represent July noon")
   return instant
 end
 
 local function c_utc_format(format: string): string
-  local instant = 0 as foreign time_t
-  local calendar = ffi.gmtime(instant)
+  const instant = 0 as foreign time_t
+  const calendar = ffi.gmtime(instant)
   if not calendar then raise "gmtime could not represent the epoch" end
   local storage = foreign char.new_array(256)
-  local written = ffi.strftime(
+  const written = ffi.strftime(
     storage as foreign *char,
     256 as foreign size_t, format, calendar)
   if written == 0 then raise "strftime did not fit the test buffer" end
-  local bytes = storage as foreign *char
+  const bytes = storage as foreign *char
   return bytes as string
 end

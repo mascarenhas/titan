@@ -8,26 +8,26 @@ local const CLIENT_DRAIN_BYTES = 262144
 local const CLIENT_CLOSE_MS = 50
 
 local record ClientConnection
-  transport: Transport
-  has_pending_input: function (): (boolean)
-  add_input_listener: function (function (): ()): (function (): ())
+  const transport: Transport
+  const has_pending_input: function (): (boolean)
+  const add_input_listener: function (function (): ()): (function (): ())
   remove_input_listener: (function (): ())?
-  secure: boolean
-  key: string
+  const secure: boolean
+  const key: string
   idle_since: integer
 end
 
 local record ClientRetirement
-  client: Client
-  lease: ClientConnection
+  const client: Client
+  const lease: ClientConnection
   task: async.Task<|nil, value|>?
 end
 
 local record ClientDrain
-  client: Client
-  lease: ClientConnection
-  parser: Parser
-  started: integer
+  const client: Client
+  const lease: ClientConnection
+  const parser: Parser
+  const started: integer
   task: async.Task<|nil, value|>?
 end
 
@@ -55,7 +55,7 @@ end
 local function Client:bind()
   async.checkpoint()
   if self.closed then raise "HTTP Client is closed" end
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   if self.loop == nil then
     self.remove_close_listener = async.add_close_listener(function ()
       -- Native handles and every worker are already retired. Idle TCP close
@@ -76,7 +76,7 @@ end
 
 local function client_pool_key(parsed: url.Url, headers: Headers,
                                 ca_file: string?): string
-  local result = client_key_part(parsed.scheme) ..
+  const result = client_key_part(parsed.scheme) ..
     client_key_part(parsed.host) .. client_key_part("" .. parsed.port) ..
     client_key_part(headers:get("Host"))
   if parsed.scheme == "https" then
@@ -87,25 +87,25 @@ local function client_pool_key(parsed: url.Url, headers: Headers,
 end
 
 local function ClientConnection:stop_watching()
-  local remove? = self.remove_input_listener
+  const remove? = self.remove_input_listener
   self.remove_input_listener = nil
   if remove ~= nil then remove() end
 end
 
 local function Client:forget_idle(lease: ClientConnection)
   lease:stop_watching()
-  local retained: {ClientConnection} = {}
+  const retained: {ClientConnection} = {}
   for index = 1, #self.idle do
-    local current = self.idle[index]
+    const current = self.idle[index]
     if current ~= lease then retained[#retained + 1] = current end
   end
   self.idle = retained
 end
 
 local function Client:forget_retirement(retirement: ClientRetirement)
-  local retained: {ClientRetirement} = {}
+  const retained: {ClientRetirement} = {}
   for index = 1, #self.retirements do
-    local current = self.retirements[index]
+    const current = self.retirements[index]
     if current ~= retirement then retained[#retained + 1] = current end
   end
   self.retirements = retained
@@ -133,7 +133,7 @@ local function Client:watch_idle(lease: ClientConnection)
     if async.is_closing() then return end
     -- Both roots survive until scheduling succeeds. Tracking also lets
     -- Client.close retire a worker cancelled before its first instruction.
-    local retirement = ClientRetirement(self, lease, nil)
+    const retirement = ClientRetirement(self, lease, nil)
     self.retirements[#self.retirements + 1] = retirement
     do
       retirement.task = async.run<|nil, value|>(function (): nil
@@ -169,7 +169,7 @@ local function ClientConnection:close_idle()
     self.transport.connection:close()
     return nil
   end)
-  local deadline = async.run<|nil, value|>(function (): nil
+  const deadline = async.run<|nil, value|>(function (): nil
     timer.sleep(CLIENT_CLOSE_MS)
     return nil
   end)
@@ -188,18 +188,18 @@ local function ClientConnection:close_idle()
 end
 
 local function Client:acquire(key: string): ClientConnection?
-  local now = uv.hrtime()
-  local retained: {ClientConnection} = {}
-  local expired: {ClientConnection} = {}
+  const now = uv.hrtime()
+  const retained: {ClientConnection} = {}
+  const expired: {ClientConnection} = {}
   local selected: ClientConnection? = nil
   local handed_off = false
   defer if selected ~= nil and not handed_off then
-    do selected.transport.abort() catch end
-  end
+    selected.transport.abort()
+  catch end
   -- Prefer the newest idle connection. All pool mutation precedes closes,
   -- which may suspend and allow another request to use this Client.
   for index = #self.idle, 1, -1 do
-    local lease = self.idle[index]
+    const lease = self.idle[index]
     if now - lease.idle_since >= CLIENT_IDLE_NS or lease.has_pending_input() then
       lease:stop_watching()
       expired[#expired + 1] = lease
@@ -216,8 +216,8 @@ local function Client:acquire(key: string): ClientConnection?
     self.idle[#self.idle + 1] = retained[index]
   end
   for index = 1, #expired do
-    do expired[index]:close_idle() catch end
-  end
+    expired[index]:close_idle()
+  catch end
   -- Closing expired TLS streams can suspend; cancellation or Client.close
   -- must not strand a lease already removed from the idle Array.
   self:bind()
@@ -235,12 +235,12 @@ local function Client:release(lease: ClientConnection)
     lease:close_idle()
     return
   end
-  local now = uv.hrtime()
-  local retained: {ClientConnection} = {}
-  local expired: {ClientConnection} = {}
+  const now = uv.hrtime()
+  const retained: {ClientConnection} = {}
+  const expired: {ClientConnection} = {}
   local same_key = 0
   for index = 1, #self.idle do
-    local current = self.idle[index]
+    const current = self.idle[index]
     if now - current.idle_since >= CLIENT_IDLE_NS then
       current:stop_watching()
       expired[#expired + 1] = current
@@ -249,7 +249,7 @@ local function Client:release(lease: ClientConnection)
       if current.key == lease.key then same_key = same_key + 1 end
     end
   end
-  local pooled = #retained < CLIENT_MAX_IDLE and same_key < CLIENT_MAX_IDLE_PER_KEY
+  const pooled = #retained < CLIENT_MAX_IDLE and same_key < CLIENT_MAX_IDLE_PER_KEY
   if pooled then
     lease.idle_since = now
     retained[#retained + 1] = lease
@@ -259,16 +259,16 @@ local function Client:release(lease: ClientConnection)
   self.idle = retained
   defer do
     for index = 1, #expired do
-      do expired[index]:close_idle() catch end
-    end
+      expired[index]:close_idle()
+    catch end
   end
   if pooled then self:watch_idle(lease) end
 end
 
 local function Client:forget_drain(drain: ClientDrain)
-  local retained: {ClientDrain} = {}
+  const retained: {ClientDrain} = {}
   for index = 1, #self.drains do
-    local current = self.drains[index]
+    const current = self.drains[index]
     if current ~= drain then retained[#retained + 1] = current end
   end
   self.drains = retained
@@ -282,7 +282,7 @@ local function client_parser_reusable(parser: Parser): boolean
 end
 
 local function ClientDrain:read_body(): boolean
-  local initial = self.parser.body_consumed
+  const initial = self.parser.body_consumed
   while true do
     if uv.hrtime() - self.started >= CLIENT_DRAIN_NS then return false end
     if #self.parser.body_excess > 0 or
@@ -310,11 +310,11 @@ local function ClientDrain:run(): nil
   local released = false
   defer do
     self.client:forget_drain(self)
-    if not released then do self.lease.transport.abort() catch end end
+    if not released then self.lease.transport.abort() catch end
     close_parser(self.parser)
   end
   if self.client.closed or uv.hrtime() - self.started >= CLIENT_DRAIN_NS then return nil end
-  local reader = async.run<|boolean, value|>(function (): boolean
+  const reader = async.run<|boolean, value|>(function (): boolean
     return self:read_body()
   end)
   defer do
@@ -326,9 +326,9 @@ local function ClientDrain:run(): nil
       reader:cancel(async.CancellationReason.simple("HTTP response drain stopped"))
     end
   end
-  local remaining = CLIENT_DRAIN_NS - (uv.hrtime() - self.started)
+  const remaining = CLIENT_DRAIN_NS - (uv.hrtime() - self.started)
   if remaining <= 0 then return nil end
-  local deadline = async.run<|nil, value|>(function (): nil
+  const deadline = async.run<|nil, value|>(function (): nil
     timer.sleep((remaining + 999999) // 1000000)
     return nil
   end)
@@ -360,7 +360,7 @@ local function Client:start_drain(lease: ClientConnection, parser: Parser,
     close_parser(parser)
     do lease.transport.abort() catch end
   end
-  local drain = ClientDrain(self, lease, parser, started, nil)
+  const drain = ClientDrain(self, lease, parser, started, nil)
   self.drains[#self.drains + 1] = drain
   do
     drain.task = async.run<|nil, value|>(function (): nil return drain:run() end)
@@ -374,15 +374,14 @@ end
 --- Retire connections currently idle; active responses and drains remain owned.
 -- @usage standard-library-http.md#client-requests
 function Client:close_idle_connections()
-  local idle = self.idle
+  const idle = self.idle
   self.idle = {}
   for index = 1, #idle do idle[index]:stop_watching() end
   local failure: async.Error? = nil
   for index = 1, #idle do
-    do idle[index]:close_idle()
-    catch
-      if failure == nil then failure = async.Error(error, traceback) end
-    end
+    idle[index]:close_idle()
+  catch
+    if failure == nil then failure = async.Error(error, traceback) end
   end
   if failure ~= nil then failure:raise() end
 end
@@ -392,35 +391,35 @@ end
 function Client:close()
   if self.closed then return end
   self.closed = true
-  local remove? = self.remove_close_listener
+  const remove? = self.remove_close_listener
   self.remove_close_listener = nil
   if remove ~= nil then remove() end
-  local drains = self.drains
+  const drains = self.drains
   self.drains = {}
-  local retirements = self.retirements
+  const retirements = self.retirements
   self.retirements = {}
   local failure: async.Error? = nil
   do self:close_idle_connections()
   catch failure = async.Error(error, traceback) end
   for index = 1, #retirements do
-    local retirement = retirements[index]
+    const retirement = retirements[index]
     do retirement.lease.transport.abort()
     catch
       if failure == nil then failure = async.Error(error, traceback) end
     end
-    local task? = retirement.task
+    const task? = retirement.task
     if task ~= nil then
       task:cancel(async.CancellationReason.simple("HTTP Client closed"))
       await_terminal_cleanup(task)
     end
   end
   for index = 1, #drains do
-    local drain = drains[index]
+    const drain = drains[index]
     do drain.lease.transport.abort()
     catch
       if failure == nil then failure = async.Error(error, traceback) end
     end
-    local task? = drain.task
+    const task? = drain.task
     if task ~= nil then
       task:cancel(async.CancellationReason.simple("HTTP Client closed"))
       await_terminal_cleanup(task)
@@ -433,10 +432,10 @@ end
 
 local function default_http_client(): Client
   async.checkpoint()
-  local current? = default_client
-  local loop = async.current_loop()
+  const current? = default_client
+  const loop = async.current_loop()
   if current ~= nil and current.loop == loop and not current.closed then return current end
-  local created = Client()
+  const created = Client()
   created:bind()
   default_client = created
   -- Normally Runtime close already cleared the default. An explicitly

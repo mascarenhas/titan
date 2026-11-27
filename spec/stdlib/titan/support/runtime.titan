@@ -8,7 +8,7 @@ local type Body = function (): ()
 local type Cleanup = function (): ()
 
 local record Session
-  cleanups: {Cleanup}
+  const cleanups: {Cleanup}
   cleanups_open: boolean
   failed: boolean
   failure_is_skip: boolean
@@ -24,8 +24,8 @@ local function remember_failure(session: Session, failure: value,
   local skipped = failure is test.Skip
   local effective = failure
   if from_cleanup and skipped then
-    local skip: test.Skip = failure
-    local reason? = skip.reason
+    const skip: test.Skip = failure
+    const reason? = skip.reason
     local message = "test.skip cannot be called from async test cleanup"
     if reason then message = message .. ": " .. (reason as string) end
     effective = message
@@ -41,11 +41,11 @@ local function remember_failure(session: Session, failure: value,
 end
 
 local function cleanup(callback: Cleanup)
-  local session? = active_session
+  const session? = active_session
   if not session or not (session as Session).cleanups_open then
     raise "cannot register async cleanup outside an active async test case"
   end
-  local current = session as Session
+  const current = session as Session
   current.cleanups[#current.cleanups + 1] = callback
 end
 
@@ -53,7 +53,7 @@ local function run_cleanups(session: Session)
   session.cleanups_open = false
   local index = #session.cleanups
   while index >= 1 do
-    local callback = session.cleanups[index]
+    const callback = session.cleanups[index]
     session.cleanups[index] = nil
     do
       callback()
@@ -66,11 +66,11 @@ end
 
 local function run(body: Body)
   if active_session then raise "async test Runtime is not reentrant" end
-  local session = Session.new({}, true, false, false, nil, "")
+  const session = Session({}, true, false, false, nil, "")
   active_session = session
   defer active_session = nil
 
-  local task = async.run<|value, value|>(function (): value
+  const task = async.run<|value, value|>(function (): value
     do
       body()
     catch
@@ -81,7 +81,7 @@ local function run(body: Body)
   end)
   async.loop()
 
-  local status = task:status()
+  const status = task:status()
   test.assert(status:has_succeeded(),
               "async test supervisor ended " .. status:as_string())
   if session.failed then raise session.failure, session.failure_traceback end

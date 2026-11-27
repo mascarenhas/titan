@@ -2,7 +2,7 @@ local runtime_close_gc = import "gc"
 local runtime_close_coroutine = import "coroutine"
 
 function test_runtime_close_listener_failure_preserves_error_and_runs_remaining(context: test.Context)
-  local marker: {string} = {"close failure"}
+  const marker: {string} = {"close failure"}
   local remaining = false
   async.run<|nil, nil|>(function (): nil return nil end)
   async.add_close_listener(function () raise marker end)
@@ -24,7 +24,7 @@ end
 -- Outside state close, a defer of an abandoned coroutine may hand disposal to
 -- a Task of the active Runtime; that Task runs after the unwind.
 local function runtime_close_abandon_generator(log: {string})
-  local generator = runtime_close_coroutine.create(function (_: value): value
+  const generator = runtime_close_coroutine.create(function (_: value): value
     defer do
       log[#log + 1] = "defer"
       async.run<|nil, value|>(function (): nil
@@ -40,7 +40,7 @@ end
 
 function test_unwind_defer_starts_task_after_collection(_: test.Context)
   runtime_test.run(function ()
-    local log: {string} = {}
+    const log: {string} = {}
     runtime_close_abandon_generator(log)
     for _ = 1, 4 do runtime_close_gc.collect() end
     test.assert(#log == 1 and log[1] == "defer", "the generator was not unwound")

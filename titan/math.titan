@@ -45,11 +45,11 @@ end
 
 -- Implementation notes: doc/implementation/math-library.md#xoshiro256
 local function next_random(): integer
-  local first = random_state.first
-  local second = random_state.second
-  local third = random_state.third ~ first
-  local fourth = random_state.fourth ~ second
-  local result = rotate_left(second * 5, 7) * 9
+  const first = random_state.first
+  const second = random_state.second
+  const third = random_state.third ~ first
+  const fourth = random_state.fourth ~ second
+  const result = rotate_left(second * 5, 7) * 9
   random_state.first = first ~ fourth
   random_state.second = second ~ third
   random_state.third = third ~ (second << 17)
@@ -106,7 +106,7 @@ end
 -- @usage standard-library-math.md
 function random(lower: integer?, upper: integer?): value
   -- Draw before validating the interval, matching Lua's state advancement.
-  local word = next_random()
+  const word = next_random()
   if not lower then
     if upper then raise "random lower limit is required" end
     return random_float(word)
@@ -233,7 +233,7 @@ end
 -- @usage standard-library-math.md
 function frexp(number: float): (float, integer)
   local exponent: foreign int = 0 as foreign int
-  local mantissa = ffi.frexp(number, exponent) as float
+  const mantissa = ffi.frexp(number, exponent) as float
   return mantissa, exponent as integer
 end
 
@@ -254,7 +254,7 @@ end
 -- @usage standard-library-math.md
 function log(number: float, base: float?): float
   if not base then return ffi.log(number) as float end
-  local actual_base = base as float
+  const actual_base = base as float
   return (ffi.log(number) / ffi.log(actual_base)) as float
 end
 
@@ -283,7 +283,7 @@ function max(first: float, ...: float): float
   local result = first
   local index = 1
   while index <= #... do
-    local candidate = ...[index]
+    const candidate = ...[index]
     if result < candidate then result = candidate end
     index = index + 1
   end
@@ -299,7 +299,7 @@ function min(first: float, ...: float): float
   local result = first
   local index = 1
   while index <= #... do
-    local candidate = ...[index]
+    const candidate = ...[index]
     if candidate < result then result = candidate end
     index = index + 1
   end
@@ -313,7 +313,7 @@ end
 function modf(number: float): (float, float)
   local integral: foreign double =
     0.0 as foreign double
-  local fractional = ffi.modf(number, integral) as float
+  const fractional = ffi.modf(number, integral) as float
   return integral as float, fractional
 end
 
@@ -350,7 +350,7 @@ function tan(number: float): float
 end
 
 local function byte_at(text: string, index: integer): integer
-  local bytes = text as foreign const *uint8_t
+  const bytes = text as foreign const *uint8_t
   return bytes[index - 1] as integer
 end
 
@@ -383,7 +383,7 @@ local function decimal_integer(text: string, first: integer, last: integer,
   local position = first
   if negative then
     while position <= last do
-      local digit = digit_value(byte_at(text, position))
+      const digit = digit_value(byte_at(text, position))
       if result < -922337203685477580 or
           (result == -922337203685477580 and digit > 8) then
         return nil
@@ -393,7 +393,7 @@ local function decimal_integer(text: string, first: integer, last: integer,
     end
   else
     while position <= last do
-      local digit = digit_value(byte_at(text, position))
+      const digit = digit_value(byte_at(text, position))
       if result > 922337203685477580 or
           (result == 922337203685477580 and digit > 7) then
         return nil
@@ -413,7 +413,7 @@ local function parse_in_base(text: string, base: integer): value?
   while last >= first and space(byte_at(text, last)) do last = last - 1 end
   local negative = false
   if first <= last then
-    local sign = byte_at(text, first)
+    const sign = byte_at(text, first)
     if sign == 43 or sign == 45 then
       negative = sign == 45
       first = first + 1
@@ -422,7 +422,7 @@ local function parse_in_base(text: string, base: integer): value?
   if first > last then return nil end
   local position = first
   while position <= last do
-    local digit = digit_value(byte_at(text, position))
+    const digit = digit_value(byte_at(text, position))
     if digit < 0 or digit >= base then return nil end
     position = position + 1
   end
@@ -432,12 +432,12 @@ end
 local function decimal_exponent(text: string, position: integer,
                                 last: integer): integer
   if position <= last then
-    local sign = byte_at(text, position)
+    const sign = byte_at(text, position)
     if sign == 43 or sign == 45 then position = position + 1 end
   end
-  local first_digit = position
+  const first_digit = position
   while position <= last do
-    local digit = digit_value(byte_at(text, position))
+    const digit = digit_value(byte_at(text, position))
     if digit < 0 or digit > 9 then break end
     position = position + 1
   end
@@ -451,14 +451,14 @@ local function parsed_float(text: string,
   -- decimal-point byte.  Translate the already length-bounded, fully validated
   -- numeral before handing it to strtod.
   if point_position == 0 then return ffi.strtod(text, nil) as float end
-  local convention = ffi.localeconv()
-  local decimal_point = convention.decimal_point
+  const convention = ffi.localeconv()
+  const decimal_point = convention.decimal_point
   if not decimal_point or decimal_point[0] == 46 then
     return ffi.strtod(text, nil) as float
   end
-  local source = text as foreign const *char
-  local storage = foreign char.new_array(#text + 1)
-  local normalized = storage as foreign *char
+  const source = text as foreign const *char
+  const storage = foreign char.new_array(#text + 1)
+  const normalized = storage as foreign *char
   ffi.memcpy(normalized, source, #text as foreign size_t)
   normalized[point_position - 1] = decimal_point[0]
   normalized[#text] = 0
@@ -473,7 +473,7 @@ local function parse_numeral(text: string): value?
   while last >= first and space(byte_at(text, last)) do last = last - 1 end
   local negative = false
   if first <= last then
-    local sign = byte_at(text, first)
+    const sign = byte_at(text, first)
     if sign == 43 or sign == 45 then
       negative = sign == 45
       first = first + 1
@@ -481,16 +481,16 @@ local function parse_numeral(text: string): value?
   end
   if first > last then return nil end
 
-  local hexadecimal = first + 1 <= last and byte_at(text, first) == 48 and
+  const hexadecimal = first + 1 <= last and byte_at(text, first) == 48 and
     (byte_at(text, first + 1) == 88 or byte_at(text, first + 1) == 120)
   local position = first
   if hexadecimal then position = position + 2 end
-  local digits_begin = position
+  const digits_begin = position
   local digit_count = 0
   local digit_base = 10
   if hexadecimal then digit_base = 16 end
   while position <= last do
-    local digit = digit_value(byte_at(text, position))
+    const digit = digit_value(byte_at(text, position))
     if digit < 0 or digit >= digit_base then break end
     digit_count = digit_count + 1
     position = position + 1
@@ -503,7 +503,7 @@ local function parse_numeral(text: string): value?
     point_position = position
     position = position + 1
     while position <= last do
-      local digit = digit_value(byte_at(text, position))
+      const digit = digit_value(byte_at(text, position))
       if digit < 0 or digit >= digit_base then break end
       digit_count = digit_count + 1
       position = position + 1
@@ -513,7 +513,7 @@ local function parse_numeral(text: string): value?
 
   local has_exponent = false
   if position <= last then
-    local marker = byte_at(text, position)
+    const marker = byte_at(text, position)
     if (not hexadecimal and (marker == 69 or marker == 101)) or
         (hexadecimal and (marker == 80 or marker == 112)) then
       has_exponent = true
@@ -527,7 +527,7 @@ local function parse_numeral(text: string): value?
     return wrapping_integer(
       text, digits_begin, last, 16, negative)
   elseif not hexadecimal and not has_point and not has_exponent then
-    local integer_result: integer? = decimal_integer(
+    const integer_result: integer? = decimal_integer(
       text, digits_begin, last, negative)
     if integer_result then return integer_result as integer end
   end
@@ -560,7 +560,7 @@ end
 function tointeger(candidate: value): integer?
   if candidate is integer then return candidate as integer end
   if candidate is string then
-    local parsed: value? = parse_numeral(candidate as string)
+    const parsed: value? = parse_numeral(candidate as string)
     if parsed ~= nil and ((parsed as value) is integer) then
       return (parsed as value) as integer
     end

@@ -1,5 +1,5 @@
 local function assert_cancelled(task: async.Task, expected: string)
-  local status = async.join(task)
+  const status = async.join(task)
   case status
   when cancelled(reason) then
     case reason
@@ -16,14 +16,14 @@ end
 function test_pending_cancellation_does_not_open_a_database(
     context: test.Context)
   runtime_test.run(function ()
-    local path = fs.tmpname()
+    const path = fs.tmpname()
     fs.unlink(path)
     defer remove_if_present(path)
     local published = false
-    local target = async.run<|nil, value|>(function (): nil
+    const target = async.run<|nil, value|>(function (): nil
       async.running():cancel(async.CancellationReason.simple(
           "cancel before SQLite open"))
-      local connection = sqlite3.connect(path)
+      const connection = sqlite3.connect(path)
       defer connection:close()
       published = true
       return nil
@@ -38,13 +38,13 @@ end
 function test_pending_cancellation_does_not_prepare_or_leave_connection_busy(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
     local published = false
-    local target = async.run<|nil, value|>(function (): nil
+    const target = async.run<|nil, value|>(function (): nil
       async.running():cancel(async.CancellationReason.simple(
           "cancel before SQLite prepare"))
-      local statement = connection:prepare("SELECT 1")
+      const statement = connection:prepare("SELECT 1")
       defer statement:close()
       published = true
       return nil
@@ -60,12 +60,12 @@ end
 function test_pending_cancellation_does_not_execute_and_statement_is_reusable(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
     execute_sql(connection, "CREATE TABLE item (value INTEGER)")
-    local statement = connection:prepare("INSERT INTO item VALUES (?)")
+    const statement = connection:prepare("INSERT INTO item VALUES (?)")
     defer statement:close()
-    local target = async.run<|nil, value|>(function (): nil
+    const target = async.run<|nil, value|>(function (): nil
       async.running():cancel(async.CancellationReason.simple(
           "cancel before SQLite execute"))
       statement:execute(7)
@@ -84,18 +84,18 @@ function test_cancelled_unwind_completes_cursor_statement_and_connection_closes(
     context: test.Context)
   runtime_test.run(function ()
     local retired = 0
-    local target = async.run<|nil, value|>(function (): nil
-      local connection = sqlite3.connect(":memory:")
+    const target = async.run<|nil, value|>(function (): nil
+      const connection = sqlite3.connect(":memory:")
       defer do
         connection:close()
         retired = retired + 1
       end
-      local statement = connection:prepare("SELECT 1 UNION ALL SELECT 2")
+      const statement = connection:prepare("SELECT 1 UNION ALL SELECT 2")
       defer do
         statement:close()
         retired = retired + 1
       end
-      local cursor = statement:query()
+      const cursor = statement:query()
       defer do
         cursor:close()
         retired = retired + 1
@@ -117,12 +117,12 @@ function test_pending_cancellation_delivers_each_explicit_cleanup_completion(
     context: test.Context)
   runtime_test.run(function ()
     local completed = 0
-    local target = async.run<|nil, value|>(function (): nil
-      local connection = sqlite3.connect(":memory:")
+    const target = async.run<|nil, value|>(function (): nil
+      const connection = sqlite3.connect(":memory:")
       defer connection:close()
-      local statement = connection:prepare("SELECT 1 UNION ALL SELECT 2")
+      const statement = connection:prepare("SELECT 1 UNION ALL SELECT 2")
       defer statement:close()
-      local cursor = statement:query()
+      const cursor = statement:query()
       defer cursor:close()
       async.running():cancel(async.CancellationReason.simple(
           "cancel before SQLite cleanup"))

@@ -54,28 +54,28 @@ end
 -- every child would impose the native match-time-result limit on wide lists.
 local function json_parse_count(
     _source: string, position: integer, budget_value: value): boolean
-  local budget: ParseBudget = budget_value
+  const budget: ParseBudget = budget_value
   budget:count_value(position)
   return true
 end
 
 local function json_parse_enter(
     _source: string, position: integer, budget_value: value): boolean
-  local budget: ParseBudget = budget_value
+  const budget: ParseBudget = budget_value
   budget:enter_container(position - 1)
   return true
 end
 
 local function json_parse_leave(
     _source: string, _position: integer, budget_value: value): boolean
-  local budget: ParseBudget = budget_value
+  const budget: ParseBudget = budget_value
   budget:leave_container()
   return true
 end
 
 local function json_parse_array_seed(position_value: value): value
-  local position: integer = position_value
-  local elements: {Node} = {}
+  const position: integer = position_value
+  const elements: {Node} = {}
   return Node {
     kind = "array",
     position = position,
@@ -86,10 +86,10 @@ local function json_parse_array_seed(position_value: value): value
 end
 
 local function json_parse_object_seed(position_value: value): value
-  local position: integer = position_value
-  local members: {Member} = {}
-  local names: {string: boolean} = {}
-  local state = ObjectParseState(names, nil)
+  const position: integer = position_value
+  const members: {Member} = {}
+  const names: {string: boolean} = {}
+  const state = ObjectParseState(names, nil)
   return Node {
     kind = "object",
     position = position,
@@ -100,20 +100,20 @@ local function json_parse_object_seed(position_value: value): value
 end
 
 local function Node:append_parse_element(child: Node)
-  local elements: {Node} = self.elements
+  const elements: {Node} = self.elements
   -- Private nodes are nonnil, including null nodes, so this dense Array
   -- retains every source position before the public nil/sentinel conversion.
   elements[#elements + 1] = child
 end
 
 local function Node:append_parse_object_node(child: Node)
-  local state: ObjectParseState = self.scalar
-  local key: Node? = state.pending_key
+  const state: ObjectParseState = self.scalar
+  const key: Node? = state.pending_key
   if key == nil then
     state.pending_key = child
     return
   end
-  local name: string = key.scalar
+  const name: string = key.scalar
   if state.names[name] ~= nil then
     raise ParseFailure {
       code = "duplicate_key",
@@ -122,23 +122,23 @@ local function Node:append_parse_object_node(child: Node)
     }
   end
   state.names[name] = true
-  local members: {Member} = self.members
+  const members: {Member} = self.members
   members[#members + 1] = Member(name, key.position, child)
   state.pending_key = nil
 end
 
 local function json_parse_array_step(
     accumulator_value: value, child_value: value): value
-  local accumulator: Node = accumulator_value
-  local child: Node = child_value
+  const accumulator: Node = accumulator_value
+  const child: Node = child_value
   accumulator:append_parse_element(child)
   return accumulator
 end
 
 local function json_parse_object_step(
     accumulator_value: value, child_value: value): value
-  local accumulator: Node = accumulator_value
-  local child: Node = child_value
+  const accumulator: Node = accumulator_value
+  const child: Node = child_value
   -- Member emits separate key and value nodes. Pairing them in this fresh
   -- object state avoids a capture wrapper around every nested member value.
   accumulator:append_parse_object_node(child)
@@ -146,7 +146,7 @@ local function json_parse_object_step(
 end
 
 local function json_parse_true(position_value: value): value
-  local position: integer = position_value
+  const position: integer = position_value
   return Node {
     kind = "boolean",
     position = position,
@@ -157,7 +157,7 @@ local function json_parse_true(position_value: value): value
 end
 
 local function json_parse_false(position_value: value): value
-  local position: integer = position_value
+  const position: integer = position_value
   return Node {
     kind = "boolean",
     position = position,
@@ -168,7 +168,7 @@ local function json_parse_false(position_value: value): value
 end
 
 local function json_parse_null(position_value: value): value
-  local position: integer = position_value
+  const position: integer = position_value
   return Node {
     kind = "null",
     position = position,
@@ -180,8 +180,8 @@ end
 
 local function json_parse_number(
     first_value: value, after_value: value): value
-  local first: integer = first_value
-  local after: integer = after_value
+  const first: integer = first_value
+  const after: integer = after_value
   -- Defer copying and numeric conversion until the requested type is known.
   return Node {
     kind = "number",
@@ -199,7 +199,7 @@ end
 local function json_parse_hex_quad(source: string, first: integer): integer
   local result = 0
   for offset = 0, 3 do
-    local octet = json_parse_byte(source, first + offset)
+    const octet = json_parse_byte(source, first + offset)
     local digit = 0
     if octet >= 48 and octet <= 57 then
       digit = octet - 48
@@ -233,12 +233,12 @@ end
 
 local function json_parse_string(
     first_value: value, after_value: value, budget_value: value): value
-  local first: integer = first_value
-  local after: integer = after_value
-  local budget: ParseBudget = budget_value
-  local source = budget.source
-  local closing = after - 1
-  local output = string.writer()
+  const first: integer = first_value
+  const after: integer = after_value
+  const budget: ParseBudget = budget_value
+  const source = budget.source
+  const closing = after - 1
+  const output = string.writer()
   defer output:close()
   local cursor = first + 1
   local plain_start = cursor
@@ -249,8 +249,8 @@ local function json_parse_string(
       if plain_start < cursor then
         output:write(string.sub(source, plain_start, cursor - 1))
       end
-      local escape_position = cursor
-      local escaped = json_parse_byte(source, cursor + 1)
+      const escape_position = cursor
+      const escaped = json_parse_byte(source, cursor + 1)
       cursor = cursor + 2
       if escaped == 34 then output:write("\"")
       elseif escaped == 92 then output:write("\\")
@@ -273,7 +273,7 @@ local function json_parse_string(
               position = escape_position
             }
           end
-          local low = json_parse_hex_quad(source, cursor + 2)
+          const low = json_parse_hex_quad(source, cursor + 2)
           if low < 0xDC00 or low > 0xDFFF then
             raise ParseFailure {
               code = "invalid_surrogate",
@@ -352,7 +352,7 @@ end
 
 -- Implementation notes: doc/implementation/json-library.md#whole-document-peg
 local function build_json_pattern(): peg.Pattern
-  local definitions: {peg.Definition} = {
+  const definitions: {peg.Definition} = {
     peg.define("state", peg.argument(1)),
     peg.define("json_ws", peg.set(" \t\r\n")),
     peg.define("json_end", peg.choice(
@@ -443,19 +443,19 @@ local function build_json_pattern(): peg.Pattern
 end
 
 local function parse_document(source: string, settings: Settings): Node
-  local budget = ParseBudget { source = source, settings = settings, nodes = 0, depth = 0 }
+  const budget = ParseBudget { source = source, settings = settings, nodes = 0, depth = 0 }
   local result: value, label: value, position: value =
     JSON_PATTERN:match(source, 1, budget)
   if result == nil then
-    local code: string = label
-    local failure_position: integer = position
+    const code: string = label
+    const failure_position: integer = position
     json_fail(code, json_parse_message(code), root_path(), source,
               failure_position)
   end
   return result
 catch
   if error is ParseFailure then
-    local failure: ParseFailure = error
+    const failure: ParseFailure = error
     json_fail(failure.code, failure.message, root_path(), source,
               failure.position)
   end

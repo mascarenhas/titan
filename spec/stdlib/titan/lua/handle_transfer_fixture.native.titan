@@ -11,7 +11,7 @@ record Pipe
 end
 
 function Pipe:close()
-  local resource = self.resource
+  const resource = self.resource
   self.resource = nil
   self.finalizer_probe = nil
   if resource then ffi.titan_test_record_handle_close(resource) end
@@ -26,7 +26,7 @@ end
 
 function Pipe.new(resource: foreign *void): Pipe
   if not resource then raise "native handle fixture requires a resource" end
-  local pipe: Pipe = { resource = resource, finalizer_probe = resource }
+  const pipe: Pipe = { resource = resource, finalizer_probe = resource }
   gc.finalizable(pipe, finalize_pipe)
   return pipe
 end
@@ -36,16 +36,16 @@ local function pipe_fields(): const {reflect.Type}
 end
 
 function Pipe:to_transfer_payload(): string
-  local resource = self.resource
+  const resource = self.resource
   if not resource then raise "native handle fixture is detached" end
-  local payload = protobuf.serialize_fields(pipe_fields(), resource)
+  const payload = protobuf.serialize_fields(pipe_fields(), resource)
   -- Only the wrapper moves close authority; the byte transport never owns it.
   self.resource = nil
   return payload
 end
 
 function Pipe.from_transfer_payload(payload: string): Pipe
-  local resource = (protobuf.deserialize_fields(payload, pipe_fields())) as foreign *void
+  const resource = (protobuf.deserialize_fields(payload, pipe_fields())) as foreign *void
   return Pipe(resource)
 end
 
@@ -55,13 +55,13 @@ function Pipe:read_byte(): integer
 end
 
 local function detached_payload(resource: foreign *void): async.TransferValue
-  local pipe = Pipe(resource)
+  const pipe = Pipe(resource)
   return async.TransferValue.from_value(pipe)
 end
 
 function send_detached(destination: value, resource: value)
   -- Only this Lua/lightuserdata boundary performs raw-pointer assertions.
-  local packet = detached_payload(resource as foreign *void)
+  const packet = detached_payload(resource as foreign *void)
   -- The source wrapper's frame is gone before collection. Its finalizer must
   -- run while the token is retained and must observe the explicit detachment.
   gc.collect()

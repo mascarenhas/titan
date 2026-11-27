@@ -1,12 +1,12 @@
 local common = import "support.common.titan"
 
 local record ConcreteTimerState
-  loop: uv.loop_t
+  const loop: uv.loop_t
   closed: integer
 end
 
 local function concrete_timer_closed(timer: uv.timer_t)
-  local state = uv.timer_get_data(timer) as ConcreteTimerState
+  const state = uv.timer_get_data(timer) as ConcreteTimerState
   test.assert(not timer:as_handle_t():is_initialized())
   state.closed = state.closed + 1
   if state.closed == 1 then
@@ -21,13 +21,13 @@ local function concrete_timer_closed(timer: uv.timer_t)
 end
 
 function test_concrete_timer_data_and_close_reuse(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   test.assert(uv.timer_get_data(timer) == nil)
   uv.timer_set_data(timer, false)
   test.assert(uv.handle_get_data(timer:as_handle_t()) == false)
-  local state = ConcreteTimerState(loop, 0)
+  const state = ConcreteTimerState(loop, 0)
   uv.handle_set_data(timer:as_handle_t(), state)
   test.assert(uv.timer_get_data(timer) == state)
   expect_error(function () uv.timer_close(timer) end, "handle is not initialized")
@@ -42,9 +42,9 @@ function test_concrete_timer_data_and_close_reuse(_context: test.Context)
 end
 
 function test_concrete_timer_close_callback_failure(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
   uv.timer_close(timer, function (owner: uv.timer_t)
     test.assert(owner == timer and not owner:as_handle_t():is_initialized())
@@ -59,7 +59,7 @@ function test_concrete_timer_close_callback_failure(_context: test.Context)
 end
 
 local function install_unref_timer(loop: uv.loop_t, weak: {value: value})
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
   weak[1] = timer
   uv.handle_set_data(timer:as_handle_t(), "public user data")
@@ -68,13 +68,13 @@ local function install_unref_timer(loop: uv.loop_t, weak: {value: value})
 end
 
 local function stop_weak_timer(weak: {value: value})
-  local timer: uv.timer_t = weak[1]
+  const timer: uv.timer_t = weak[1]
   success(uv.timer_stop(timer))
 end
 
 local function close_weak_timer(loop: uv.loop_t, weak: {value: value},
                                 closed: function (): ())
-  local timer: uv.timer_t = weak[1]
+  const timer: uv.timer_t = weak[1]
   test.assert(uv.handle_get_data(timer:as_handle_t()) == "public user data")
   test.assert(uv.handle_get_loop(timer:as_handle_t()) == loop)
   test.assert(uv.loop_close(loop) == uv.EBUSY)
@@ -87,9 +87,9 @@ local function close_weak_timer(loop: uv.loop_t, weak: {value: value},
 end
 
 function test_stopped_unref_handle_rooted_until_close(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   install_unref_timer(loop, weak)
   collect()
@@ -110,9 +110,9 @@ function test_stopped_unref_handle_rooted_until_close(_context: test.Context)
 end
 
 function test_close_callback_can_reinitialize_same_owner(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
   local fired, closed = 0, 0
   uv.close(timer:as_handle_t(), function (view: uv.handle_t)
@@ -123,7 +123,7 @@ function test_close_callback_can_reinitialize_same_owner(_context: test.Context)
     success(uv.timer_start(timer, function (owner: uv.timer_t)
       test.assert(owner == timer)
       fired = fired + 1
-      uv.close(owner:as_handle_t(), function (_view: uv.handle_t) closed = closed + 1 end)
+      uv.close(owner:as_handle_t(), function (_: uv.handle_t) closed = closed + 1 end)
     end, 0, 0))
     collect()
   end)
@@ -132,9 +132,9 @@ function test_close_callback_can_reinitialize_same_owner(_context: test.Context)
 end
 
 function test_walk_is_synchronous_and_loop_driving_cannot_reenter(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
   local visited = 0
   uv.walk(loop, function (view: uv.handle_t, argument: value)
@@ -156,18 +156,18 @@ end
 
 function test_loop_abandon_is_idempotent_and_suppresses_user_callbacks(context: test.Context)
   context:run("fresh", function (_: test.Context)
-    local loop = uv.loop_t()
+    const loop = uv.loop_t()
     success(uv.loop_abandon(loop))
     success(uv.loop_abandon(loop))
   end)
   context:run("empty-initialized", function (_: test.Context)
-    local loop = new_loop()
+    const loop = new_loop()
     success(uv.loop_abandon(loop))
     test.assert(uv.loop_close(loop) == uv.EINVAL)
     success(uv.loop_abandon(loop))
   end)
   context:run("live-and-closing-handles", function (_: test.Context)
-    local loop = new_loop()
+    const loop = new_loop()
     local live, closing, typed = uv.timer_t(), uv.timer_t(), uv.timer_t()
     local calls = 0
     success(uv.timer_init(loop, live))
@@ -196,10 +196,10 @@ local function TimerReceiver:receive(owner: uv.timer_t)
 end
 
 function test_callbacks_use_ordinary_callable_adaptation(context: test.Context)
-  context:run("adjusted_titan_closure", function (_child: test.Context)
-    local loop = new_loop()
+  context:run("adjusted_titan_closure", function (_: test.Context)
+    const loop = new_loop()
     defer finish_loop(loop)
-    local timer = uv.timer_t()
+    const timer = uv.timer_t()
     success(uv.timer_init(loop, timer))
     local calls = 0
     success(uv.timer_start(timer, function ()
@@ -210,25 +210,25 @@ function test_callbacks_use_ordinary_callable_adaptation(context: test.Context)
     success(uv.run(loop))
     test.assert(calls == 1)
   end)
-  context:run("bound_titan_method", function (_child: test.Context)
-    local loop = new_loop()
+  context:run("bound_titan_method", function (_: test.Context)
+    const loop = new_loop()
     defer finish_loop(loop)
-    local timer = uv.timer_t()
+    const timer = uv.timer_t()
     success(uv.timer_init(loop, timer))
-    local receiver = TimerReceiver(0)
+    const receiver = TimerReceiver(0)
     success(uv.timer_start(timer, receiver:receive, 0, 0))
     success(uv.run(loop))
     test.assert(receiver.calls == 1)
   end)
-  context:run("lua_callable_table", function (_child: test.Context)
-    local loop = new_loop()
+  context:run("lua_callable_table", function (_: test.Context)
+    const loop = new_loop()
     defer finish_loop(loop)
-    local timer = uv.timer_t()
+    const timer = uv.timer_t()
     success(uv.timer_init(loop, timer))
     local calls = 0
-    local make = lua.load([[local callback = ...
+    const make = lua.load([[local callback = ...
       return setmetatable({}, {__call = function(_, owner) callback(owner) end})]])
-    local callback: function (uv.timer_t): () = make(function (owner: uv.timer_t)
+    const callback: function (uv.timer_t): () = make(function (owner: uv.timer_t)
       calls = calls + 1
       test.assert(owner == timer)
       uv.close(owner:as_handle_t())
@@ -238,13 +238,13 @@ function test_callbacks_use_ordinary_callable_adaptation(context: test.Context)
     success(uv.run(loop))
     test.assert(calls == 1)
   end)
-  context:run("lua_c_function", function (_child: test.Context)
-    local loop = new_loop()
+  context:run("lua_c_function", function (_: test.Context)
+    const loop = new_loop()
     defer finish_loop(loop)
-    local timer = uv.timer_t()
+    const timer = uv.timer_t()
     success(uv.timer_init(loop, timer))
-    local get_error = lua.load("return error")
-    local callback: function (uv.timer_t): () = get_error()
+    const get_error = lua.load("return error")
+    const callback: function (uv.timer_t): () = get_error()
     success(uv.timer_start(timer, callback, 0, 0))
     expect_error(function () uv.run(loop) end, timer)
     test.assert(timer:as_handle_t():is_initialized())
@@ -252,9 +252,9 @@ function test_callbacks_use_ordinary_callable_adaptation(context: test.Context)
 end
 
 local function callback_failure(context: test.Context, payload: value, expected: value)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
   success(uv.timer_start(timer, function (owner: uv.timer_t)
     uv.close(owner:as_handle_t())
@@ -267,8 +267,8 @@ local function callback_failure(context: test.Context, payload: value, expected:
     caught = true
     test.assert(error == expected, "callback error value changed at run boundary")
     test.assert(#traceback > 0, "callback traceback was lost")
-    local trace = traceback
-    context:run("symbolic_frame", function (_child: test.Context)
+    const trace = traceback
+    context:run("symbolic_frame", function (_: test.Context)
       test.assert(strings.find(trace, "callback_failure", 1, true) ~= nil,
                   "callback traceback lost its Titan frame")
     end)
@@ -290,20 +290,20 @@ end
 
 local function failing_close(loop: uv.loop_t, failure: value,
                              observe: function (value): ())
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
-  uv.close(timer:as_handle_t(), function (_handle: uv.handle_t)
+  uv.close(timer:as_handle_t(), function (_: uv.handle_t)
     observe(failure)
     raise failure
   end)
 end
 
 function test_first_callback_failure_survives_secondary_failure(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local calls = 0
   local first: value = nil
-  local observe = function (failure: value)
+  const observe = function (failure: value)
     if calls == 0 then first = failure end
     calls = calls + 1
   end
@@ -324,9 +324,9 @@ end
 function test_owner_created_on_disposable_lua_thread_uses_main(_context: test.Context)
   local loop: uv.loop_t? = nil
   defer if loop ~= nil then finish_loop(loop) end
-  local is_main = lua.load("local _, main = coroutine.running(); return main")
+  const is_main = lua.load("local _, main = coroutine.running(); return main")
   local calls = 0
-  local create_on_thread = lua.load([[local create, drive = ...
+  const create_on_thread = lua.load([[local create, drive = ...
     local thread = coroutine.create(function()
       create()
       local ok, err = pcall(drive)
@@ -335,15 +335,15 @@ function test_owner_created_on_disposable_lua_thread_uses_main(_context: test.Co
     assert(coroutine.resume(thread))
     assert(coroutine.status(thread) == "dead")
     return thread]])
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   -- The helper frame releases the returned Lua thread before collection.
-  local create = function ()
+  const create = function ()
     loop = new_loop()
-    local timer = uv.timer_t()
+    const timer = uv.timer_t()
     success(uv.timer_init(loop, timer))
     success(uv.timer_start(timer, function (owner: uv.timer_t)
-      local main: boolean = is_main()
+      const main: boolean = is_main()
       test.assert(main, "callback used its creator's Lua thread")
       calls = calls + 1
       uv.close(owner:as_handle_t())
@@ -363,7 +363,7 @@ local function save_lua_thread(weak: {value: value},
 end
 
 function test_loop_phases_async_notification_and_metrics(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   success(uv.loop_configure(loop, uv.METRICS_IDLE_TIME))
   uv.loop_set_data(loop, false)

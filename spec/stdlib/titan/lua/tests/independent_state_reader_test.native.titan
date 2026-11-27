@@ -1,9 +1,9 @@
 local record StateReader
-  local chunks: {string}
+  local const chunks: {string}
   local index: integer
   local closed: boolean
-  local fail: boolean
-  local block: boolean
+  local const fail: boolean
+  local const block: boolean
   local waiting: boolean
 end
 
@@ -36,9 +36,9 @@ end
 function test_lua_independent_readers_drain_chunks_and_remain_borrowed(
     _context: test.Context)
   runtime_test.run(function ()
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
-    local synchronous = StateReader({ "", "return ", "", "...", "" })
+    const synchronous = StateReader({ "", "return ", "", "...", "" })
     local values: {async.TransferValue} = { state:run_from_loader(
       synchronous, "=independent-reader", async.TransferValue.is_integer(29),
       async.TransferValue.is_nil(), async.TransferValue.is_string("a\0b")) }
@@ -46,19 +46,19 @@ function test_lua_independent_readers_drain_chunks_and_remain_borrowed(
     test.assert(transfer_integer(values[1]) == 29)
     assert_transfer_nil(values[2])
     test.assert(transfer_string(values[3]) == "a\0b")
-    local asynchronous = StateReader({ "", "return ", "...", "" })
+    const asynchronous = StateReader({ "", "return ", "...", "" })
     values = { state:run_async_from_loader(asynchronous,
       "=independent-async-reader", async.TransferValue.is_string("async"),
       async.TransferValue.is_nil()) }
     test.assert(not asynchronous.closed and #values == 2)
     test.assert(transfer_string(values[1]) == "async")
     assert_transfer_nil(values[2])
-    local bad_source = StateReader({ "return )" })
+    const bad_source = StateReader({ "return )" })
     common.assert_raises_contains(function ()
       state:run_from_loader(bad_source, "=independent-reader-syntax")
     end, "independent-reader-syntax")
     test.assert(not bad_source.closed)
-    local bad_read = StateReader({}, true)
+    const bad_read = StateReader({}, true)
     common.assert_raises_contains(function ()
       state:run_async_from_loader(bad_read)
     end, "independent reader error")
@@ -70,10 +70,10 @@ end
 function test_lua_independent_reader_cancellation_precedes_state_reservation(
     _context: test.Context)
   runtime_test.run(function ()
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
-    local reader = StateReader({ "independent_reader_ran = true" }, false, true)
-    local target = async.run<|nil, value|>(function (): nil
+    const reader = StateReader({ "independent_reader_ran = true" }, false, true)
+    const target = async.run<|nil, value|>(function (): nil
       state:run_async_from_loader(reader, "=cancelled-independent-reader")
       return nil
     end)
@@ -88,7 +88,7 @@ function test_lua_independent_reader_cancellation_precedes_state_reservation(
     test.assert(async.join(target):has_cancelled(),
                 "blocked Reader did not report cancellation")
     test.assert(not reader.closed, "reader cancellation closed a borrowed Reader")
-    local ran: async.TransferValue = state:run("return independent_reader_ran")
+    const ran: async.TransferValue = state:run("return independent_reader_ran")
     assert_transfer_nil(ran)
     assert_state_reusable(state)
   end)

@@ -30,7 +30,7 @@ end
 
 local function os_getenv(name: string): string?
   checked_text(name, "os.getenv")
-  local found = ffi.getenv(name)
+  const found = ffi.getenv(name)
   if not found then return nil end
   return found as string
 end
@@ -39,7 +39,7 @@ local function os_setenv(name: string, contents: string)
   checked_text(name, "os.setenv")
   checked_text(contents, "os.setenv")
   if ffi.setenv(name, contents, 1) ~= 0 then
-    local code: integer = ffi.errno
+    const code: integer = ffi.errno
     raise make_error(code, "os.setenv")
   end
 end
@@ -47,7 +47,7 @@ end
 local function os_unsetenv(name: string)
   checked_text(name, "os.unsetenv")
   if ffi.unsetenv(name) ~= 0 then
-    local code: integer = ffi.errno
+    const code: integer = ffi.errno
     raise make_error(code, "os.unsetenv")
   end
 end

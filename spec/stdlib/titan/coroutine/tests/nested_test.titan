@@ -1,17 +1,17 @@
 local function nested_yield_run(): string
-  local tag_main: value = "main"
-  local tag_a: value = "a"
-  local b = coroutine.create(function(_: value): value
+  const tag_main: value = "main"
+  const tag_a: value = "a"
+  const b = coroutine.create(function(_: value): value
     coroutine.yield("from-b", tag_main)
     return "b-done"
   end, tag_a)
-  local a = coroutine.create(function(_: value): value
-    local got = b:resume("to-b")
+  const a = coroutine.create(function(_: value): value
+    const got = b:resume("to-b")
     return "a:" .. (got as string)
   end, tag_main)
-  local first = a:resume("start", tag_main)
-  local middle = a:status() .. "/" .. b:status()
-  local second = a:resume("again", tag_main)
+  const first = a:resume("start", tag_main)
+  const middle = a:status() .. "/" .. b:status()
+  const second = a:resume("again", tag_main)
   return (first as string) .. "," .. middle .. "," ..
          (second as string) .. "," .. a:status() .. "/" .. b:status()
 end
@@ -23,9 +23,9 @@ function test_routes_nested_tagged_yield_through_suspended_outer_handler(
 end
 
 local function nested_error_run(): string
-  local tag_main: value = "main"
-  local tag_a: value = "a"
-  local b = coroutine.create(function(_: value): value
+  const tag_main: value = "main"
+  const tag_a: value = "a"
+  const b = coroutine.create(function(_: value): value
     do
       coroutine.yield("from-b", tag_main)
     catch
@@ -33,12 +33,12 @@ local function nested_error_run(): string
     end
     return "b-missed"
   end, tag_a)
-  local a = coroutine.create(function(_: value): value
-    local got = b:resume("to-b")
+  const a = coroutine.create(function(_: value): value
+    const got = b:resume("to-b")
     return "a:" .. (got as string)
   end, tag_main)
-  local first = a:resume("start", tag_main)
-  local second = a:error("oops", tag_main)
+  const first = a:resume("start", tag_main)
+  const second = a:error("oops", tag_main)
   return (first as string) .. "," .. (second as string) ..
          "," .. a:status() .. "/" .. b:status()
 end
@@ -60,12 +60,12 @@ end
 local function nested_uncaught(): value
   nested_main_tag = "main"
   nested_a_tag = "a"
-  local b = coroutine.create(nested_fail_body, nested_a_tag)
-  local a = coroutine.create(function(_: value): value
-    local got = b:resume("to-b")
+  const b = coroutine.create(nested_fail_body, nested_a_tag)
+  const a = coroutine.create(function(_: value): value
+    const got = b:resume("to-b")
     return "a:" .. (got as string)
   end, nested_main_tag)
-  local first = a:resume("start", nested_main_tag)
+  const first = a:resume("start", nested_main_tag)
   test.assert(first == "from-b", "nested coroutine returned a bad first value")
   return a:error("oops", nested_main_tag)
 end
@@ -78,9 +78,9 @@ function test_preserves_uncaught_trace_through_nested_stacked_yield(
   catch
     caught = true
     test.assert(error == "oops", "nested coroutine changed the error value")
-    local trace = traceback
+    const trace = traceback
     test.assert(#trace > 0, "nested coroutine omitted its traceback")
-    context:run("symbolic_frames", function (_context: test.Context)
+    context:run("symbolic_frames", function (_: test.Context)
       test.assert(support.contains(trace, "in coroutine.tests.nested_fail_body"),
                   "missing nested coroutine frame\n" .. trace)
       test.assert(support.contains(trace, "in coroutine.tests.nested_uncaught"),
@@ -91,32 +91,32 @@ function test_preserves_uncaught_trace_through_nested_stacked_yield(
 end
 
 local function stacked_resume_run(): string
-  local tag_main: value = "main"
-  local tag_a: value = "a"
-  local b = coroutine.create(function(_: value): value
+  const tag_main: value = "main"
+  const tag_a: value = "a"
+  const b = coroutine.create(function(_: value): value
     coroutine.yield("from-b", tag_main)
     return "b-done"
   end, tag_a)
-  local a = coroutine.create(function(_: value): value
-    local got = b:resume("to-b")
+  const a = coroutine.create(function(_: value): value
+    const got = b:resume("to-b")
     return "a:" .. (got as string)
   end, tag_main)
-  local first = a:resume("start", tag_main)
-  local stacked = a:status() .. "/" .. b:status()
+  const first = a:resume("start", tag_main)
+  const stacked = a:status() .. "/" .. b:status()
   local rejected = "missed"
   do
     b:resume("direct", tag_a)
   catch
     rejected = support.caught_string(error)
   end
-  local restored = a:resume("again", tag_main)
+  const restored = a:resume("again", tag_main)
   return (first as string) .. "," .. stacked .. "," .. rejected ..
          "," .. (restored as string)
 end
 
 function test_rejects_direct_resume_of_stacked_coroutine(
     _context: test.Context)
-  local text = stacked_resume_run()
+  const text = stacked_resume_run()
   test.assert(text ==
               "from-b,suspended/stacked,Coroutine not suspended,a:b-done",
               text)

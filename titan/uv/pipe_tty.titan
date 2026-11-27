@@ -46,12 +46,12 @@ const WRITABLE: integer = 2
 -- @usage uv/functions/pipe.md#pipe_init
 function pipe_init(loop: loop_t, handle: pipe_t, ipc: integer): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
-  local native_ipc = ipc as foreign int
-  local native_owner = handle as foreign *void
+  const native_ipc = ipc as foreign int
+  const native_owner = handle as foreign *void
   loop.handles[handle] = true
   handle.loop = loop
   -- 1.53.0 Unix and Windows pipe_init have no rejection path.
-  local status: integer = ffi.uv_pipe_init(loop.native, handle.native, native_ipc)
+  const status: integer = ffi.uv_pipe_init(loop.native, handle.native, native_ipc)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   handle.eligibility.available = 1
@@ -66,7 +66,7 @@ end
 -- @usage uv/functions/pipe.md#pipe_open
 function pipe_open(handle: pipe_t, file: integer): integer
   if not handle:valid() then return ffi.UV_EINVAL end
-  local native_file = file as foreign uv_file
+  const native_file = file as foreign uv_file
   handle.eligibility.available = 0
   return ffi.uv_pipe_open(handle.native, native_file)
 end
@@ -93,8 +93,8 @@ function pipe_bind2(handle: pipe_t, name: string, namelen: integer,
                     flags: integer): integer
   if not handle:valid() then return ffi.UV_EINVAL end
   if namelen < 0 or namelen > #name then return ffi.UV_EINVAL end
-  local native_length = namelen as foreign size_t
-  local native_flags = flags as foreign unsigned int
+  const native_length = namelen as foreign size_t
+  const native_flags = flags as foreign unsigned int
   handle.eligibility.available = 0
   return ffi.uv_pipe_bind2(handle.native, name, native_length, native_flags)
 end
@@ -108,7 +108,7 @@ end
 function pipe_getsockname(handle: pipe_t, buffer: buf_t): (integer, integer)
   if not handle:valid() or not buffer.writable then return ffi.UV_EINVAL, 0 end
   local length: foreign size_t = buffer.native.len as integer
-  local status: integer = ffi.uv_pipe_getsockname(handle.native, buffer.native.base, length)
+  const status: integer = ffi.uv_pipe_getsockname(handle.native, buffer.native.base, length)
   return status, length
 end
 
@@ -121,7 +121,7 @@ end
 function pipe_getpeername(handle: pipe_t, buffer: buf_t): (integer, integer)
   if not handle:valid() or not buffer.writable then return ffi.UV_EINVAL, 0 end
   local length: foreign size_t = buffer.native.len as integer
-  local status: integer = ffi.uv_pipe_getpeername(handle.native, buffer.native.base, length)
+  const status: integer = ffi.uv_pipe_getpeername(handle.native, buffer.native.base, length)
   return status, length
 end
 
@@ -131,7 +131,7 @@ end
 -- @usage uv/functions/pipe.md#pipe_pending_instances
 function pipe_pending_instances(handle: pipe_t, count: integer)
   if not handle:valid() then raise "pipe handle is not live" end
-  local native_count = count as foreign int
+  const native_count = count as foreign int
   handle.eligibility.available = 0
   ffi.uv_pipe_pending_instances(handle.native, native_count)
 end
@@ -161,7 +161,7 @@ end
 -- @usage uv/functions/pipe.md#pipe_chmod
 function pipe_chmod(handle: pipe_t, flags: integer): integer
   if not handle:valid() then return ffi.UV_EINVAL end
-  local native_flags = flags as foreign int
+  const native_flags = flags as foreign int
   handle.eligibility.available = 0
   return ffi.uv_pipe_chmod(handle.native, native_flags)
 end
@@ -176,12 +176,12 @@ end
 -- @return Native operation result or submission status; negative values report libuv errors.
 -- @usage uv/functions/pipe.md#pipe
 function pipe(read_flags: integer, write_flags: integer): (integer, integer, integer)
-  local native_read_flags = read_flags as foreign int
-  local native_write_flags = write_flags as foreign int
+  const native_read_flags = read_flags as foreign int
+  const native_write_flags = write_flags as foreign int
   local files = foreign uv_file.new_array(2)
   files[0] = -1
   files[1] = -1
-  local status: integer = ffi.uv_pipe(files, native_read_flags, native_write_flags)
+  const status: integer = ffi.uv_pipe(files, native_read_flags, native_write_flags)
   return status, files[0], files[1]
 end
 
@@ -199,14 +199,14 @@ end
 -- @usage uv/functions/tcp.md#socketpair
 function socketpair(kind: integer, protocol: integer, flags0: integer,
                      flags1: integer): (integer, os_sock_t?, os_sock_t?)
-  local native_kind = kind as foreign int
-  local native_protocol = protocol as foreign int
-  local native_flags0 = flags0 as foreign int
-  local native_flags1 = flags1 as foreign int
-  local left: os_sock_t = {native = 0}
-  local right: os_sock_t = {native = 0}
+  const native_kind = kind as foreign int
+  const native_protocol = protocol as foreign int
+  const native_flags0 = flags0 as foreign int
+  const native_flags1 = flags1 as foreign int
+  const left: os_sock_t = {native = 0}
+  const right: os_sock_t = {native = 0}
   local sockets = foreign uv_os_sock_t.new_array(2)
-  local status: integer = ffi.uv_socketpair(native_kind, native_protocol, sockets,
+  const status: integer = ffi.uv_socketpair(native_kind, native_protocol, sockets,
                                            native_flags0, native_flags1)
   if status < 0 then return status, nil, nil end
   -- Full-width native assignments cannot raise after acquisition. The token
@@ -225,14 +225,14 @@ end
 -- @usage uv/functions/tty.md#tty_init
 function tty_init(loop: loop_t, handle: tty_t, fd: integer, unused: integer): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
-  local native_fd = fd as foreign uv_file
-  local native_unused = unused as foreign int
-  local native_owner = handle as foreign *void
+  const native_fd = fd as foreign uv_file
+  const native_unused = unused as foreign int
+  const native_owner = handle as foreign *void
   loop.handles[handle] = true
   handle.loop = loop
   -- Unix late macOS select failure removes handle_queue before returning;
   -- Windows rejects only before uv__stream_init. Neither owes a close on error.
-  local status: integer = ffi.uv_tty_init(loop.native, handle.native, native_fd, native_unused)
+  const status: integer = ffi.uv_tty_init(loop.native, handle.native, native_fd, native_unused)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native, native_owner)
@@ -256,12 +256,12 @@ function tty_set_mode(handle: tty_t, mode: tty_mode_t): integer
   if ffi.TITAN_UV_NETWORK_WINDOWS == 0 then
     return ffi.uv_tty_set_mode(handle.native, native_mode)
   end
-  local loop = handle.loop as loop_t
+  const loop = handle.loop as loop_t
   if L ~= main_thread then raise "TTY set_mode requires the owning main Lua thread" end
   if ffi.lua_checkstack(L, ffi.LUA_MINSTACK) == 0 then raise "cannot reserve native callback stack" end
-  local saved_count = loop.failure_count
-  local saved_error = loop.failure_error
-  local saved_trace = loop.failure_trace
+  const saved_count = loop.failure_count
+  const saved_error = loop.failure_error
+  const saved_trace = loop.failure_trace
   defer do
     inline_dispatch_depth = inline_dispatch_depth - 1
       loop.inline_depth = loop.inline_depth - 1
@@ -274,7 +274,7 @@ function tty_set_mode(handle: tty_t, mode: tty_mode_t): integer
   loop.failure_trace = ""
   inline_dispatch_depth = inline_dispatch_depth + 1
     loop.inline_depth = loop.inline_depth + 1
-  local status = ffi.uv_tty_set_mode(handle.native, native_mode) as integer
+  const status = ffi.uv_tty_set_mode(handle.native, native_mode) as integer
   rethrow(loop)
   return status
 end
@@ -296,7 +296,7 @@ function tty_get_winsize(handle: tty_t): (integer, integer, integer)
   if not handle:valid() then return ffi.UV_EINVAL, 0, 0 end
   local width: foreign int = 0
   local height: foreign int = 0
-  local status: integer = ffi.uv_tty_get_winsize(handle.native, width, height)
+  const status: integer = ffi.uv_tty_get_winsize(handle.native, width, height)
   return status, width, height
 end
 
@@ -316,7 +316,7 @@ end
 -- @usage uv/functions/tty.md#tty_get_vterm_state
 function tty_get_vterm_state(): (integer, tty_vtermstate_t?)
   local state: foreign uv_tty_vtermstate_t = ffi.UV_TTY_UNSUPPORTED
-  local status: integer = ffi.uv_tty_get_vterm_state(state)
+  const status: integer = ffi.uv_tty_get_vterm_state(state)
   if status ~= 0 then return status, nil end
   if state == ffi.UV_TTY_SUPPORTED then return status, tty_vtermstate_t.TTY_SUPPORTED() end
   if state == ffi.UV_TTY_UNSUPPORTED then return status, tty_vtermstate_t.TTY_UNSUPPORTED() end

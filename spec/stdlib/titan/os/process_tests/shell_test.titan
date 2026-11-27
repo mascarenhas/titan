@@ -6,7 +6,7 @@ local function popen_quote(argument: string): string
     output = '"'
     local slashes = 0
     for index = 1, #argument do
-      local byte = strings.sub(argument, index, index)
+      const byte = strings.sub(argument, index, index)
       if byte == "\\" then
         slashes = slashes + 1
       else
@@ -39,13 +39,13 @@ local function shell_newline(): string
 end
 
 local function check_stream_interfaces(pipe: system.InputOutputStream)
-  local reader: stream.Reader = pipe
-  local writer: stream.Writer = pipe
-  local closer: stream.Closer = pipe
-  local reader_writer: stream.ReaderWriter = pipe
-  local reader_closer: stream.ReaderCloser = pipe
-  local writer_closer: stream.WriterCloser = pipe
-  local all: stream.ReaderWriterCloser = pipe
+  const reader: stream.Reader = pipe
+  const writer: stream.Writer = pipe
+  const closer: stream.Closer = pipe
+  const reader_writer: stream.ReaderWriter = pipe
+  const reader_closer: stream.ReaderCloser = pipe
+  const writer_closer: stream.WriterCloser = pipe
+  const all: stream.ReaderWriterCloser = pipe
   if not reader or not writer or not closer or not reader_writer or
       not reader_closer or not writer_closer or not all then
     raise "InputOutputStream Interface conversion produced nil"
@@ -70,10 +70,10 @@ function test_os_shell_transfer_recovers_second_dup_failure(context: test.Contex
     return
   end
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     context:cleanup(function () command.remove_tree(workspace) end)
-    local sdk? = system.getenv("TITAN_TEST_SDK_ROOT")
+    const sdk? = system.getenv("TITAN_TEST_SDK_ROOT")
     test.assert(sdk ~= nil, "I/O transfer fixture requires the selected test SDK")
     local output, why, status = command.capture({
       "bash", "spec/support/check_io_transfer_failure.sh", sdk, workspace,
@@ -103,7 +103,7 @@ function test_os_shell_interactive_merged_output_and_status(
     end
     test.assert(rejected_nul, "popen accepted an embedded NUL command")
 
-    local pipe = system.popen(popen_quote(process_support.child_path()) ..
+    const pipe = system.popen(popen_quote(process_support.child_path()) ..
                               " popen-interactive")
     defer pipe:close()
     check_stream_interfaces(pipe)
@@ -111,8 +111,8 @@ function test_os_shell_interactive_merged_output_and_status(
     test.assert(read_process_output(pipe) == "OUT:hello world:ERR",
                 "interactive popen changed merged output")
 
-    local first = pipe:wait()
-    local second = pipe:wait()
+    const first = pipe:wait()
+    const second = pipe:wait()
     test.assert(first.code == 7 and not first.signal and
                 first.signal_number == 0,
                 "popen returned the wrong normal exit status")
@@ -124,7 +124,7 @@ function test_os_shell_interactive_merged_output_and_status(
     pipe:close()
     test.assert(not pipe:read() and not pipe:read_until("missing"),
                 "closed popen stream did not keep terminal EOF")
-    local after_close = pipe:wait()
+    const after_close = pipe:wait()
     test.assert(first.code == after_close.code and
                 first.signal == after_close.signal and
                 first.signal_number == after_close.signal_number,
@@ -134,8 +134,8 @@ end
 
 function test_os_shell_binary_delimiters(_context: test.Context)
   runtime_test.run(function ()
-    local payload = "head\0middle\r\n\26\255trail"
-    local pipe = system.popen(popen_quote(process_support.child_path()) ..
+    const payload = "head\0middle\r\n\26\255trail"
+    const pipe = system.popen(popen_quote(process_support.child_path()) ..
         " echo-count " .. #payload .. " " .. popen_quote("|done"))
     defer pipe:close()
     pipe:write(payload)
@@ -145,7 +145,7 @@ function test_os_shell_binary_delimiters(_context: test.Context)
                 "popen delimiter read lost retained excess")
     test.assert(not pipe:read() and not pipe:read_until("missing"),
                 "repeated popen reads did not return EOF")
-    local status = pipe:wait()
+    const status = pipe:wait()
     test.assert(status.code == 0 and not status.signal,
                 "binary popen command did not exit normally")
     pipe:close()
@@ -155,7 +155,7 @@ end
 function test_os_shell_close_terminates_and_reaps(
     _context: test.Context)
   runtime_test.run(function ()
-    local pipe = system.popen(
+    const pipe = system.popen(
         shell_syntax("printf 'READY\\nUNREAD\\n'; while :; do :; done",
                      "echo READY&echo UNREAD&for /l %i in (0,0,1) do @rem hold"))
     defer pipe:close()
@@ -166,8 +166,8 @@ function test_os_shell_close_terminates_and_reaps(
     test.assert(not pipe:read() and not pipe:read_until("missing"),
                 "closing popen did not discard unread output")
 
-    local first = pipe:wait()
-    local second = pipe:wait()
+    const first = pipe:wait()
+    const second = pipe:wait()
     test.assert(first.signal == "term" and first.signal_number > 0,
                 "popen close did not terminate its running child")
     test.assert(first.code == second.code and first.signal == second.signal and
@@ -178,11 +178,11 @@ end
 
 function test_os_shell_quoted_unicode_arguments(_context: test.Context)
   runtime_test.run(function ()
-    local child = process_support.child_path()
-    local cwd = system.cwd()
-    local name = "TITAN_POPEN_METADATA"
-    local value = "space value"
-    local arguments: {string} = {"", "space argument", "a&b|<>^", "ação東京😀", "trailing\\"}
+    const child = process_support.child_path()
+    const cwd = system.cwd()
+    const name = "TITAN_POPEN_METADATA"
+    const value = "space value"
+    const arguments: {string} = {"", "space argument", "a&b|<>^", "ação東京😀", "trailing\\"}
     local command = shell_syntax(name .. "=" .. popen_quote(value) .. " ",
                                   'set "' .. name .. '=' .. value .. '"&&') ..
                     popen_quote(child) .. " argv-env-cwd " .. name
@@ -190,12 +190,12 @@ function test_os_shell_quoted_unicode_arguments(_context: test.Context)
         "env:" .. #value .. ":" .. value .. "\n" ..
         "argv0:" .. #child .. ":" .. child .. "\n"
     for index = 1, #arguments do
-      local argument = arguments[index]
+      const argument = arguments[index]
       command = command .. " " .. popen_quote(argument)
       expected = expected .. "arg:" .. #argument .. ":" .. argument .. "\n"
     end
-    local previous? = system.getenv(name)
-    local pipe = system.popen(command)
+    const previous? = system.getenv(name)
+    const pipe = system.popen(command)
     defer pipe:close()
     test.assert(read_process_output(pipe) == expected,
                 "shell quoting changed UTF-8 arguments or metacharacters")
@@ -207,7 +207,7 @@ end
 
 function test_os_shell_pipeline_and_redirection(_context: test.Context)
   runtime_test.run(function ()
-    local temporary = fs.tmpname()
+    const temporary = fs.tmpname()
     local path = temporary .. " output ação 東京.bin"
     defer do
       if fs.stat(temporary) ~= nil then fs.unlink(temporary) end
@@ -224,15 +224,15 @@ function test_os_shell_pipeline_and_redirection(_context: test.Context)
       end
       path = native
     end
-    local child = popen_quote(process_support.child_path())
-    local pipe = system.popen(child .. " dual 64 > " .. popen_quote(path) ..
+    const child = popen_quote(process_support.child_path())
+    const pipe = system.popen(child .. " dual 64 > " .. popen_quote(path) ..
         " 2>&1 && " .. shell_syntax("cat ", "type ") .. popen_quote(path) ..
         " | " .. child .. " echo")
     defer pipe:close()
-    local bytes = read_process_output(pipe)
+    const bytes = read_process_output(pipe)
     local stdout_count, stderr_count = 0, 0
     for index = 1, #bytes do
-      local byte = strings.sub(bytes, index, index)
+      const byte = strings.sub(bytes, index, index)
       if byte == "O" then stdout_count = stdout_count + 1
       elseif byte == "E" then stderr_count = stderr_count + 1
       else test.assert(false, "shell pipeline gained unexpected output") end
@@ -247,11 +247,11 @@ end
 
 function test_os_shell_nonzero_and_missing_command_status(_context: test.Context)
   runtime_test.run(function ()
-    local failed = system.popen(shell_syntax("exit 126", "exit /b 126"))
+    const failed = system.popen(shell_syntax("exit 126", "exit /b 126"))
     defer failed:close()
     test.assert(read_process_output(failed) == "" and failed:wait().code == 126,
                 "nonzero shell exit became a spawn error")
-    local missing = system.popen(popen_quote(process_support.child_path() .. ".absent"))
+    const missing = system.popen(popen_quote(process_support.child_path() .. ".absent"))
     defer missing:close()
     test.assert(#read_process_output(missing) > 0,
                 "missing command lost merged diagnostic")
@@ -264,13 +264,13 @@ end
 
 local function popen_cancellation_case(waiting: boolean)
   runtime_test.run(function ()
-    local pipe = system.popen(shell_syntax(
+    const pipe = system.popen(shell_syntax(
         "printf 'READY\\n'; IFS= read -r ignored; printf 'AFTER\\n'",
         "echo READY&set /p ignored=&echo AFTER"))
     defer pipe:close()
     test.assert(pipe:read_until(shell_newline(), true) == "READY",
                 "shell did not become ready")
-    local task = async.run<|value, value|>(function (): value
+    const task = async.run<|value, value|>(function (): value
       if waiting then pipe:wait() else pipe:read() end
       return nil
     end)
@@ -299,14 +299,14 @@ end
 
 function test_os_shell_fixed_system_shell(_context: test.Context)
   runtime_test.run(function ()
-    local name = shell_syntax("SHELL", "COMSPEC")
-    local previous? = system.getenv(name)
+    const name = shell_syntax("SHELL", "COMSPEC")
+    const previous? = system.getenv(name)
     defer do
       if previous then system.setenv(name, previous)
       else system.unsetenv(name) end
     end
     system.setenv(name, process_support.child_path() .. ".absent")
-    local pipe = system.popen("echo SYSTEM_SHELL")
+    const pipe = system.popen("echo SYSTEM_SHELL")
     defer pipe:close()
     test.assert(read_process_output(pipe) == "SYSTEM_SHELL" .. shell_newline(),
                 "popen did not select its fixed system shell")
@@ -317,7 +317,7 @@ end
 function test_os_shell_transfer_keeps_process_ownership_at_origin(
     _context: test.Context)
   runtime_test.run(function ()
-    local source = system.popen(popen_quote(process_support.child_path()) ..
+    const source = system.popen(popen_quote(process_support.child_path()) ..
                                " echo-count 4 " .. popen_quote("|done"))
     defer source:close()
     local target = source
@@ -326,7 +326,7 @@ function test_os_shell_transfer_keeps_process_ownership_at_origin(
       do source:to_transfer_payload()
       catch
         test.assert(error is async.OperationError)
-        local failure = error as async.OperationError
+        const failure = error as async.OperationError
         test.assert(failure.name == "EBUSY" and failure.operation == "stdio.transfer")
         refused = true
       end
@@ -334,7 +334,7 @@ function test_os_shell_transfer_keeps_process_ownership_at_origin(
     else
       -- Registration runs with an active Runtime but outside Task execution.
       async.await<|nil, nil|>(function (resolve, _reject, _fatal)
-        local packet = async.TransferValue.from_value(source)
+        const packet = async.TransferValue.from_value(source)
         target = packet:to_value()
         resolve(nil)
       end)
@@ -358,11 +358,11 @@ end
 function test_os_shell_transfer_rejects_pending_reader_before_detachment(
     _context: test.Context)
   runtime_test.run(function ()
-    local source = system.popen(popen_quote(process_support.child_path()) ..
+    const source = system.popen(popen_quote(process_support.child_path()) ..
                                " popen-interactive")
     defer source:close()
     local received = ""
-    local reader = async.run<|nil, value|>(function (): nil
+    const reader = async.run<|nil, value|>(function (): nil
       received = read_process_output(source)
       return nil
     end)
@@ -386,10 +386,10 @@ function test_os_shell_transfer_crosses_states_with_origin_reaping(
     return
   end
   runtime_test.run(function ()
-    local source = system.popen(popen_quote(process_support.child_path()) ..
+    const source = system.popen(popen_quote(process_support.child_path()) ..
                                " echo-count 4 " .. popen_quote("|done"))
     defer source:close()
-    local state = transfer_lua.new()
+    const state = transfer_lua.new()
     defer state:close()
     -- Arguments are decoded before the Lua chunk starts. Establish the
     -- destination Runtime before adopting the closure's captured pipes.
@@ -397,14 +397,14 @@ function test_os_shell_transfer_crosses_states_with_origin_reaping(
       local async = require('titan.async')
       async.run(function () end)
     ]], "=shell-stream-transfer-runtime")
-    local operation = function (): string
+    const operation = function (): string
       defer source:close()
       common.assert_raises_contains(function () source:wait() end,
                                    "no child process owner")
       source:write("x\0y\255")
       return read_process_output(source)
     end
-    local result: async.TransferValue = state:run_async([[
+    const result: async.TransferValue = state:run_async([[
       local operation = ...
       local async = require('titan.async')
       local task = async.run(operation)

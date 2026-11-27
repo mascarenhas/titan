@@ -89,16 +89,16 @@ end
 -- Cleanup work must finish even when its caller is already cancelled. The
 -- public request retains the packet until its terminal callback has returned.
 local record CleanupWork
-  local request: uv.work_t
-  local packet: owned *TitanSqlitePacket
+  local const request: uv.work_t
+  local const packet: owned *TitanSqlitePacket
   local done: async.Completion<|CleanupWork, nil, integer|>?
   local number: integer
 end
 
 local function cleanup_completed(request: uv.work_t, status: integer)
-  local work: CleanupWork = request:get_data()
-  local done = work.done as async.Completion<|CleanupWork, nil, integer|>
-  local number = work.number
+  const work: CleanupWork = request:get_data()
+  const done = work.done as async.Completion<|CleanupWork, nil, integer|>
+  const number = work.number
   request:set_data(nil)
   work.done = nil
   do
@@ -108,11 +108,11 @@ local function cleanup_completed(request: uv.work_t, status: integer)
 end
 
 local function start_cleanup(done: async.Completion<|CleanupWork, nil, integer|>, number: integer): uv.req_t?
-  local work = done:context(number)
+  const work = done:context(number)
   work.done = done
   work.number = number
   work.request:set_data(work)
-  local status = uv.queue_work(async.current_loop(), work.request,
+  const status = uv.queue_work(async.current_loop(), work.request,
       sqlite_run_worker, work.packet, cleanup_completed, work.packet)
   if status ~= 0 then
     work.request:set_data(nil)
@@ -160,12 +160,12 @@ local function Connection:run_cleanup(worker: foreign function (*void): void,
   packet.worker = worker
   -- Allocate before marking the packet pending: a failure between the mark
   -- and submission would abandon a packet that no worker owns.
-  local work = CleanupWork(uv.work_t(), packet, nil, 0)
+  const work = CleanupWork(uv.work_t(), packet, nil, 0)
   packet.handoff = 0
   packet.pending = 1
   defer self:abandon_if_pending(packet)
   do
-    local result = async.await_cleanup_with<|CleanupWork, nil, integer|>(work, start_cleanup)
+    const result = async.await_cleanup_with<|CleanupWork, nil, integer|>(work, start_cleanup)
     packet.pending = 0
     case result
     when error(status) then
@@ -236,8 +236,8 @@ end
 -- performs no database I/O.
 local function finalize_connection(candidate: value)
   if ffi.titan_state_closing(L) == 0 then return end
-  local connection: Connection = candidate
-  local handle = connection.handle
+  const connection: Connection = candidate
+  const handle = connection.handle
   if not handle or connection.busy then return end
   connection.handle = nil
   sqlite_release_connection(handle)
@@ -251,14 +251,14 @@ function connect(name: string): Connection
   check_no_nul(name, "connect")
   -- Allocate the public shell and register its state-close finalizer before
   -- acquiring the native handle.
-  local connection = Connection {
+  const connection = Connection {
     handle = nil,
     statements = 0,
     busy = false,
     active_statement = nil
   }
   gc.finalizable<|value|>(connection, finalize_connection)
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer connection:retire_packet(packet)
   copy_input(packet, name, "connect")
@@ -277,8 +277,8 @@ function Connection:prepare(sql: string): Statement
   self:reserve("prepare", true)
   defer self.busy = false
   check_no_nul(sql, "prepare")
-  local statement = Statement { connection = self, handle = nil, parameter_count = 0 }
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const statement = Statement { connection = self, handle = nil, parameter_count = 0 }
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer self:retire_packet(packet)
   packet.db = self.handle
@@ -306,7 +306,7 @@ function Connection:close()
       operation = "close"
     }
   end
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.handle
   -- A failed submission leaves the public owner open and available for retry.
@@ -333,7 +333,7 @@ function Connection:to_transfer_payload(): string
     }
   end
   -- Allocate the bytes before relinquishing the source's close authority.
-  local payload = protobuf.serialize_fields(connection_transfer_fields, self.handle)
+  const payload = protobuf.serialize_fields(connection_transfer_fields, self.handle)
   self.handle = nil
   return payload
 end
@@ -343,7 +343,7 @@ end
 -- @return Fresh connection owner; the supplied pointer must not be adopted again.
 -- @usage standard-library-sqlite3.md#transferring-connections
 function Connection.from_transfer_payload(payload: string): Connection
-  local raw_handle: value = (function (): value
+  const raw_handle: value = (function (): value
     return protobuf.deserialize_fields(payload, connection_transfer_fields)
   catch
     raise Error {
@@ -351,14 +351,14 @@ function Connection.from_transfer_payload(payload: string): Connection
       code = nil, extended_code = nil, operation = "from_transfer_payload"
     }
   end)()
-  local handle = raw_handle as foreign *void
+  const handle = raw_handle as foreign *void
   if not handle then
     raise Error {
       message = "invalid connection transfer pointer",
       code = nil, extended_code = nil, operation = "from_transfer_payload"
     }
   end
-  local connection = Connection {
+  const connection = Connection {
     handle = nil,
     statements = 0,
     busy = false,
@@ -385,7 +385,7 @@ function Statement:close()
       operation = "statement.close"
     }
   end
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.connection.handle
   packet.stmt = self.handle
@@ -403,7 +403,7 @@ local function Connection:transaction(worker: foreign function (*void): void,
                                       operation: string)
   self:reserve(operation, false)
   defer self.busy = false
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.handle
   self:run_worker(worker, packet)
@@ -428,7 +428,7 @@ end
 function Connection:get_autocommit(): boolean
   self:reserve("get_autocommit", true)
   defer self.busy = false
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.handle
   self:run_worker(sqlite_autocommit_worker, packet)
@@ -454,7 +454,7 @@ function Statement:execute(...: value): integer
   self:require_open("execute")
   self.connection:reserve("execute", false)
   defer self.connection.busy = false
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer self.connection:retire_packet(packet)
   packet.db = self.connection.handle
@@ -473,7 +473,7 @@ function Statement:query(...: value): Cursor
   self:require_open("query")
   self.connection:reserve("query", false)
   defer self.connection.busy = false
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer self.connection:retire_packet(packet)
   packet.db = self.connection.handle
@@ -481,10 +481,10 @@ function Statement:query(...: value): Cursor
   self:bind(packet, "query", ...)
   self.connection:run_worker(sqlite_query_worker, packet)
   check_result(packet, "query")
-  local columns = decode_columns(packet)
+  const columns = decode_columns(packet)
   local row: Row?
   if packet.has_row ~= 0 then row = decode_row(packet, columns) end
-  local cursor = Cursor {
+  const cursor = Cursor {
     columns = columns,
     statement = self,
     pending = row,
@@ -509,14 +509,14 @@ function Cursor:fetch(): Row?
     }
   end
   if self.pending ~= nil then
-    local row: Row? = self.pending
+    const row: Row? = self.pending
     self.pending = nil
     return row
   end
   if self.exhausted then return nil end
   self.statement.connection:reserve("fetch", true)
   defer self.statement.connection.busy = false
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.statement.connection.handle
   packet.stmt = self.statement.handle
@@ -537,7 +537,7 @@ function Cursor:fetch(): Row?
     published = true
     return nil
   end
-  local row = decode_row(packet, self.columns)
+  const row = decode_row(packet, self.columns)
   packet.needs_reset = 0
   published = true
   return row
@@ -560,7 +560,7 @@ function Cursor:close()
   end
   self.statement.connection:reserve("cursor.close", true)
   defer self.statement.connection.busy = false
-  local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
+  const packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.statement.connection.handle
   packet.stmt = self.statement.handle

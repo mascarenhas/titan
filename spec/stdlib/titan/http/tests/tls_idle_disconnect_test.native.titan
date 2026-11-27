@@ -1,7 +1,7 @@
 local function task_diagnostic_count(output: string): integer
   local diagnostics, offset = 0, 1
   while true do
-    local found? = string.find(output, "uncaught error in async Task", offset)
+    const found? = string.find(output, "uncaught error in async Task", offset)
     if found == nil then return diagnostics end
     diagnostics = diagnostics + 1
     offset = found + 1
@@ -35,7 +35,7 @@ local function add_tls_disconnect_case(context: test.Context, workspace: string,
       test.assert(why == "exit" and status == 0, "HTTPS disconnect fixture failed:\n" .. output)
       test.assert(string.find(output, "HTTPS DISCONNECT OK") ~= nil and
                   string.find(output, "LISTENER succeeded") ~= nil, "HTTPS fixture did not complete:\n" .. output)
-      local diagnostics = task_diagnostic_count(output)
+      const diagnostics = task_diagnostic_count(output)
       if mode == "partial" or mode == "body" then
         test.assert(diagnostics == 1, "incomplete HTTPS request lost or duplicated its diagnostic:\n" .. output)
       else
@@ -48,7 +48,7 @@ local function add_tls_disconnect_case(context: test.Context, workspace: string,
 end
 
 function test_https_idle_tls_disconnect_boundary(context: test.Context)
-  local workspace = compile_disconnect_fixture(context, "http_tls_idle_app")
+  const workspace = compile_disconnect_fixture(context, "http_tls_idle_app")
   add_tls_disconnect_case(context, workspace, "idle", false)
   add_tls_disconnect_case(context, workspace, "idle", true)
   add_tls_disconnect_case(context, workspace, "clean", false)
@@ -71,7 +71,7 @@ local function add_tcp_reset_case(context: test.Context, workspace: string,
       test.assert(why == "exit" and status == 0, "HTTP reset fixture failed:\n" .. output)
       test.assert(string.find(output, "HTTP RESET OK") ~= nil and
                   string.find(output, "LISTENER succeeded") ~= nil, "HTTP reset fixture did not complete:\n" .. output)
-      local diagnostics = task_diagnostic_count(output)
+      const diagnostics = task_diagnostic_count(output)
       if mode == "partial" then
         test.assert(diagnostics == 1 and string.find(output, "net.read: ECONNRESET (") ~= nil,
           "partial HTTP reset lost or changed its transport error:\n" .. output)
@@ -85,7 +85,7 @@ local function add_tcp_reset_case(context: test.Context, workspace: string,
 end
 
 function test_http_idle_tcp_reset_boundary(context: test.Context)
-  local workspace = compile_disconnect_fixture(context, "http_tcp_idle_app")
+  const workspace = compile_disconnect_fixture(context, "http_tcp_idle_app")
   add_tcp_reset_case(context, workspace, "idle", false)
   add_tcp_reset_case(context, workspace, "idle", true)
   add_tcp_reset_case(context, workspace, "partial", false)

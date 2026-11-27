@@ -11,20 +11,20 @@ local requests: {browser.BrowserRequest} = {}
 local finalizer_anchor: {string: integer}?
 
 local function observe(index: integer, kind: string)
-  local target = browser.binding("public_state_entry")
+  const target = browser.binding("public_state_entry")
   defer target:close()
   target:call(Value.is_integer(index), Value.is_string(kind))
 end
 
 function prepare(index: integer): integer
-  local callback = function (...: Value): Value
+  const callback = function (...: Value): Value
     observe(index, "wrapper")
     case ...[1]
     when is_integer(number) then return Value.is_integer(number + index)
     end
     raise "public child expects an integer"
   end
-  local pin = browser.pin(callback)
+  const pin = browser.pin(callback)
   local state, slot, generation = pin:identity()
   test.assert(state > 0 and slot > 0 and generation > 0,
     "a live public pin has a zero state, slot or generation")
@@ -35,16 +35,16 @@ function prepare(index: integer): integer
     "public pin close was not idempotent while its state was live")
   held_pin = browser.pin(callback)
   held_handle = browser.binding("public_state_handle")
-  local source = browser.binding("public_state_request")
+  const source = browser.binding("public_state_request")
   defer source:close()
-  local names = {"queued", "late"}
+  const names = {"queued", "late"}
   for position = 1, #names do
-    local name = names[position]
-    local success = function (...: Value): Value
+    const name = names[position]
+    const success = function (...: Value): Value
       observe(index, name)
       return Value.is_nil()
     end
-    local failure = function (...: Value): Value
+    const failure = function (...: Value): Value
       observe(index, "failure")
       case ...[2]
       when is_handle(thrown) then thrown:close()
@@ -58,10 +58,10 @@ function prepare(index: integer): integer
   early_close.set_finalizer(function ()
     local inert = false
     do
-      local handle = held_handle
+      const handle = held_handle
       handle:close()
       handle:close()
-      local pin = held_pin
+      const pin = held_pin
       pin:close()
       pin:close()
       for position = 1, #requests do
@@ -76,14 +76,14 @@ function prepare(index: integer): integer
     browser.binding("public_state_after_close")
   end)
   -- A plain Map gets a private metatable; Arrays share their finalizer callback.
-  local anchor: {string: integer} = {}
+  const anchor: {string: integer} = {}
   gc.finalizable<|value|>(anchor, function (_: value)
-    local target = browser.binding("public_state_finalizer")
+    const target = browser.binding("public_state_finalizer")
     defer target:close()
     target:call(Value.is_integer(index))
   end)
   finalizer_anchor = anchor
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
   target:call(Value.is_string("public_child_" .. index), Value.is_callable(callback))
   return state

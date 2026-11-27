@@ -1,5 +1,5 @@
 local function stock_state(mode: Value): stock_lua.Lua?
-  local name = text_of(mode)
+  const name = text_of(mode)
   if name == "child" then return stock_lua.new() end
   test.assert(name == "owner", "unknown stock Lua state")
   return nil
@@ -14,21 +14,21 @@ end
 -- in the owner state and in an independent state: each is the host's
 -- numeric local offset that the harness expects.
 local function calendar_zone(...: Value): Value
-  local expected = text_of(...[1])
-  local formatted = system.date("%z %Z", 1700000000)
+  const expected = text_of(...[1])
+  const formatted = system.date("%z %Z", 1700000000)
   test.assert(formatted is string and formatted as string == expected,
     "Titan %z %Z differs from the host's local offset")
-  local chunk = "local actual = os.date('%z %Z', 1700000000)\n" ..
+  const chunk = "local actual = os.date('%z %Z', 1700000000)\n" ..
     "assert(actual == '" .. expected .. "', 'stock %z %Z differs from the host: ' .. actual)"
   run_stock(nil, chunk)
-  local child = stock_lua.new()
+  const child = stock_lua.new()
   defer child:close()
   run_stock(child, chunk)
   return Value.is_boolean(true)
 end
 
 local function stock_stdin(...: Value): Value
-  local state? = stock_state(...[1])
+  const state? = stock_state(...[1])
   defer if state ~= nil then state:close() end
   run_stock(state, [[
     local result, message, code = io.read()
@@ -42,7 +42,7 @@ local function stock_stdin(...: Value): Value
 end
 
 local function stock_environment(...: Value): Value
-  local state? = stock_state(...[1])
+  const state? = stock_state(...[1])
   defer if state ~= nil then state:close() end
   run_stock(state, [[
     assert(os.getenv('FOO') == 'bar' and os.getenv('TZ') == 'Asia/Tokyo',
@@ -58,7 +58,7 @@ local function stock_environment(...: Value): Value
 end
 
 local function stock_output(...: Value): Value
-  local state? = stock_state(...[1])
+  const state? = stock_state(...[1])
   defer if state ~= nil then state:close() end
   system.stdout:write("T\0")
   -- io.write stays in the C buffer until print's newline/flush.
@@ -72,7 +72,7 @@ local function stock_output(...: Value): Value
 end
 
 local function stock_child_exit(...: Value): Value
-  local state = stock_lua.new()
+  const state = stock_lua.new()
   defer state:close()
   state:run([[
     for _, status in ipairs({3, true, false}) do
@@ -85,7 +85,7 @@ local function stock_child_exit(...: Value): Value
 end
 
 local function buffered_exit(status: string, use_stock: boolean)
-  local literal = status
+  const literal = status
   local code = 3
   if status ~= "3" then
     test.assert(status == "true" or status == "false", "unknown stock exit status")
@@ -102,7 +102,7 @@ local function buffered_exit(status: string, use_stock: boolean)
     raise "native exit returned to its owner Task"
   end
   defer do
-    local matches = stock_lua.load([[
+    const matches = stock_lua.load([[
       local input, output, errors = ...
       local linked = package.loaded['titan.os']
       return linked ~= nil and linked.stdin == input and linked.stdout == output

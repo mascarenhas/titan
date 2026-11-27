@@ -1,7 +1,7 @@
 foreign import "locale.h"
 
 local function core_error(action: function (): (), code: string): json.Error
-  local failure = expect_json_error(action)
+  const failure = expect_json_error(action)
   test.assert(failure.code == code, "expected " .. code .. ", got " .. failure.code)
   return failure
 end
@@ -17,43 +17,43 @@ function test_core_scalars_containers_and_escaping(_context: test.Context)
   test.assert(json.encode(nil) == "null")
   test.assert(json.encode(true) == "true" and json.encode(false) == "false")
   test.assert(json.encode(42) == "42" and json.encode(42.0) == "42.0")
-  local empty_array: {value} = {}
-  local empty_map: {string: value} = {}
+  const empty_array: {value} = {}
+  const empty_map: {string: value} = {}
   test.assert(json.encode(empty_array) == "[]" and json.encode(empty_map) == "{}")
-  local array: {value} = {1, nil, 3, nil}
+  const array: {value} = {1, nil, 3, nil}
   test.assert(json.encode(array) == "[1,null,3]")
   test.assert(#array == 3 and array[2] == nil, "encoding changed the Array")
-  local frozen: const {value} = {false, "ok"}
+  const frozen: const {value} = {false, "ok"}
   test.assert(json.encode(frozen) == '[false,"ok"]')
-  local text = "a\0\1\b\t\n\f\r\"\\é😀"
-  local encoded = json.encode(text)
+  const text = "a\0\1\b\t\n\f\r\"\\é😀"
+  const encoded = json.encode(text)
   test.assert(encoded == [["a\u0000\u0001\b\t\n\f\r\"\\é😀"]])
   test.assert(json.decode(encoded) == text)
-  local object: {string: value} = {["z"] = 2, ["a"] = false, ["middle"] = "text"}
+  const object: {string: value} = {["z"] = 2, ["a"] = false, ["middle"] = "text"}
   test.assert(json.encode(object) == [[{"a":false,"middle":"text","z":2}]])
-  local utf8_keys: {string: value} = {}
+  const utf8_keys: {string: value} = {}
   utf8_keys["é"] = 2
   utf8_keys["z"] = 1
   test.assert(json.encode(utf8_keys) == [[{"z":1,"é":2}]])
 end
 
 function test_core_map_keys_with_shared_prefixes(_context: test.Context)
-  local object: {string: value} = {}
+  const object: {string: value} = {}
   object["aa"] = 1
   object["a"] = 2
   object["a\0"] = 3
   object["aé"] = 4
   object["ab"] = 5
-  local encoded = json.encode(object)
+  const encoded = json.encode(object)
   test.assert(encoded == [[{"a":2,"a\u0000":3,"aa":1,"ab":5,"aé":4}]])
-  local decoded: {string: value} = json.decode(encoded)
+  const decoded: {string: value} = json.decode(encoded)
   test.assert(decoded["a"] == 2 and decoded["a\0"] == 3 and
               decoded["aa"] == 1 and decoded["ab"] == 5 and decoded["aé"] == 4)
 end
 
 function test_core_utf8_scalar_boundaries_and_invalid_tails(context: test.Context)
-  context:run("valid_scalars", function(_child: test.Context)
-    local subjects: {string} = {
+  context:run("valid_scalars", function(_: test.Context)
+    const subjects: {string} = {
       string.char(194, 128), string.char(223, 191),
       string.char(224, 160, 128), string.char(237, 159, 191),
       string.char(238, 128, 128), string.char(239, 191, 191),
@@ -61,21 +61,21 @@ function test_core_utf8_scalar_boundaries_and_invalid_tails(context: test.Contex
       string.char(244, 143, 191, 191),
     }
     for index = 1, #subjects do
-      local subject = subjects[index] as string
-      local encoded = json.encode(subject)
+      const subject = subjects[index] as string
+      const encoded = json.encode(subject)
       test.assert(encoded == '"' .. subject .. '"')
       test.assert(json.decode(encoded) == subject)
     end
   end)
-  context:run("invalid_continuation_after_second_byte", function(_child: test.Context)
-    local subjects: {string} = {
+  context:run("invalid_continuation_after_second_byte", function(_: test.Context)
+    const subjects: {string} = {
       string.char(226, 130, 65), string.char(226, 130, 192),
       string.char(241, 128, 128, 65), string.char(241, 128, 128, 192),
     }
     for index = 1, #subjects do
-      local values: {value} = {subjects[index]}
-      local object: {string: value} = {["payload"] = values}
-      local failure = core_error(function() json.encode(object) end, "invalid_utf8")
+      const values: {value} = {subjects[index]}
+      const object: {string: value} = {["payload"] = values}
+      const failure = core_error(function() json.encode(object) end, "invalid_utf8")
       test.assert(failure.path == '$["payload"][1]' and failure.position == nil and
                   failure.line == nil and failure.column == nil)
     end
@@ -110,12 +110,12 @@ function test_core_exact_integer_conversion(_context: test.Context)
 end
 
 function test_core_float_range_tags_and_round_trips(_context: test.Context)
-  local samples: {float} = {0.0, -0.0, 1.0, -1.25, math.pi, 1.2345678901234567,
+  const samples: {float} = {0.0, -0.0, 1.0, -1.25, math.pi, 1.2345678901234567,
     9007199254740992.0, 1.7976931348623157e308, 2.2250738585072014e-308,
     4.9406564584124654e-324}
   for index = 1, #samples do
-    local sample = samples[index] as float
-    local encoded = json.encode(sample)
+    const sample = samples[index] as float
+    const encoded = json.encode(sample)
     case reflect.inspect(json.decode(encoded))
     when is_float(actual) then
       test.assert(actual == sample, "float round trip changed " .. encoded)
@@ -132,7 +132,7 @@ function test_core_float_range_tags_and_round_trips(_context: test.Context)
   when is_integer(number) then test.assert(number == 0)
   else raise "integer negative zero did not normalize"
   end
-  local wide: float = json.decode("9223372036854775808", reflect.Type.is_float())
+  const wide: float = json.decode("9223372036854775808", reflect.Type.is_float())
   test.assert(wide == 9223372036854775808.0)
   core_error(function() json.decode("1e309") end, "number_range")
   core_error(function() json.decode("1e-9999") end, "number_range")
@@ -142,19 +142,19 @@ function test_core_float_range_tags_and_round_trips(_context: test.Context)
 end
 
 function test_core_locale_independent_numbers(_context: test.Context)
-  local original = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
+  const original = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
   defer ffi.setlocale(ffi.LC_NUMERIC, original)
-  local candidates: {string} = {"de_DE.UTF-8", "fr_FR.UTF-8", "pt_BR.UTF-8",
+  const candidates: {string} = {"de_DE.UTF-8", "fr_FR.UTF-8", "pt_BR.UTF-8",
     "de_DE.utf8", "fr_FR.utf8", "French_France.1252"}
   local changed = false
   for index = 1, #candidates do
     if ffi.setlocale(ffi.LC_NUMERIC, candidates[index]) ~= nil then
-      local point = ffi.localeconv().decimal_point as string
+      const point = ffi.localeconv().decimal_point as string
       if point ~= "." then changed = true; break end
     end
   end
   if not changed then test.skip("capability: no alternate numeric locale installed") end
-  local before = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
+  const before = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
   test.assert(json.encode(1234.5) == "1234.5")
   test.assert(json.decode("1234.5", reflect.Type.is_float()) == 1234.5)
   core_integer("9007199254740993.0", 9007199254740993)
@@ -189,17 +189,17 @@ function test_core_options_and_limits(_context: test.Context)
   test.assert(json.encode("x", json.EncodeOption.max_bytes(3)) == [["x"]])
   core_error(function() json.encode("x", json.EncodeOption.max_bytes(2)) end, "limit_exceeded")
   core_error(function() json.encode("\0", json.EncodeOption.max_bytes(7)) end, "limit_exceeded")
-  local exact: {value} = {1, nil, 2}
+  const exact: {value} = {1, nil, 2}
   test.assert(json.encode(exact, json.EncodeOption.max_nodes(4), json.EncodeOption.max_depth(1)) ==
               "[1,null,2]")
   core_error(function() json.encode(exact, json.EncodeOption.max_nodes(3)) end, "limit_exceeded")
-  local nested: {value} = {exact}
+  const nested: {value} = {exact}
   core_error(function() json.encode(nested, json.EncodeOption.max_depth(1)) end, "limit_exceeded")
-  local event = MappingEvent.empty()
+  const event = MappingEvent.empty()
   test.assert(json.encode(event, json.EncodeOption.max_nodes(2)) == [[{"tag":"empty"}]])
   core_error(function() json.encode(event, json.EncodeOption.max_nodes(1)) end, "limit_exceeded")
   test.assert(json.encode(event, json.EncodeOption.null_value("empty")) == [[{"tag":"empty"}]])
-  local empty_key: {string: value} = {}
+  const empty_key: {string: value} = {}
   empty_key[""] = 1
   test.assert(json.encode(empty_key, json.EncodeOption.null_value("")) == [[{"":1}]])
   core_error(function()
@@ -210,13 +210,13 @@ function test_core_options_and_limits(_context: test.Context)
 end
 
 function test_core_default_depth_limit(_context: test.Context)
-  local source = string.rep("[", 32) .. "true" .. string.rep("]", 32)
-  local decoded: value = json.decode(source)
+  const source = string.rep("[", 32) .. "true" .. string.rep("]", 32)
+  const decoded: value = json.decode(source)
   test.assert(json.encode(decoded) == source)
-  local failure = core_error(function() json.decode("[" .. source .. "]") end,
+  const failure = core_error(function() json.decode("[" .. source .. "]") end,
                              "limit_exceeded")
   test.assert(failure.position == 33)
-  local deeper: {value} = {decoded}
+  const deeper: {value} = {decoded}
   core_error(function() json.encode(deeper) end, "limit_exceeded")
   test.assert(json.encode(deeper, json.EncodeOption.max_depth(33)) ==
               "[" .. source .. "]")
@@ -232,10 +232,10 @@ local function writer_depth_chain(depth: integer, kind: string): (value, string)
   local suffix = "]"
   for _ = 1, depth do
     if kind == "array" then
-      local array: {value} = {current}
+      const array: {value} = {current}
       current = array
     elseif kind == "map" then
-      local map: {string: value} = {["next"] = current}
+      const map: {string: value} = {["next"] = current}
       current = map
       prefix, suffix = '{"next":', "}"
     else
@@ -247,8 +247,8 @@ local function writer_depth_chain(depth: integer, kind: string): (value, string)
 end
 
 local function check_writer_depth_limit(context: test.Context, kind: string)
-  local configured = 128
-  local limit = configured
+  const configured = 128
+  const limit = configured
   context:run(kind .. "_accepts_" .. limit, function(_: test.Context)
     local subject, expected = writer_depth_chain(limit, kind)
     test.assert(json.encode(subject, json.EncodeOption.max_depth(configured)) == expected)
@@ -256,7 +256,7 @@ local function check_writer_depth_limit(context: test.Context, kind: string)
   end)
   context:run(kind .. "_rejects_" .. (limit + 1), function(_: test.Context)
     local subject, expected = writer_depth_chain(limit + 1, kind)
-    local failure = core_error(function()
+    const failure = core_error(function()
       json.encode(subject, json.EncodeOption.max_depth(configured))
     end, "limit_exceeded")
     test.assert(failure.message == "value exceeds max_depth")
@@ -269,7 +269,7 @@ local function check_writer_depth_limit(context: test.Context, kind: string)
     local subject, expected = writer_depth_chain(limit - 1, kind)
     test.assert(json.encode(subject, json.EncodeOption.max_depth(math.maxinteger),
       json.EncodeOption.max_depth(limit - 1)) == expected)
-    local failure = core_error(function()
+    const failure = core_error(function()
       json.encode(subject, json.EncodeOption.max_depth(math.maxinteger),
         json.EncodeOption.max_depth(limit - 2))
     end, "limit_exceeded")
@@ -284,31 +284,31 @@ function test_core_writer_target_depth_limit(context: test.Context)
 end
 
 function test_core_cycles_sharing_and_unsupported_values(_context: test.Context)
-  local cycle: {value} = {}
+  const cycle: {value} = {}
   cycle[1] = cycle
-  local failure = core_error(function() json.encode(cycle) end, "cycle")
+  const failure = core_error(function() json.encode(cycle) end, "cycle")
   test.assert(failure.path == "$[1]" and failure.position == nil and
               failure.line == nil and failure.column == nil)
-  local shared: {value} = {1}
-  local repeated: {value} = {shared, shared}
+  const shared: {value} = {1}
+  const repeated: {value} = {shared, shared}
   test.assert(json.encode(repeated) == "[[1],[1]]")
-  local map_cycle: {string: value} = {}
+  const map_cycle: {string: value} = {}
   map_cycle["self"] = map_cycle
   core_error(function() json.encode(map_cycle) end, "cycle")
-  local record_cycle = MappingLink.new(1, nil)
+  const record_cycle = MappingLink(1, nil)
   record_cycle.next = record_cycle
   core_error(function() json.encode(record_cycle) end, "cycle")
-  local invalid_keys: {value: value} = {}
+  const invalid_keys: {value: value} = {}
   invalid_keys[1] = "number key"
   core_error(function() json.encode(invalid_keys) end, "invalid_map_key")
   core_error(function() json.encode(function() end) end, "unsupported_type")
-  local length = 4
-  local owner = foreign char.new_array(length)
+  const length = 4
+  const owner = foreign char.new_array(length)
   core_error(function() json.encode(owner) end, "unsupported_type")
-  local malformed: {string} = {string.char(128), string.char(192, 175),
+  const malformed: {string} = {string.char(128), string.char(192, 175),
     string.char(237, 160, 128), string.char(244, 144, 128, 128), string.char(226, 130)}
   for index = 1, #malformed do
-    local text = malformed[index] as string
+    const text = malformed[index] as string
     core_error(function() json.encode(text) end, "invalid_utf8")
   end
 end

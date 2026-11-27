@@ -16,13 +16,13 @@
 -- relabel module.
 
 local record RelabelSuffix
-  local kind: integer
-  local operand: value
+  local const kind: integer
+  local const operand: value
 end
 
 local record RelabelParsedRule
-  local name: string
-  local pattern: Pattern
+  local const name: string
+  local const pattern: Pattern
 end
 
 local type RelabelReplacementCallback =
@@ -47,7 +47,7 @@ local _relabel_match_cache: {string: Pattern} = {}
 
 local function _relabel_byte(source: string,
                              position: integer): integer
-  local bytes =
+  const bytes =
     source as foreign const *unsigned char
   return bytes[position - 1] as integer
 end
@@ -55,10 +55,10 @@ end
 local function _relabel_slice(source: string, first: integer,
                              after: integer): string
   if after <= first then return "" end
-  local length = after - first
-  local result = foreign char.new_array(length)
-  local source_bytes = source as foreign const *char
-  local result_bytes = result as foreign *char
+  const length = after - first
+  const result = foreign char.new_array(length)
+  const source_bytes = source as foreign const *char
+  const result_bytes = result as foreign *char
   ffi.memcpy(
     result_bytes, source_bytes + first - 1,
     length as foreign size_t)
@@ -69,13 +69,13 @@ local function _relabel_source_line(subject: string,
                                     position: integer): string
   local start = position
   while start > 1 do
-    local previous = _relabel_byte(subject, start - 1)
+    const previous = _relabel_byte(subject, start - 1)
     if previous == 10 or previous == 13 then break end
     start = start - 1
   end
   local after = position
   while after <= #subject do
-    local current = _relabel_byte(subject, after)
+    const current = _relabel_byte(subject, after)
     if current == 10 or current == 13 then break end
     after = after + 1
   end
@@ -84,8 +84,8 @@ end
 
 local function _relabel_spaces(count: integer): string
   if count <= 0 then return "" end
-  local buffer = foreign char.new_array(count)
-  local bytes = buffer as foreign *char
+  const buffer = foreign char.new_array(count)
+  const bytes = buffer as foreign *char
   local index = 0
   while index < count do
     bytes[index] = 32 as foreign char
@@ -149,7 +149,7 @@ end
 
 local function _relabel_raise_syntax(source: string, label: value,
                                      position: integer)
-  local name = label as string
+  const name = label as string
   if position < 1 then position = 1 end
   if position > #source + 1 then position = #source + 1 end
   local line, column = line_column(source, position)
@@ -163,13 +163,13 @@ end
 local function _relabel_definition_table(
     definitions: {Definition}?):
       ({string: value}, {string: integer?})
-  local native: {string: value} = {}
-  local sizes: {string: integer?} = {}
-  local seen: {string: boolean} = {}
+  const native: {string: value} = {}
+  const sizes: {string: integer?} = {}
+  const seen: {string: boolean} = {}
   if definitions then
     local index = 1
     while index <= #definitions do
-      local item = definitions[index]
+      const item = definitions[index]
       if seen[item.name] then
         raise "duplicate PEG definition name '" .. item.name .. "'"
       end
@@ -190,7 +190,7 @@ local function _relabel_decimal(text: string): integer
   local result = 0
   local index = 1
   while index <= #text do
-    local digit = _relabel_byte(text, index) - 48
+    const digit = _relabel_byte(text, index) - 48
     if digit < 0 or digit > 9 then
       raise "invalid decimal PEG repetition"
     end
@@ -225,8 +225,8 @@ end
 
 local function _relabel_class_capture(
     first: value, captured_pattern: value): Pattern
-  local complement = first as string
-  local pattern = captured_pattern as Pattern
+  const complement = first as string
+  const pattern = captured_pattern as Pattern
   if complement == "^" then
     return difference(any(), pattern)
   end
@@ -236,18 +236,18 @@ end
 local function _relabel_resolve_pattern(
     first: value, raw_definitions: value,
     raw_sizes: value): Pattern
-  local name = first as string
-  local definitions = raw_definitions
+  const name = first as string
+  const definitions = raw_definitions
     as {string: value}
-  local sizes = raw_sizes as {string: integer?}
-  local candidate = definitions[name]
+  const sizes = raw_sizes as {string: integer?}
+  const candidate = definitions[name]
   if candidate == nil then
-    local predefined: Pattern? =
+    const predefined: Pattern? =
       _relabel_predefined[name]
     if predefined then return predefined end
     raise "name '" .. name .. "' undefined"
   end
-  local size: integer? = sizes[name]
+  const size: integer? = sizes[name]
   if not size then
     raise "PEG definition '" .. name .. "' is not a pattern"
   end
@@ -256,9 +256,9 @@ end
 
 local function _relabel_resolve_value(
     first: value, definitions: value): value
-  local name = first as string
-  local native = definitions as {string: value}
-  local candidate = native[name]
+  const name = first as string
+  const native = definitions as {string: value}
+  const candidate = native[name]
   if candidate == nil then
     raise "undefined name: " .. name
   end
@@ -267,21 +267,21 @@ end
 
 local function _relabel_named_replace_suffix(
     first: value, definitions: value): RelabelSuffix
-  local candidate = _relabel_resolve_value(first, definitions)
+  const candidate = _relabel_resolve_value(first, definitions)
   return RelabelSuffix(
     RELABEL_SUFFIX_REPLACE, candidate)
 end
 
 local function _relabel_named_match_time_suffix(
     first: value, definitions: value): RelabelSuffix
-  local candidate = _relabel_resolve_value(first, definitions)
+  const candidate = _relabel_resolve_value(first, definitions)
   return RelabelSuffix(
     RELABEL_SUFFIX_MATCH_TIME, candidate)
 end
 
 local function _relabel_named_fold_suffix(
     first: value, definitions: value): RelabelSuffix
-  local candidate = _relabel_resolve_value(first, definitions)
+  const candidate = _relabel_resolve_value(first, definitions)
   return RelabelSuffix(
     RELABEL_SUFFIX_FOLD, candidate)
 end
@@ -313,8 +313,8 @@ end
 
 local function _relabel_signed_suffix(
     first: value): RelabelSuffix
-  local text = first as string
-  local amount = _relabel_decimal(
+  const text = first as string
+  const amount = _relabel_decimal(
     _relabel_slice(text, 2, #text + 1))
   if _relabel_byte(text, 1) == 43 then
     return RelabelSuffix(
@@ -364,7 +364,7 @@ local function _relabel_apply_suffixes(
   local pattern = first as Pattern
   local index = 1
   while index <= #... do
-    local suffix = ...[index] as RelabelSuffix
+    const suffix = ...[index] as RelabelSuffix
     if suffix.kind == RELABEL_SUFFIX_AT_LEAST then
       pattern = at_least(
         pattern, suffix.operand as integer)
@@ -442,7 +442,7 @@ local function _relabel_back_reference_callback(
     subject: string, position: integer,
     first: value): integer?
   if not (first is string) then return nil end
-  local captured = first as string
+  const captured = first as string
   if #captured > #subject - position + 1 then return nil end
   local index = 1
   while index <= #captured do
@@ -479,8 +479,8 @@ end
 
 local function _relabel_nonterminal(
     first: value, raw_in_grammar: value): Pattern
-  local name = first as string
-  local in_grammar = raw_in_grammar as boolean
+  const name = first as string
+  const in_grammar = raw_in_grammar as boolean
   if not in_grammar then
     raise "rule '" .. name .. "' used outside a grammar"
   end
@@ -495,16 +495,16 @@ end
 
 local function _relabel_target_grammar(
     first: value, ...: value): Pattern
-  local initial = first as RelabelParsedRule
-  local seen: {string: boolean} = {
+  const initial = first as RelabelParsedRule
+  const seen: {string: boolean} = {
     [initial.name] = true,
   }
-  local rules: {Rule} = {
+  const rules: {Rule} = {
     rule(initial.name, initial.pattern),
   }
   local index = 1
   while index <= #... do
-    local parsed = ...[index] as RelabelParsedRule
+    const parsed = ...[index] as RelabelParsedRule
     if seen[parsed.name] then
       raise "'" .. parsed.name ..
         "' already defined as a rule"
@@ -518,66 +518,66 @@ local function _relabel_target_grammar(
 end
 
 local record RelabelLexical
-  local one: Pattern
-  local spacing: Pattern
-  local name: Pattern
-  local digits: Pattern
-  local number: Pattern
-  local arrow: Pattern
-  local defined: Pattern
-  local quoted: Pattern
-  local class_pattern: Pattern
-  local label: Pattern
+  local const one: Pattern
+  local const spacing: Pattern
+  local const name: Pattern
+  local const digits: Pattern
+  local const number: Pattern
+  local const arrow: Pattern
+  local const defined: Pattern
+  local const quoted: Pattern
+  local const class_pattern: Pattern
+  local const label: Pattern
 end
 
 local function _relabel_build_lexical(): RelabelLexical
-  local one = any()
-  local spaces = _relabel_predefined["space"] as Pattern
-  local comment = sequence(
+  const one = any()
+  const spaces = _relabel_predefined["space"] as Pattern
+  const comment = sequence(
     literal("--"),
     zero_or_more(difference(one, literal("\n"))))
-  local spacing = zero_or_more(choice(spaces, comment))
-  local name_start = ranges("AZ", "az", "__")
-  local name_rest = ranges("AZ", "az", "__", "09")
-  local name = capture(sequence(
+  const spacing = zero_or_more(choice(spaces, comment))
+  const name_start = ranges("AZ", "az", "__")
+  const name_rest = ranges("AZ", "az", "__", "09")
+  const name = capture(sequence(
     name_start, zero_or_more(name_rest)))
-  local digits = one_or_more(ranges("09"))
-  local number = function_capture(
+  const digits = one_or_more(ranges("09"))
+  const number = function_capture(
     sequence(capture(digits), spacing),
     _relabel_number_value)
-  local arrow = sequence(spacing, literal("<-"))
-  local definition_pattern = sequence(
+  const arrow = sequence(spacing, literal("<-"))
+  const definition_pattern = sequence(
     name, argument(1), argument(2))
-  local defined = function_capture(
+  const defined = function_capture(
     sequence(literal("%"), definition_pattern),
     _relabel_resolve_pattern)
-  local single_string = sequence(
+  const single_string = sequence(
     literal("'"),
     capture(zero_or_more(
       difference(one, literal("'")))),
     _relabel_expect(literal("'"), "MisTerm1"))
-  local double_string = sequence(
+  const double_string = sequence(
     literal("\""),
     capture(zero_or_more(
       difference(one, literal("\"")))),
     _relabel_expect(literal("\""), "MisTerm2"))
-  local quoted = choice(single_string, double_string)
-  local range_item = function_capture(
+  const quoted = choice(single_string, double_string)
+  const range_item = function_capture(
     sequence(
       capture(one), literal("-"),
       capture(difference(one, literal("]")))),
     _relabel_range_capture)
-  local literal_item = function_capture(
+  const literal_item = function_capture(
     capture(one), _relabel_literal_capture)
-  local class_item = choice(
+  const class_item = choice(
     defined, range_item, literal_item)
-  local folded_class = fold_capture(
+  const folded_class = fold_capture(
     sequence(
       class_item,
       zero_or_more(
         difference(class_item, literal("]")))),
     _relabel_choice_fold)
-  local class_pattern = function_capture(
+  const class_pattern = function_capture(
     sequence(
       literal("["),
       capture(optional(literal("^"))),
@@ -600,42 +600,42 @@ end
 
 local function _relabel_build_suffix_operation(
     lex: RelabelLexical): Pattern
-  local suffix_plus = constant(
+  const suffix_plus = constant(
     RelabelSuffix(RELABEL_SUFFIX_AT_LEAST, 1))
-  local suffix_star = constant(
+  const suffix_star = constant(
     RelabelSuffix(RELABEL_SUFFIX_AT_LEAST, 0))
-  local suffix_optional = constant(
+  const suffix_optional = constant(
     RelabelSuffix(RELABEL_SUFFIX_AT_MOST, 1))
-  local exact_suffix = function_capture(
+  const exact_suffix = function_capture(
     capture(lex.digits), _relabel_exact_suffix)
-  local signed_suffix = function_capture(
+  const signed_suffix = function_capture(
     capture(sequence(set("+-"), lex.digits)),
     _relabel_signed_suffix)
-  local label_suffix = function_capture(
+  const label_suffix = function_capture(
     lex.name, _relabel_label_suffix)
-  local replace_string = function_capture(
+  const replace_string = function_capture(
     lex.quoted, _relabel_string_suffix)
-  local replace_number = function_capture(
+  const replace_number = function_capture(
     capture(lex.digits), _relabel_number_suffix)
-  local replace_table = sequence(
+  const replace_table = sequence(
     literal("{}"),
     constant(RelabelSuffix(
       RELABEL_SUFFIX_TABLE, nil)))
-  local replace_named = function_capture(
+  const replace_named = function_capture(
     sequence(lex.name, argument(1)),
     _relabel_named_replace_suffix)
-  local match_time_named = function_capture(
+  const match_time_named = function_capture(
     sequence(lex.name, argument(1)),
     _relabel_named_match_time_suffix)
-  local fold_named = function_capture(
+  const fold_named = function_capture(
     sequence(lex.name, argument(1)),
     _relabel_named_fold_suffix)
-  local repetition = sequence(
+  const repetition = sequence(
     literal("^"),
     _relabel_expect(
       choice(exact_suffix, signed_suffix, label_suffix),
       "ExpNumName"))
-  local replacement = sequence(
+  const replacement = sequence(
     literal("->"),
     _relabel_expect(
       sequence(
@@ -643,12 +643,12 @@ local function _relabel_build_suffix_operation(
         choice(replace_string, replace_number,
                replace_table, replace_named)),
       "ExpCap"))
-  local match_time_suffix = sequence(
+  const match_time_suffix = sequence(
     literal("=>"),
     _relabel_expect(
       sequence(lex.spacing, match_time_named),
       "ExpName1"))
-  local fold_suffix = sequence(
+  const fold_suffix = sequence(
     literal("~>"), lex.spacing, fold_named)
   return sequence(
     lex.spacing,
@@ -662,14 +662,14 @@ end
 
 local function _relabel_build_primary(
     lex: RelabelLexical): Pattern
-  local grouped = sequence(
+  const grouped = sequence(
     literal("("),
     _relabel_expect(variable("Exp"), "ExpPatt4"),
     _relabel_expect(
       sequence(lex.spacing, literal(")")), "MisClose1"))
-  local quoted = function_capture(
+  const quoted = function_capture(
     lex.quoted, _relabel_literal_capture)
-  local thrown = function_capture(
+  const thrown = function_capture(
     sequence(
       literal("%"),
       _relabel_expect(literal("{"), "ExpNameOrLab"),
@@ -679,7 +679,7 @@ local function _relabel_build_primary(
       _relabel_expect(
         sequence(lex.spacing, literal("}")), "MisClose7")),
     _relabel_throw_capture)
-  local grouped_capture = function_capture(
+  const grouped_capture = function_capture(
     sequence(
       literal("{:"),
       choice(
@@ -689,26 +689,26 @@ local function _relabel_build_primary(
       _relabel_expect(
         sequence(lex.spacing, literal(":}")), "MisClose2")),
     _relabel_group_capture)
-  local back = function_capture(
+  const back = function_capture(
     sequence(
       literal("="),
       _relabel_expect(lex.name, "ExpName2")),
     _relabel_back_reference)
-  local substitute = function_capture(
+  const substitute = function_capture(
     sequence(
       literal("{~"),
       _relabel_expect(variable("Exp"), "ExpPatt6"),
       _relabel_expect(
         sequence(lex.spacing, literal("~}")), "MisClose3")),
     _relabel_substitution_capture)
-  local table_result = function_capture(
+  const table_result = function_capture(
     sequence(
       literal("{|"),
       _relabel_expect(variable("Exp"), "ExpPatt7"),
       _relabel_expect(
         sequence(lex.spacing, literal("|}")), "MisClose4")),
     _relabel_table_capture_callback)
-  local simple_capture = function_capture(
+  const simple_capture = function_capture(
     sequence(
       literal("{"),
       _relabel_expect(
@@ -716,13 +716,13 @@ local function _relabel_build_primary(
       _relabel_expect(
         sequence(lex.spacing, literal("}")), "MisClose5")),
     _relabel_simple_capture)
-  local angle_name = sequence(
+  const angle_name = sequence(
     literal("<"),
     _relabel_expect(lex.name, "ExpName3"),
     _relabel_expect(literal(">"), "MisClose6"))
-  local bare_name = sequence(
+  const bare_name = sequence(
     lex.name, negative(lex.arrow))
-  local nonterminal = function_capture(
+  const nonterminal = function_capture(
     sequence(
       choice(bare_name, angle_name),
       back_capture("G")),
@@ -741,7 +741,7 @@ local function _relabel_compile_source(
     definitions: {Definition}?): Pattern
   local native_definitions, sizes =
     _relabel_definition_table(definitions)
-  local parser = _relabel_parser as Pattern
+  const parser = _relabel_parser as Pattern
   local compiled: value, label: value, position: value =
     parser:match(
       source .. " ", 1, native_definitions, sizes)
@@ -758,18 +758,18 @@ end
 local function _relabel_cached_source(
     source: string,
     cache: {string: Pattern}): Pattern
-  local cached: Pattern? = cache[source]
+  const cached: Pattern? = cache[source]
   if cached then return cached as Pattern end
-  local compiled = _relabel_compile_source(source, nil)
+  const compiled = _relabel_compile_source(source, nil)
   cache[source] = compiled
   return compiled
 end
 
 -- Implementation notes: doc/implementation/lpeglabel-embedding.md#relabel-translation
 local function _relabel_refresh_locale()
-  local current = locale()
-  local any_byte = any()
-  local predefined: {string: Pattern} = {
+  const current = locale()
+  const any_byte = any()
+  const predefined: {string: Pattern} = {
     ["nl"] = literal("\n"),
     ["alnum"] = current.alnum,
     ["alpha"] = current.alpha,
@@ -804,7 +804,7 @@ local function _relabel_refresh_locale()
   predefined["W"] = difference(any_byte, current.alnum)
   predefined["X"] = difference(any_byte, current.xdigit)
   _relabel_predefined = predefined
-  local cache: {string: Pattern} = {}
+  const cache: {string: Pattern} = {}
   gc.weak(cache as {value: value})
   _relabel_match_cache = cache
   _relabel_parser = _relabel_build_parser()

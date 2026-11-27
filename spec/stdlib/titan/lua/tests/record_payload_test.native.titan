@@ -10,15 +10,15 @@ end
 function test_lua_record_payload_receiver_reconstructs_after_sender_close(
     _context: test.Context)
   runtime_test.run(function ()
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     state:run("require('lua.transfer_fixture').send_custom_record(...)", nil,
       async.TransferValue.is_pointer(inbox:handle()))
     state:close()
     gclib.collect()
-    local restored: transfer_fixture.PayloadRecord = inbox:wait()
+    const restored: transfer_fixture.PayloadRecord = inbox:wait()
     test.assert(restored:number_value() == 97)
     test.assert(restored:text_value() == strings.rep("payload\0bytes", 1024))
   end)

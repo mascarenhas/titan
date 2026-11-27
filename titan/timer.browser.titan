@@ -51,10 +51,10 @@ local function host_error(message: Value, thrown: Value, operation: string): asy
 end
 
 local function sleep_once(milliseconds: integer)
-  local task = async.running()
-  local token = async.ResumeToken("timer.sleep")
+  const task = async.running()
+  const token = async.ResumeToken("timer.sleep")
   local failure: async.OperationError? = nil
-  local request = timeout_source():start(function (...: Value): Value
+  const request = timeout_source():start(function (...: Value): Value
     task:resume(token)
     return Value.is_nil()
   end, function (...: Value): Value
@@ -66,7 +66,7 @@ local function sleep_once(milliseconds: integer)
   -- Cancellation clears the host timer and ends the wait at once; the loader
   -- drops a settlement that arrives later.
   async.suspend(token, function () request:cancel() catch end)
-  local failed? = failure
+  const failed? = failure
   if failed ~= nil then raise failed end
 end
 
@@ -104,7 +104,7 @@ end
 -- where the subscription itself cannot close.
 local function Ticker:retire_request()
   self.closed = true
-  local open? = self.request
+  const open? = self.request
   if open ~= nil then
     self.request = nil
     open:close()
@@ -117,7 +117,7 @@ local function Ticker:arm(remaining: integer, period: integer,
     publish: function (boolean): (boolean), fail: function (async.OperationError): (boolean))
   local delay = remaining
   if delay > MAX_HOST_DELAY then delay = MAX_HOST_DELAY end
-  local previous? = self.request
+  const previous? = self.request
   self.request = timeout_source():start(function (...: Value): Value
     if remaining > delay then
       self:arm(remaining - delay, period, publish, fail)
@@ -129,7 +129,7 @@ local function Ticker:arm(remaining: integer, period: integer,
   catch
     local message = "host timer failed"
     if error is browser.BrowserError then
-      local failure: browser.BrowserError = error
+      const failure: browser.BrowserError = error
       message = failure.message
       failure:close()
     end
@@ -149,8 +149,8 @@ end
 function ticker(milliseconds: integer): Ticker
   if milliseconds <= 0 then raise "ticker interval must be positive" end
   async.checkpoint()
-  local recurring: Ticker = {request = nil, subscription = nil, closed = false, remove_close_listener = nil}
-  local remove = async.add_close_listener(function () recurring:retire_request() end)
+  const recurring: Ticker = {request = nil, subscription = nil, closed = false, remove_close_listener = nil}
+  const remove = async.add_close_listener(function () recurring:retire_request() end)
   recurring.remove_close_listener = remove
   local accepted = false
   defer do
@@ -158,14 +158,14 @@ function ticker(milliseconds: integer): Ticker
   end
   recurring.subscription = async.CoalescingSubscription<|boolean, async.OperationError|>(
     function (publish, fail, _finish): async.SubscriptionActions<|boolean|>
-      local stop = function ()
-        local open? = recurring.request
+      const stop = function ()
+        const open? = recurring.request
         if open ~= nil then open:cancel() end
       end
-      local close = function (_drain: function (): (async.SubscriptionBatch<|boolean|>))
+      const close = function (_: function (): (async.SubscriptionBatch<|boolean|>))
         recurring:retire_request()
       end
-      local actions = async.SubscriptionActions<|boolean|>(stop, close)
+      const actions = async.SubscriptionActions<|boolean|>(stop, close)
       if milliseconds > MAX_HOST_DELAY then
         recurring:arm(milliseconds, milliseconds, publish, fail)
       else
@@ -190,7 +190,7 @@ function Ticker:tick(): boolean
   async.checkpoint()
   if self.closed then return false end
   if self.subscription:has_waiter() then raise "Ticker already has a waiting Task" end
-  local outcome = self.subscription:next()
+  const outcome = self.subscription:next()
   case outcome
   when item(value) then return value
   when error(failure) then raise failure
@@ -204,7 +204,7 @@ function Ticker:close()
   async.running()
   if self.closed then return end
   self.subscription:close()
-  local remove? = self.remove_close_listener
+  const remove? = self.remove_close_listener
   if remove ~= nil then
     self.remove_close_listener = nil
     remove()

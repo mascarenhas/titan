@@ -4,13 +4,13 @@ local lua = import "lua"
 local support = import "reflect.tests.titan"
 
 function test_value_and_type_fields_cross_lua_boundary(_context: test.Context)
-  local original = support.SimpleRecord.new(13, 21)
-  local inspected = support.record_value(original)
+  const original = support.SimpleRecord(13, 21)
+  const inspected = support.record_value(original)
   test.assert(inspected.value == original as value)
   test.assert(inspected.type == support.required_record("reflect.tests.SimpleRecord"))
 
-  local variants = support.required_union("reflect.tests.TestShape").variants
-  local read_fields = lua.load([[
+  const variants = support.required_union("reflect.tests.TestShape").variants
+  const read_fields = lua.load([[
     local reflected, payload, empty = ...
     return reflected.value, reflected.type, reflected.type.fields[1].type,
            payload.parts[1].type, #empty.parts
@@ -25,7 +25,7 @@ function test_value_and_type_fields_cross_lua_boundary(_context: test.Context)
 end
 
 function test_number_inspection_preserves_lua_numeric_subtype(_context: test.Context)
-  local chunk = lua.load("return 4, 4.0, -0.0, 1.5")
+  const chunk = lua.load("return 4, 4.0, -0.0, 1.5")
   local int, integral_float, negative_zero, fraction = chunk()
   case reflect.inspect(int)
   when is_integer(n) then test.assert(n == 4)
@@ -46,9 +46,9 @@ function test_number_inspection_preserves_lua_numeric_subtype(_context: test.Con
 end
 
 function test_lua_function_c_function_and_thread_variants(_context: test.Context)
-  local make_function = lua.load("return function(first, second, ...) return first, second, ... end",
+  const make_function = lua.load("return function(first, second, ...) return first, second, ... end",
                                  "=reflection-fixture")
-  local candidate: value = make_function()
+  const candidate: value = make_function()
   case reflect.inspect(candidate)
   when is_lua_function{fn_value = value, fn_type = type} then
     test.assert(fn_type.source == "=reflection-fixture")
@@ -63,12 +63,12 @@ function test_lua_function_c_function_and_thread_variants(_context: test.Context
   else raise "expected Lua function"
   end
 
-  local get_functions = lua.load("return math.abs, string.gmatch('ab', '.')")
+  const get_functions = lua.load("return math.abs, string.gmatch('ab', '.')")
   local light, closure = get_functions()
   case reflect.inspect(light)
   when is_lua_c_function{fn_value = value, fn_entry = entry} then
     test.assert(fn_entry ~= nil)
-    local callable = fn_value
+    const callable = fn_value
     test.assert(callable(-4) as integer == 4)
   else raise "expected light Lua C function"
   end
@@ -80,8 +80,8 @@ function test_lua_function_c_function_and_thread_variants(_context: test.Context
   else raise "expected Lua C closure"
   end
 
-  local create_thread = lua.load("return coroutine.create(function() end)")
-  local thread: value = create_thread()
+  const create_thread = lua.load("return coroutine.create(function() end)")
+  const thread: value = create_thread()
   case reflect.inspect(thread)
   when is_lua_thread{inspected_value = value, inspected_thread = thread} then
     test.assert(inspected_value == thread)

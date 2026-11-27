@@ -9,9 +9,9 @@ end
 -- Escape underscores as well as punctuation so distinct qualified names can
 -- never collapse to the same protobuf identifier.
 local function identifier(name: string): string
-  local output = string.writer()
+  const output = string.writer()
   for index = 1, #name do
-    local byte: integer = string.byte(name, index)
+    const byte: integer = string.byte(name, index)
     local plain = false
     if byte >= 48 and byte <= 57 then plain = true
     elseif byte >= 65 and byte <= 90 then plain = true
@@ -36,8 +36,8 @@ end
 
 local function Schema:array(element: reflect.Type, name: string,
                              titan_array: boolean, depth: integer): string
-  local slot = name .. "_Slot"
-  local body = string.writer()
+  const slot = name .. "_Slot"
+  const body = string.writer()
   body:write("message " .. slot .. " {\n")
   self:field(body, "value", 1, element, slot .. "_Value", depth + 1)
   body:write("}\n\nmessage " .. name .. " {\n  repeated " .. slot .. " items = 1;\n")
@@ -50,10 +50,10 @@ end
 -- One shared TitanValue oneof for every `value` field; its Array arm reuses
 -- the ordinary Titan Array message with TitanValue elements.
 local function Schema:dynamic(depth: integer): string
-  local name = "TitanValue"
+  const name = "TitanValue"
   if self.seen["value:"] ~= nil then return name end
   self.seen["value:"] = name
-  local array = self:array(dynamic_value, "TitanValue_Array", true, depth)
+  const array = self:array(dynamic_value, "TitanValue_Array", true, depth)
   self.output:write("message TitanValue_Nominal {\n  optional bytes module = 1;\n"
       .. "  optional bytes name = 2;\n  optional bytes message = 3;\n}\n\n")
   self.output:write("message TitanValue {\n  oneof kind {\n    bool boolean = 1;\n"
@@ -65,7 +65,7 @@ end
 local function Schema:type_name(descriptor: reflect.Type, hint: string,
                                   depth: integer): (string, boolean)
   require_depth(depth)
-  local resolved = resolve_type(descriptor)
+  const resolved = resolve_type(descriptor)
   case resolved
   when is_option(base) then return self:type_name(base, hint, depth)
   when is_boolean() then return "bool", true
@@ -74,26 +74,26 @@ local function Schema:type_name(descriptor: reflect.Type, hint: string,
   when is_string() then return "bytes", true
   when is_value() then return self:dynamic(depth), false
   when is_nil() then
-    local name = hint .. "_Nil"
+    const name = hint .. "_Nil"
     self.output:write("message " .. name .. " {}\n\n")
     return name, false
   when is_array{elem_descriptor} then
     return self:array(elem_descriptor, hint .. "_Array", true, depth), false
   when is_record(record_type) then
-    local encode? = find_transfer_hooks(record_type, "protobuf")
+    const encode? = find_transfer_hooks(record_type, "protobuf")
     if depth > 1 and encode ~= nil then
       return "bytes", true
     end
     require_record(record_type)
-    local key = "record:" .. record_type.name
-    local previous? = self.seen[key]
+    const key = "record:" .. record_type.name
+    const previous? = self.seen[key]
     if previous ~= nil then return previous, false end
-    local name = "T_" .. identifier(record_type.name)
+    const name = "T_" .. identifier(record_type.name)
     self.seen[key] = name
-    local body = string.writer()
+    const body = string.writer()
     body:write("message " .. name .. " {\n")
     for index = 1, #record_type.fields do
-      local field = record_type.fields[index]
+      const field = record_type.fields[index]
       self:field(body, field.name, field_number(index), field.type,
                   name .. "_Field" .. index, depth + 1)
     end
@@ -102,20 +102,20 @@ local function Schema:type_name(descriptor: reflect.Type, hint: string,
     return name, false
   when is_union(union_type) then
     require_union(union_type)
-    local key = "union:" .. union_type.name
-    local previous? = self.seen[key]
+    const key = "union:" .. union_type.name
+    const previous? = self.seen[key]
     if previous ~= nil then return previous, false end
-    local name = "T_" .. identifier(union_type.name)
+    const name = "T_" .. identifier(union_type.name)
     self.seen[key] = name
-    local body = string.writer()
+    const body = string.writer()
     body:write("message " .. name .. " {\n  oneof variant {\n")
     for index = 1, #union_type.variants do
-      local variant = union_type.variants[index]
-      local payload_name = name .. "_Variant" .. index
-      local payload = string.writer()
+      const variant = union_type.variants[index]
+      const payload_name = name .. "_Variant" .. index
+      const payload = string.writer()
       payload:write("message " .. payload_name .. " {\n")
       for part = 1, #variant.parts do
-        local field = variant.parts[part]
+        const field = variant.parts[part]
         self:field(payload, field.name, field_number(part), field.type,
                     payload_name .. "_Part" .. part, depth + 1)
       end
@@ -142,11 +142,11 @@ local function Schema:type_name(descriptor: reflect.Type, hint: string,
     return self:array(elem_descriptor, hint .. "_CArray", false, depth), false
   when is_foreign_struct(structure) then
     require_struct(structure)
-    local name = hint .. "_Struct"
-    local body = string.writer()
+    const name = hint .. "_Struct"
+    const body = string.writer()
     body:write("message " .. name .. " {\n")
     for index = 1, #structure.fields do
-      local field = structure.fields[index]
+      const field = structure.fields[index]
       if field.is_flexible_array then raise "protobuf: flexible foreign array" end
       self:field(body, field.name, field_number(index), field.type,
                   name .. "_Field" .. index, depth + 1)

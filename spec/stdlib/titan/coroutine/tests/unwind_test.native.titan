@@ -42,9 +42,9 @@ local UNWIND_LUA_PRELUDE = [==[
 ]==]
 
 local function unwind_run_lua(scenario: string, mode: string): (string, string)
-  local log: owned char[] = foreign char.new_array(support.UNWIND_BUFFER_SIZE)
-  local warnings: owned char[] = foreign char.new_array(support.UNWIND_BUFFER_SIZE)
-  local state = unwind_lua.new()
+  const log: owned char[] = foreign char.new_array(support.UNWIND_BUFFER_SIZE)
+  const warnings: owned char[] = foreign char.new_array(support.UNWIND_BUFFER_SIZE)
+  const state = unwind_lua.new()
   defer state:close()
   state:run(UNWIND_LUA_PRELUDE .. scenario, "=unwind-scenario",
     unwind_async.TransferValue.is_pointer(log as foreign *void),
@@ -62,7 +62,7 @@ local function unwind_run_lua(scenario: string, mode: string): (string, string)
 end
 
 local function unwind_warning_lines(warnings: string): {string}
-  local lines: {string} = {}
+  const lines: {string} = {}
   for line in unwind_string.split(warnings, "\n") do
     if #line > 0 then lines[#lines + 1] = line end
   end
@@ -72,7 +72,7 @@ end
 -- Each expected fragment must appear in its own warning line, in order, and
 -- no other warning may be reported.
 local function unwind_assert_warnings(mode: string, warnings: string, expected: {string})
-  local lines = unwind_warning_lines(warnings)
+  const lines = unwind_warning_lines(warnings)
   test.assert(#lines == #expected, mode .. " warnings:\n" .. warnings)
   for index = 1, #expected do
     test.assert(support.contains(lines[index], "error in coroutine cleanup (") and
@@ -346,9 +346,9 @@ local UNWIND_DECOY_SCENARIO = [==[
 
 local function unwind_decoy_order(context: test.Context, name: string, decoys_first: boolean)
   context:run(name, function (child: test.Context)
-    local scenario = "local decoys_first = " .. (decoys_first and "true" or "false") ..
+    const scenario = "local decoys_first = " .. (decoys_first and "true" or "false") ..
       "\n" .. UNWIND_DECOY_SCENARIO
-    local chain = "d2 c2 d1 c1 d0 c0"
+    const chain = "d2 c2 d1 c1 d0 c0"
     unwind_lua_mode(child, "collect", scenario,
       chain .. " a=suspended:a-done:x b=suspended:b-done:true:y" ..
       " c=suspended:normal:normal c-result=c:l1:l2:z:dead", {})
@@ -415,7 +415,7 @@ local UNWIND_CONTINUATION_SCENARIO = [==[
 ]==]
 
 function test_unwind_crosses_continuation_on_new_stack(context: test.Context)
-  local unwound = "d_inner c_inner c_l d_b l=dead inner=dead"
+  const unwound = "d_inner c_inner c_l d_b l=dead inner=dead"
   unwind_lua_mode(context, "collect", UNWIND_CONTINUATION_SCENARIO,
     unwound .. " a=suspended a-resumed:go d_a a-result=a-done", {})
   unwind_lua_mode(context, "close", UNWIND_CONTINUATION_SCENARIO,

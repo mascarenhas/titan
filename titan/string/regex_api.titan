@@ -1,20 +1,20 @@
 local record RegexDiagnostic
-  label: string
-  message: string
-  source: string
-  position: integer
-  line: integer
-  column: integer
-  source_line: string
+  const label: string
+  const message: string
+  const source: string
+  const position: integer
+  const line: integer
+  const column: integer
+  const source_line: string
 end
 
 local _regex_cache: {string: Regex} = {}
 local _regex_group_sentinel: {value: value} = {}
 
 local function cached_regex(expression: string): Regex
-  local found: Regex? = _regex_cache[expression]
+  const found: Regex? = _regex_cache[expression]
   if found then return found as Regex end
-  local compiled = compile_regex(expression)
+  const compiled = compile_regex(expression)
   _regex_cache[expression] = compiled
   return compiled
 end
@@ -24,8 +24,8 @@ local function regex_normalized_init(subject: string,
                                      supplied: integer?):
                                      (integer, boolean)
   if not supplied then return 1, false end
-  local position = supplied as integer
-  local length = #subject
+  const position = supplied as integer
+  const length = #subject
   if position > 0 then
     if position > length + 1 then return position, true end
     return position, false
@@ -41,12 +41,12 @@ end
 
 local function regex_attempt(regex: Regex, subject: string,
                              position: integer): RegexMatch?
-  local raw: value = regex.pattern:match(subject, position)
+  const raw: value = regex.pattern:match(subject, position)
   if raw == nil then return nil end
-  local captured = raw as {integer: value}
-  local first = captured[1] as integer
-  local after = captured[2] as integer
-  local groups: {Span} = {}
+  const captured = raw as {integer: value}
+  const first = captured[1] as integer
+  const after = captured[2] as integer
+  const groups: {Span} = {}
   local index = 1
   while index <= regex.capture_count do
     groups[index] = captured[index + 2] as Span
@@ -63,7 +63,7 @@ local function regex_find_from(regex: Regex, subject: string,
   end
   local current = position
   while current <= #subject + 1 do
-    local found: RegexMatch? =
+    const found: RegexMatch? =
       regex_attempt(regex, subject, current)
     if found then return found end
     current = current + 1

@@ -3,8 +3,8 @@ function test_observed_task_status_snapshots_keep_transition_identity(context: t
   local running_second: async.TaskStatus? = nil
   local waiting_first: async.TaskStatus? = nil
   local waiting_second: async.TaskStatus? = nil
-  local target = async.run<|value, value|>(function (): value
-    local current = async.running()
+  const target = async.run<|value, value|>(function (): value
+    const current = async.running()
     running_first = current:status()
     test.assert(running_first == current:status(), "running snapshot was not cached")
     async.yield()
@@ -13,9 +13,9 @@ function test_observed_task_status_snapshots_keep_transition_identity(context: t
     async.yield()
     return nil
   end)
-  local ready = target:status()
+  const ready = target:status()
   test.assert(ready == target:status(), "ready snapshot was not cached")
-  local observer = async.run<|nil, nil|>(function (): nil
+  const observer = async.run<|nil, nil|>(function (): nil
     waiting_first = target:status()
     test.assert(waiting_first == target:status(), "waiting snapshot was not cached")
     async.yield()
@@ -36,10 +36,10 @@ function test_observed_task_status_snapshots_keep_transition_identity(context: t
 end
 
 function test_queued_yield_observes_first_cancellation_without_resuming_twice(context: test.Context)
-  local reason = async.CancellationReason<|value|>.complex(false)
+  const reason = async.CancellationReason<|value|>.complex(false)
   local caught = 0
   local continued = false
-  local target = async.run<|nil, value|>(function (): nil
+  const target = async.run<|nil, value|>(function (): nil
     do async.yield()
     catch
       test.assert(error == reason, "queued yield changed cancellation identity")
@@ -53,7 +53,7 @@ function test_queued_yield_observes_first_cancellation_without_resuming_twice(co
     continued = true
     return nil
   end)
-  local cancelling = async.run<|nil, nil|>(function (): nil
+  const cancelling = async.run<|nil, nil|>(function (): nil
     target:cancel(reason)
     target:cancel(async.CancellationReason.simple("second reason"))
     return nil
@@ -70,12 +70,12 @@ end
 function test_resume_tokens_guard_identity_and_each_suspension(
     context: test.Context)
   runtime_test.run(function ()
-    local first = async.ResumeToken.new("first guarded suspension")
-    local same_source =
-      async.ResumeToken.new("first guarded suspension")
-    local second = async.ResumeToken.new("second guarded suspension")
+    const first = async.ResumeToken("first guarded suspension")
+    const same_source =
+      async.ResumeToken("first guarded suspension")
+    const second = async.ResumeToken("second guarded suspension")
     local phase = 0
-    local target = async.run<|nil, value|>(function (): nil
+    const target = async.run<|nil, value|>(function (): nil
       phase = 1
       async.suspend(first)
       phase = 2
@@ -137,7 +137,7 @@ end
 function test_resume_token_rejects_ready_task(context: test.Context)
   runtime_test.run(function ()
     local started = false
-    local target = async.run<|nil, value|>(function (): nil
+    const target = async.run<|nil, value|>(function (): nil
       started = true
       return nil
     end)
@@ -147,7 +147,7 @@ function test_resume_token_rejects_ready_task(context: test.Context)
 
     local mismatch = ""
     do
-      target:resume(async.ResumeToken.new("ready Task outsider"))
+      target:resume(async.ResumeToken("ready Task outsider"))
     catch
       mismatch = error as string
     end
@@ -163,9 +163,9 @@ end
 
 function test_resume_token_reports_unknown_source(context: test.Context)
   runtime_test.run(function ()
-    local expected = async.ResumeToken.new(nil)
-    local wrong_token = async.ResumeToken.new(nil)
-    local target = async.run<|nil, value|>(function (): nil
+    const expected = async.ResumeToken(nil)
+    const wrong_token = async.ResumeToken(nil)
+    const target = async.run<|nil, value|>(function (): nil
       async.suspend(expected)
       return nil
     end)
@@ -196,7 +196,7 @@ function test_self_cancelled_task_is_rejected_by_combinators(
     local candidate: async.Task? = nil
     candidate = async.run<|value, value|>(function (): value
       async.yield()
-      local current = candidate as async.Task
+      const current = candidate as async.Task
       current:cancel(async.CancellationReason.simple("self-cancelled"))
       test.assert(current:status():as_string() == "running",
             "self-cancellation published an intermediate TaskStatus")
@@ -211,7 +211,7 @@ function test_self_cancelled_task_is_rejected_by_combinators(
     end)
     task_support.cleanup_task(candidate as async.Task,
                  "self-cancelled Task cleanup")
-    local status = async.join(candidate as async.Task)
+    const status = async.join(candidate as async.Task)
     test.assert(support.cancelled_with(status, "self-cancelled"),
           "self-cancelled Task did not publish its reason")
   end)
@@ -268,7 +268,7 @@ end
 
 -- Count from zero with no pending call.
 local function task_trace_reset(cells: owned int[])
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0, "cannot reserve Lua stack for the trace hook")
   ffi.lua_pushlightuserdata(L, nil)
@@ -279,7 +279,7 @@ end
 -- Hook the current thread, whose later Tasks inherit the hook, and the main
 -- thread, where the driver resumes Task roots.
 local function task_trace_hook_install(cells: owned int[])
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 2) ~= 0, "cannot reserve Lua stack for the trace hook")
   task_trace_reset(cells)
@@ -288,14 +288,14 @@ local function task_trace_hook_install(cells: owned int[])
   ffi.lua_pushlightuserdata(L, cells as foreign *void)
   ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_cells")
   ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
-  local main = ffi.lua_tothread(L, -1)
-  local mask = ffi.LUA_MASKCALL | ffi.LUA_MASKRET
+  const main = ffi.lua_tothread(L, -1)
+  const mask = ffi.LUA_MASKCALL | ffi.LUA_MASKRET
   ffi.lua_sethook(L, task_trace_capture_hook, mask, 0)
   ffi.lua_sethook(main, task_trace_capture_hook, mask, 0)
 end
 
 local function task_trace_hook_remove()
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 2) ~= 0, "cannot reserve Lua stack for the trace hook")
   ffi.lua_sethook(L, nil, 0, 0)
@@ -315,11 +315,11 @@ end
 
 local function task_trace_cancelled_parked_task()
   runtime_test.run(function ()
-    local cells: owned int[] = foreign int.new_array(1)
+    const cells: owned int[] = foreign int.new_array(1)
     task_trace_hook_install(cells)
     defer task_trace_hook_remove()
-    local token = async.ResumeToken("trace capture probe")
-    local parked = async.run<|value, value|>(function (): value
+    const token = async.ResumeToken("trace capture probe")
+    const parked = async.run<|value, value|>(function (): value
       async.suspend(token)
       return nil
     end)
@@ -327,8 +327,8 @@ local function task_trace_cancelled_parked_task()
     support.wait_until_waiting(parked)
     task_trace_reset(cells)
     parked:cancel(async.CancellationReason.simple("trace capture probe"))
-    local status = async.join(parked)
-    local count = cells[0] as integer
+    const status = async.join(parked)
+    const count = cells[0] as integer
     test.assert(support.cancelled_with(status, "trace capture probe"),
       "the parked Task was not cancelled")
     -- Only the cancellation raised at the Task's yield point builds a trace,
@@ -339,7 +339,7 @@ end
 
 local function task_trace_reported_failure(context: test.Context, with_cleanup: boolean)
   runtime_test.run(function ()
-    local cells: owned int[] = foreign int.new_array(1)
+    const cells: owned int[] = foreign int.new_array(1)
     task_trace_hook_install(cells)
     defer task_trace_hook_remove()
     local failing: async.Task? = nil
@@ -352,9 +352,9 @@ local function task_trace_reported_failure(context: test.Context, with_cleanup: 
     task_support.cleanup_task(failing, "trace capture probe cleanup")
     task_trace_reset(cells)
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local status = async.join(failing)
+    const status = async.join(failing)
     context:log("END expected uncaught async Task diagnostics")
-    local count = cells[0] as integer
+    const count = cells[0] as integer
     local failed, failure? = status:has_failed()
     test.assert(failed and failure.error == "trace capture probe failure",
       "the failing Task reported " .. status:as_string())
@@ -389,12 +389,12 @@ end
 function test_repeated_resume_during_registration_keeps_one_continuation(_: test.Context)
   runtime_test.run(function ()
     task_support.each_wake_offset(true, nil, function (): task_support.WakeCase
-      local first = async.ResumeToken("latched registration")
-      local second = async.ResumeToken("after the yield")
+      const first = async.ResumeToken("latched registration")
+      const second = async.ResumeToken("after the yield")
       local returns = 0
       local consumed = false
       local parked = false
-      local body = function (): value
+      const body = function (): value
         async.running():resume(first)
         async.suspend(first)
         consumed = true
@@ -404,7 +404,7 @@ function test_repeated_resume_during_registration_keeps_one_continuation(_: test
         async.suspend(second)
         return returns
       end
-      local drive = function (window: task_support.WakeWindow, target: async.Task)
+      const drive = function (window: task_support.WakeWindow, target: async.Task)
         async.yield()
         window.open = false
         for _ = 1, 50 do
@@ -430,7 +430,7 @@ end
 local function task_cancel_window(driver: boolean)
   runtime_test.run(function ()
     task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
-      local token = async.ResumeToken("cancelled in its window")
+      const token = async.ResumeToken("cancelled in its window")
       local actions = 0
       return task_support.WakeCase(function (): value
         async.suspend(token, function () actions = actions + 1 end)
@@ -457,9 +457,9 @@ end
 function test_resume_after_delivered_suspension_latches_the_next(_: test.Context)
   runtime_test.run(function ()
     task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
-      local first = async.ResumeToken("delivered first")
-      local second = async.ResumeToken("latched second")
-      local drive = function (window: task_support.WakeWindow, target: async.Task)
+      const first = async.ResumeToken("delivered first")
+      const second = async.ResumeToken("latched second")
+      const drive = function (window: task_support.WakeWindow, target: async.Task)
         window.open = false
         async.yield()
         window.open = true
@@ -485,8 +485,8 @@ end
 function test_stale_resume_after_delivery_follows_token_reuse(context: test.Context)
   context:run("reused_token_returns_at_once", function (_: test.Context)
     runtime_test.run(function ()
-      local token = async.ResumeToken("reused")
-      local target = async.run<|value, value|>(function (): value
+      const token = async.ResumeToken("reused")
+      const target = async.run<|value, value|>(function (): value
         async.suspend(token)
         async.running():resume(token)
         async.suspend(token)
@@ -502,10 +502,10 @@ function test_stale_resume_after_delivery_follows_token_reuse(context: test.Cont
   end)
   context:run("fresh_token_parks", function (_: test.Context)
     runtime_test.run(function ()
-      local first = async.ResumeToken("first wait")
-      local second = async.ResumeToken("second wait")
+      const first = async.ResumeToken("first wait")
+      const second = async.ResumeToken("second wait")
       local reached = false
-      local target = async.run<|value, value|>(function (): value
+      const target = async.run<|value, value|>(function (): value
         async.suspend(first)
         async.running():resume(first)
         reached = true
@@ -534,9 +534,9 @@ end
 function test_resume_during_delivery_is_discarded(_: test.Context)
   runtime_test.run(function ()
     task_support.each_wake_offset(true, nil, function (): task_support.WakeCase
-      local token = async.ResumeToken("delivered")
+      const token = async.ResumeToken("delivered")
       local returned = false
-      local drive = function (window: task_support.WakeWindow, target: async.Task)
+      const drive = function (window: task_support.WakeWindow, target: async.Task)
         window.open = false
         async.yield()
         window.open = true
@@ -562,7 +562,7 @@ end
 function test_resume_raises_while_yield_is_queued(_: test.Context)
   runtime_test.run(function ()
     local spinning = true
-    local target = async.run<|value, value|>(function (): value
+    const target = async.run<|value, value|>(function (): value
       while spinning do async.yield() end
       return nil
     end)

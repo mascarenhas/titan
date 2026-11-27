@@ -6,11 +6,11 @@ local type CaseStart = function (integer): (async.Task)
 
 local function run_case(_: test.Context, start: CaseStart,
                         first_port: integer, expected: string)
-  local task = start(first_port)
+  const task = start(first_port)
   runtime_test.cleanup(function ()
     task_support.cancel_and_join_task(task, "HTTP test cleanup")
   end)
-  local status = async.join(task)
+  const status = async.join(task)
   test.assert(status:has_succeeded(),
         "HTTP case Task ended " .. status:as_string() ..
         " with support.outcome " .. support.result())
@@ -146,8 +146,8 @@ end
 function test_server_idle_timeout_api_validation_and_updates(
     context: test.Context)
   runtime_test.run(function ()
-    local missing_pem_path = support.absent_temporary_path(context)
-    local start: CaseStart = function (first_port: integer): async.Task
+    const missing_pem_path = support.absent_temporary_path(context)
+    const start: CaseStart = function (first_port: integer): async.Task
       return start_idle_timeout_api(first_port, missing_pem_path)
     end
     run_case(context, start, 21000, "idle-timeout-api-ok")

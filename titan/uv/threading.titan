@@ -69,10 +69,10 @@ end
 function create_native_thread(entry: foreign function(*void): void,
                               argument: foreign *void): (integer, foreign *void)
   if not entry then return ffi.UV_EINVAL, nil end
-  local token = ffi.malloc(foreign titan_uv_thread_storage.sizeof)
+  const token = ffi.malloc(foreign titan_uv_thread_storage.sizeof)
     as foreign *titan_uv_thread_storage
   if token == nil then return ffi.UV_ENOMEM, nil end
-  local status: integer = ffi.uv_thread_create(token as foreign *uv_thread_t,
+  const status: integer = ffi.uv_thread_create(token as foreign *uv_thread_t,
     entry, argument)
   if status ~= 0 then
     ffi.free(token)
@@ -134,7 +134,7 @@ function thread_t:create(entry: foreign function(*void): void,
   if self.phase ~= THREAD_FRESH and self.phase ~= THREAD_RETIRED then return ffi.UV_EBUSY end
   if not entry then return ffi.UV_EINVAL end
   self:begin_create(argument_owner)
-  local status = ffi.uv_thread_create(self.native as foreign *uv_thread_t, entry,
+  const status = ffi.uv_thread_create(self.native as foreign *uv_thread_t, entry,
                                       argument) as integer
   -- No allocations, user calls, or ownership change can precede this commit.
   if status == 0 then
@@ -164,7 +164,7 @@ function thread_t:create_ex(options: thread_options_t,
   native_options.flags = options.flags
   native_options.stack_size = options.stack_size
   self:begin_create(argument_owner)
-  local status = ffi.uv_thread_create_ex(self.native as foreign *uv_thread_t, native_options,
+  const status = ffi.uv_thread_create_ex(self.native as foreign *uv_thread_t, native_options,
                                          entry, argument) as integer
   if status == 0 then
     self.phase = THREAD_JOINABLE
@@ -181,7 +181,7 @@ end
 function thread_t:join(): integer
   if self.phase ~= THREAD_JOINABLE then return ffi.UV_EINVAL end
   -- This blocks the current OS thread, including the whole Lua event loop.
-  local status = ffi.uv_thread_join(self.native as foreign *uv_thread_t) as integer
+  const status = ffi.uv_thread_join(self.native as foreign *uv_thread_t) as integer
   if status == 0 then
     self.phase = THREAD_RETIRED
     self.argument_owner = nil
@@ -201,7 +201,7 @@ end
 function thread_t:detach(): integer
   if self.phase ~= THREAD_JOINABLE then return ffi.UV_EINVAL end
   if self.argument_owner ~= nil then return ffi.UV_EBUSY end
-  local status = ffi.uv_thread_detach(self.native as foreign *uv_thread_t) as integer
+  const status = ffi.uv_thread_detach(self.native as foreign *uv_thread_t) as integer
   if status == 0 then
     self.phase = THREAD_RETIRED
     thread_roots[self] = nil
@@ -213,7 +213,7 @@ end
 -- @return Native thread_t result with the documented lifetime and units.
 -- @usage uv/functions/threading.md#thread_self
 function thread_self(): thread_t
-  local owner = thread_t()
+  const owner = thread_t()
   owner.native.thread = ffi.uv_thread_self()
   owner.phase = THREAD_BORROWED
   return owner
@@ -241,7 +241,7 @@ end
 function thread_t:getpriority(): (integer, integer?)
   if not self:is_live() then return ffi.UV_EINVAL, nil end
   local priority: foreign int = 0
-  local status = ffi.uv_thread_getpriority(self.native.thread, priority) as integer
+  const status = ffi.uv_thread_getpriority(self.native.thread, priority) as integer
   if status ~= 0 then return status, nil end
   return status, priority
 end
@@ -263,8 +263,8 @@ end
 function thread_t:getname(capacity: integer): (integer, string?)
   if not self:is_live() then return ffi.UV_EINVAL, nil end
   if capacity <= 0 then return ffi.UV_EINVAL, nil end
-  local buffer: owned char[] = foreign char.new_array(capacity)
-  local status = ffi.uv_thread_getname(self.native as foreign *uv_thread_t, buffer, capacity) as integer
+  const buffer: owned char[] = foreign char.new_array(capacity)
+  const status = ffi.uv_thread_getname(self.native as foreign *uv_thread_t, buffer, capacity) as integer
   if status ~= 0 then return status, nil end
   return status, (buffer as foreign *char) as string
 end
@@ -321,7 +321,7 @@ end
 function thread_t:setaffinity(mask: owned char[], oldmask: (owned char[])?): integer
   if not self:is_live() then return ffi.UV_EINVAL end
   if oldmask ~= nil then
-    local previous: owned char[] = oldmask
+    const previous: owned char[] = oldmask
     if #previous < #mask then return ffi.UV_EINVAL end
     return ffi.uv_thread_setaffinity(self.native as foreign *uv_thread_t, mask, previous, #mask)
   end

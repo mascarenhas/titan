@@ -1,9 +1,9 @@
 record MappingPublicGaps
-  local hidden_first: string
+  local const hidden_first: string
   identifier: integer
-  local hidden_middle: string
+  local const hidden_middle: string
   name: string
-  local hidden_last: string
+  local const hidden_last: string
 end
 
 record MappingOptional
@@ -53,21 +53,21 @@ record MappingFactory
 end
 
 local function MappingFactory.from_row(row: sqlite3.Row): MappingFactory
-  local identifier: integer = row:get(1)
-  local name: string = row:get(2)
+  const identifier: integer = row:get(1)
+  const name: string = row:get(2)
   test.assert(identifier > 0 and #name > 0,
               "factory received invalid application input")
-  return MappingFactory.new(identifier, name)
+  return MappingFactory(identifier, name)
 end
 
 function test_row_fill_uses_public_ordinals_and_explicit_column_names(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
-    local target = MappingPublicGaps.new(
+    const target = MappingPublicGaps(
         "private first", 0, "private middle", "old", "private last")
-    local row = first_row(connection,
+    const row = first_row(connection,
         "SELECT 'mapped' AS name, 42 AS identifier")
     row:fill(target)
     test.assert(target.identifier == 42 and target.name == "mapped",
@@ -82,9 +82,9 @@ end
 function test_row_fill_preserves_null_options_and_maps_boolean_zero_one(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
-    local optional = MappingOptional.new(1, true, "old")
+    const optional = MappingOptional(1, true, "old")
     first_row(connection,
         "SELECT NULL AS number, NULL AS enabled, NULL AS arbitrary"):fill(
           optional)
@@ -96,7 +96,7 @@ function test_row_fill_preserves_null_options_and_maps_boolean_zero_one(
     test.assert(optional.number == 17 and optional.enabled == false and
                 optional.arbitrary as string == "text",
                 "optional Boolean zero used Lua truthiness")
-    local target = MappingBoolean.new(false)
+    const target = MappingBoolean(false)
     first_row(connection, "SELECT 1 AS enabled"):fill(target)
     test.assert(target.enabled, "SQL integer one did not map to true")
     first_row(connection, "SELECT 0 AS enabled"):fill(target)
@@ -118,9 +118,9 @@ end
 function test_row_fill_checks_shape_and_constness_before_any_write(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
-    local scalar = MappingScalar.new(10)
+    const scalar = MappingScalar(10)
     expect_wrapper_error(function ()
       first_row(connection, "SELECT 1 AS other"):fill(scalar)
     end)
@@ -131,13 +131,13 @@ function test_row_fill_checks_shape_and_constness_before_any_write(
       first_row(connection, "SELECT 1 AS amount, 2 AS amount"):fill(scalar)
     end)
     test.assert(scalar.amount == 10, "shape rejection changed the record")
-    local constant = MappingConst.new(11, 12)
+    const constant = MappingConst(11, 12)
     expect_wrapper_error(function ()
       first_row(connection, "SELECT 1 AS first, 2 AS second"):fill(constant)
     end)
     test.assert(constant.first == 11 and constant.second == 12,
                 "const-field rejection happened after a preceding write")
-    local unsupported = MappingUnsupported.new(21, {22})
+    const unsupported = MappingUnsupported(21, {22})
     expect_wrapper_error(function ()
       first_row(connection, 'SELECT 1 AS first, NULL AS "values"'):fill(
           unsupported)
@@ -149,12 +149,12 @@ end
 
 function test_row_fill_rejects_nonrecord_destinations(context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
-    local row = first_row(connection, "SELECT 1 AS name")
-    local array: {integer} = {0}
-    local map: {string: integer} = {["name"] = 0}
-    local iface: BindingInterface = BindingInterfaceRecord.new("original")
+    const row = first_row(connection, "SELECT 1 AS name")
+    const array: {integer} = {0}
+    const map: {string: integer} = {["name"] = 0}
+    const iface: BindingInterface = BindingInterfaceRecord("original")
     expect_wrapper_error(function () row:fill(nil) end)
     expect_wrapper_error(function () row:fill(1) end)
     expect_wrapper_error(function () row:fill(array) end)
@@ -170,9 +170,9 @@ end
 function test_row_fill_uses_checked_numeric_conversion_and_partial_writes(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
-    local scalar = MappingScalar.new(10)
+    const scalar = MappingScalar(10)
     first_row(connection, "SELECT 42.0 AS amount"):fill(scalar)
     test.assert(scalar.amount == 42,
                 "record fill did not apply normal integral-float conversion")
@@ -181,8 +181,8 @@ function test_row_fill_uses_checked_numeric_conversion_and_partial_writes(
     end)
     test.assert(scalar.amount == 42,
                 "integer overflow changed the rejected destination field")
-    local partial = MappingPartial.new(90, 91)
-    local failure = expect_wrapper_error(function ()
+    const partial = MappingPartial(90, 91)
+    const failure = expect_wrapper_error(function ()
       first_row(connection, "SELECT 1.5 AS second, 7 AS first"):fill(partial)
     end)
     test.assert(partial.first == 7 and partial.second == 91,
@@ -195,16 +195,16 @@ end
 function test_row_fill_keeps_blob_and_text_destination_types_distinct(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
-    local blob = MappingBlob.new(sqlite3.Blob.new("old"))
+    const blob = MappingBlob(sqlite3.Blob("old"))
     first_row(connection, "SELECT x'610062' AS bytes"):fill(blob)
     test.assert(blob.bytes.bytes == "a\0b",
                 "Blob field did not preserve binary result bytes")
-    local optional = MappingOptionalBlob.new(blob.bytes)
+    const optional = MappingOptionalBlob(blob.bytes)
     first_row(connection, "SELECT NULL AS bytes"):fill(optional)
     test.assert(optional.bytes == nil, "optional Blob rejected SQL NULL")
-    local text = MappingText.new("old")
+    const text = MappingText("old")
     expect_wrapper_error(function ()
       first_row(connection, "SELECT x'61' AS bytes"):fill(text)
     end)
@@ -220,15 +220,15 @@ function test_explicit_row_factory_constructs_const_fields_without_a_task(
     context: test.Context)
   local snapshot: sqlite3.Row? = nil
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
     snapshot = first_row(connection, "SELECT 5 AS identifier, 'domain' AS name")
   end)
-  local factory: function (sqlite3.Row): (MappingFactory) = MappingFactory.from_row
-  local result = factory(snapshot)
+  const factory: function (sqlite3.Row): (MappingFactory) = MappingFactory.from_row
+  const result = factory(snapshot)
   test.assert(result.identifier == 5 and result.name == "domain",
               "explicit row factory did not initialize const fields")
-  local mutable = MappingPublicGaps.new("", 0, "", "", "")
+  const mutable = MappingPublicGaps("", 0, "", "", "")
   snapshot:fill(mutable)
   test.assert(mutable.identifier == 5 and mutable.name == "domain",
               "Row.fill required a running Task after owner retirement")

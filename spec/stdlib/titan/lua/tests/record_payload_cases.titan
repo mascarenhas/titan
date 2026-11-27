@@ -4,15 +4,15 @@ local function check_record_payload(packet: async.TransferValue, number: integer
     test.assert(module == "lua.transfer_fixture" and
       name == "lua.transfer_fixture.PayloadRecord" and #payload > 0)
   else raise "record hooks did not produce a payload carrier" end
-  local restored: transfer_fixture.PayloadRecord = packet:to_value()
+  const restored: transfer_fixture.PayloadRecord = packet:to_value()
   test.assert(restored:number_value() == number)
   test.assert(restored:text_value() == strings.rep("payload\0bytes", 1024))
 end
 
 local function check_record_payload_source_close(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local values: {async.TransferValue} = {run(state, [[
+  const values: {async.TransferValue} = {run(state, [[
     local fixture = require('lua.transfer_fixture')
     return fixture.payload_record_value(71), nil,
       fixture.nested_payload_value(73), fixture.closure_custom_record(),
@@ -24,10 +24,10 @@ local function check_record_payload_source_close(run: IndependentRun)
   gclib.collect()
   check_record_payload(values[1], 71)
   assert_transfer_nil(values[2])
-  local nested: transfer_fixture.NestedPayload = values[3]:to_value()
+  const nested: transfer_fixture.NestedPayload = values[3]:to_value()
   test.assert(nested:number_value() == 73)
-  local captured_record: function (): integer = values[4]:to_value()
-  local captured_policy: function (): integer = values[5]:to_value()
+  const captured_record: function (): integer = values[4]:to_value()
+  const captured_policy: function (): integer = values[5]:to_value()
   test.assert(captured_record() == 83)
   test.assert(captured_policy() == 89)
 end
@@ -38,11 +38,11 @@ function test_lua_record_payloads_copy_private_values_and_survive_source_close(
 end
 
 local function check_record_payload_arguments(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
   run(state, "require = nil")
-  local packet = async.TransferValue.from_value(transfer_fixture.payload_record_value(79))
-  local result: async.TransferValue = run(state, [[
+  const packet = async.TransferValue.from_value(transfer_fixture.payload_record_value(79))
+  const result: async.TransferValue = run(state, [[
     local item = ...
     assert(item:number_value() == 79)
     collectgarbage('collect')
@@ -57,15 +57,15 @@ function test_lua_record_payload_arguments_initialize_destination_owner(
 end
 
 local function check_registered_payload_owner(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
   run(state, [[
     require('lua.transfer_fixture')
     package.preload['lua.transfer_fixture'] = nil
     require = nil
   ]])
-  local packet = async.TransferValue.from_value(transfer_fixture.payload_record_value(81))
-  local result: async.TransferValue = run(state, [[
+  const packet = async.TransferValue.from_value(transfer_fixture.payload_record_value(81))
+  const result: async.TransferValue = run(state, [[
     local item = ...
     return item:number_value()
   ]], nil, packet)
@@ -79,16 +79,16 @@ function test_lua_record_payload_uses_registered_owner_without_preload(
 end
 
 local function check_record_payload_failures(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local partial = [[
+  const partial = [[
     local fixture = require('lua.transfer_fixture')
     return fixture.payload_record_value(11), fixture.failing_payload_value('encode')
   ]]
   common.assert_raises_contains(function () run(state, partial) end,
     "record hook encode failure")
   assert_state_reusable(state)
-  local rejected = async.TransferValue.from_value(
+  const rejected = async.TransferValue.from_value(
     transfer_fixture.failing_payload_value("decode"))
   common.assert_raises_contains(function ()
     run(state, "return ...", nil, rejected)
@@ -106,7 +106,7 @@ function test_lua_record_payload_failures_release_partial_packets_and_state(
 end
 
 local function check_nested_record_payload(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
   local env_packet, choice_packet = run(state, [[
     local fixture = require('lua.transfer_fixture')
@@ -114,14 +114,14 @@ local function check_nested_record_payload(run: IndependentRun)
   ]])
   state:close()
   gclib.collect()
-  local env: transfer_fixture.EnvelopeWithPayload = env_packet:to_value()
+  const env: transfer_fixture.EnvelopeWithPayload = env_packet:to_value()
   test.assert(env.tag == "env")
   test.assert(env.item:number_value() == 101)
   test.assert(#env.items == 2)
   test.assert(env.items[1]:number_value() == 102)
   test.assert(env.items[2]:number_value() == 103)
 
-  local choice: transfer_fixture.ChoiceWithPayload = choice_packet:to_value()
+  const choice: transfer_fixture.ChoiceWithPayload = choice_packet:to_value()
   case choice
   when wrapped(item, count) then
     test.assert(item:number_value() == 107 and count == 214)
@@ -135,15 +135,15 @@ function test_lua_nested_custom_record_payload_in_ordinary_record_and_union(
 end
 
 local function check_payload_hook_states(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
   local encoded, decoded = transfer_fixture.payload_hook_counts()
-  local packet = async.TransferValue.from_value(
+  const packet = async.TransferValue.from_value(
     transfer_fixture.payload_record_value(113))
   local source_encoded, source_decoded = transfer_fixture.payload_hook_counts()
   test.assert(source_encoded == encoded + 1 and source_decoded == decoded,
     "creating a payload did not encode only in its source state")
-  local returned: async.TransferValue = run(state, [[
+  const returned: async.TransferValue = run(state, [[
     local item = ...
     local fixture = require('lua.transfer_fixture')
     local encoded, decoded = fixture.payload_hook_counts()
@@ -158,7 +158,7 @@ local function check_payload_hook_states(run: IndependentRun)
   source_encoded, source_decoded = transfer_fixture.payload_hook_counts()
   test.assert(source_encoded == encoded + 1 and source_decoded == decoded,
     "running a child hook changed the parent's hook counters")
-  local restored: transfer_fixture.PayloadRecord = returned:to_value()
+  const restored: transfer_fixture.PayloadRecord = returned:to_value()
   test.assert(restored:number_value() == 113)
   source_encoded, source_decoded = transfer_fixture.payload_hook_counts()
   test.assert(source_encoded == encoded + 1 and source_decoded == decoded + 1,

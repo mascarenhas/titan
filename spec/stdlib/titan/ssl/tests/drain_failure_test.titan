@@ -2,8 +2,8 @@ function test_ssl_drain_preserves_write_shutdown_failure(context: test.Context)
   runtime_test.run(function ()
     local server, port = net_support.listen_available(49170)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:close()
       test.assert(accepted:read() == nil,
                   "write-half-closed transport emitted bytes during TLS adoption")
@@ -13,11 +13,11 @@ function test_ssl_drain_preserves_write_shutdown_failure(context: test.Context)
     end)
     task_support.cleanup_task(peer, "TLS write-half-closed transport peer")
 
-    local transport = net.connect("127.0.0.1", port)
+    const transport = net.connect("127.0.0.1", port)
     local adopted = false
     defer if not adopted then transport:close() end
     transport:shutdown()
-    local connection = ssl.client(transport, "localhost", support.TRUST_ROOT)
+    const connection = ssl.client(transport, "localhost", support.TRUST_ROOT)
     adopted = true
     defer connection:abort()
     local observed: value = nil

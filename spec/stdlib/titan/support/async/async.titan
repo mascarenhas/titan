@@ -33,34 +33,34 @@ end
 -- driver mode while no Task runs, the target has run and has not finished,
 -- and, when `phase` is given, the target's status is `phase`.
 local record WakeWindow
-  driver: boolean
-  phase: string?
+  const driver: boolean
+  const phase: string?
   open: boolean
-  offset: integer
+  const offset: integer
   visits: integer
   target: async.Task?
   target_ran: boolean
   fired: boolean
   failure: value
-  wake: function (async.Task): ()
+  const wake: function (async.Task): ()
 end
 
 -- One enumerated case: the target body, the wake, an optional supervisor
 -- routine that drives the target (the default yields once and, in driver
 -- mode, then closes the window), and the check of a run whose wake ran.
 local record WakeCase
-  body: function (): (value)
-  wake: function (async.Task): ()
-  drive: (function (WakeWindow, async.Task): ())?
-  verify: function (async.Task, integer): ()
+  const body: function (): (value)
+  const wake: function (async.Task): ()
+  const drive: (function (WakeWindow, async.Task): ())?
+  const verify: function (async.Task, integer): ()
 end
 
 local wake_window_probe: WakeWindow? = nil
 
 local function wake_window_fire(_: value)
-  local window? = wake_window_probe
+  const window? = wake_window_probe
   if window == nil or window.fired then return end
-  local target? = window.target
+  const target? = window.target
   if target ~= nil then
     local current: async.Task? = nil
     do current = async.running() catch end
@@ -68,7 +68,7 @@ local function wake_window_fire(_: value)
     local eligible = false
     if window.open then
       if window.driver then
-        local phase? = window.phase
+        const phase? = window.phase
         eligible = current == nil and window.target_ran and
           not target:status():has_finished() and
           (phase == nil or target:status():as_string() == phase)
@@ -86,24 +86,24 @@ local function wake_window_fire(_: value)
       window.visits = window.visits + 1
     end
   end
-  local sentinel: {string: value} = {}
+  const sentinel: {string: value} = {}
   gc.finalizable<|value|>(sentinel, wake_window_fire)
 end
 
 -- Run one case with its wake at `offset`. Returns the target and the window.
 local function run_wake_case(driver: boolean, phase: string?, offset: integer,
     wake_case: WakeCase): (async.Task, WakeWindow)
-  local window = WakeWindow(driver, phase, true, offset, 0, nil, false, false, nil, wake_case.wake)
+  const window = WakeWindow(driver, phase, true, offset, 0, nil, false, false, nil, wake_case.wake)
   wake_window_probe = window
   defer wake_window_probe = nil
-  local target = async.run<|value, value|>(wake_case.body)
+  const target = async.run<|value, value|>(wake_case.body)
   cleanup_task(target, "wake window cleanup")
   window.target = target
   -- Arm the first sentinel before the target starts, and run one young
   -- collection so that the zero minor debt takes effect.
   wake_window_fire(nil)
   gc.step(0)
-  local drive? = wake_case.drive
+  const drive? = wake_case.drive
   if drive ~= nil then
     drive(window, target)
   else
@@ -123,16 +123,16 @@ end
 -- Returns the number of offsets in the window.
 local function each_wake_offset(driver: boolean, phase: string?,
     make: function (): (WakeCase)): integer
-  local was_generational = gc.generational()
-  local minormul = gc.minormul(0)
-  local minormajor = gc.minormajor(0)
+  const was_generational = gc.generational()
+  const minormul = gc.minormul(0)
+  const minormajor = gc.minormajor(0)
   defer do
     gc.minormul(minormul)
     gc.minormajor(minormajor)
     if not was_generational then gc.incremental() end
   end
   for offset = 0, 256 do
-    local wake_case = make()
+    const wake_case = make()
     local target, window = run_wake_case(driver, phase, offset, wake_case)
     if not window.fired then
       test.assert(offset > 0, "the wake window was empty")

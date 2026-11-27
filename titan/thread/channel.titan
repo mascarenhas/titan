@@ -247,8 +247,8 @@ end
 -- closures themselves as the shared metatable's `__gc`; a concrete endpoint
 -- parameter would need a fresh callable-adjustment wrapper per construction.
 local function sender_finalize(candidate: value)
-  local self: Sender<|value|> = candidate
-  local ch = self.native
+  const self: Sender<|value|> = candidate
+  const ch = self.native
   self.native = nil
   if ch ~= nil then
     channel_release_sender_native(ch)
@@ -256,8 +256,8 @@ local function sender_finalize(candidate: value)
 end
 
 local function receiver_finalize(candidate: value)
-  local self: Receiver<|value|> = candidate
-  local ch = self.native
+  const self: Receiver<|value|> = candidate
+  const ch = self.native
   self.native = nil
   if ch ~= nil then
     channel_release_receiver_native(ch)
@@ -265,13 +265,13 @@ local function receiver_finalize(candidate: value)
 end
 
 local function new_sender<|T|>(): Sender<|T|>
-  local tx = Sender<|T|> { native = nil }
+  const tx = Sender<|T|> { native = nil }
   gc.finalizable<|value|>(tx, sender_finalize)
   return tx
 end
 
 local function new_receiver<|T|>(): Receiver<|T|>
-  local rx = Receiver<|T|> { native = nil }
+  const rx = Receiver<|T|> { native = nil }
   gc.finalizable<|value|>(rx, receiver_finalize)
   return rx
 end
@@ -279,18 +279,18 @@ end
 -- Exact fixed callables for transfer's registered nominal capability. Private
 -- native fields stay under the generated typed accessors in this module.
 local function sender_resource(candidate: value): foreign *void
-  local tx: Sender<|value|> = candidate
+  const tx: Sender<|value|> = candidate
   return tx.native as foreign *void
 end
 
 local function receiver_resource(candidate: value): foreign *void
-  local rx: Receiver<|value|> = candidate
+  const rx: Receiver<|value|> = candidate
   return rx.native as foreign *void
 end
 
 local function sender_from_resource(context: value, data: foreign const *void,
     length: integer): value
-  local tx = new_sender<|value|>()
+  const tx = new_sender<|value|>()
   tx.native = transfer.claim_registered_resource(
       context, data, length, channel_release_sender_native) as foreign *titan_thread_channel
   return tx
@@ -298,7 +298,7 @@ end
 
 local function receiver_from_resource(context: value, data: foreign const *void,
     length: integer): value
-  local rx = new_receiver<|value|>()
+  const rx = new_receiver<|value|>()
   rx.native = transfer.claim_registered_resource(
       context, data, length, channel_release_receiver_native) as foreign *titan_thread_channel
   return rx
@@ -316,14 +316,14 @@ end
 -- @return Paired Sender and Receiver endpoints sharing the channel.
 -- @usage standard-library-thread.md
 function channel<|T|>(capacity: integer?): (Sender<|T|>, Receiver<|T|>)
-  local cap = capacity or 1
+  const cap = capacity or 1
   if cap < 1 then
     raise "channel capacity must be positive"
   end
-  local tx = new_sender<|T|>()
-  local rx = new_receiver<|T|>()
-  local mutex = uv.mutex_t.create_native()
-  local ch = channel_new_native(cap as foreign size_t, mutex)
+  const tx = new_sender<|T|>()
+  const rx = new_receiver<|T|>()
+  const mutex = uv.mutex_t.create_native()
+  const ch = channel_new_native(cap as foreign size_t, mutex)
   if ch == nil then
     raise "thread: out of memory allocating channel"
   end
@@ -342,7 +342,7 @@ function Sender:send(message: T)
   -- by the defer would get a setjmp spill whose recovery reload restores stale
   -- bytes over the C registrar's packet commit.
   local wait_storage = foreign titan_thread_channel_wait.new()
-  local wait: foreign *titan_thread_channel_wait = wait_storage
+  const wait: foreign *titan_thread_channel_wait = wait_storage
   wait.channel = self.native
   wait.message = value_to_thread_message(message as value)
   defer if wait.message ~= nil then thread_message_discard(wait.message) end
@@ -375,7 +375,7 @@ end
 function Sender:try_send(message: T): boolean
   local msg: foreign *titan_thread_message = value_to_thread_message(message as value)
   defer if msg ~= nil then thread_message_discard(msg) end
-  local rc = channel_try_enqueue_native(self.native, msg, nil, nil)
+  const rc = channel_try_enqueue_native(self.native, msg, nil, nil)
   if rc == 0 then
     msg = nil
     return true
@@ -403,7 +403,7 @@ end
 -- @return Cloned Sender endpoint.
 -- @usage standard-library-thread.md
 function Sender:clone(): Sender<|T|>
-  local tx = new_sender<|T|>()
+  const tx = new_sender<|T|>()
   channel_retain_sender_native(self.native)
   tx.native = self.native
   return tx
@@ -424,7 +424,7 @@ end
 -- @return Reconstructed Sender endpoint.
 -- @usage standard-library-thread.md
 function Sender.from_transfer_payload(payload: string): Sender<|T|>
-  local tx = new_sender<|T|>()
+  const tx = new_sender<|T|>()
   tx.native = transfer.claim_resource(payload, channel_release_sender_native)
     as foreign *titan_thread_channel
   return tx
@@ -432,7 +432,7 @@ end
 
 local function Receiver:dequeue_or_wait(): (boolean, foreign *void)
   local wait_storage = foreign titan_thread_channel_wait.new()
-  local wait: foreign *titan_thread_channel_wait = wait_storage
+  const wait: foreign *titan_thread_channel_wait = wait_storage
   wait.channel = self.native
   -- The first attempt is the plain fast check; each retry follows a wake and
   -- acknowledges it under the channel lock.
@@ -451,7 +451,7 @@ local function Receiver:dequeue_or_wait(): (boolean, foreign *void)
       async.wait_external_native(self, wait,
         channel_register_receive_wait, channel_unregister_receive_wait)
       if wait.status == 0 then
-        local msg = wait.message
+        const msg = wait.message
         wait.message = nil
         return true, msg
       elseif wait.status == 2 then
@@ -492,7 +492,7 @@ end
 -- @usage standard-library-thread.md
 function Receiver:try_receive(): (boolean, T?)
   local msg: foreign *titan_thread_message = nil
-  local status = channel_try_dequeue_native(self.native, nil, nil, msg)
+  const status = channel_try_dequeue_native(self.native, nil, nil, msg)
   local raw: foreign *void = msg
   defer thread_message_discard(raw)
   if status == 0 then
@@ -532,7 +532,7 @@ end
 -- @return Cloned Receiver endpoint.
 -- @usage standard-library-thread.md
 function Receiver:clone(): Receiver<|T|>
-  local rx = new_receiver<|T|>()
+  const rx = new_receiver<|T|>()
   channel_retain_receiver_native(self.native)
   rx.native = self.native
   return rx
@@ -553,7 +553,7 @@ end
 -- @return Reconstructed Receiver endpoint.
 -- @usage standard-library-thread.md
 function Receiver.from_transfer_payload(payload: string): Receiver<|T|>
-  local rx = new_receiver<|T|>()
+  const rx = new_receiver<|T|>()
   rx.native = transfer.claim_resource(payload, channel_release_receiver_native)
     as foreign *titan_thread_channel
   return rx

@@ -20,8 +20,8 @@ end
 function test_client_prefetched_frame_and_masked_empty_writes(_context: test.Context)
   runtime_test.run(function ()
     with_client(function (wire: Wire)
-      local text = wire:frame()
-      local binary = wire:frame()
+      const text = wire:frame()
+      const binary = wire:frame()
       test.assert(text.opcode == 1 and text.masked and text.final and text.payload == "",
                   "client empty text frame is wrong")
       test.assert(binary.opcode == 2 and binary.masked and binary.final and binary.payload == "\0\xff",
@@ -44,14 +44,14 @@ end
 
 function test_valid_unicode_scalar_boundaries_survive_one_byte_fragments(_context: test.Context)
   runtime_test.run(function ()
-    local payload = "\0\x7f\xc2\x80\xdf\xbf\xe0\xa0\x80\xed\x9f\xbf" ..
+    const payload = "\0\x7f\xc2\x80\xdf\xbf\xe0\xa0\x80\xed\x9f\xbf" ..
                     "\xee\x80\x80\xef\xbf\xbf\xf0\x90\x80\x80\xf4\x8f\xbf\xbf"
     with_server(function (connection: websocket.Connection)
       local kind?, data? = connection:read()
       assert_text(kind, data, payload)
       connection:read()
     end, function (wire: Wire)
-      local output = string.writer()
+      const output = string.writer()
       for index = 1, #payload do
         local opcode = 0
         if index == 1 then opcode = 1 end
@@ -65,10 +65,10 @@ function test_valid_unicode_scalar_boundaries_survive_one_byte_fragments(_contex
 end
 
 local function outgoing_fragments(wire: Wire, expected: string, masked: boolean)
-  local output = string.writer()
+  const output = string.writer()
   local count = 0
   while true do
-    local received = wire:frame()
+    const received = wire:frame()
     count = count + 1
     local opcode = 0
     if count == 1 then opcode = 2 end
@@ -82,7 +82,7 @@ end
 
 function test_server_large_binary_write_fragments_without_interleaving(_context: test.Context)
   runtime_test.run(function ()
-    local payload = string.rep("\0\xff", 32768) .. "tail"
+    const payload = string.rep("\0\xff", 32768) .. "tail"
     with_server(function (connection: websocket.Connection)
       connection:write(websocket.BINARY, payload)
       connection:read()
@@ -95,7 +95,7 @@ end
 
 function test_client_large_binary_write_masks_all_fragments(_context: test.Context)
   runtime_test.run(function ()
-    local payload = string.rep("\0\xff", 32768) .. "tail"
+    const payload = string.rep("\0\xff", 32768) .. "tail"
     with_client(function (wire: Wire)
       outgoing_fragments(wire, payload, true)
       wire.stream:write(frame(8, "")); assert_close(wire, nil, true)
@@ -108,7 +108,7 @@ end
 
 function test_server_fragmented_utf8_with_interleaved_full_ping(_context: test.Context)
   runtime_test.run(function ()
-    local ping = string.rep("\0\xffP", 41) .. "\x80!"
+    const ping = string.rep("\0\xffP", 41) .. "\x80!"
     with_server(function (connection: websocket.Connection)
       local kind?, bytes? = connection:read()
       assert_text(kind, bytes, "A\xf0\x9f\x98\x80Z")
@@ -116,7 +116,7 @@ function test_server_fragmented_utf8_with_interleaved_full_ping(_context: test.C
     end, function (wire: Wire)
       wire.stream:write(frame(1, "A\xf0", true, false) .. frame(9, ping, true) ..
                         frame(0, "", true, false) .. frame(0, "\x9f\x98\x80Z", true))
-      local pong = wire:frame()
+      const pong = wire:frame()
       test.assert(pong.opcode == 10 and pong.final and not pong.masked and pong.payload == ping,
                   "Ping interleaved in fragmented UTF-8 lost identical Pong bytes")
       wire.stream:write(frame(8, "", true))
@@ -126,13 +126,13 @@ function test_server_fragmented_utf8_with_interleaved_full_ping(_context: test.C
 end
 
 function test_server_reads_all_header_mask_and_first_payload_splits(context: test.Context)
-  local payload = string.rep("x", 126)
-  local encoded = frame(2, payload, true)
+  const payload = string.rep("x", 126)
+  const encoded = frame(2, payload, true)
   -- Distinct named splits exercise the two-byte header, extended length,
   -- all four mask bytes and payload boundaries without relying on TCP chunks.
   for split = 1, 9 do
-    local boundary = split
-    context:run("split_" .. boundary, function (_child: test.Context)
+    const boundary = split
+    context:run("split_" .. boundary, function (_: test.Context)
       runtime_test.run(function ()
         with_server(function (connection: websocket.Connection)
           local kind?, bytes? = connection:read()
@@ -155,12 +155,12 @@ function test_server_reads_all_header_mask_and_first_payload_splits(context: tes
 end
 
 function test_server_accepts_canonical_payload_length_boundaries(context: test.Context)
-  local sizes: {integer} = {0, 1, 125, 126, 65535, 65536}
+  const sizes: {integer} = {0, 1, 125, 126, 65535, 65536}
   for index = 1, #sizes do
-    local length = sizes[index]
-    context:run("bytes_" .. length, function (_child: test.Context)
+    const length = sizes[index]
+    context:run("bytes_" .. length, function (_: test.Context)
       runtime_test.run(function ()
-        local payload = string.rep("\0\xff", length // 2) .. string.rep("x", length % 2)
+        const payload = string.rep("\0\xff", length // 2) .. string.rep("x", length % 2)
         with_server(function (connection: websocket.Connection)
           local kind?, bytes? = connection:read()
           assert_binary(kind, bytes, payload)
@@ -176,7 +176,7 @@ end
 
 function test_tiny_message_limit_keeps_full_controls_independent(_context: test.Context)
   runtime_test.run(function ()
-    local ping = string.rep("p", 125)
+    const ping = string.rep("p", 125)
     with_server(function (connection: websocket.Connection)
       local kind?, data? = connection:read()
       assert_text(kind, data, "x")
@@ -208,8 +208,8 @@ end
 
 function test_received_message_strings_survive_later_reads_and_forced_gc(_context: test.Context)
   runtime_test.run(function ()
-    local first = string.rep("first\0\xff", 4000)
-    local second = string.rep("second\0\x80", 5000)
+    const first = string.rep("first\0\xff", 4000)
+    const second = string.rep("second\0\x80", 5000)
     with_server(function (connection: websocket.Connection)
       local first_kind?, retained? = connection:read()
       assert_binary(first_kind, retained, first)

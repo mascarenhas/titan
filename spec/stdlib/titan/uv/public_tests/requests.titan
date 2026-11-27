@@ -1,10 +1,10 @@
 local record RequestDataMarker
-  id: integer
+  const id: integer
 end
 
 local function install_request_data(write_data: function (value): (),
                                     weak: {value: value}, index: integer)
-  local marker = RequestDataMarker(index)
+  const marker = RequestDataMarker(index)
   weak[index] = marker
   write_data(marker)
 end
@@ -22,7 +22,7 @@ local function check_concrete_request_data(view: uv.req_t,
   test.assert(view:get_data() == false, "concrete setter lost false payload")
   view:set_data(nil)
   test.assert(read_data() == nil, "generic setter did not clear concrete data")
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   install_request_data(write_data, weak, 1)
   collect()
@@ -42,32 +42,32 @@ local function check_concrete_request_data(view: uv.req_t,
 end
 
 function test_concrete_request_data_matches_generic_views(context: test.Context)
-  context:run("fs", function (_child: test.Context)
-    local request = uv.fs_t()
+  context:run("fs", function (_: test.Context)
+    const request = uv.fs_t()
     check_concrete_request_data(request:as_req_t(),
       function (): value return request:get_data() end,
       function (data: value) request:set_data(data) end)
   end)
-  context:run("work", function (_child: test.Context)
-    local request = uv.work_t()
+  context:run("work", function (_: test.Context)
+    const request = uv.work_t()
     check_concrete_request_data(request:as_req_t(),
       function (): value return request:get_data() end,
       function (data: value) request:set_data(data) end)
   end)
-  context:run("getaddrinfo", function (_child: test.Context)
-    local request = uv.getaddrinfo_t()
+  context:run("getaddrinfo", function (_: test.Context)
+    const request = uv.getaddrinfo_t()
     check_concrete_request_data(request:as_req_t(),
       function (): value return request:get_data() end,
       function (data: value) request:set_data(data) end)
   end)
-  context:run("connect", function (_child: test.Context)
-    local request = uv.connect_t()
+  context:run("connect", function (_: test.Context)
+    const request = uv.connect_t()
     check_concrete_request_data(request:as_req_t(),
       function (): value return request:get_data() end,
       function (data: value) request:set_data(data) end)
   end)
-  context:run("shutdown", function (_child: test.Context)
-    local request = uv.shutdown_t()
+  context:run("shutdown", function (_: test.Context)
+    const request = uv.shutdown_t()
     check_concrete_request_data(request:as_req_t(),
       function (): value return request:get_data() end,
       function (data: value) request:set_data(data) end)
@@ -75,28 +75,28 @@ function test_concrete_request_data_matches_generic_views(context: test.Context)
 end
 
 local function close_file(file: integer)
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   success(uv.fs_close(nil, request, file))
 end
 
 local function remove_file(path: string)
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   success(uv.fs_unlink(nil, request, path))
 end
 
 local function fixture_file(): string
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
-  local file = uv.fs_mkstemp(nil, request, "uv-public-XXXXXX")
+  const file = uv.fs_mkstemp(nil, request, "uv-public-XXXXXX")
   test.assert(file >= 0)
   defer close_file(file)
-  local path = uv.fs_get_path(request)
+  const path = uv.fs_get_path(request)
   local transferred = false
   defer if not transferred then remove_file(path) end
   uv.fs_req_cleanup(request)
-  local bytes = "public\0UV\255\n"
+  const bytes = "public\0UV\255\n"
   test.assert(uv.fs_write(nil, request, file, {uv.buf_t.from_string(bytes)}, 0) == #bytes)
   transferred = true
   return path
@@ -104,30 +104,30 @@ end
 
 local function assert_descriptor_retired(descriptor: integer, device: integer,
                                          inode: integer, message: string)
-  local probe = uv.fs_t()
+  const probe = uv.fs_t()
   defer uv.fs_req_cleanup(probe)
-  local status = uv.fs_fstat(nil, probe, descriptor)
+  const status = uv.fs_fstat(nil, probe, descriptor)
   -- DNS/NSS workers can reuse a closed descriptor for an unrelated socket or
   -- file. Prove the original file is gone, not that its number stays unused.
   if status == uv.EBADF then return end
   success(status)
-  local current = uv.fs_get_statbuf(probe)
+  const current = uv.fs_get_statbuf(probe)
   test.assert(current.st_dev ~= device or current.st_ino ~= inode, message)
 end
 
 function test_loop_abandon_retires_requests_without_user_delivery(_: test.Context)
-  local path = fixture_file()
+  const path = fixture_file()
   defer remove_file(path)
-  local loop = new_loop()
+  const loop = new_loop()
   local opened, directory, stat, resolved = uv.fs_t(), uv.fs_t(), uv.fs_t(), uv.getaddrinfo_t()
   local calls = 0
-  local fs_callback = function (_: uv.fs_t) calls = calls + 1 end
-  local close_request = uv.fs_t()
-  local descriptor_to_close = uv.fs_open(nil, close_request, path, uv.FS_O_RDONLY, 0)
+  const fs_callback = function (_: uv.fs_t) calls = calls + 1 end
+  const close_request = uv.fs_t()
+  const descriptor_to_close = uv.fs_open(nil, close_request, path, uv.FS_O_RDONLY, 0)
   test.assert(descriptor_to_close >= 0)
   uv.fs_req_cleanup(close_request)
   success(uv.fs_fstat(nil, close_request, descriptor_to_close))
-  local identity = uv.fs_get_statbuf(close_request)
+  const identity = uv.fs_get_statbuf(close_request)
   local device, inode = identity.st_dev, identity.st_ino
   uv.fs_req_cleanup(close_request)
   success(uv.fs_close(loop, close_request, descriptor_to_close, fs_callback))
@@ -144,7 +144,7 @@ function test_loop_abandon_retires_requests_without_user_delivery(_: test.Contex
     "abandonment left accepted native requests or loop internals live")
   test.assert(uv.fs_get_ptr(opened) == nil and uv.fs_get_ptr(directory) == nil and
     uv.fs_get_ptr(stat) == nil, "abandonment left native FS request results owned")
-  local descriptor = uv.fs_get_result(opened)
+  const descriptor = uv.fs_get_result(opened)
   if descriptor >= 0 then
     assert_descriptor_retired(descriptor, device, inode,
       "abandonment leaked an undelivered open descriptor")
@@ -161,7 +161,7 @@ end
 
 local function submit_file_chain(loop: uv.loop_t, path: string, weak: {value: value},
                                 files: {integer}, delivered: function (): ())
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   weak[1] = request
   uv.req_set_data(request:as_req_t(), "request user data")
   success(uv.fs_stat(loop, request, path, function (current: uv.fs_t)
@@ -171,24 +171,24 @@ local function submit_file_chain(loop: uv.loop_t, path: string, weak: {value: va
     uv.fs_req_cleanup(current)
     delivered()
     success(uv.fs_open(loop, current, path, uv.FS_O_RDONLY, 0, function (opened: uv.fs_t)
-      local file = uv.fs_get_result(opened)
+      const file = uv.fs_get_result(opened)
       test.assert(file >= 0)
       files[1] = file
       -- Cleaning request memory must not close the descriptor it produced.
       uv.fs_req_cleanup(opened)
       delivered()
-      local buffer = uv.buf_t.allocate(32)
+      const buffer = uv.buf_t.allocate(32)
       weak[2] = buffer
-      local buffers = {buffer}
+      const buffers = {buffer}
       success(uv.fs_read(loop, opened, file, buffers, 0, function (read: uv.fs_t)
         collect()
-        local completed_buffer: uv.buf_t = weak[2]
-        local count = uv.fs_get_result(read)
+        const completed_buffer: uv.buf_t = weak[2]
+        const count = uv.fs_get_result(read)
         test.assert(count == 11 and completed_buffer:to_string(count) == "public\0UV\255\n")
         test.assert(uv.req_get_data(read:as_req_t()) == "request user data")
         uv.fs_req_cleanup(read)
         delivered()
-        local submitted = uv.fs_close(loop, read, file, function (closed: uv.fs_t)
+        const submitted = uv.fs_close(loop, read, file, function (closed: uv.fs_t)
           test.assert(closed == weak[1], "resubmission changed the request owner")
           success(uv.fs_get_result(closed))
           uv.fs_req_cleanup(closed)
@@ -208,13 +208,13 @@ local function submit_file_chain(loop: uv.loop_t, path: string, weak: {value: va
 end
 
 function test_fs_callback_reuse_keeps_new_registration_and_buffers(_context: test.Context)
-  local path = fixture_file()
+  const path = fixture_file()
   defer remove_file(path)
-  local files = {-1}
+  const files = {-1}
   defer if files[1] >= 0 then close_file(files[1]) end
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   local calls = 0
   submit_file_chain(loop, path, weak, files, function () calls = calls + 1 end)
@@ -229,16 +229,16 @@ function test_fs_callback_reuse_keeps_new_registration_and_buffers(_context: tes
 end
 
 function test_fs_rejection_and_async_native_error_have_distinct_cleanup(_context: test.Context)
-  local path = fixture_file()
+  const path = fixture_file()
   defer remove_file(path)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   local calls = 0
   -- Immutable output storage is binding rejection: there is no callback.
   test.assert(uv.fs_read(loop, request, -1, {uv.buf_t.from_string("read-only")}, 0,
-    function (_request: uv.fs_t) calls = calls + 1 end) == uv.EINVAL)
+    function (_: uv.fs_t) calls = calls + 1 end) == uv.EINVAL)
   success(uv.run(loop))
   test.assert(calls == 0)
   success(uv.fs_open(loop, request, path .. ".missing", uv.FS_O_RDONLY, 0,
@@ -255,28 +255,28 @@ function test_fs_rejection_and_async_native_error_have_distinct_cleanup(_context
 end
 
 function test_dns_copied_addresses_survive_explicit_result_release(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local request = uv.getaddrinfo_t()
-  local hints = uv.addrinfo_hints_t(uv.AI_NUMERICHOST | uv.AI_NUMERICSERV,
+  const request = uv.getaddrinfo_t()
+  const hints = uv.addrinfo_hints_t(uv.AI_NUMERICHOST | uv.AI_NUMERICSERV,
                                   uv.AF_INET, uv.SOCK_STREAM, uv.IPPROTO_TCP)
   success(uv.getaddrinfo(loop, request, nil, "127.0.0.1", "1234", hints))
   local status, result? = request:addrinfo()
   success(status)
   test.assert(result ~= nil)
   defer uv.freeaddrinfo(result)
-  local entries = result:entries()
+  const entries = result:entries()
   test.assert(#entries == 1)
-  local entry = entries[1]
+  const entry = entries[1]
   test.assert(entry.ai_family == uv.AF_INET and entry.ai_socktype == uv.SOCK_STREAM)
   test.assert(entry.ai_protocol == uv.IPPROTO_TCP and #entry.ai_addr_bytes == entry.ai_addrlen)
-  local address = entry.ai_addr
+  const address = entry.ai_addr
   uv.freeaddrinfo(result)
   uv.freeaddrinfo(result)
   collect()
   test.assert(address:port() == 1234)
   expect_error(function () result:entries() end, "addrinfo result was released")
-  local reverse = uv.getnameinfo_t()
+  const reverse = uv.getnameinfo_t()
   success(uv.getnameinfo(loop, reverse, nil, address, uv.NI_NUMERICHOST | uv.NI_NUMERICSERV))
   local reverse_status, host?, service? = reverse:result()
   success(reverse_status)
@@ -284,9 +284,9 @@ function test_dns_copied_addresses_survive_explicit_result_release(_context: tes
 end
 
 function test_dns_callback_error_preserves_result_cleanup(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local request = uv.getaddrinfo_t()
+  const request = uv.getaddrinfo_t()
   local result: uv.addrinfo_result_t? = nil
   defer uv.freeaddrinfo(result)
   local calls = 0
@@ -309,12 +309,12 @@ function test_dns_callback_error_preserves_result_cleanup(_context: test.Context
 end
 
 local function check_address_port(context: test.Context, name: string, port: integer)
-  context:run(name .. "_ipv4", function (_child: test.Context)
+  context:run(name .. "_ipv4", function (_: test.Context)
     local status, address? = uv.ip4_addr("127.0.0.1", port)
     success(status)
     test.assert(address:port() == port, "IPv4 port changed byte order")
   end)
-  context:run(name .. "_ipv6", function (_child: test.Context)
+  context:run(name .. "_ipv6", function (_: test.Context)
     local status, address? = uv.ip6_addr("::1", port)
     success(status)
     test.assert(address:port() == port, "IPv6 port changed byte order")
@@ -332,13 +332,13 @@ function test_ipv6_fields_preserve_unsigned_values(context: test.Context)
   local status, address? = uv.ip6_addr("::1", 1234)
   success(status)
   test.assert(address:family() == uv.AF_INET6)
-  context:run("flowinfo", function (_child: test.Context)
+  context:run("flowinfo", function (_: test.Context)
     address:set_flowinfo(0xffffffff)
     test.assert(address:flowinfo() == 0xffffffff)
     address:set_flowinfo(0)
     test.assert(address:flowinfo() == 0)
   end)
-  context:run("scope_id", function (_child: test.Context)
+  context:run("scope_id", function (_: test.Context)
     address:set_scope_id(0xffffffff)
     test.assert(address:scope_id() == 0xffffffff)
     address:set_scope_id(0)

@@ -1,7 +1,7 @@
 -- Public contextual completion capabilities and their operation-scoped lifetime.
 local record CompletionTestContext
-  number: integer
-  text: string
+  const number: integer
+  const text: string
 end
 
 local function completion_test_raises(action: function (): ())
@@ -11,11 +11,11 @@ local function completion_test_raises(action: function (): ())
 end
 
 local function completion_test_later(milliseconds: integer, action: function (): ())
-  local owner = uv.timer_t.new()
-  local closed = function (_: uv.timer_t) action() end
-  local fired = function (timer: uv.timer_t) uv.timer_close(timer, closed) end
+  const owner = uv.timer_t()
+  const closed = function (_: uv.timer_t) action() end
+  const fired = function (timer: uv.timer_t) uv.timer_close(timer, closed) end
   test.assert(uv.timer_init(async.current_loop(), owner) == 0, "completion timer init")
-  local status = uv.timer_start(owner, fired, milliseconds, 0)
+  const status = uv.timer_start(owner, fired, milliseconds, 0)
   if status < 0 then uv.timer_close(owner); raise "completion timer start" end
 end
 
@@ -95,8 +95,9 @@ end
 local function completion_test_later_success_nil(
     done: async.Completion<|integer, nil, nil|>, number: integer): uv.req_t?
   completion_test_later(0, function ()
-    do done:resolve(number, nil)
-    catch done:fatal(number, error, traceback); raise end
+    done:resolve(number, nil)
+  catch
+    done:fatal(number, error, traceback); raise
   end)
   return nil
 end
@@ -106,13 +107,13 @@ function test_completion_retained_payloadless_successes_keep_their_outcomes(cont
     -- Payload-less successes may share one immutable Result per state. Results
     -- retained across later inline and callback settlements, other type
     -- applications, rejections and the cancellable family keep their outcomes.
-    local first = async.await_with<|integer?, integer?, nil|>(nil, completion_test_success_context)
-    local present = async.await_with<|integer?, integer?, nil|>(42, completion_test_success_context)
-    local deferred = async.await_with<|integer, nil, nil|>(41, completion_test_later_success_nil)
-    local rejected = async.await_with<|integer, nil, nil|>(41, completion_test_error_nil)
-    local cancellable = async.await_cancellable_with<|integer, nil, nil|>(
+    const first = async.await_with<|integer?, integer?, nil|>(nil, completion_test_success_context)
+    const present = async.await_with<|integer?, integer?, nil|>(42, completion_test_success_context)
+    const deferred = async.await_with<|integer, nil, nil|>(41, completion_test_later_success_nil)
+    const rejected = async.await_with<|integer, nil, nil|>(41, completion_test_error_nil)
+    const cancellable = async.await_cancellable_with<|integer, nil, nil|>(
       41, completion_test_success_nil)
-    local cleanup = async.await_cleanup_with<|integer, nil, nil|>(41, completion_test_success_nil)
+    const cleanup = async.await_cleanup_with<|integer, nil, nil|>(41, completion_test_success_nil)
     case first
     when success(item) then test.assert(item == nil, "retained nil success gained a payload")
     else raise "retained nil success changed its tag" end
@@ -137,10 +138,10 @@ end
 function test_completion_same_stack_successor_has_independent_typed_context(context: test.Context)
   runtime_test.run(function ()
     local second_registered, first_checked, second_completed = false, false, false
-    local first = async.await_with<|CompletionTestContext, integer, nil|>(
+    const first = async.await_with<|CompletionTestContext, integer, nil|>(
         CompletionTestContext(17, "first"), function (done, number): uv.req_t?
       completion_test_later(0, function ()
-        local saved = done:context(number)
+        const saved = done:context(number)
         do
           done:resolve(number, saved.number)
           test.assert(second_registered, "settlement did not enter the next registration")
@@ -157,14 +158,14 @@ function test_completion_same_stack_successor_has_independent_typed_context(cont
     when success(item) then test.assert(item == 17, "first typed result changed")
     else raise "first typed result tag" end
 
-    local second = async.await_with<|string, boolean, integer|>("second", function (done, number): uv.req_t?
+    const second = async.await_with<|string, boolean, integer|>("second", function (done, number): uv.req_t?
       second_registered = true
       completion_test_later(1, function ()
-        do
-          test.assert(first_checked and done:context(number) == "second", "successor context changed")
-          second_completed = true
-          done:resolve(number, false)
-        catch done:fatal(number, error, traceback); raise end
+        test.assert(first_checked and done:context(number) == "second", "successor context changed")
+        second_completed = true
+        done:resolve(number, false)
+      catch
+        done:fatal(number, error, traceback); raise
       end)
       return nil
     end)
@@ -179,8 +180,8 @@ function test_completion_retired_context_is_released_with_task_and_capability_re
     local finalized = false
     local saved: async.Completion<|{string: value}, nil, nil|>? = nil
     local operation_number = 0
-    local target = async.run<|nil, nil|>(function (): nil
-      local payload_context: {string: value} = {["payload"] = "released with the operation"}
+    const target = async.run<|nil, nil|>(function (): nil
+      const payload_context: {string: value} = {["payload"] = "released with the operation"}
       support.mark_finalizable(payload_context, function (_: value) finalized = true end)
       async.await_with<|{string: value}, nil, nil|>(payload_context, function (done, number): uv.req_t?
         saved = done
@@ -207,7 +208,7 @@ function test_completion_registration_is_outside_task_and_exception_beats_inline
   end)
   runtime_test.run(function ()
     local returned = false
-    local marker = CompletionTestContext(23, "registration exception")
+    const marker = CompletionTestContext(23, "registration exception")
     local caught = false
     do
       async.await_with<|CompletionTestContext, nil, nil|>(marker, function (done, number): uv.req_t?
@@ -237,10 +238,10 @@ end
 
 function test_completion_pre_cancellation_skips_registration_but_allows_cleanup(context: test.Context)
   runtime_test.run(function ()
-    local first = async.CancellationReason<|value|>.complex(false)
+    const first = async.CancellationReason<|value|>.complex(false)
     local registrations = 0
     local cleanup_returned = false
-    local target = async.run<|nil, value|>(function (): nil
+    const target = async.run<|nil, value|>(function (): nil
       async.running():cancel(first)
       async.running():cancel(async.CancellationReason.simple("later"))
       local caught = false
@@ -280,22 +281,22 @@ end
 
 function test_completion_cancellation_waits_for_accepted_native_request(context: test.Context)
   runtime_test.run(function ()
-    local first = async.CancellationReason<|value|>.complex(false)
+    const first = async.CancellationReason<|value|>.complex(false)
     local submitted, completed, returned_cancelled = false, false, false
-    local target = async.run<|nil, value|>(function (): nil
-      local owner = async.running()
-      local result = async.await_cancellable_with<|uv.fs_t, integer, string|>(uv.fs_t.new(), function (done, number): uv.req_t?
-        local request = done:context(number)
-        local view = request:as_req_t()
-        local callback = function (_: uv.fs_t)
-          local status = uv.fs_get_result(request)
+    const target = async.run<|nil, value|>(function (): nil
+      const owner = async.running()
+      const result = async.await_cancellable_with<|uv.fs_t, integer, string|>(uv.fs_t(), function (done, number): uv.req_t?
+        const request = done:context(number)
+        const view = request:as_req_t()
+        const callback = function (_: uv.fs_t)
+          const status = uv.fs_get_result(request)
           uv.fs_req_cleanup(request)
           do
             completed = true
             done:resolve(number, status)
           catch done:fatal(number, error, traceback); raise end
         end
-        local status = uv.fs_stat(async.current_loop(), request, ".", callback)
+        const status = uv.fs_stat(async.current_loop(), request, ".", callback)
         if status < 0 then
           uv.fs_req_cleanup(request)
           done:reject(number, uv.strerror(status))
@@ -329,24 +330,22 @@ function test_completion_registration_rollback_keeps_its_own_context_until_callb
     do
       async.await_with<|CompletionTestContext, nil, nil|>(
           CompletionTestContext(29, "pending native rollback"), function (done, number): uv.req_t?
-        local saved_context = done:context(number)
+        const saved_context = done:context(number)
         stale, stale_number = done, number
         completion_test_later(0, function ()
-          do
-            test.assert(saved_context.number == 29 and saved_context.text == "pending native rollback",
-                "partial-acceptance rollback lost its saved context")
-            completion_test_raises(function () done:context(number) end)
-            rollback_finished = true
-            -- The new cleanup operation waits for this independently owned
-            -- rollback callback; no timing assumption orders two timers.
-            local next = successor as async.Completion<|integer, integer, nil|>
-            local next_number = successor_number
-            next:resolve(next_number, next:context(next_number))
-          catch
-            if successor ~= nil then successor:fatal(successor_number, error, traceback)
-            else done:fatal(number, error, traceback) end
-            raise
-          end
+          test.assert(saved_context.number == 29 and saved_context.text == "pending native rollback",
+              "partial-acceptance rollback lost its saved context")
+          completion_test_raises(function () done:context(number) end)
+          rollback_finished = true
+          -- The new cleanup operation waits for this independently owned
+          -- rollback callback; no timing assumption orders two timers.
+          const next = successor as async.Completion<|integer, integer, nil|>
+          const next_number = successor_number
+          next:resolve(next_number, next:context(next_number))
+        catch
+          if successor ~= nil then successor:fatal(successor_number, error, traceback)
+          else done:fatal(number, error, traceback) end
+          raise
         end)
         raise "registration failed after accepting rollback"
         return nil
@@ -354,7 +353,7 @@ function test_completion_registration_rollback_keeps_its_own_context_until_callb
     catch caught = error == "registration failed after accepting rollback" end
     test.assert(caught, "registration failure was not delivered to its Task")
     support.collect_garbage()
-    local result = async.await_cleanup_with<|integer, integer, nil|>(31, function (done, number): uv.req_t?
+    const result = async.await_cleanup_with<|integer, integer, nil|>(31, function (done, number): uv.req_t?
       successor, successor_number = done, number
       return nil
     end)
@@ -372,12 +371,12 @@ function test_completion_peer_settlement_defers_delivery_and_preserves_legacy_st
     local returned = false
     local settled = false
     local old_resolve: (function (nil): ())? = nil
-    local target = async.run<|nil, nil|>(function (): nil
+    const target = async.run<|nil, nil|>(function (): nil
       async.await<|nil, nil|>(function (resolve, _reject, _fatal)
         old_resolve = resolve
         resolve(nil)
       end)
-      local result = async.await_with<|nil, boolean, nil|>(nil, function (capability, operation_number): uv.req_t?
+      const result = async.await_with<|nil, boolean, nil|>(nil, function (capability, operation_number): uv.req_t?
         done, number = capability, operation_number
         return nil
       end)
@@ -409,9 +408,9 @@ function test_completion_peer_settlement_defers_delivery_and_preserves_legacy_st
 end
 
 function test_completion_late_fatal_preserves_successor_cleanup_and_first_error(context: test.Context)
-  local marker = FatalMarker(1960, "")
+  const marker = FatalMarker(1960, "")
   local successor_registered, successor_completed, successor_returned = false, false, false
-  local target = async.run<|nil, value|>(function (): nil
+  const target = async.run<|nil, value|>(function (): nil
     async.await_with<|nil, nil, nil|>(nil, function (done, number): uv.req_t?
       completion_test_later(0, function ()
         done:resolve(number, nil)
@@ -425,14 +424,14 @@ function test_completion_late_fatal_preserves_successor_cleanup_and_first_error(
       end)
       return nil
     end)
-    local result = async.await_cleanup_with<|string, string, nil|>("new cleanup", function (done, number): uv.req_t?
+    const result = async.await_cleanup_with<|string, string, nil|>("new cleanup", function (done, number): uv.req_t?
       successor_registered = true
       completion_test_later(1, function ()
-        do
-          local value = done:context(number)
-          successor_completed = true
-          done:resolve(number, value)
-        catch done:fatal(number, error, traceback); raise end
+        const value = done:context(number)
+        successor_completed = true
+        done:resolve(number, value)
+      catch
+        done:fatal(number, error, traceback); raise
       end)
       return nil
     end)

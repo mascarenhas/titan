@@ -1,16 +1,16 @@
 -- Native worker-pool offload: run_foreign and its after-work completion.
 
 local record ForeignWork
-  local request: uv.work_t
-  local worker: foreign function (*void): void
-  local argument: foreign *void
+  local const request: uv.work_t
+  local const worker: foreign function (*void): void
+  local const argument: foreign *void
   local done: Completion<|ForeignWork, value, OperationError|>?
   local number: integer
-  local abandoned: foreign function (*void): void
+  local const abandoned: foreign function (*void): void
 end
 
 local function ForeignWork:release_abandoned()
-  local release = self.abandoned
+  const release = self.abandoned
   release(self.argument)
 end
 
@@ -20,7 +20,7 @@ end
 -- already finalized has drained, so release at once.
 local function ForeignWork:abandon()
   if not self.abandoned then return end
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime == nil then
     self:release_abandoned()
     return
@@ -29,9 +29,9 @@ local function ForeignWork:abandon()
 end
 
 local function foreign_work_completed(request: uv.work_t, status: integer)
-  local work: ForeignWork = request:get_data()
-  local done = work.done as Completion<|ForeignWork, value, OperationError|>
-  local number = work.number
+  const work: ForeignWork = request:get_data()
+  const done = work.done as Completion<|ForeignWork, value, OperationError|>
+  const number = work.number
   request:set_data(nil)
   work.done = nil
   do
@@ -41,11 +41,11 @@ local function foreign_work_completed(request: uv.work_t, status: integer)
 end
 
 local function start_foreign_work(done: Completion<|ForeignWork, value, OperationError|>, number: integer): uv.req_t?
-  local work = done:context(number)
+  const work = done:context(number)
   work.done = done
   work.number = number
   work.request:set_data(work)
-  local status = uv.queue_work(current_loop(), work.request, work.worker,
+  const status = uv.queue_work(current_loop(), work.request, work.worker,
       work.argument, foreign_work_completed, nil)
   if status < 0 then
     work.request:set_data(nil)
@@ -63,7 +63,7 @@ end
 function run_foreign(f: foreign function (*void): void, arg: foreign *void,
                      abandoned: foreign function (*void): void)
   if not f then raise "async.run_foreign callback must not be NULL" end
-  local work = ForeignWork(uv.work_t.new(), f, arg, nil, 0, abandoned)
+  const work = ForeignWork(uv.work_t(), f, arg, nil, 0, abandoned)
   -- catch never runs during an unwind, so `waiting` stays set only when a
   -- Lua state close abandons the wait.
   local waiting = true

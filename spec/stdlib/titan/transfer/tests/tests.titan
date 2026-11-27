@@ -7,10 +7,10 @@ foreign import "lauxlib.h"
 foreign import "transfer.h"
 
 function test_raw_loader_uses_explicit_length_and_canonical_identity(_context: test.Context)
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 3) ~= 0)
-  local name = "titan.protobuf"
+  const name = "titan.protobuf"
   transfer.transfer_load_module(L, name .. "ignored trailing bytes", #name)
   test.assert(ffi.lua_gettop(L) == top + 1 and
               ffi.lua_type(L, -1) == ffi.LUA_TUSERDATA,

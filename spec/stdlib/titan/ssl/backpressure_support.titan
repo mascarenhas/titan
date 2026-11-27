@@ -7,20 +7,20 @@ local test = import "test"
 local task_support = import "support.async.titan"
 
 local record CloseWait
-  handle: uv.handle_t
+  const handle: uv.handle_t
   done: async.Completion<|CloseWait, nil, nil|>?
   number: integer
 end
 
 local function closed(handle: uv.handle_t)
-  local waiter = uv.handle_get_data(handle) as CloseWait
+  const waiter = uv.handle_get_data(handle) as CloseWait
   uv.handle_set_data(handle, nil)
   waiter.done:resolve(waiter.number, nil)
 end
 
 local function start_close(done: async.Completion<|CloseWait, nil, nil|>,
                            number: integer): uv.req_t?
-  local waiter = done:context(number)
+  const waiter = done:context(number)
   waiter.done = done
   waiter.number = number
   uv.handle_set_data(waiter.handle, waiter)
@@ -35,25 +35,25 @@ local function close_handle(handle: uv.handle_t)
 end
 
 local record ResetWait
-  front: uv.tcp_t
+  const front: uv.tcp_t
   done: async.Completion<|ResetWait, nil, integer|>?
   number: integer
 end
 
 local function reset_closed(handle: uv.handle_t)
-  local waiter = uv.handle_get_data(handle) as ResetWait
+  const waiter = uv.handle_get_data(handle) as ResetWait
   uv.handle_set_data(handle, nil)
   waiter.done:resolve(waiter.number, nil)
 end
 
 local function start_reset(done: async.Completion<|ResetWait, nil, integer|>,
                            number: integer): uv.req_t?
-  local waiter = done:context(number)
+  const waiter = done:context(number)
   waiter.done = done
   waiter.number = number
-  local handle = waiter.front:as_handle_t()
+  const handle = waiter.front:as_handle_t()
   uv.handle_set_data(handle, waiter)
-  local status = uv.tcp_close_reset(waiter.front, reset_closed)
+  const status = uv.tcp_close_reset(waiter.front, reset_closed)
   if status < 0 then
     uv.handle_set_data(handle, nil)
     done:reject(number, status)
@@ -62,15 +62,15 @@ local function start_reset(done: async.Completion<|ResetWait, nil, integer|>,
 end
 
 local record WriteWait
-  request: uv.write_t
-  stream: uv.stream_t
-  bytes: string
+  const request: uv.write_t
+  const stream: uv.stream_t
+  const bytes: string
   done: async.Completion<|WriteWait, nil, integer|>?
   number: integer
 end
 
 local function written(request: uv.write_t, status: integer)
-  local waiter = request:get_data() as WriteWait
+  const waiter = request:get_data() as WriteWait
   request:set_data(nil)
   if status < 0 then waiter.done:reject(waiter.number, status)
   else waiter.done:resolve(waiter.number, nil) end
@@ -78,11 +78,11 @@ end
 
 local function start_write(done: async.Completion<|WriteWait, nil, integer|>,
                            number: integer): uv.req_t?
-  local waiter = done:context(number)
+  const waiter = done:context(number)
   waiter.done = done
   waiter.number = number
   waiter.request:set_data(waiter)
-  local status = uv.write_string(waiter.request, waiter.stream, waiter.bytes,
+  const status = uv.write_string(waiter.request, waiter.stream, waiter.bytes,
                                  written)
   if status < 0 then
     waiter.request:set_data(nil)
@@ -93,7 +93,7 @@ end
 
 record Proxy
   const port: integer
-  local listener: uv.tcp_t
+  local const listener: uv.tcp_t
   local front: uv.tcp_t?
   local backend: net.Connection?
   local incoming: async.BufferedSubscription<|string, value|>?
@@ -103,11 +103,11 @@ record Proxy
 end
 
 local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): value
-  local backend = net.connect("127.0.0.1", backend_port)
+  const backend = net.connect("127.0.0.1", backend_port)
   proxy.backend = backend
-  local stream = front:as_stream_t()
-  local incoming = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
-    local status = uv.read_start(stream,
+  const stream = front:as_stream_t()
+  const incoming = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
+    const status = uv.read_start(stream,
       function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
         return uv.buf_t.allocate(65536)
       end,
@@ -123,12 +123,12 @@ local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): valu
       function (drain: function (): async.SubscriptionBatch<|string|>) drain() end)
   end)
   proxy.incoming = incoming
-  local receiver = async.run<|value, value|>(function (): value
+  const receiver = async.run<|value, value|>(function (): value
     do
       while true do
-        local bytes? = backend:read()
+        const bytes? = backend:read()
         if bytes == nil then return nil end
-        case async.await_with(WriteWait(uv.write_t.new(), stream, bytes, nil, 0),
+        case async.await_with(WriteWait(uv.write_t(), stream, bytes, nil, 0),
                                start_write)
         when error(status) then
           if proxy.closing then return nil end
@@ -160,23 +160,23 @@ local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): valu
 end
 
 function new(backend_port: integer): Proxy
-  local loop = async.current_loop()
-  local listener = uv.tcp_t.new()
+  const loop = async.current_loop()
+  const listener = uv.tcp_t()
   test.assert(uv.tcp_init(loop, listener) >= 0)
   local address_status, address? = uv.ip4_addr("127.0.0.1", 0)
   test.assert(address_status >= 0)
   test.assert(uv.tcp_bind(listener, address, 0) >= 0)
   local bound_status, bound? = uv.tcp_getsockname(listener)
   test.assert(bound_status >= 0)
-  local proxy = Proxy(bound:port(), listener, nil, nil, nil, nil, nil, false)
-  local status = uv.listen(listener:as_stream_t(), 1,
+  const proxy = Proxy(bound:port(), listener, nil, nil, nil, nil, nil, false)
+  const status = uv.listen(listener:as_stream_t(), 1,
     function (_: uv.stream_t, accepted_status: integer)
       test.assert(accepted_status >= 0 and proxy.front == nil)
-      local front = uv.tcp_t.new()
+      const front = uv.tcp_t()
       test.assert(uv.tcp_init(loop, front) >= 0)
       test.assert(uv.accept(listener:as_stream_t(), front:as_handle_t()) >= 0)
       proxy.front = front
-      local sender = async.run<|value, value|>(function (): value
+      const sender = async.run<|value, value|>(function (): value
         return relay(proxy, front, backend_port)
       end)
       proxy.sender = sender

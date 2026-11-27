@@ -1,7 +1,7 @@
 -- These cases deliberately fail a Runtime and verify its next session.
 -- The callback's raw error and original traceback must survive generic E.
 local record FatalMarker
-  id: integer
+  const id: integer
   source_trace: string
 end
 
@@ -27,15 +27,15 @@ end
 
 
 local function fatal_test_registration_fatal(after_settle: boolean)
-  local marker = FatalMarker(5, "")
+  const marker = FatalMarker(5, "")
   local returned = false
   local observed = false
   local reentered = false
   local result_value = 0
   marker.source_trace = "registration fatal trace"
-  local task = async.run<|value, value|>(function (): value
+  const task = async.run<|value, value|>(function (): value
     do
-      local result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), fatal: function (value, string): ())
+      const result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), fatal: function (value, string): ())
         if after_settle then resolve(31) end
         fatal(marker, marker.source_trace)
         returned = true
@@ -55,18 +55,18 @@ local function fatal_test_registration_fatal(after_settle: boolean)
   test.assert(returned and not reentered, "registration fatal recursively entered the Task")
   if after_settle then
     test.assert(result_value == 31, "late inline fatal replaced settled cleanup result")
-    local succeeded = task:status():has_succeeded()
+    const succeeded = task:status():has_succeeded()
     test.assert(succeeded, "late inline fatal changed the completed Task status")
   else
     test.assert(observed, "registration fatal entered generic E instead of raw exception")
-    local failed = task:status():has_failed()
+    const failed = task:status():has_failed()
     test.assert(failed, "registration fatal origin did not remain failed")
   end
 end
 
 
 local function fatal_test_fresh_session()
-  local task = async.run<|integer, value|>(function (): integer return 42 end)
+  const task = async.run<|integer, value|>(function (): integer return 42 end)
   async.loop()
   local success, value? = task:status():has_succeeded()
   test.assert(success and value == 42, "failed Runtime leaked into next session")
@@ -83,7 +83,7 @@ function test_generic_await_fatal_during_registration(context: test.Context)
 end
 
 function test_saved_error_raise_preserves_value_and_trace(context: test.Context)
-  local marker = FatalMarker.new(193, "original supervised trace")
+  const marker = FatalMarker(193, "original supervised trace")
   local caught: value = nil
   local original = ""
   do

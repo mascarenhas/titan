@@ -18,26 +18,26 @@ local type CheckedAction = function (): ()
 -- numeral parsing, or a dynamic call which Titan's checker intentionally
 -- rejects. All assertions remain native Titan code.
 local function lua_helper(source: string): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 2) == 0 then
     raise "cannot reserve Lua stack for native math test helper"
   end
   local status = ffi.luaL_loadstring(L, source)
   if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
   status = ffi.lua_pcallk(L, 0, 1, 0, 0, nil)
   if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
   return ffi.lua_totvalue(L, -1)
 end
 
 local function numeric_tag(candidate: value): integer
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for numeric tag probe"
@@ -54,12 +54,12 @@ local function same_numeric(actual: value?, expected: value?)
                 "numeric option presence differed")
     return
   end
-  local left = actual as value
-  local right = expected as value
+  const left = actual as value
+  const right = expected as value
   local equal = left == right
   if left is float and right is float then
-    local left_float = left as float
-    local right_float = right as float
+    const left_float = left as float
+    const right_float = right as float
     if left_float ~= left_float and right_float ~= right_float then
       equal = true
     end
@@ -71,13 +71,13 @@ end
 
 local function error_text(failure: value): string
   local result = "<unprintable error>"
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
   if ffi.lua_checkstack(L, 3) ~= 0 then
     ffi.lua_pushtvalue(L, failure)
     ffi.luaL_tolstring(L, -1, nil)
-    local rendered: value = ffi.lua_totvalue(L, -1)
+    const rendered: value = ffi.lua_totvalue(L, -1)
     if rendered is string then result = rendered as string end
   end
   return result
@@ -104,7 +104,7 @@ local function assert_raises_contains(action: CheckedAction,
     action()
   catch
     caught = true
-    local message = error_text(error)
+    const message = error_text(error)
     test.assert(contains(message, fragment),
                 "expected error containing '" .. fragment ..
                 "', got '" .. message .. "'")
@@ -118,7 +118,7 @@ function test_automatic_and_argumentless_seeding(_context: test.Context)
   local first, second = mathlib.randomseed()
   test.assert(numeric_tag(first) == 1 and numeric_tag(second) == 1,
               "argumentless randomseed did not return two integer seeds")
-  local draw: float = mathlib.random()
+  const draw: float = mathlib.random()
   test.assert(draw >= 0.0 and draw < 1.0)
   mathlib.randomseed(first, second)
   test.assert(mathlib.random() == draw,
@@ -126,8 +126,8 @@ function test_automatic_and_argumentless_seeding(_context: test.Context)
 end
 
 function test_integer_extremes(_: test.Context)
-  local maximum: integer = mathlib.maxinteger
-  local minimum: integer = mathlib.mininteger
+  const maximum: integer = mathlib.maxinteger
+  const minimum: integer = mathlib.mininteger
   test.assert(maximum == (1 << 62) + ((1 << 62) - 1))
   test.assert(minimum == -maximum - 1)
   test.assert(numeric_tag(maximum) == 1 and numeric_tag(minimum) == 1)
@@ -150,12 +150,12 @@ end
 
 function test_typed_surface_and_constants(_context: test.Context)
   -- These declarations keep the original typed probe's exact result shape.
-  local absolute: float = mathlib.abs(-2)
-  local ceiling: float = mathlib.ceil(2.25)
+  const absolute: float = mathlib.abs(-2)
+  const ceiling: float = mathlib.ceil(2.25)
   local mantissa: float, exponent: integer = mathlib.frexp(12.0)
   local integral: float, fractional: float = mathlib.modf(-3.25)
-  local unsigned_less: boolean = mathlib.ult(-1, 0)
-  local parsed: value? = mathlib.tonumber("0x2a")
+  const unsigned_less: boolean = mathlib.ult(-1, 0)
+  const parsed: value? = mathlib.tonumber("0x2a")
 
   test.assert(absolute == 2.0 and numeric_tag(absolute) == 2)
   test.assert(ceiling == 3.0 and numeric_tag(ceiling) == 2)
@@ -170,8 +170,8 @@ function test_typed_surface_and_constants(_context: test.Context)
   test.assert(mathlib.mininteger == -9223372036854775807 - 1)
   test.assert(mathlib.abs(-mathlib.huge) == mathlib.huge)
 
-  local square_root_nan = mathlib.sqrt(-1.0)
-  local remainder_nan = mathlib.fmod(1.0, 0.0)
+  const square_root_nan = mathlib.sqrt(-1.0)
+  const remainder_nan = mathlib.fmod(1.0, 0.0)
   test.assert(square_root_nan ~= square_root_nan)
   test.assert(remainder_nan ~= remainder_nan)
 
@@ -190,8 +190,8 @@ function test_typed_surface_and_constants(_context: test.Context)
   test.assert(mathlib.log(100.0, 10.0) == 2.0)
   test.assert(mathlib.log2(64.0) == 6.0)
   test.assert(mathlib.log10(100.0) == 2.0)
-  local maximum = mathlib.max(-3, 8, 2)
-  local minimum = mathlib.min(-3, 8, 2)
+  const maximum = mathlib.max(-3, 8, 2)
+  const minimum = mathlib.min(-3, 8, 2)
   test.assert(maximum == 8.0 and numeric_tag(maximum) == 2)
   test.assert(minimum == -3.0)
   test.assert(mathlib.rad(180.0) == mathlib.pi)
@@ -206,7 +206,7 @@ function test_typed_surface_and_constants(_context: test.Context)
   -- Raw tag inspection and the absent member require the Lua boundary.
   -- Inspect the qualified Titan module rather than conflating it with Lua's
   -- independent global math table.
-  local lua_boundary = lua_helper([[
+  const lua_boundary = lua_helper([[
 return function()
   local m = require "titan.math"
   local has_type = pcall(function() return m.type end)
@@ -229,33 +229,33 @@ end
 function test_xoshiro256_star_star_matches_lua(_context: test.Context)
   -- The native test owner is `math.tests`, so Lua's independent global math
   -- library remains available as a live reference implementation.
-  local lua_randomseed = lua_helper([[
+  const lua_randomseed = lua_helper([[
 return function(first, second) return math.randomseed(first, second) end
 ]]) as function (integer, integer): (integer, integer)
-  local lua_random_unit = lua_helper([[
+  const lua_random_unit = lua_helper([[
 return function() return math.random() end
 ]]) as function (): (float)
-  local lua_random_full = lua_helper([[
+  const lua_random_full = lua_helper([[
 return function() return math.random(0) end
 ]]) as function (): (integer)
-  local lua_random_upper = lua_helper([[
+  const lua_random_upper = lua_helper([[
 return function(upper) return math.random(upper) end
 ]]) as function (integer): (integer)
-  local lua_random_interval = lua_helper([[
+  const lua_random_interval = lua_helper([[
 return function(lower, upper) return math.random(lower, upper) end
 ]]) as function (integer, integer): (integer)
 
   mathlib.randomseed(0x123456789abcdef, -77)
   lua_randomseed(0x123456789abcdef, -77)
-  local pinned_unit: {float} = {
+  const pinned_unit: {float} = {
     0.46466756637445317,
     0.97989383630972426,
     0.83972835883933472,
   }
   local index = 1
   while index <= 24 do
-    local actual = mathlib.random()
-    local reference = lua_random_unit()
+    const actual = mathlib.random()
+    const reference = lua_random_unit()
     same_numeric(actual, reference)
     if index <= #pinned_unit then
       same_numeric(actual, pinned_unit[index])
@@ -286,7 +286,7 @@ return function(lower, upper) return math.random(lower, upper) end
   local first, second = mathlib.randomseed(55, 66)
   local lua_first, lua_second = lua_randomseed(55, 66)
   test.assert(first == lua_first and second == lua_second)
-  local sequence: {integer} = {
+  const sequence: {integer} = {
     mathlib.random(0) as integer,
     mathlib.random(0) as integer,
     mathlib.random(0) as integer,
@@ -303,27 +303,27 @@ function test_randomseed_optional_components_preserve_replay(_context: test.Cont
   local first, second = mathlib.randomseed(0)
   test.assert(first == 0 and second == 0,
               "single zero seed must default only the second component")
-  local single_seed_draw = mathlib.random(0)
+  const single_seed_draw = mathlib.random(0)
   mathlib.randomseed(0, 0)
   test.assert(mathlib.random(0) == single_seed_draw,
               "single-component seed differs from explicit zero second seed")
 
   local default_first, default_second = mathlib.randomseed()
-  local default_draw = mathlib.random(0)
+  const default_draw = mathlib.random(0)
   mathlib.randomseed(default_first, default_second)
   test.assert(mathlib.random(0) == default_draw,
               "default seed components must reproduce the selected state")
 end
 
 function test_bounded_numerals_and_explicit_bases(_context: test.Context)
-  local lua_tonumber = lua_helper([[
+  const lua_tonumber = lua_helper([[
 return function(candidate) return tonumber(candidate) end
 ]]) as function (value): (value?)
-  local lua_tonumber_base = lua_helper([[
+  const lua_tonumber_base = lua_helper([[
 return function(candidate, base) return tonumber(candidate, base) end
 ]]) as function (value, integer): (value?)
 
-  local cases: {value} = {
+  const cases: {value} = {
     0, 2.0, -3.5, "", " ", "+", "-", "0", "-0", "+17",
     "  -42  ", "9223372036854775807", "-9223372036854775808",
     "9223372036854775808", "-9223372036854775809", "1.5", ".5",
@@ -334,19 +334,19 @@ return function(candidate, base) return tonumber(candidate, base) end
   }
   local index = 1
   while index <= #cases do
-    local candidate: value = cases[index]
+    const candidate: value = cases[index]
     same_numeric(mathlib.tonumber(candidate), lua_tonumber(candidate))
     index = index + 1
   end
 
   local base = 2
-  local base_cases: {string} = {
+  const base_cases: {string} = {
     "0", "10", "-10", "+Z", " z ", "123xyz", "",
   }
   while base <= 36 do
     index = 1
     while index <= #base_cases do
-      local candidate = base_cases[index]
+      const candidate = base_cases[index]
       same_numeric(mathlib.tonumber(candidate, base),
                    lua_tonumber_base(candidate, base))
       index = index + 1
@@ -354,25 +354,25 @@ return function(candidate, base) return tonumber(candidate, base) end
     base = base + 1
   end
 
-  local parsed_integer = mathlib.tonumber(7)
-  local parsed_float = mathlib.tonumber(7.0)
+  const parsed_integer = mathlib.tonumber(7)
+  const parsed_float = mathlib.tonumber(7.0)
   test.assert(parsed_integer ~= nil and
               numeric_tag(parsed_integer as value) == 1)
   test.assert(parsed_float ~= nil and
               numeric_tag(parsed_float as value) == 2)
 
-  local previous_pointer = ffi.setlocale(ffi.LC_NUMERIC, nil)
+  const previous_pointer = ffi.setlocale(ffi.LC_NUMERIC, nil)
   if previous_pointer then
     -- Copy the previous locale before setlocale may reuse its static buffer.
-    local previous = previous_pointer as string
+    const previous = previous_pointer as string
     local selected = ffi.setlocale(ffi.LC_NUMERIC, "de_DE.UTF-8")
     if not selected then
       selected = ffi.setlocale(ffi.LC_NUMERIC, "de_DE.utf8")
     end
     if selected then
       defer ffi.setlocale(ffi.LC_NUMERIC, previous)
-      local converted = mathlib.tonumber("1.5")
-      local hexadecimal = mathlib.tonumber("0x1.8p1")
+      const converted = mathlib.tonumber("1.5")
+      const hexadecimal = mathlib.tonumber("0x1.8p1")
       test.assert(converted ~= nil and
                   (converted as value) as float == 1.5)
       test.assert(hexadecimal ~= nil and
@@ -401,7 +401,7 @@ function test_rejects_invalid_typed_requests(_context: test.Context)
     mathlib.ldexp(1.0, mathlib.maxinteger)
   end)
 
-  local bad_dynamic_call = lua_helper([[
+  const bad_dynamic_call = lua_helper([[
 return function()
   local m = require "titan.math"
   return pcall(m.max, "not a number")

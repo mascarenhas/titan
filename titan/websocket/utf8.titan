@@ -10,9 +10,9 @@ local function Utf8:reset()
   self.remaining = 0; self.lower = 128; self.upper = 191
 end
 local function Utf8:feed(bytes: string)
-  local input = bytes as foreign const *unsigned char
+  const input = bytes as foreign const *unsigned char
   for index = 0, #bytes - 1 do
-    local byte: integer = input[index]
+    const byte: integer = input[index]
     if self.remaining > 0 then
       if byte < self.lower or byte > self.upper then
         raise wire_error("utf8", "invalid UTF-8 continuation", 1007)
@@ -42,7 +42,7 @@ local function Utf8:finish()
   end
 end
 local function validate_text(bytes: string, operation: string)
-  local state = Utf8(0, 128, 191)
+  const state = Utf8(0, 128, 191)
   local first = 1
   while first <= #bytes do
     local last = first + WORK_BYTES - 1
@@ -54,7 +54,7 @@ local function validate_text(bytes: string, operation: string)
   state:finish()
 catch
   if error is Error then
-    local failure = error as Error
+    const failure = error as Error
     raise Error(failure.kind, operation, failure.message, nil)
   end
   raise

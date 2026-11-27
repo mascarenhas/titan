@@ -18,8 +18,8 @@ end
 --- A borrowed dynamic-library symbol address; retain its library while using it.
 -- @usage uv/types.md#symbol_t
 record symbol_t
-  local owner: lib_t
-  local address: foreign *void
+  local const owner: lib_t
+  local const address: foreign *void
 end
 
 local function dll_require_cstring(text: string, label: string)
@@ -47,7 +47,7 @@ function lib_t:dlopen(filename: string): integer
   dll_require_cstring(filename, "lib_t:dlopen filename")
   -- The final packed owner exists before native initialization. Both return
   -- paths owe dlclose: a failed native open may allocate error text.
-  local status: integer = ffi.uv_dlopen(filename, self.native)
+  const status: integer = ffi.uv_dlopen(filename, self.native)
   if status == 0 then self.state = LIB_OPEN else self.state = LIB_FAILED end
   return status
 end
@@ -61,7 +61,7 @@ function lib_t:dlsym(name: string): (integer, symbol_t?)
   if self.state ~= LIB_OPEN then raise "lib_t:dlsym requires an open library" end
   dll_require_cstring(name, "lib_t:dlsym name")
   local address: foreign *void = nil
-  local status: integer = ffi.uv_dlsym(self.native, name, address)
+  const status: integer = ffi.uv_dlsym(self.native, name, address)
   if status ~= 0 then return status, nil end
   -- Native success may have a NULL address. Presence of symbol_t, not the
   -- address's truthiness, distinguishes that case from lookup failure.

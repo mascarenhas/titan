@@ -32,11 +32,11 @@ function test_tcp_transfer_attaches_destination_loop_and_retires_source(_context
   success(uv.tcp_init(source, reader))
   success(uv.tcp_open(writer, left))
   success(uv.tcp_open(reader, right))
-  local packet = writer:to_transfer_payload()
+  const packet = writer:to_transfer_payload()
   test.assert(uv.is_closing(writer:as_handle_t()), "source still accepts operations")
   uv.bind_transfer_loop(destination)
   defer uv.unbind_transfer_loop(destination)
-  local restored = uv.tcp_t.from_transfer_payload(packet)
+  const restored = uv.tcp_t.from_transfer_payload(packet)
   test.assert(uv.handle_get_loop(restored:as_handle_t()) == destination)
   test.assert(uv.handle_get_data(restored:as_handle_t()) == nil)
   collect()
@@ -54,7 +54,7 @@ function test_pipe_transfer_requires_destination_binding_before_adoption(_contex
   defer finish_loop(source)
   defer finish_loop(destination)
   local reader, writer = open_pipe_pair(source)
-  local packet = writer:to_transfer_payload()
+  const packet = writer:to_transfer_payload()
   test.assert(uv.is_closing(writer:as_handle_t()))
   transfer_rejected(function () uv.pipe_t.from_transfer_payload(packet) end)
   uv.bind_transfer_loop(destination)
@@ -62,7 +62,7 @@ function test_pipe_transfer_requires_destination_binding_before_adoption(_contex
   uv.bind_transfer_loop(destination)
   transfer_rejected(function () uv.bind_transfer_loop(source) end)
   uv.unbind_transfer_loop(source)
-  local restored = uv.pipe_t.from_transfer_payload(packet)
+  const restored = uv.pipe_t.from_transfer_payload(packet)
   test.assert(uv.handle_get_loop(restored:as_handle_t()) == destination)
   success(uv.write_string(uv.write_t(), restored:as_stream_t(), "pipe\0handoff\255",
     function (_: uv.write_t, code: integer)
@@ -74,10 +74,10 @@ function test_pipe_transfer_requires_destination_binding_before_adoption(_contex
 end
 
 function test_native_transfer_refuses_userdata_pending_write_and_active_read(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local reader, writer = open_pipe_pair(loop)
-  local writer_handle = writer:as_handle_t()
+  const writer_handle = writer:as_handle_t()
   uv.handle_set_data(writer_handle, "source metadata")
   transfer_rejected(function () writer:to_transfer_payload() end)
   test.assert(not uv.is_closing(writer_handle))
@@ -100,7 +100,7 @@ function test_native_transfer_refuses_userdata_pending_write_and_active_read(_co
 end
 
 function test_pipe_transfer_rejects_invalid_descriptor_before_owner_init(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   uv.bind_transfer_loop(loop)
   defer uv.unbind_transfer_loop(loop)
@@ -117,10 +117,10 @@ end
 
 function test_native_transfer_discard_retires_unadopted_payload_without_loop_binding(
     _context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local pipe_reader, pipe_writer = open_pipe_pair(loop)
-  local pipe_packet = pipe_writer:to_transfer_payload()
+  const pipe_packet = pipe_writer:to_transfer_payload()
   success(uv.pipe_t.discard_transfer_payload(pipe_packet))
   test.assert(transfer_read_all(loop, pipe_reader:as_stream_t()) == "")
 
@@ -132,7 +132,7 @@ function test_native_transfer_discard_retires_unadopted_payload_without_loop_bin
   success(uv.tcp_init(loop, reader))
   success(uv.tcp_open(writer, left))
   success(uv.tcp_open(reader, right))
-  local tcp_packet = writer:to_transfer_payload()
+  const tcp_packet = writer:to_transfer_payload()
   success(uv.tcp_t.discard_transfer_payload(tcp_packet))
   test.assert(transfer_read_all(loop, reader:as_stream_t()) == "")
 

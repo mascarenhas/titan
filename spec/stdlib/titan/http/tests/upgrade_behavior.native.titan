@@ -1,14 +1,14 @@
 -- A public stream implementation makes every response split and abort order
 -- deterministic without coupling these tests to llhttp or native handles.
 local record OpeningStream
-  chunks: {string}
+  const chunks: {string}
   index: integer
   output: string
   closed: boolean
   aborts: integer
-  blocked_write: boolean
+  const blocked_write: boolean
   writer: async.Task?
-  token: async.ResumeToken
+  const token: async.ResumeToken
 end
 
 local function opening_stream(chunks: {string}, blocked: boolean?): OpeningStream
@@ -21,7 +21,7 @@ end
 
 function OpeningStream:read(): string?
   if self.closed then return nil end
-  local result? = self.chunks[self.index]
+  const result? = self.chunks[self.index]
   self.index = self.index + 1
   return result
 end
@@ -33,9 +33,9 @@ end
 function OpeningStream:write(data: string)
   self.output = self.output .. data
   if not self.blocked_write then return end
-  local current = async.running()
+  const current = async.running()
   self.writer = current
-  local detach = function ()
+  const detach = function ()
     if self.writer == current then self.writer = nil end
   end
   defer detach()
@@ -47,28 +47,27 @@ function OpeningStream:close()
   if self.closed then return end
   self.closed = true
   self.aborts = self.aborts + 1
-  local writer? = self.writer
+  const writer? = self.writer
   if writer then writer:resume(self.token) end
 end
 
 local record OpeningFailure
-  operation: string
+  const operation: string
 end
 
 local record FailingOpeningStream
-  sentinel: OpeningFailure
-  fail_write: boolean
+  const sentinel: OpeningFailure
+  const fail_write: boolean
   original_trace: string
   closed: boolean
   aborts: integer
 end
 
 local function FailingOpeningStream:fail()
-  do raise self.sentinel
-  catch
-    self.original_trace = traceback
-    raise
-  end
+  raise self.sentinel
+catch
+  self.original_trace = traceback
+  raise
 end
 
 function FailingOpeningStream:read(): string?
@@ -95,8 +94,8 @@ end
 
 local function opening_error_trace(fail_write: boolean)
   runtime_test.run(function ()
-    local sentinel = OpeningFailure("public HTTP opening I/O")
-    local stream = FailingOpeningStream(sentinel, fail_write, "", false, 0)
+    const sentinel = OpeningFailure("public HTTP opening I/O")
+    const stream = FailingOpeningStream(sentinel, fail_write, "", false, 0)
     local actual_error: value = nil
     local actual_trace = ""
     do
@@ -137,23 +136,23 @@ local function assert_http_error(action: function (): (), expected: string)
 end
 
 local function client_upgrade_split(split: integer)
-  local input = UPGRADE_RESPONSE .. UPGRADE_SUFFIX
-  local stream = opening_stream({
+  const input = UPGRADE_RESPONSE .. UPGRADE_SUFFIX
+  const stream = opening_stream({
     string.sub(input, 1, split), string.sub(input, split + 1),
   })
-  local response = http.request_upgrade_on(
+  const response = http.request_upgrade_on(
     stream, stream:close, "http://example.test/path?q=one", "echo")
   defer response:close()
   test.assert(response.status == 101)
   test.assert(support.contains(stream.output, "GET /path?q=one HTTP/1.1\r\n"))
   test.assert(support.contains(stream.output, "Connection: Upgrade\r\n"))
   assert_http_error(function () response:read() end, "no readable body")
-  local upgraded = response:take_upgrade()
+  const upgraded = response:take_upgrade()
   defer upgraded:close()
   assert_http_error(function () response:take_upgrade() end, "no pending upgrade")
   test.assert(upgraded:read_until("END", true) == "x\0prefix",
               "HTTP upgrade lost bytes at the parser/stream boundary")
-  local tail = string.writer()
+  const tail = string.writer()
   for chunk in upgraded:read do tail:write(chunk) end
   test.assert(tail:drain() == "tail\0", "HTTP upgrade changed binary excess")
   response:close()
@@ -164,7 +163,7 @@ local function client_upgrade_split(split: integer)
 end
 
 function test_upgrade_client_preserves_every_binary_header_split(context: test.Context)
-  local input = UPGRADE_RESPONSE .. UPGRADE_SUFFIX
+  const input = UPGRADE_RESPONSE .. UPGRADE_SUFFIX
   for split = 1, #input do
     context:run("split_" .. split, function (_: test.Context)
       runtime_test.run(function () client_upgrade_split(split) end)
@@ -174,19 +173,19 @@ end
 
 function test_upgrade_client_header_bound_excludes_binary_suffix(_: test.Context)
   runtime_test.run(function ()
-    local prefix = "HTTP/1.1 101 Switching Protocols\r\n" ..
+    const prefix = "HTTP/1.1 101 Switching Protocols\r\n" ..
       "Connection: Upgrade\r\nUpgrade: echo\r\nX-Pad: "
-    local header = prefix .. string.rep("x", 65536 - #prefix - 4) .. "\r\n\r\n"
-    local stream = opening_stream({header .. string.rep("\0z", 65536)})
-    local response = http.request_upgrade_on(
+    const header = prefix .. string.rep("x", 65536 - #prefix - 4) .. "\r\n\r\n"
+    const stream = opening_stream({header .. string.rep("\0z", 65536)})
+    const response = http.request_upgrade_on(
       stream, stream:close, "http://example.test/", "echo")
     defer response:close()
-    local upgraded = response:take_upgrade()
+    const upgraded = response:take_upgrade()
     defer upgraded:close()
     test.assert(upgraded:read() == string.rep("\0z", 65536),
                 "HTTP header limit charged coalesced protocol input")
 
-    local excessive = opening_stream({prefix ..
+    const excessive = opening_stream({prefix ..
       string.rep("x", 65536 - #prefix - 3) .. "\r\n\r\n"})
     assert_http_error(function ()
       http.request_upgrade_on(excessive, excessive:close,
@@ -198,13 +197,13 @@ end
 
 function test_upgrade_client_bounds_interim_responses(_: test.Context)
   runtime_test.run(function ()
-    local interim = "HTTP/1.1 100 Continue\r\n\r\n"
-    local allowed = opening_stream({string.rep(interim, 16) .. UPGRADE_RESPONSE})
-    local response = http.request_upgrade_on(
+    const interim = "HTTP/1.1 100 Continue\r\n\r\n"
+    const allowed = opening_stream({string.rep(interim, 16) .. UPGRADE_RESPONSE})
+    const response = http.request_upgrade_on(
       allowed, allowed:close, "http://example.test/", "echo")
     defer response:close()
     test.assert(response.status == 101)
-    local excessive = opening_stream({string.rep(interim, 17) .. UPGRADE_RESPONSE})
+    const excessive = opening_stream({string.rep(interim, 17) .. UPGRADE_RESPONSE})
     assert_http_error(function ()
       http.request_upgrade_on(excessive, excessive:close,
                               "http://example.test/", "echo")
@@ -215,10 +214,10 @@ end
 
 function test_upgrade_rejection_remains_readable_and_owned(_: test.Context)
   runtime_test.run(function ()
-    local stream = opening_stream({
+    const stream = opening_stream({
       "HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\nno\0!",
     })
-    local response = http.request_upgrade_on(
+    const response = http.request_upgrade_on(
       stream, stream:close, "http://example.test/", "echo")
     defer response:close()
     test.assert(response.status == 403)
@@ -230,9 +229,9 @@ end
 
 function test_upgrade_opening_cancellation_aborts_before_output_drain(_: test.Context)
   runtime_test.run(function ()
-    local stream = opening_stream({}, true)
-    local opening = async.run<|nil, value|>(function (): nil
-      local response = http.request_upgrade_on(
+    const stream = opening_stream({}, true)
+    const opening = async.run<|nil, value|>(function (): nil
+      const response = http.request_upgrade_on(
         stream, stream:close, "http://example.test/", "echo")
       defer response:close()
       return nil
@@ -240,7 +239,7 @@ function test_upgrade_opening_cancellation_aborts_before_output_drain(_: test.Co
     defer task_support.cancel_and_join_task(opening, "HTTP cancellation test cleanup")
     while stream.writer == nil do timer.yield() end
     opening:cancel(async.CancellationReason.simple("cancel accepted HTTP output"))
-    local status = async.join(opening)
+    const status = async.join(opening)
     test.assert(status:has_cancelled(), "opening did not preserve Task cancellation")
     test.assert(stream.closed and stream.aborts == 1 and stream.writer == nil,
                 "opening published cancellation before abort and output retirement")
@@ -258,15 +257,15 @@ local function run_upgrade_server(first_port: integer,
   local server, port = support.http_listen(first_port,
     function (request: http.Request, response: http.Response)
       response:set_header("X-Handler", "preserved")
-      local extra = http.headers(nil)
+      const extra = http.headers(nil)
       extra:add("X-Accepted", "yes")
-      local upgraded = response:upgrade(request, protocol, extra)
+      const upgraded = response:upgrade(request, protocol, extra)
       response:abort() -- HTTP has transferred ownership; this must be a no-op.
       assert_http_error(function () request:read() end, "exchange has ended")
       assert_http_error(function () response:write("HTTP body") end, "exchange has ended")
       session = async.run<|nil, value|>(function (): nil
         defer upgraded:close()
-        local suffix = upgraded:read_until("END", false)
+        const suffix = upgraded:read_until("END", false)
         test.assert(suffix == "x\0prefixEND")
         test.assert(handler_returned, "HTTP handler did not return before the new owner ran")
         upgraded:write("accepted:" .. suffix)
@@ -275,13 +274,13 @@ local function run_upgrade_server(first_port: integer,
       handler_returned = true
     end)
   defer server:close()
-  local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+  const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
   defer task_support.cancel_and_join_task(serving, "HTTP upgrade serving cleanup")
-  local connection = net.connect("127.0.0.1", port)
+  const connection = net.connect("127.0.0.1", port)
   defer connection:close()
   connection:write("GET /upgrade HTTP/1.1\r\nHost: example.test\r\n" ..
     "Connection: Upgrade\r\nUpgrade: " .. protocols .. "\r\n\r\nx\0prefixEND")
-  local preamble = connection:read_until("\r\n\r\n", false)
+  const preamble = connection:read_until("\r\n\r\n", false)
   test.assert(support.contains(preamble, "HTTP/1.1 101 Switching Protocols\r\n"))
   test.assert(support.contains(preamble, "X-Accepted: yes\r\n"))
   test.assert(support.contains(preamble, "X-Handler: preserved\r\n"))
@@ -319,13 +318,13 @@ function test_upgrade_server_rejection_does_not_drain_protocol_suffix(_: test.Co
         response:set_header("Content-Length", "0")
       end)
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP rejection cleanup")
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     defer connection:close()
     connection:write("GET /upgrade HTTP/1.1\r\nHost: example.test\r\n" ..
       "Connection: Upgrade\r\nUpgrade: echo\r\n\r\n\0binary suffix")
-    local preamble = connection:read_until("\r\n\r\n", false)
+    const preamble = connection:read_until("\r\n\r\n", false)
     test.assert(support.contains(preamble, "HTTP/1.1 403 Forbidden\r\n"))
     test.assert(support.contains(preamble, "Connection: close\r\n"))
     test.assert(connection:read() == nil and called == 1)
@@ -334,7 +333,7 @@ end
 
 function test_http_header_limit_setting_and_scheme_guard(_: test.Context)
   runtime_test.run(function ()
-    local server, _port = support.http_listen(23700,
+    local server, _ = support.http_listen(23700,
       function (_request: http.Request, _response: http.Response) end)
     defer server:close()
     test.assert(server:header_limit() == 65536)
@@ -355,7 +354,7 @@ end
 function test_http_server_header_limit_counts_raw_leading_lines(context: test.Context)
   runtime_test.run(function ()
     local called = 0
-    local request_text = "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
+    const request_text = "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
     local server, port = support.http_listen(23800,
       function (_request: http.Request, response: http.Response)
         called = called + 1
@@ -363,16 +362,16 @@ function test_http_server_header_limit_counts_raw_leading_lines(context: test.Co
       end)
     defer server:close()
     server:header_limit(#request_text + 2)
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP header cap cleanup")
-    local exact = net.connect("127.0.0.1", port)
+    const exact = net.connect("127.0.0.1", port)
     defer exact:close()
     exact:write("\r\n" .. request_text)
-    local preamble = exact:read_until("\r\n\r\n", false)
+    const preamble = exact:read_until("\r\n\r\n", false)
     test.assert(support.contains(preamble, "HTTP/1.1 200 OK\r\n") and called == 1)
     exact:close()
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local excessive = net.connect("127.0.0.1", port)
+    const excessive = net.connect("127.0.0.1", port)
     defer excessive:close()
     excessive:write("\r\n\r\n" .. request_text)
     test.assert(excessive:read() == nil,
@@ -387,21 +386,21 @@ function test_upgrade_rejects_malformed_body_without_draining(_: test.Context)
     local completed = false
     local server, port = support.http_listen(23900,
       function (request: http.Request, response: http.Response)
-        local fields = http.headers(nil)
+        const fields = http.headers(nil)
         fields:add("X-Rejection", "checked")
         response:reject_upgrade(request, 400, fields)
         completed = true
       end)
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP malformed rejection cleanup")
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     defer connection:close()
     -- Missing Upgrade and Connection plus an unsent declared body must not
     -- make rejection wait in the ordinary HTTP body's automatic drain.
     connection:write("GET /upgrade HTTP/1.1\r\nHost: example.test\r\n" ..
                      "Content-Length: 1000000\r\n\r\n")
-    local preamble = connection:read_until("\r\n\r\n", false)
+    const preamble = connection:read_until("\r\n\r\n", false)
     test.assert(support.contains(preamble, "HTTP/1.1 400 Bad Request\r\n"))
     test.assert(support.contains(preamble, "X-Rejection: checked\r\n"))
     test.assert(support.contains(preamble, "Content-Length: 0\r\n"))
@@ -437,23 +436,23 @@ function test_upgrade_requires_live_pair_and_unsent_output(_: test.Context)
         end
       end)
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP live exchange cleanup")
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     defer connection:close()
     connection:write("GET /first HTTP/1.1\r\nHost: example.test\r\n\r\n")
-    local first = connection:read_until("\r\n\r\n", false)
+    const first = connection:read_until("\r\n\r\n", false)
     test.assert(support.contains(first, "HTTP/1.1 200 OK\r\n"))
     connection:write("GET /wrong-pair HTTP/1.1\r\nHost: example.test\r\n" ..
                      "Connection: Upgrade\r\nUpgrade: echo\r\n\r\n")
-    local rejected = connection:read_until("\r\n\r\n", false)
+    const rejected = connection:read_until("\r\n\r\n", false)
     test.assert(support.contains(rejected, "HTTP/1.1 400 Bad Request\r\n"))
     test.assert(connection:read() == nil and checks == 1)
-    local sent = net.connect("127.0.0.1", port)
+    const sent = net.connect("127.0.0.1", port)
     defer sent:close()
     sent:write("GET /prior-output HTTP/1.1\r\nHost: example.test\r\n" ..
                "Connection: Upgrade\r\nUpgrade: echo\r\n\r\n")
-    local ordinary = sent:read_until("\r\n\r\n", false)
+    const ordinary = sent:read_until("\r\n\r\n", false)
     test.assert(support.contains(ordinary, "HTTP/1.1 200 OK\r\n"))
     test.assert(sent:read() == nil and checks == 2)
   end)
@@ -463,8 +462,8 @@ function test_ordinary_http_client_rejects_101(_: test.Context)
   runtime_test.run(function ()
     local server, port = support.raw_listen(24100)
     defer server:close()
-    local peer = async.run<|nil, value|>(function (): nil
-      local connection = server:accept()
+    const peer = async.run<|nil, value|>(function (): nil
+      const connection = server:accept()
       defer connection:close()
       connection:read_until("\r\n\r\n", false)
       connection:write(UPGRADE_RESPONSE .. "\0opaque")
@@ -486,13 +485,13 @@ local function reject_upgrade_expectation(port_start: integer, opening: string)
         called = true
       end)
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP upgrade expectation cleanup")
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     defer connection:close()
     connection:write("GET /upgrade HTTP/1.1\r\nHost: example.test\r\n" ..
       opening .. "Content-Length: 1\r\nExpect: 100-continue\r\n\r\n")
-    local preamble = connection:read_until("\r\n\r\n", false)
+    const preamble = connection:read_until("\r\n\r\n", false)
     test.assert(preamble == "HTTP/1.1 400 Bad Request\r\n" ..
       "Content-Length: 0\r\nConnection: close\r\n\r\n")
     test.assert(not support.contains(preamble, "100 Continue") and not called)
@@ -510,15 +509,15 @@ local function reject_upgrade_semantics(port_start: integer, version: string,
       end)
     defer server:close()
     server:idle_timeout(2000)
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP malformed upgrade cleanup")
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     defer connection:close()
     -- Withhold the declared body: rejection must happen at the complete
     -- header boundary without an interim response or any body drain.
     connection:write("GET /upgrade " .. version .. "\r\n" .. host_fields ..
       "Connection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 1\r\n\r\n")
-    local preamble = connection:read_until("\r\n\r\n", false)
+    const preamble = connection:read_until("\r\n\r\n", false)
     test.assert(preamble == "HTTP/1.1 400 Bad Request\r\n" ..
       "Content-Length: 0\r\nConnection: close\r\n\r\n",
       "malformed complete upgrade did not receive one bodyless 400")
@@ -569,9 +568,9 @@ function test_response_abort_skips_output_and_unread_body_drain(_: test.Context)
         finished(true)
       end)
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP response abort cleanup")
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     defer connection:close()
     connection:write("POST /abort HTTP/1.1\r\nHost: example.test\r\n" ..
                      "Content-Length: 100\r\n\r\n")
@@ -596,24 +595,24 @@ function test_response_abort_truncates_stream_and_preserves_later_exchange(_: te
         end
       end)
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP response stream abort cleanup")
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     defer connection:close()
     connection:write("GET /first HTTP/1.1\r\nHost: example.test\r\n\r\n")
     test.assert(support.contains(connection:read_until("\r\n\r\n", false), "Content-Length: 0\r\n"))
     connection:write("GET /stream HTTP/1.1\r\nHost: example.test\r\n\r\n")
-    local output = string.writer()
+    const output = string.writer()
     for chunk in connection:read do output:write(chunk) end
-    local bytes = output:drain()
+    const bytes = output:drain()
     test.assert(support.contains(bytes, "HTTP/1.1 200 OK\r\n"), "stale response closed the later exchange")
     test.assert(support.contains(bytes, "\r\n7\r\npartial\r\n"), "abort lost committed output")
     test.assert(not support.contains(bytes, "\r\n0\r\n\r\n"), "abort finished a truncated stream")
     previous:abort() -- Retained responses stay harmless after transport retirement.
-    local short = net.connect("127.0.0.1", port)
+    const short = net.connect("127.0.0.1", port)
     defer short:close()
     short:write("GET /length HTTP/1.1\r\nHost: example.test\r\n\r\n")
-    local short_output = string.writer()
+    const short_output = string.writer()
     for chunk in short:read do short_output:write(chunk) end
     test.assert(support.contains(short_output:drain(), "Content-Length: 20\r\n"),
                 "abort retried a short fixed-length response")
@@ -626,7 +625,7 @@ local function response_abort_pending_body(encrypted: boolean)
     defer close()
     local finished, wait_finished, close_finished = async.channel<|boolean|>(1)
     defer close_finished()
-    local handler: http.Handler = function (request: http.Request, response: http.Response)
+    const handler: http.Handler = function (request: http.Request, response: http.Response)
         publish(response)
         local failed = false
         do request:read()
@@ -634,25 +633,25 @@ local function response_abort_pending_body(encrypted: boolean)
         end
         finished(failed)
       end
-    local listen = function (): (http.Server, integer)
+    const listen = function (): (http.Server, integer)
       if encrypted then return support.https_listen(25200, handler, 0) end
       return support.http_listen(25000, handler)
     end
     local server, port = listen()
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP pending body abort cleanup")
-    local connect = function (): io.ReaderWriterCloser
+    const connect = function (): io.ReaderWriterCloser
       if encrypted then return ssl.connect("127.0.0.1", port, support.TRUST_ROOT) end
       return net.connect("127.0.0.1", port)
     end
-    local connection = connect()
+    const connection = connect()
     defer connection:close()
     connection:write("POST /blocked HTTP/1.1\r\nHost: example.test\r\n" ..
                      "Content-Length: 100\r\n\r\n")
-    local response = receive()
-    local reason = async.CancellationReason.simple("cancelled abort owner")
-    local aborting = async.run<|nil, value|>(function (): nil
+    const response = receive()
+    const reason = async.CancellationReason.simple("cancelled abort owner")
+    const aborting = async.run<|nil, value|>(function (): nil
       async.running():cancel(reason)
       response:abort()
       return nil
@@ -701,14 +700,14 @@ function test_response_pending_headers_are_immutable_and_abortable(_: test.Conte
         finished(true)
       end)
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "HTTP header abort cleanup")
-    local connection = net.connect("127.0.0.1", port)
+    const connection = net.connect("127.0.0.1", port)
     defer connection:close()
     connection:write("GET /blocked HTTP/1.1\r\nHost: example.test\r\n\r\n")
-    local response = receive()
+    const response = receive()
     async.await<|nil, nil|>(function (resolve, _reject, _fatal)
-      local start = release
+      const start = release
       release = nil
       start(nil) -- Reach native header submission before any UV callback runs.
       test.assert(owner:status():as_string() == "waiting", "header writer did not suspend before mutation checks")

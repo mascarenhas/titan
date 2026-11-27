@@ -1,7 +1,7 @@
 function test_caught_cancellation_remains_authoritative(
     context: test.Context)
   runtime_test.run(function ()
-    local returned = async.run<|value, value|>(function (): value
+    const returned = async.run<|value, value|>(function (): value
       do
         timer.sleep(60000)
       catch
@@ -10,7 +10,7 @@ function test_caught_cancellation_remains_authoritative(
       return "unexpected return"
     end)
     task_support.cleanup_task(returned, "caught-return Task cleanup")
-    local replaced = async.run<|value, value|>(function (): value
+    const replaced = async.run<|value, value|>(function (): value
       do
         timer.sleep(60000)
       catch
@@ -47,16 +47,16 @@ end
 function test_cancellation_shields_file_cleanup_calls(
     context: test.Context)
   runtime_test.run(function ()
-    local first_path = support.temporary_file(context)
-    local second_path = support.temporary_file(context)
+    const first_path = support.temporary_file(context)
+    const second_path = support.temporary_file(context)
     local first_file: fs.File? = nil
     local second_file: fs.File? = nil
     local cleanup_progress = 0
     local task: async.Task? = nil
 
     task = async.run<|value, value|>(function (): value
-      local first = fs.open(first_path, "w")
-      local second = fs.open(second_path, "w")
+      const first = fs.open(first_path, "w")
+      const second = fs.open(second_path, "w")
       first_file = first
       second_file = second
       defer do
@@ -97,8 +97,8 @@ function test_cancellation_crosses_close_callback(
     context: test.Context)
   runtime_test.run(function ()
     local close_finished = false
-    local target = async.run<|value, value|>(function (): value
-      local ticker = timer.ticker(60000)
+    const target = async.run<|value, value|>(function (): value
+      const ticker = timer.ticker(60000)
       -- Establish cancellation before the ownership-retiring close. The close
       -- dispatch and callback must both ignore cancellation until completion;
       -- polling from another Task would depend on libuv timer/close phase order.
@@ -126,9 +126,9 @@ function test_suspend_cancellation_action_is_synchronous_and_specific(
   runtime_test.run(function ()
     local cancel_entered = false
     local cancel_actions = 0
-    local cancel_token =
-      async.ResumeToken.new("suspend cancellation test")
-    local cancelled = async.run<|value, value|>(function (): value
+    const cancel_token =
+      async.ResumeToken("suspend cancellation test")
+    const cancelled = async.run<|value, value|>(function (): value
       cancel_entered = true
       async.suspend(cancel_token, function ()
         cancel_actions = cancel_actions + 1
@@ -149,9 +149,9 @@ function test_suspend_cancellation_action_is_synchronous_and_specific(
 
     local resume_entered = false
     local resume_actions = 0
-    local resume_token =
-      async.ResumeToken.new("ordinary resume cancellation test")
-    local resumed = async.run<|value, value|>(function (): value
+    const resume_token =
+      async.ResumeToken("ordinary resume cancellation test")
+    const resumed = async.run<|value, value|>(function (): value
       resume_entered = true
       async.suspend(resume_token, function ()
         resume_actions = resume_actions + 1

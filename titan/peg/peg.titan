@@ -72,9 +72,9 @@ local _cp_pattern: value = nil
 --- Opaque pattern owned by Titan private embedded LPegLabel engine.
 -- @usage standard-library-peg.md
 record Pattern
-  local raw: value
+  local const raw: value
   local match_raw: value
-  local tree_size: integer
+  local const tree_size: integer
 end
 
 --- Leftmost search result with an inclusive byte span and separately stored captures.
@@ -84,25 +84,25 @@ end
 record Match
   first: integer
   last: integer
-  local capture_count: integer
-  local captures: {value}
+  local const capture_count: integer
+  local const captures: {value}
 end
 
 local record PatternMatchAttempt
-  local matched: boolean
-  local after: integer
-  local capture_count: integer
-  local captures: {value}
-  local ordinary_failure: boolean
-  local failure_label: string
-  local failure_position: integer
+  local const matched: boolean
+  local const after: integer
+  local const capture_count: integer
+  local const captures: {value}
+  local const ordinary_failure: boolean
+  local const failure_label: string
+  local const failure_position: integer
 end
 
 --- Named grammar rule created by rule and consumed by grammar.
 -- @usage standard-library-peg.md
 record Rule
-  local name: string
-  local pattern: Pattern
+  local const name: string
+  local const pattern: Pattern
 end
 
 --- Byte-class patterns built from the current C locale.
@@ -135,9 +135,9 @@ end
 --- Named Relabel pattern or value binding supplied to compile.
 -- @usage standard-library-peg.md
 record Definition
-  local name: string
-  local raw: value
-  local tree_size: integer
+  local const name: string
+  local const raw: value
+  local const tree_size: integer
 end
 
 -- Matching and grammar construction.
@@ -153,13 +153,13 @@ local function pattern_match_attempt(
     raw = _sequence(_sequence(_sentinel_pattern, pattern.raw), _cp_pattern)
     pattern.match_raw = raw
   end
-  local results: {value} = {
+  const results: {value} = {
     _match(raw, subject, start, ...)
   }
-  local native_count = #results
+  const native_count = #results
   if native_count >= 2 and
       results[1] == _match_success_sentinel then
-    local capture_count = native_count - 2
+    const capture_count = native_count - 2
     if capture_count > 200 then
       raise "too many flexible return values (max 200)"
     end
@@ -173,7 +173,7 @@ local function pattern_match_attempt(
       failure_position = 0
     }
   elseif native_count == 3 then
-    local label = results[2] as string
+    const label = results[2] as string
     return PatternMatchAttempt {
       matched = false,
       after = 0,
@@ -195,7 +195,7 @@ end
 -- @usage standard-library-peg.md
 function Pattern:match(subject: string, init: integer?,
                        ...: value): (value, ...: value)
-  local attempt = pattern_match_attempt(
+  const attempt = pattern_match_attempt(
     self, subject, _normalized_init(subject, init), ...)
   if attempt.matched then
     if attempt.capture_count == 0 then return attempt.after end
@@ -229,13 +229,13 @@ end
 function grammar(start: string,
                  rules: {Rule}): Pattern
   local total_size = 2
-  local seen: {string: boolean} = {}
-  local native: {value: value} = {}
+  const seen: {string: boolean} = {}
+  const native: {value: value} = {}
   native[1] = start
   local index = 1
   while index <= #rules do
     if index > MAX_RULES then raise "PEG grammar has too many rules" end
-    local item = rules[index]
+    const item = rules[index]
     if seen[item.name] then
       raise "duplicate PEG grammar rule name"
     end
@@ -255,7 +255,7 @@ end
 -- @return Locale record containing the character classes.
 -- @usage standard-library-peg.md
 function locale(): Locale
-  local native = _locale()
+  const native = _locale()
   return Locale {
     alnum = _pattern(native["alnum"], 5),
     alpha = _pattern(native["alpha"], 5),
@@ -295,7 +295,7 @@ end
 -- @return Literal pattern.
 -- @usage standard-library-peg.md
 function literal(text: string): Pattern
-  local length = #text
+  const length = #text
   local size = 1
   if length > 0 then
     if length > (MAX_PATTERN_SIZE + 1) // 2 then
@@ -348,7 +348,7 @@ end
 -- @usage standard-library-peg.md
 function runtime(
     callback: function (string, integer, string): (...: value)): Pattern
-  local adapter:
+  const adapter:
       function (string, integer, string): (...: value) =
     function(subject: string, position: integer,
              whole: string): (...: value)
@@ -410,7 +410,7 @@ end
 function behind(pattern: Pattern): Pattern
   -- The engine remains authoritative for fixed-length/capture-free checks.
   -- Its numeric bound is validated there after Titan's tree-size projection.
-  local size = _checked_unary(pattern, 1)
+  const size = _checked_unary(pattern, 1)
   return _pattern(_B(pattern.raw), size)
 end
 
@@ -432,8 +432,8 @@ function sequence(...: Pattern): Pattern
   local result = ...[1]
   local index = 2
   while index <= #... do
-    local next_pattern = ...[index]
-    local size = _checked_sum(
+    const next_pattern = ...[index]
+    const size = _checked_sum(
       result.tree_size, next_pattern.tree_size, 1)
     result = _pattern(
       _sequence(result.raw, next_pattern.raw), size)
@@ -451,8 +451,8 @@ function choice(...: Pattern): Pattern
   local result = ...[1]
   local index = 2
   while index <= #... do
-    local next_pattern = ...[index]
-    local size = _checked_sum(
+    const next_pattern = ...[index]
+    const size = _checked_sum(
       result.tree_size, next_pattern.tree_size, 1)
     result = _pattern(
       _choice(result.raw, next_pattern.raw), size)
@@ -471,8 +471,8 @@ function difference(first: Pattern,
   local result = first
   local index = 1
   while index <= #... do
-    local next_pattern = ...[index]
-    local size = _checked_sum(
+    const next_pattern = ...[index]
+    const size = _checked_sum(
       result.tree_size, next_pattern.tree_size, 2)
     result = _pattern(
       _difference(result.raw, next_pattern.raw), size)
@@ -507,7 +507,7 @@ end
 function at_least(pattern: Pattern,
                   count: integer): Pattern
   if count < 0 then raise "PEG repetition count must be nonnegative" end
-  local size = _at_least_size(pattern, count)
+  const size = _at_least_size(pattern, count)
   return _pattern(_repeat(pattern.raw, count), size)
 end
 
@@ -520,7 +520,7 @@ function at_most(pattern: Pattern,
                  count: integer): Pattern
   if count < 0 then raise "PEG repetition count must be nonnegative" end
   if count == 0 then return succeed() end
-  local size = _at_most_size(pattern, count)
+  const size = _at_most_size(pattern, count)
   return _pattern(_repeat(pattern.raw, -count), size)
 end
 
@@ -564,7 +564,7 @@ end
 -- @return Constant-capture pattern.
 -- @usage standard-library-peg.md
 function constant(...: value): Pattern
-  local count = #...
+  const count = #...
   local size = 1
   if count == 1 then
     size = 2
@@ -583,7 +583,7 @@ end
 function match_time(
     pattern: Pattern,
     callback: function (string, integer, value, ...: value): (...: value)): Pattern
-  local adapter:
+  const adapter:
       function (string, integer, value, ...: value): (...: value) =
     function(subject: string, position: integer,
              first: value, ...: value): (...: value)
@@ -646,7 +646,7 @@ end
 function fold_capture(
     pattern: Pattern,
     callback: function (value, ...: value): (value)): Pattern
-  local adapter:
+  const adapter:
       function (value, ...: value): (value) =
     function(accumulator: value, ...: value): value
       return callback(accumulator, ...)
@@ -712,7 +712,7 @@ end
 function function_capture(
     pattern: Pattern,
     callback: function (value, ...: value): (...: value)): Pattern
-  local adapter:
+  const adapter:
       function (value, ...: value): (...: value) =
     function(first: value, ...: value): (...: value)
       return callback(first, ...)
@@ -738,7 +738,7 @@ function line_column(subject: string,
   local line_start = 1
   local cursor = 1
   while cursor < position do
-    local byte = _relabel_byte(subject, cursor)
+    const byte = _relabel_byte(subject, cursor)
     if byte == 13 and cursor < #subject and
         _relabel_byte(subject, cursor + 1) == 10 then
       if cursor + 1 >= position then break end
@@ -795,7 +795,7 @@ function compile(
   if not (candidate is string) then
     raise "PEG expression must be a string or Pattern"
   end
-  local source = candidate as string
+  const source = candidate as string
   if not definitions then
     return _relabel_cached_source(
       source, _relabel_match_cache)
@@ -811,11 +811,11 @@ end
 -- @usage standard-library-peg.md
 function match(subject: string, candidate: value,
                init: integer?): Match?
-  local compiled = compile(candidate)
+  const compiled = compile(candidate)
 
   local start = _normalized_init(subject, init)
   while start <= #subject + 1 do
-    local attempt = pattern_match_attempt(
+    const attempt = pattern_match_attempt(
       compiled, subject, start)
     if attempt.matched then
       return Match {
@@ -839,19 +839,19 @@ end
 -- @usage standard-library-peg.md
 function gsub(subject: string, candidate: value,
               replacement: function (string): (string)): string
-  local compiled = compile(candidate)
+  const compiled = compile(candidate)
 
-  local adapter: function (value): (string) =
+  const adapter: function (value): (string) =
     function(found: value): string
       return replacement(found as string)
     end
   -- `%0` discards any captures inside the candidate and supplies the exact
   -- whole match as the callback's sole value.
-  local replaced = function_capture(
+  const replaced = function_capture(
     template_capture(compiled, "%0"), adapter)
-  local substitution_pattern = substitution(
+  const substitution_pattern = substitution(
     zero_or_more(choice(replaced, any())))
-  local result: value = substitution_pattern:match(subject)
+  const result: value = substitution_pattern:match(subject)
   return result as string
 end
 

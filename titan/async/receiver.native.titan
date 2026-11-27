@@ -4,7 +4,7 @@
 -- wait: later waits reserve by setting task and reuse the token and action.
 local record ReceiverReader
   task: Task<|value, value|>?
-  token: ResumeToken
+  const token: ResumeToken
   withdraw: SuspendCancelAction?
 end
 
@@ -13,8 +13,8 @@ end
 -- @usage async-io.md#cross-state-receivers
 record Receiver
   local native: foreign titan_async_receiver
-  local native_handle: uv.async_t
-  local handle_view: uv.handle_t
+  local const native_handle: uv.async_t
+  local const handle_view: uv.handle_t
   local reader: ReceiverReader?
 end
 
@@ -52,9 +52,9 @@ local function Receiver:begin_close()
 end
 
 local function Receiver:wake()
-  local reader? = self.reader
+  const reader? = self.reader
   if reader == nil then return end
-  local task? = reader.task
+  const task? = reader.task
   -- Task:resume wakes a reader suspended on its token and latches the wake of
   -- a running reader, one about to suspend or one decoding, whose loop in
   -- wait rechecks the slot after every return; it coalesces repeated wakes.
@@ -79,12 +79,12 @@ end
 -- @usage async-io.md#cross-state-receivers
 function receiver(): Receiver
   -- Implementation notes: doc/implementation/libuv-runtime.md#cross-state-receiver-ownership
-  local runtime = ensure_runtime()
+  const runtime = ensure_runtime()
   if runtime.closing or runtime.exit_code ~= nil then
     raise "cannot create a receiver while async Runtime is shutting down"
   end
-  local handle = uv.async_t.new()
-  local owner = Receiver {
+  const handle = uv.async_t()
+  const owner = Receiver {
     native = foreign titan_async_receiver.new(),
     native_handle = handle,
     handle_view = handle:as_handle_t(),
@@ -95,7 +95,7 @@ function receiver(): Receiver
   do
     -- A notification carries no resource. The actual packet stays in the
     -- native slot, including while a reader's deferred wake is queued.
-    local callback = function (_: uv.async_t) owner:wake() end
+    const callback = function (_: uv.async_t) owner:wake() end
     uv.handle_set_data(owner.handle_view, owner)
     owner.native.send = uv.async_send_function()
     check_status(uv.async_init(runtime.backend.loop, handle, callback), "async.receiver")
@@ -129,7 +129,7 @@ function send(handle: foreign *void, candidate: value)
   defer transfer.discard_message(raw)
   -- Call at the real guarded local: its volatile home exposes the native clear
   -- before check_status can enter ordinary Titan code or raise.
-  local status = receiver_send_native(handle as foreign *titan_async_receiver, raw)
+  const status = receiver_send_native(handle as foreign *titan_async_receiver, raw)
   if status == 2 then raise "receiver is closed" end
   check_status(status, "async.send")
 end
@@ -137,7 +137,7 @@ end
 -- Notification-only Receivers never allocate reader state. The first wait
 -- publishes it only once complete; every later wait reuses it.
 local function Receiver:create_reader(): ReceiverReader
-  local reader = ReceiverReader(nil, ResumeToken("async.Receiver.wait"), nil)
+  const reader = ReceiverReader(nil, ResumeToken("async.Receiver.wait"), nil)
   -- Task:cancel runs this only while the reserving Task is suspended in wait,
   -- so the reservation it withdraws is necessarily that Task's.
   reader.withdraw = function () reader.task = nil end
@@ -151,8 +151,8 @@ end
 -- @return Decoded value, including nil and false as data.
 -- @usage async-io.md#cross-state-receivers
 function Receiver:wait(): value
-  local task = running()
-  local reader = self.reader or self:create_reader()
+  const task = running()
+  const reader = self.reader or self:create_reader()
   if reader.task ~= nil then raise "receiver already has a waiting reader" end
   -- Cancellation withdraws the reservation before this Task unwinds, so a
   -- successor may already hold it on exit; release only this Task's own.
@@ -163,7 +163,7 @@ function Receiver:wait(): value
   while true do
     checkpoint()
     local raw: foreign *void = nil
-    local status = receiver_take_native(self.native, raw)
+    const status = receiver_take_native(self.native, raw)
     if status == 2 then raise "receiver is closed" end
     if status == 1 then
       -- Guard only after the native take, so no later write reaches `raw`;

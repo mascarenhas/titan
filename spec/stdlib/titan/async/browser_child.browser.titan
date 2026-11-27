@@ -15,7 +15,7 @@ catch
 end
 
 function publication()
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
   target:call(Value.is_string("child_echo"), Value.is_callable(function (...: Value): Value
     return ...[1]

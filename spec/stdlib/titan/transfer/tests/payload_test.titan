@@ -26,7 +26,7 @@ local transfer_payload_encode_calls = 0
 local transfer_payload_decode_calls = 0
 
 record TransferPayloadRecord
-  local secret: integer
+  local const secret: integer
 end
 
 function TransferPayloadRecord.new(secret: integer): TransferPayloadRecord
@@ -56,7 +56,7 @@ function TransferPayloadRecord.from_transfer_payload(payload: string): TransferP
 end
 
 record TransferPayloadEmpty
-  local marker: integer
+  local const marker: integer
 end
 
 function TransferPayloadEmpty:to_transfer_payload(): string
@@ -69,7 +69,7 @@ function TransferPayloadEmpty.from_transfer_payload(payload: string): TransferPa
 end
 
 record TransferPayloadGeneric<|T|>
-  local item: T
+  local const item: T
 end
 
 function TransferPayloadGeneric:to_transfer_payload(): string
@@ -77,7 +77,7 @@ function TransferPayloadGeneric:to_transfer_payload(): string
 end
 
 function TransferPayloadGeneric.from_transfer_payload(payload: string): TransferPayloadGeneric<|T|>
-  local item: value = transfer_protobuf.deserialize_fields(payload,
+  const item: value = transfer_protobuf.deserialize_fields(payload,
     {transfer_reflect.Type.is_string()})
   return { item = item }
 end
@@ -98,11 +98,11 @@ function TransferPayloadRetry.from_transfer_payload(payload: string): TransferPa
 end
 
 record TransferPayloadCycle
-  local marker: integer
+  local const marker: integer
 end
 
 function TransferPayloadCycle:to_transfer_payload(): string
-  local packet = transfer_mod.TransferValue.from_value(self)
+  local _ = transfer_mod.TransferValue.from_value(self)
   return ""
 end
 
@@ -191,7 +191,7 @@ record TransferPayloadPlain
 end
 
 record TransferPayloadMutator
-  local mutate: function (): ()
+  local const mutate: function (): ()
 end
 
 function TransferPayloadMutator:read(): integer
@@ -247,9 +247,9 @@ local foreign function test_resource_release(raw: *void)
 end
 
 record TransferPayloadHookStep
-  local label: string
-  local fail_encode: boolean
-  local fail_decode: boolean
+  local const label: string
+  local const fail_encode: boolean
+  local const fail_decode: boolean
 end
 
 local function transfer_hook_step_fields(): const {transfer_reflect.Type}
@@ -277,12 +277,12 @@ function TransferPayloadHookStep.from_transfer_payload(
 end
 
 record TransferPayloadCustomResourceProbe
-  local mode: string
-  local ptr: foreign *void
+  local const mode: string
+  local const ptr: foreign *void
 end
 
 function TransferPayloadCustomResourceProbe:to_transfer_payload(): string
-  local null_cb: foreign function(*void): void = nil
+  const null_cb: foreign function(*void): void = nil
   if self.mode == "null-resource" then
     return transfer_mod.attach_resource(nil, test_resource_retain, test_resource_release)
   elseif self.mode == "null-retain" then
@@ -295,25 +295,25 @@ end
 
 function TransferPayloadCustomResourceProbe.from_transfer_payload(
     payload: string): TransferPayloadCustomResourceProbe
-  local raw = transfer_mod.claim_resource(payload, test_resource_release)
+  const raw = transfer_mod.claim_resource(payload, test_resource_release)
   return { mode = "claimed", ptr = raw }
 end
 
 local function set_closure_upvalue(fn: value, upvalue_one_based: integer, replacement: value): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 3) ~= 0)
   ffi.lua_pushtvalue(L, fn)
-  local fn_idx = ffi.lua_gettop(L)
+  const fn_idx = ffi.lua_gettop(L)
   test.assert(ffi.lua_getupvalue(L, fn_idx, upvalue_one_based as foreign int) ~= nil)
-  local previous: value = ffi.lua_totvalue(L, -1)
+  const previous: value = ffi.lua_totvalue(L, -1)
   ffi.lua_pushtvalue(L, replacement)
   test.assert(ffi.lua_setupvalue(L, fn_idx, upvalue_one_based as foreign int) ~= nil)
   return previous
 end
 
 local function make_lightuserdata_from_buffer(buffer: owned char[]): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0)
   ffi.lua_pushlightuserdata(L, buffer as foreign *void)
@@ -321,7 +321,7 @@ local function make_lightuserdata_from_buffer(buffer: owned char[]): value
 end
 
 local function make_null_lightuserdata(): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0)
   ffi.lua_pushlightuserdata(L, nil)
@@ -343,7 +343,7 @@ record TransferPayloadStructuralHookArray
 end
 
 local function make_lua_cfunction(upvalues: integer): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, upvalues + 2) ~= 0)
   if upvalues == 0 then
@@ -358,7 +358,7 @@ local function make_lua_cfunction(upvalues: integer): value
 end
 
 local function make_light_cfunction(): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0)
   ffi.lua_pushcclosure(L, transfer_test_callback, 0)
@@ -366,25 +366,25 @@ local function make_light_cfunction(): value
 end
 
 local function make_unbranded_userdata(): (value, foreign *void)
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0)
-  local ptr = ffi.lua_newuserdatauv(L, foreign int.sizeof as foreign size_t, 0)
-  local bytes = ptr as foreign *int
+  const ptr = ffi.lua_newuserdatauv(L, foreign int.sizeof as foreign size_t, 0)
+  const bytes = ptr as foreign *int
   bytes[0] = 919
   return ffi.lua_totvalue(L, -1), ptr
 end
 
 local function make_lua_thread_value(): (value, foreign *lua_State)
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0)
-  local th = ffi.lua_newthread(L)
+  const th = ffi.lua_newthread(L)
   return ffi.lua_totvalue(L, -1), th
 end
 
 local function make_plain_lua_function(): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 2) ~= 0)
   test.assert(ffi.luaL_loadstring(L, "return 1") == ffi.LUA_OK)
@@ -395,8 +395,8 @@ function test_transfer_payload_private_fields_empty_and_generic(_context: test.C
   transfer_payload_new_calls = 0
   transfer_payload_encode_calls = 0
   transfer_payload_decode_calls = 0
-  local source: TransferPayloadRecord = { secret = 73 }
-  local packet = transfer_mod.TransferValue.from_value(source)
+  const source: TransferPayloadRecord = { secret = 73 }
+  const packet = transfer_mod.TransferValue.from_value(source)
   test.assert(transfer_payload_encode_calls == 1 and transfer_payload_decode_calls == 0)
   case packet
   when is_record_payload(module, name, payload) then
@@ -404,21 +404,21 @@ function test_transfer_payload_private_fields_empty_and_generic(_context: test.C
   else raise "private record did not select custom payload hooks"
   end
   transfer_gc.collect()
-  local restored: TransferPayloadRecord = packet:to_value()
+  const restored: TransferPayloadRecord = packet:to_value()
   test.assert(restored ~= source and restored.secret == 73)
   test.assert(transfer_payload_decode_calls == 1 and transfer_payload_new_calls == 0,
               "custom transfer invoked a constructor or repeated reconstruction")
-  local empty: TransferPayloadEmpty = { marker = -1 }
-  local empty_copy: TransferPayloadEmpty = transfer_mod.TransferValue.from_value(empty):to_value()
+  const empty: TransferPayloadEmpty = { marker = -1 }
+  const empty_copy: TransferPayloadEmpty = transfer_mod.TransferValue.from_value(empty):to_value()
   test.assert(empty_copy.marker == 42)
-  local generic: TransferPayloadGeneric<|string|> = { item = "erased\0payload" }
-  local generic_copy: TransferPayloadGeneric<|string|> =
+  const generic: TransferPayloadGeneric<|string|> = { item = "erased\0payload" }
+  const generic_copy: TransferPayloadGeneric<|string|> =
     transfer_mod.TransferValue.from_value(generic):to_value()
   test.assert(generic_copy.item == generic.item)
 end
 
 function test_transfer_payload_rejects_malformed_hook_pairs(_context: test.Context)
-  local cases: {value} = {
+  const cases: {value} = {
     TransferPayloadToOnly(1), TransferPayloadFromOnly(1), TransferPayloadWrongKinds(1),
     TransferPayloadFixedOutput(1), TransferPayloadWrongTail(1),
     TransferPayloadFixedInput(1), TransferPayloadWrongReturn(1)
@@ -439,13 +439,13 @@ function test_transfer_payload_rejects_malformed_hook_pairs(_context: test.Conte
 end
 
 function test_transfer_payload_reentrant_error_releases_pack_guard(_context: test.Context)
-  local source: TransferPayloadRetry = { fail = true }
+  const source: TransferPayloadRetry = { fail = true }
   transfer_payload_error(function () transfer_mod.TransferValue.from_value(source) end,
                          "transfer-hook-failure")
   source.fail = false
-  local restored: TransferPayloadRetry = transfer_mod.TransferValue.from_value(source):to_value()
+  const restored: TransferPayloadRetry = transfer_mod.TransferValue.from_value(source):to_value()
   test.assert(not restored.fail, "failed transfer retained its active-record guard")
-  local cyclic: TransferPayloadCycle = { marker = 1 }
+  const cyclic: TransferPayloadCycle = { marker = 1 }
   transfer_payload_error(function () transfer_mod.TransferValue.from_value(cyclic) end,
                          "cyclic record payload")
   transfer_payload_error(function () transfer_mod.TransferValue.from_value(cyclic) end,
@@ -454,30 +454,30 @@ end
 
 function test_transfer_closure_projects_all_immediate_captures_before_hooks(_context: test.Context)
   local number = 41
-  local mutator = TransferPayloadMutator(function () number = 99 end)
-  local source = function (): integer return mutator:read() + number end
-  local packet = transfer_mod.TransferValue.from_value(source)
+  const mutator = TransferPayloadMutator(function () number = 99 end)
+  const source = function (): integer return mutator:read() + number end
+  const packet = transfer_mod.TransferValue.from_value(source)
   test.assert(source() == 99, "fixture hook did not change the origin cell")
-  local restored: function (): integer = packet:to_value()
+  const restored: function (): integer = packet:to_value()
   test.assert(restored() == 41, "a hook changed a later immediate capture before projection")
 end
 
 function test_transfer_closure_validates_entry_before_decoding_payload(context: test.Context)
-  local packet = transfer_mod.TransferValue.from_value(function (): integer return 43 end)
+  const packet = transfer_mod.TransferValue.from_value(function (): integer return 43 end)
   case packet
   when is_closure(module, entry, _bytes) then
-    local pointer_fields: const {transfer_reflect.Type} = {
+    const pointer_fields: const {transfer_reflect.Type} = {
       transfer_reflect.Type.is_foreign_pointer(transfer_reflect.Type.is_foreign_void(), {}),
     }
-    local address_one = (transfer_protobuf.deserialize_fields(
+    const address_one = (transfer_protobuf.deserialize_fields(
       "\9\1\0\0\0\0\0\0\0", pointer_fields)) as foreign *void
-    local tokens: {transfer_mod.TransferValue} = {
+    const tokens: {transfer_mod.TransferValue} = {
       transfer_mod.TransferValue.is_pointer(nil), transfer_mod.TransferValue.is_pointer(address_one),
     }
-    local names = {"null", "address-one"}
+    const names = {"null", "address-one"}
     for index = 1, #tokens do
-      local token = tokens[index]
-      context:run(names[index], function (_context: test.Context)
+      const token = tokens[index]
+      context:run(names[index], function (_: test.Context)
         case token
         when is_pointer(pointer) then
           transfer_payload_error(function ()
@@ -486,8 +486,8 @@ function test_transfer_closure_validates_entry_before_decoding_payload(context: 
         else raise "invalid entry fixture policy" end
       end)
     end
-    context:run("unregistered-identical-entry", function (_context: test.Context)
-      local copied: owned *TitanTransferEntry = foreign TitanTransferEntry.new()
+    context:run("unregistered-identical-entry", function (_: test.Context)
+      const copied: owned *TitanTransferEntry = foreign TitanTransferEntry.new()
       ffi.memcpy(copied, entry, foreign TitanTransferEntry.sizeof)
       transfer_payload_error(function ()
         transfer_mod.TransferValue.is_closure(module, copied as foreign *void,
@@ -498,17 +498,17 @@ function test_transfer_closure_validates_entry_before_decoding_payload(context: 
 end
 
 function test_transfer_closure_validates_counts_before_decoding_captures(_context: test.Context)
-  local source = TransferPayloadRecord(47)
-  local packet = transfer_mod.TransferValue.from_value(function (): integer return source.secret end)
-  local fields: const {transfer_reflect.Type} = {
+  const source = TransferPayloadRecord(47)
+  const packet = transfer_mod.TransferValue.from_value(function (): integer return source.secret end)
+  const fields: const {transfer_reflect.Type} = {
     transfer_reflect.Type.is_array(transfer_reflect.ArrayTypeConstness.is_mutable(),
       transfer_reflect.Type.is_named(transfer_reflect.NamedType("titan.transfer.TransferValue"))),
     transfer_reflect.Type.is_array(transfer_reflect.ArrayTypeConstness.is_mutable(),
       transfer_reflect.Type.is_boolean()),
   }
-  local policies = {transfer_mod.TransferValue.from_value(source)}
-  local flags: {boolean} = {}
-  local bytes = transfer_protobuf.serialize_fields(fields, policies, flags)
+  const policies = {transfer_mod.TransferValue.from_value(source)}
+  const flags: {boolean} = {}
+  const bytes = transfer_protobuf.serialize_fields(fields, policies, flags)
   transfer_payload_decode_calls = 0
   case packet
   when is_closure(module, entry, _bytes) then
@@ -521,26 +521,26 @@ function test_transfer_closure_validates_counts_before_decoding_captures(_contex
 end
 
 function test_transfer_closure_validates_all_slots_before_decoding_captures(context: test.Context)
-  local source = TransferPayloadRecord(53)
-  local left = 1
-  local right = 2
-  local packet = transfer_mod.TransferValue.from_value(function (): integer
+  const source = TransferPayloadRecord(53)
+  const left = 1
+  const right = 2
+  const packet = transfer_mod.TransferValue.from_value(function (): integer
     return source.secret + left + right
   end)
-  local fields: const {transfer_reflect.Type} = {
+  const fields: const {transfer_reflect.Type} = {
     transfer_reflect.Type.is_array(transfer_reflect.ArrayTypeConstness.is_mutable(),
       transfer_reflect.Type.is_named(transfer_reflect.NamedType("titan.transfer.TransferValue"))),
     transfer_reflect.Type.is_array(transfer_reflect.ArrayTypeConstness.is_mutable(),
       transfer_reflect.Type.is_boolean()),
   }
-  local record_policy = transfer_mod.TransferValue.from_value(source)
-  local valid_policies: {value} = {record_policy,
+  const record_policy = transfer_mod.TransferValue.from_value(source)
+  const valid_policies: {value} = {record_policy,
     transfer_mod.TransferValue.is_integer(1), transfer_mod.TransferValue.is_integer(2)}
-  local valid_flags: {value} = {false, false, false}
-  local policy_hole: {value} = {record_policy, nil, transfer_mod.TransferValue.is_integer(2)}
-  local flag_hole: {value} = {false, nil, false}
-  local rejected = function (policies: {value}, flags: {value}, expected: string)
-    local bytes = transfer_protobuf.serialize_fields(fields, policies, flags)
+  const valid_flags: {value} = {false, false, false}
+  const policy_hole: {value} = {record_policy, nil, transfer_mod.TransferValue.is_integer(2)}
+  const flag_hole: {value} = {false, nil, false}
+  const rejected = function (policies: {value}, flags: {value}, expected: string)
+    const bytes = transfer_protobuf.serialize_fields(fields, policies, flags)
     transfer_payload_decode_calls = 0
     case packet
     when is_closure(module, entry, _bytes) then
@@ -551,27 +551,27 @@ function test_transfer_closure_validates_all_slots_before_decoding_captures(cont
     test.assert(transfer_payload_decode_calls == 0,
       "a malformed closure slot invoked a resource-capable decoder")
   end
-  context:run("policy-hole", function (_context: test.Context)
+  context:run("policy-hole", function (_: test.Context)
     rejected(policy_hole, valid_flags, "nil")
   end)
-  context:run("flag-hole", function (_context: test.Context)
+  context:run("flag-hole", function (_: test.Context)
     rejected(valid_policies, flag_hole, "boolean")
   end)
 end
 
 function test_transfer_closure_failed_restore_releases_temporary_state(_context: test.Context)
   local number = 5
-  local source = function (): integer number = number + 1 return number end
-  local packet = transfer_mod.TransferValue.from_value(source)
-  local fields: const {transfer_reflect.Type} = {
+  const source = function (): integer number = number + 1 return number end
+  const packet = transfer_mod.TransferValue.from_value(source)
+  const fields: const {transfer_reflect.Type} = {
     transfer_reflect.Type.is_array(transfer_reflect.ArrayTypeConstness.is_mutable(),
       transfer_reflect.Type.is_named(transfer_reflect.NamedType("titan.transfer.TransferValue"))),
     transfer_reflect.Type.is_array(transfer_reflect.ArrayTypeConstness.is_mutable(),
       transfer_reflect.Type.is_boolean()),
   }
-  local wrong = {transfer_mod.TransferValue.is_string("wrong capture type")}
-  local flags = {false}
-  local bytes = transfer_protobuf.serialize_fields(fields, wrong, flags)
+  const wrong = {transfer_mod.TransferValue.is_string("wrong capture type")}
+  const flags = {false}
+  const bytes = transfer_protobuf.serialize_fields(fields, wrong, flags)
   case packet
   when is_closure(module, entry, _bytes) then
     transfer_payload_error(function ()
@@ -579,14 +579,14 @@ function test_transfer_closure_failed_restore_releases_temporary_state(_context:
     end, "integer")
   else raise "closure snapshot did not preserve its carrier" end
   transfer_gc.collect()
-  local first: function (): integer = packet:to_value()
-  local second: function (): integer = packet:to_value()
+  const first: function (): integer = packet:to_value()
+  const second: function (): integer = packet:to_value()
   test.assert(first() == 6 and second() == 6 and source() == 6,
     "failed restoration corrupted the state or shared restored cells")
 end
 
 function test_transfer_payload_explicit_policies_and_structural_fallback(_context: test.Context)
-  local chosen = transfer_mod.TransferValue.is_string("chosen\0policy")
+  const chosen = transfer_mod.TransferValue.is_string("chosen\0policy")
   test.assert(transfer_mod.TransferValue.from_value(chosen) == chosen,
               "explicit TransferValue policy was reinterpreted")
   test.assert(chosen:to_value() == "chosen\0policy")
@@ -596,33 +596,33 @@ function test_transfer_payload_explicit_policies_and_structural_fallback(_contex
   when is_float(number) then test.assert(number == 42.0)
   else raise "from_value changed an integral float into an integer"
   end
-  local plain = TransferPayloadPlain(42)
-  local plain_packet = transfer_mod.TransferValue.from_value(plain)
+  const plain = TransferPayloadPlain(42)
+  const plain_packet = transfer_mod.TransferValue.from_value(plain)
   case plain_packet
   when is_record(module, name, bytes) then
     test.assert(module == "transfer.tests" and name == "transfer.tests.TransferPayloadPlain")
     test.assert(bytes == transfer_protobuf.serialize(plain))
   else raise "record without hooks skipped structural protobuf"
   end
-  local plain_copy: TransferPayloadPlain = plain_packet:to_value()
+  const plain_copy: TransferPayloadPlain = plain_packet:to_value()
   test.assert(plain_copy ~= plain and plain_copy.marker == 42)
-  local message = TransferPayloadPlainUnion.item(73)
-  local union_copy: TransferPayloadPlainUnion = transfer_mod.TransferValue.from_value(message):to_value()
+  const message = TransferPayloadPlainUnion.item(73)
+  const union_copy: TransferPayloadPlainUnion = transfer_mod.TransferValue.from_value(message):to_value()
   case union_copy
   when item(number) then test.assert(number == 73)
   end
-  local closure = function (): integer return 91 end
-  local closure_packet = transfer_mod.TransferValue.from_value(closure)
-  local restored_closure: function (): integer = closure_packet:to_value()
+  const closure = function (): integer return 91 end
+  const closure_packet = transfer_mod.TransferValue.from_value(closure)
+  const restored_closure: function (): integer = closure_packet:to_value()
   test.assert(restored_closure() == 91, "local closure snapshot changed its behavior")
-  local storage: owned int[] = foreign int.new_array(1)
+  const storage: owned int[] = foreign int.new_array(1)
   storage[0] = 117
-  local pointer_packet = transfer_mod.TransferValue.is_pointer(storage as foreign *void)
+  const pointer_packet = transfer_mod.TransferValue.is_pointer(storage as foreign *void)
   case transfer_reflect.inspect(pointer_packet:to_value())
   when is_raw_pointer(pointer) then test.assert(pointer == storage as foreign *void)
   else raise "borrowed pointer policy did not recover a raw pointer"
   end
-  local native: function (...: value): (...: value) =
+  const native: function (...: value): (...: value) =
     transfer_mod.TransferValue.is_function(transfer_test_callback):to_value()
   test.assert(native(23) == 23)
   transfer_payload_error(function () transfer_mod.TransferValue.from_value({1, 2, 3}) end,
@@ -630,19 +630,19 @@ function test_transfer_payload_explicit_policies_and_structural_fallback(_contex
 end
 
 function test_transfer_resource_validation_and_claim_errors(context: test.Context)
-  context:run("no-active-scope-and-invalid-attach", function (_context: test.Context)
-    local counter: owned int[] = foreign int.new_array(1)
+  context:run("no-active-scope-and-invalid-attach", function (_: test.Context)
+    const counter: owned int[] = foreign int.new_array(1)
     counter[0] = 1
-    local ptr = counter as foreign *void
+    const ptr = counter as foreign *void
     transfer_payload_raises(function ()
       transfer_mod.attach_resource(ptr, test_resource_retain, test_resource_release)
     end, "attach_resource succeeded outside encode scope")
     transfer_payload_raises(function ()
       transfer_mod.claim_resource("\0\0\0\0", test_resource_release)
     end, "claim_resource succeeded outside decode scope")
-    local bad_modes = {"null-resource", "null-retain", "null-release"}
+    const bad_modes = {"null-resource", "null-retain", "null-release"}
     for i = 1, #bad_modes do
-      local bad_mode = bad_modes[i]
+      const bad_mode = bad_modes[i]
       transfer_payload_raises(function ()
         transfer_roundtrip_value(TransferPayloadCustomResourceProbe(bad_mode, ptr))
       end, "attach_resource accepted invalid argument mode: " .. bad_mode)
@@ -653,7 +653,7 @@ function test_transfer_resource_validation_and_claim_errors(context: test.Contex
     local raw = transfer_mod.encode_message(TransferPayloadCustomResourceProbe("ok", ptr))
     defer transfer_mod.discard_message(raw)
     test.assert(counter[0] == 2)
-    local claimed: TransferPayloadCustomResourceProbe = transfer_mod.decode_message(raw)
+    const claimed: TransferPayloadCustomResourceProbe = transfer_mod.decode_message(raw)
     test.assert(claimed.ptr == ptr and counter[0] == 2,
                 "claimed resource was released by decode_message")
     test_resource_release(claimed.ptr)
@@ -672,24 +672,24 @@ end
 function test_transfer_closure_avoids_signature_hydration_while_reflection_stays_eager(
     context: test.Context)
   context:run("poisoned-signature-tag-transfers-but-fails-reflection",
-    function (_context: test.Context)
-      local captured = 19
-      local inner = function (x: integer): integer return x + captured end
-      local outer = function (y: integer): integer return inner(y) + 1 end
-      local invalid_tag = "not_a_valid_type_descriptor("
-      local poison_buffer: owned char[] = foreign char.new_array(#invalid_tag + 1)
+    function (_: test.Context)
+      const captured = 19
+      const inner = function (x: integer): integer return x + captured end
+      const outer = function (y: integer): integer return inner(y) + 1 end
+      const invalid_tag = "not_a_valid_type_descriptor("
+      const poison_buffer: owned char[] = foreign char.new_array(#invalid_tag + 1)
       ffi.memcpy(poison_buffer as foreign *char, invalid_tag as foreign const *char,
                  #invalid_tag as foreign size_t)
       poison_buffer[#invalid_tag] = 0 as foreign char
-      local poison_ptr = make_lightuserdata_from_buffer(poison_buffer)
-      local saved_inner = set_closure_upvalue(inner, 2, poison_ptr)
+      const poison_ptr = make_lightuserdata_from_buffer(poison_buffer)
+      const saved_inner = set_closure_upvalue(inner, 2, poison_ptr)
       defer do
         set_closure_upvalue(inner, 2, saved_inner)
         -- This deferred use pins the mutable owner through both original-tag
         -- restorations; the outer restoration runs first by LIFO cleanup.
         poison_buffer[0] = 0 as foreign char
       end
-      local saved_outer = set_closure_upvalue(outer, 2, poison_ptr)
+      const saved_outer = set_closure_upvalue(outer, 2, poison_ptr)
       defer set_closure_upvalue(outer, 2, saved_outer)
 
       -- Eager reflection must read upvalue[1] (1-based index 2) and fail to hydrate.
@@ -703,9 +703,9 @@ function test_transfer_closure_avoids_signature_hydration_while_reflection_stays
 
       -- Transfer (both TransferValue.from_value and encode_message) must NOT
       -- hydrate signatures for root or nested captured closures.
-      local policy = transfer_mod.TransferValue.from_value(outer)
-      local restored_from_policy: function (integer): integer = policy:to_value()
-      local restored_from_pkt: function (integer): integer = transfer_roundtrip_value(outer)
+      const policy = transfer_mod.TransferValue.from_value(outer)
+      const restored_from_policy: function (integer): integer = policy:to_value()
+      const restored_from_pkt: function (integer): integer = transfer_roundtrip_value(outer)
       test.assert(restored_from_policy(22) == 42 and restored_from_pkt(22) == 42)
 
       -- Restored closures use the destination module's canonical signature tag,
@@ -717,11 +717,11 @@ function test_transfer_closure_avoids_signature_hydration_while_reflection_stays
       end
     end)
 
-  context:run("invalid-closure-headers-and-manifest-membership", function (_context: test.Context)
-    local dummy = 7
-    local candidate = function (): integer return dummy end
+  context:run("invalid-closure-headers-and-manifest-membership", function (_: test.Context)
+    const dummy = 7
+    const candidate = function (): integer return dummy end
     -- Upvalue 1 (0-based 0): module userdata
-    local saved_mod = set_closure_upvalue(candidate, 1, 42)
+    const saved_mod = set_closure_upvalue(candidate, 1, 42)
     transfer_payload_error(function () transfer_mod.TransferValue.from_value(candidate) end,
                            "invalid Titan closure module")
     transfer_payload_error(function () transfer_roundtrip_value(candidate) end,
@@ -743,7 +743,7 @@ function test_transfer_closure_avoids_signature_hydration_while_reflection_stays
     set_closure_upvalue(candidate, 3, saved_native)
 
     -- Upvalue 4 (0-based 3): TITAN_BRAND lightuserdata
-    local saved_brand = set_closure_upvalue(candidate, 4, make_null_lightuserdata())
+    const saved_brand = set_closure_upvalue(candidate, 4, make_null_lightuserdata())
     transfer_payload_error(function () transfer_mod.TransferValue.from_value(candidate) end,
                            "cannot transfer a Lua C closure with upvalues")
     transfer_payload_error(function () transfer_roundtrip_value(candidate) end,
@@ -751,7 +751,7 @@ function test_transfer_closure_avoids_signature_hydration_while_reflection_stays
     set_closure_upvalue(candidate, 4, saved_brand)
 
     -- Last upvalue (1-based 6 for 1-capture closure): strict entry light C function
-    local saved_strict = set_closure_upvalue(candidate, 6, 42)
+    const saved_strict = set_closure_upvalue(candidate, 6, 42)
     transfer_payload_error(function () transfer_mod.TransferValue.from_value(candidate) end,
                            "invalid Titan closure strict entry")
     set_closure_upvalue(candidate, 6, saved_strict)
@@ -761,12 +761,12 @@ end
 
 function test_transfer_scalar_and_structural_codec_equivalence(context: test.Context)
   context:run("numeric-subtypes-negative-zero-and-binary-strings",
-    function (_context: test.Context)
+    function (_: test.Context)
       -- Integer vs integral float vs negative zero.
-      local int_zero: value = 0
-      local pos_float_zero: value = 0.0
-      local neg_float_zero: value = -0.0
-      local integral_float: value = 42.0
+      const int_zero: value = 0
+      const pos_float_zero: value = 0.0
+      const neg_float_zero: value = -0.0
+      const integral_float: value = 42.0
 
       case transfer_reflect.inspect(transfer_roundtrip_value(int_zero))
       when is_integer(n) then test.assert(n == 0)
@@ -800,26 +800,26 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
                   transfer_math.maxinteger)
       test.assert(transfer_roundtrip_value(transfer_math.huge) as float ==
                   transfer_math.huge)
-      local nan_val: float = 0.0 / 0.0
-      local nan_dec = transfer_roundtrip_value(nan_val) as float
+      const nan_val: float = 0.0 / 0.0
+      const nan_dec = transfer_roundtrip_value(nan_val) as float
       test.assert(nan_dec ~= nan_dec, "transfer roundtrip did not preserve NaN")
 
-      local strings_to_check = {
+      const strings_to_check = {
         "",
         "\0",
         "\0\255binary\0payload\0",
         transfer_string.rep("chunk\0\255", 2048),
       }
       for i = 1, #strings_to_check do
-        local s = strings_to_check[i]
+        const s = strings_to_check[i]
         test.assert(transfer_roundtrip_value(s) as string == s)
         test.assert(transfer_mod.TransferValue.from_value(s):to_value() as string == s)
       end
     end)
 
   context:run("pointers-threads-userdata-cfunctions-and-unsupported",
-    function (_context: test.Context)
-      local null_lud = make_null_lightuserdata()
+    function (_: test.Context)
+      const null_lud = make_null_lightuserdata()
       case transfer_reflect.inspect(transfer_roundtrip_value(null_lud))
       when is_raw_pointer(p) then test.assert(p == nil)
       else raise "NULL lightuserdata lost raw_pointer classification"
@@ -846,18 +846,18 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
       else raise "Lua thread did not decode to borrowed lua_State pointer"
       end
 
-      local lcf = make_light_cfunction()
-      local lcf_dec: function (...: value): (...: value) =
+      const lcf = make_light_cfunction()
+      const lcf_dec: function (...: value): (...: value) =
         transfer_roundtrip_value(lcf)
       local arg1, arg2, arg3 = lcf_dec(10, 20, 30)
       test.assert(arg1 == 10 and arg2 == 20 and arg3 == 30,
                   "bare C function lost its flexible-result contract")
 
-      local ccl_1 = make_lua_cfunction(1)
-      local ccl_5 = make_lua_cfunction(5)
-      local bad_fns: {value} = {ccl_1, ccl_5}
+      const ccl_1 = make_lua_cfunction(1)
+      const ccl_5 = make_lua_cfunction(5)
+      const bad_fns: {value} = {ccl_1, ccl_5}
       for i = 1, #bad_fns do
-        local bad_fn = bad_fns[i]
+        const bad_fn = bad_fns[i]
         transfer_payload_error(function ()
           transfer_mod.TransferValue.from_value(bad_fn)
         end, "cannot transfer a Lua C closure with upvalues")
@@ -866,8 +866,8 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
         end, "cannot transfer a Lua C closure with upvalues")
       end
 
-      local null_cfunc: foreign function(*lua_State): int = nil
-      local null_fn_policy = transfer_mod.TransferValue.is_function(null_cfunc)
+      const null_cfunc: foreign function(*lua_State): int = nil
+      const null_fn_policy = transfer_mod.TransferValue.is_function(null_cfunc)
       transfer_payload_error(function ()
         null_fn_policy:to_value()
       end, "cannot transfer a NULL Lua C function")
@@ -875,10 +875,10 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
         transfer_roundtrip_value(null_fn_policy)
       end, "cannot send a NULL Lua C function")
 
-      local owned_arr: owned int[] = foreign int.new_array(2)
-      local map_val: {string: integer} = {["a"] = 1}
-      local lua_fn = make_plain_lua_function()
-      local unsupported: {value} = {
+      const owned_arr: owned int[] = foreign int.new_array(2)
+      const map_val: {string: integer} = {["a"] = 1}
+      const lua_fn = make_plain_lua_function()
+      const unsupported: {value} = {
         {1, 2},
         ({1, 2} as const {integer}),
         map_val,
@@ -886,7 +886,7 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
         lua_fn,
       }
       for i = 1, #unsupported do
-        local bad = unsupported[i]
+        const bad = unsupported[i]
         transfer_payload_error(function ()
           transfer_mod.TransferValue.from_value(bad)
         end, "transfer: unsupported value")
@@ -900,11 +900,11 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
     end)
 
   context:run("structural-wire-equivalence-and-single-hook-invocation",
-    function (_context: test.Context)
+    function (_: test.Context)
       reset_transfer_hook_state()
-      local rec = TransferPayloadStructuralHookParent(
+      const rec = TransferPayloadStructuralHookParent(
         77, TransferPayloadHookStep("rec-once", false, false))
-      local rec_policy = transfer_mod.TransferValue.from_value(rec)
+      const rec_policy = transfer_mod.TransferValue.from_value(rec)
       test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:rec-once",
                   "TransferValue.from_value invoked structural child hook more than once")
       case rec_policy
@@ -920,14 +920,14 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
       defer transfer_mod.discard_message(rec_raw)
       test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:rec-once",
                   "encode_message invoked structural record child hook more than once")
-      local rec_dec: TransferPayloadStructuralHookParent = transfer_mod.decode_message(rec_raw)
+      const rec_dec: TransferPayloadStructuralHookParent = transfer_mod.decode_message(rec_raw)
       test.assert(rec_dec.id == 77 and #transfer_hook_log == 2 and
                   transfer_hook_log[2] == "dec:rec-once")
 
       reset_transfer_hook_state()
-      local u = TransferPayloadStructuralHookUnion.present(
+      const u = TransferPayloadStructuralHookUnion.present(
         TransferPayloadHookStep("union-once", false, false), "u-tag")
-      local u_policy = transfer_mod.TransferValue.from_value(u)
+      const u_policy = transfer_mod.TransferValue.from_value(u)
       test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:union-once")
       case u_policy
       when is_union(module, name, bytes) then
@@ -941,7 +941,7 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
       local u_raw = transfer_mod.encode_message(u)
       defer transfer_mod.discard_message(u_raw)
       test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:union-once")
-      local u_dec: TransferPayloadStructuralHookUnion = transfer_mod.decode_message(u_raw)
+      const u_dec: TransferPayloadStructuralHookUnion = transfer_mod.decode_message(u_raw)
       case u_dec
       when present(_step, tag) then
         test.assert(tag == "u-tag" and #transfer_hook_log == 2 and
@@ -955,7 +955,7 @@ function test_transfer_hook_array_encounter_order_and_single_invocation(
     _context: test.Context)
   reset_transfer_hook_state()
   defer reset_transfer_hook_state()
-  local item = TransferPayloadStructuralHookArray({
+  const item = TransferPayloadStructuralHookArray({
     TransferPayloadHookStep("array-first", false, false),
     TransferPayloadHookStep("array-second", false, false),
   })
@@ -965,7 +965,7 @@ function test_transfer_hook_array_encounter_order_and_single_invocation(
               transfer_hook_log[1] == "enc:array-first" and
               transfer_hook_log[2] == "enc:array-second",
               "Array field encode changed hook encounter order or invoked a hook twice")
-  local restored: TransferPayloadStructuralHookArray = transfer_mod.decode_message(raw)
+  const restored: TransferPayloadStructuralHookArray = transfer_mod.decode_message(raw)
   test.assert(#restored.items == 2 and
               restored.items[1].label == "array-first" and
               restored.items[2].label == "array-second" and
@@ -985,15 +985,15 @@ function test_transfer_nil_boolean_policies_and_scalar_captures(_context: test.C
     transfer_mod.TransferValue.is_boolean(false)) == false)
   test.assert(transfer_roundtrip_value(
     transfer_mod.TransferValue.is_string("policy\0bytes")) == "policy\0bytes")
-  local absent: value = nil
-  local flag = false
-  local integer_value = 41
-  local float_value = -0.0
-  local bytes = "capture\0bytes"
-  local closure = function (): (value, boolean, integer, float, string)
+  const absent: value = nil
+  const flag = false
+  const integer_value = 41
+  const float_value = -0.0
+  const bytes = "capture\0bytes"
+  const closure = function (): (value, boolean, integer, float, string)
     return absent, flag, integer_value, float_value, bytes
   end
-  local restored: function (): (value, boolean, integer, float, string) =
+  const restored: function (): (value, boolean, integer, float, string) =
     transfer_roundtrip_value(closure)
   local out_absent: value, out_flag: boolean, out_integer: integer,
         out_float: float, out_bytes: string = restored()
@@ -1005,7 +1005,7 @@ end
 function test_transfer_copy_message_preserves_single_resource_owner(
     _context: test.Context)
   test.assert(transfer_mod.copy_message(nil) == nil)
-  local counter: owned int[] = foreign int.new_array(1)
+  const counter: owned int[] = foreign int.new_array(1)
   counter[0] = 1
   local attached = transfer_mod.encode_message(
     TransferPayloadCustomResourceProbe("ok", counter as foreign *void))

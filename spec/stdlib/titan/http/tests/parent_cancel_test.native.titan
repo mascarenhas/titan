@@ -6,33 +6,33 @@ local function cancelled_header_parent(encrypted: boolean, first_port: integer)
   runtime_test.run(function ()
     local owner: async.Task? = nil
     local handled = false
-    local handler: http.Handler = function (_: http.Request, response: http.Response)
+    const handler: http.Handler = function (_: http.Request, response: http.Response)
       test.assert(owner == nil, "unexpected second HTTP handler")
       owner = async.running()
       response:set_header("Content-Length", "0")
       response:close()
       handled = true
     end
-    local listen = function (): (http.Server, integer)
+    const listen = function (): (http.Server, integer)
       if encrypted then return support.https_listen(first_port, handler, 10000) end
       return support.http_listen(first_port, handler, 10000)
     end
     local server, port = listen()
     defer server:close()
-    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
     defer task_support.cancel_and_join_task(serving, "private HTTP listener cleanup")
-    local connect = function (): io.ReaderWriterCloser
+    const connect = function (): io.ReaderWriterCloser
       if encrypted then return ssl.connect("127.0.0.1", port, support.TRUST_ROOT) end
       return net.connect("127.0.0.1", port)
     end
-    local client = connect()
+    const client = connect()
     defer client:close()
     client:write("GET /prime HTTP/1.1\r\nHost: localhost\r\n\r\nG")
     test.assert(client:read_until("\r\n\r\n", false) ~= nil,
                 "priming response did not arrive")
     while not handled do timer.yield() end
     test.assert(owner ~= nil, "handler omitted its public Task")
-    local parent = owner as async.Task
+    const parent = owner as async.Task
     task_support.cleanup_task(parent, "private HTTP connection cleanup")
     -- The response is complete and a partial next request remains buffered.
     -- Allow its reader/deadline children to register before cancellation.
@@ -40,7 +40,7 @@ local function cancelled_header_parent(encrypted: boolean, first_port: integer)
     timer.yield()
     test.assert(parent:status():as_string() == "waiting",
                 "connection parent was not waiting for the next header")
-    local reason = async.CancellationReason<|value|>.complex(false)
+    const reason = async.CancellationReason<|value|>.complex(false)
     parent:cancel(reason)
     local saw_eof = false
     do

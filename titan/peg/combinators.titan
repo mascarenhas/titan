@@ -7,7 +7,7 @@
 local function _at_least_size(pattern: Pattern,
                               count: integer): integer
   -- Native formula: (count + 1) * (tree_size + 1).
-  local unit = pattern.tree_size + 1
+  const unit = pattern.tree_size + 1
   if count > MAX_PATTERN_SIZE // unit - 1 then
     raise "PEG pattern is too large"
   end
@@ -17,7 +17,7 @@ end
 local function _at_most_size(pattern: Pattern,
                              count: integer): integer
   -- Native formula: count * (tree_size + 3) - 1.
-  local unit = pattern.tree_size + 3
+  const unit = pattern.tree_size + 3
   if count > (MAX_PATTERN_SIZE + 1) // unit then
     raise "PEG pattern is too large"
   end

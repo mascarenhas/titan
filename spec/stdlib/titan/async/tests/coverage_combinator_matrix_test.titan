@@ -2,21 +2,21 @@
 -- Each worker waits on its own channel, so results depend on explicit release
 -- rather than timer delays. The same cases exercise each positional listener.
 local record CoverageAsyncMatrixOperand
-  task: async.Task
-  release: function (value): ()
-  close: function (): ()
+  const task: async.Task
+  const release: function (value): ()
+  const close: function (): ()
 end
 
 local record CoverageAsyncMatrixOutcome
-  position: integer
-  status: async.TaskStatus?
-  payload: value
+  const position: integer
+  const status: async.TaskStatus?
+  const payload: value
 end
 
 local function coverage_async_matrix_operand(fails: boolean): CoverageAsyncMatrixOperand
   local send, receive, close = async.channel<|value|>()
-  local task = async.run<|value, value|>(function (): value
-    local result = receive()
+  const task = async.run<|value, value|>(function (): value
+    const result = receive()
     if fails then raise result end
     return result
   end)
@@ -27,7 +27,7 @@ end
 
 local function coverage_async_matrix_operands(count: integer,
                                               fails: boolean): {CoverageAsyncMatrixOperand}
-  local result: {CoverageAsyncMatrixOperand} = {}
+  const result: {CoverageAsyncMatrixOperand} = {}
   for position = 1, count do
     result[position] = coverage_async_matrix_operand(fails)
   end
@@ -36,7 +36,7 @@ local function coverage_async_matrix_operands(count: integer,
 end
 
 local function coverage_async_matrix_tasks(operands: {CoverageAsyncMatrixOperand}): {async.Task}
-  local result: {async.Task} = {}
+  const result: {async.Task} = {}
   for position = 1, #operands do result[position] = operands[position].task end
   return result
 end
@@ -195,7 +195,7 @@ local function coverage_async_matrix_rejection(tasks: {async.Task}): CoverageAsy
 end
 
 local function coverage_async_matrix_waiter(call: function (): (CoverageAsyncMatrixOutcome)): async.Task
-  local task = async.run<|value, value|>(function (): value return call() end)
+  const task = async.run<|value, value|>(function (): value return call() end)
   task_support.cleanup_task(task, "matrix waiter cleanup")
   support.wait_until_waiting(task)
   return task
@@ -208,11 +208,11 @@ end
 function test_coverage_async_matrix_any_terminal_failures(context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected matrix Task failure diagnostic")
-    local failure = support.failing("matrix-terminal-failure")
+    const failure = support.failing("matrix-terminal-failure")
     task_support.cleanup_task(failure, "matrix terminal failure cleanup")
     coverage_async_matrix_assert_status(async.join(failure), 2, "matrix-terminal-failure")
     for arity = 2, 5 do
-      local tasks: {async.Task} = {}
+      const tasks: {async.Task} = {}
       for position = 1, arity do tasks[position] = failure end
       test.assert(coverage_async_matrix_any(tasks).position == 0,
                   "any did not reject all already-failed operands")
@@ -225,14 +225,14 @@ function test_coverage_async_matrix_any_live_success_positions(_context: test.Co
   runtime_test.run(function ()
     for arity = 2, 5 do
       for winner = 1, arity do
-        local operands = coverage_async_matrix_operands(arity, false)
-        local tasks = coverage_async_matrix_tasks(operands)
-        local waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
+        const operands = coverage_async_matrix_operands(arity, false)
+        const tasks = coverage_async_matrix_tasks(operands)
+        const waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
           return coverage_async_matrix_any(tasks)
         end)
-        local label = "winner-" .. arity .. "-" .. winner
+        const label = "winner-" .. arity .. "-" .. winner
         coverage_async_matrix_settle(operands[winner], 1, label)
-        local outcome = coverage_async_matrix_result(waiter)
+        const outcome = coverage_async_matrix_result(waiter)
         test.assert(outcome.position == winner and outcome.payload == label,
                     "any lost the released operand's position or payload")
         for position = 1, arity do
@@ -253,9 +253,9 @@ function test_coverage_async_matrix_any_live_all_rejections(context: test.Contex
     for mode = 2, 3 do
       for arity = 2, 5 do
         for final = 1, arity do
-          local operands = coverage_async_matrix_operands(arity, mode == 2)
-          local tasks = coverage_async_matrix_tasks(operands)
-          local waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
+          const operands = coverage_async_matrix_operands(arity, mode == 2)
+          const tasks = coverage_async_matrix_tasks(operands)
+          const waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
             return coverage_async_matrix_any(tasks)
           end)
           for position = 1, arity do
@@ -282,14 +282,14 @@ function test_coverage_async_matrix_race_live_terminal_positions(context: test.C
     for mode = 1, 3 do
       for arity = 2, 5 do
         for winner = 1, arity do
-          local operands = coverage_async_matrix_operands(arity, mode == 2)
-          local tasks = coverage_async_matrix_tasks(operands)
-          local waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
+          const operands = coverage_async_matrix_operands(arity, mode == 2)
+          const tasks = coverage_async_matrix_tasks(operands)
+          const waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
             return coverage_async_matrix_race(tasks)
           end)
-          local label = "race-" .. arity .. "-" .. winner
+          const label = "race-" .. arity .. "-" .. winner
           coverage_async_matrix_settle(operands[winner], mode, label)
-          local outcome = coverage_async_matrix_result(waiter)
+          const outcome = coverage_async_matrix_result(waiter)
           test.assert(outcome.position == winner, "race lost the terminal operand's position")
           coverage_async_matrix_assert_status(outcome.status, mode, label)
           for position = 1, arity do
@@ -309,17 +309,17 @@ end
 function test_coverage_async_matrix_all_terminal_failure_positions(context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected matrix Task failure diagnostic")
-    local failure = support.failing("matrix-all-terminal-failure")
-    local succeeded = support.successful("retained-success")
+    const failure = support.failing("matrix-all-terminal-failure")
+    const succeeded = support.successful("retained-success")
     task_support.cleanup_task(failure, "matrix failure cleanup")
     task_support.cleanup_task(succeeded, "matrix success cleanup")
     async.join_two(failure, succeeded)
     for arity = 2, 5 do
       for rejected = 1, arity do
-        local tasks: {async.Task} = {}
+        const tasks: {async.Task} = {}
         for position = 1, arity do tasks[position] = succeeded end
         tasks[rejected] = failure
-        local outcome = coverage_async_matrix_rejection(tasks)
+        const outcome = coverage_async_matrix_rejection(tasks)
         test.assert(outcome.position == rejected, "all changed the already-failed position")
         coverage_async_matrix_assert_status(outcome.status, 2, "matrix-all-terminal-failure")
       end
@@ -334,14 +334,14 @@ function test_coverage_async_matrix_all_live_rejection_positions(context: test.C
     for mode = 2, 3 do
       for arity = 2, 5 do
         for rejected = 1, arity do
-          local operands = coverage_async_matrix_operands(arity, mode == 2)
-          local tasks = coverage_async_matrix_tasks(operands)
-          local waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
+          const operands = coverage_async_matrix_operands(arity, mode == 2)
+          const tasks = coverage_async_matrix_tasks(operands)
+          const waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
             return coverage_async_matrix_rejection(tasks)
           end)
-          local label = "all-rejection-" .. rejected
+          const label = "all-rejection-" .. rejected
           coverage_async_matrix_settle(operands[rejected], mode, label)
-          local outcome = coverage_async_matrix_result(waiter)
+          const outcome = coverage_async_matrix_result(waiter)
           test.assert(outcome.position == rejected, "all changed the live rejecting position")
           coverage_async_matrix_assert_status(outcome.status, mode, label)
           for position = 1, arity do
@@ -362,9 +362,9 @@ function test_coverage_async_matrix_all_live_completion_positions(_context: test
   runtime_test.run(function ()
     for arity = 2, 5 do
       for final = 1, arity do
-        local operands = coverage_async_matrix_operands(arity, false)
-        local tasks = coverage_async_matrix_tasks(operands)
-        local waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
+        const operands = coverage_async_matrix_operands(arity, false)
+        const tasks = coverage_async_matrix_tasks(operands)
+        const waiter = coverage_async_matrix_waiter(function (): CoverageAsyncMatrixOutcome
           return CoverageAsyncMatrixOutcome(0, nil, coverage_async_matrix_all(tasks))
         end)
         for position = 1, arity do
@@ -374,7 +374,7 @@ function test_coverage_async_matrix_all_live_completion_positions(_context: test
           end
         end
         coverage_async_matrix_settle(operands[final], 1, "result-" .. final)
-        local results = coverage_async_matrix_result(waiter).payload as {value}
+        const results = coverage_async_matrix_result(waiter).payload as {value}
         test.assert(#results == arity, "all changed its result count")
         for position = 1, arity do
           test.assert(results[position] == "result-" .. position, "all reordered completion values")
@@ -389,7 +389,7 @@ function test_coverage_async_matrix_channel_exact_delimiter_boundary(_context: t
   runtime_test.run(function ()
     local reader, writer = async.reader_writer_channel()
     runtime_test.cleanup(function () writer:close(); reader:close() end)
-    local producer = async.run(function (): nil
+    const producer = async.run(function (): nil
       writer:write("prefix")
       writer:write("suffix\n")
     end)
@@ -407,9 +407,9 @@ function test_coverage_async_matrix_subscription_batch_terminals(_context: test.
   runtime_test.run(function ()
     for mode = 1, 3 do
       local stops, closes = 0, 0
-      local stream = async.BufferedSubscription<|value, value|>(
+      const stream = async.BufferedSubscription<|value, value|>(
         function (_publish, reject, finish): async.SubscriptionActions<|value|>
-          local actions = async.SubscriptionActions<|value|>(
+          const actions = async.SubscriptionActions<|value|>(
             function () stops = stops + 1 end,
             function (drain: function (): (async.SubscriptionBatch<|value|>))
               closes = closes + 1
@@ -421,7 +421,7 @@ function test_coverage_async_matrix_subscription_batch_terminals(_context: test.
         end)
       defer stream:close()
       if mode == 3 then stream:close() end
-      for repetition = 1, 2 do
+      for _ = 1, 2 do
         case stream:next_batch()
         when error(failure) then
           test.assert(mode == 1 and failure == false, "batch changed its false error payload")
@@ -440,9 +440,9 @@ end
 function test_coverage_async_matrix_coalescing_stop_keeps_latest(_context: test.Context)
   runtime_test.run(function ()
     local stops, closes = 0, 0
-    local stream = async.CoalescingSubscription<|value, value|>(
+    const stream = async.CoalescingSubscription<|value, value|>(
       function (publish, _reject, _finish): async.SubscriptionActions<|value|>
-        local actions = async.SubscriptionActions<|value|>(
+        const actions = async.SubscriptionActions<|value|>(
           function () stops = stops + 1 end,
           function (drain: function (): (async.SubscriptionBatch<|value|>))
             closes = closes + 1

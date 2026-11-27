@@ -50,13 +50,13 @@ local function assert_transfer_boolean(candidate: async.TransferValue,
 end
 
 local function assert_state_reusable(state: tlua.Lua)
-  local result: async.TransferValue = state:run("return 42")
+  const result: async.TransferValue = state:run("return 42")
   test.assert(transfer_integer(result) == 42,
               "failed call left the independent state unusable")
 end
 
 local function finalizable_state(counter: owned int[]): tlua.Lua
-  local state = tlua.new()
+  const state = tlua.new()
   state:run([[
     local finish, counter = ...
     finalizer_probe = setmetatable({}, {
@@ -68,7 +68,7 @@ local function finalizable_state(counter: owned int[]): tlua.Lua
 end
 
 local function abandon_state(counter: owned int[], close: boolean)
-  local state = finalizable_state(counter)
+  const state = finalizable_state(counter)
   if close then
     state:close()
     state:close()
@@ -77,12 +77,12 @@ end
 
 function test_lua_independent_states_isolate_globals_and_load_libraries(
     _context: test.Context)
-  local first = tlua.new()
+  const first = tlua.new()
   defer first:close()
-  local second = tlua.new()
+  const second = tlua.new()
   defer second:close()
   first:run("independent_state_marker = 73")
-  local values: {async.TransferValue} = { second:run([[
+  const values: {async.TransferValue} = { second:run([[
     return independent_state_marker, math.floor(4.8), string.upper('ok'),
            type(io.open), type(os.clock), type(debug.getinfo),
            type(package.loaded), type(coroutine.create), type(utf8.len)
@@ -96,17 +96,17 @@ function test_lua_independent_states_isolate_globals_and_load_libraries(
     if index == 7 then expected = "table" end
     test.assert(transfer_string(values[index]) == expected)
   end
-  local marker: async.TransferValue = first:run(
+  const marker: async.TransferValue = first:run(
     "return independent_state_marker")
   test.assert(transfer_integer(marker) == 73)
-  local host_marker: value = tlua.load("return independent_state_marker")()
+  const host_marker: value = tlua.load("return independent_state_marker")()
   test.assert(host_marker == nil, "independent state changed host globals")
 end
 
 local function check_scalar_transfers(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local values: {async.TransferValue} = { run(state, "return ...", nil,
+  const values: {async.TransferValue} = { run(state, "return ...", nil,
     async.TransferValue.is_nil(), async.TransferValue.is_boolean(false),
     async.TransferValue.is_boolean(true), async.TransferValue.is_integer(-73),
     async.TransferValue.is_float(2.5), async.TransferValue.is_string("a\0b"),
@@ -133,9 +133,9 @@ function test_lua_independent_transfer_scalars_and_binary_strings(
 end
 
 function test_lua_independent_empty_string_copy(_: test.Context)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local result: async.TransferValue = state:run("return ''")
+  const result: async.TransferValue = state:run("return ''")
   state:close()
   gclib.collect()
   test.assert(transfer_string(result) == "",
@@ -144,12 +144,12 @@ end
 
 function test_lua_independent_binary_chunks_and_embedded_zero_source(
     _context: test.Context)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local dump = common.lua_helper([[
+  const dump = common.lua_helper([[
     return function() return string.dump(function(...) return ... end) end
   ]]) as function (): string
-  local returned: async.TransferValue = state:run(dump(), "=independent-binary",
+  const returned: async.TransferValue = state:run(dump(), "=independent-binary",
     async.TransferValue.is_string("binary\0argument"))
   test.assert(transfer_string(returned) == "binary\0argument")
   common.assert_raises_contains(function ()
@@ -159,11 +159,11 @@ function test_lua_independent_binary_chunks_and_embedded_zero_source(
 end
 
 local function check_foreign_transfers(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local counter: owned int[] = foreign int.new_array(1)
+  const counter: owned int[] = foreign int.new_array(1)
   counter[0] = 12
-  local values: {async.TransferValue} = { run(state, [[
+  const values: {async.TransferValue} = { run(state, [[
     local echo, make_userdata, pointer = ...
     saved_thread = coroutine.create(function() end)
     saved_userdata = make_userdata()
@@ -172,7 +172,7 @@ local function check_foreign_transfers(run: IndependentRun)
       async.TransferValue.is_function(state_userdata),
       async.TransferValue.is_pointer(counter as foreign *void)) }
   test.assert(#values == 7)
-  local expected_callback: foreign function (*lua_State): int = state_echo
+  const expected_callback: foreign function (*lua_State): int = state_echo
   case values[1]
   when is_function(callback) then
     test.assert(callback == expected_callback)
@@ -186,7 +186,7 @@ local function check_foreign_transfers(run: IndependentRun)
   case values[3]
   when is_lua_state(thread) then
     test.assert(thread ~= nil)
-    local returned: async.TransferValue = run(state, "return ...", nil,
+    const returned: async.TransferValue = run(state, "return ...", nil,
       async.TransferValue.is_lua_state(thread))
     case returned
     when is_pointer(pointer) then
@@ -198,7 +198,7 @@ local function check_foreign_transfers(run: IndependentRun)
   end
   case values[4]
   when is_pointer(pointer) then
-    local bytes = pointer as foreign *unsigned char
+    const bytes = pointer as foreign *unsigned char
     test.assert(bytes[0] == 73,
                 "full userdata transfer did not expose its payload")
   else raise "full userdata was not transferred as a pointer"
@@ -206,7 +206,7 @@ local function check_foreign_transfers(run: IndependentRun)
   test.assert(transfer_string(values[5]) == "a\0b")
   assert_transfer_nil(values[6])
   test.assert(transfer_integer(values[7]) == 17)
-  local echoed: async.TransferValue = run(state,
+  const echoed: async.TransferValue = run(state,
     "local echo = ...; return echo(19)", nil, values[1])
   test.assert(transfer_integer(echoed) == 19,
               "returned native function did not preserve its calling contract")
@@ -224,7 +224,7 @@ end
 function test_lua_independent_errors_restore_stack_and_allow_reuse(
     context: test.Context)
   context:run("syntax", function (_: test.Context)
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     common.assert_raises_contains(function ()
       state:run("return )", "=independent-syntax")
@@ -232,7 +232,7 @@ function test_lua_independent_errors_restore_stack_and_allow_reuse(
     assert_state_reusable(state)
   end)
   context:run("runtime", function (_: test.Context)
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     common.assert_raises_contains(function ()
       state:run("error('independent runtime failure')", "=independent-error")
@@ -252,7 +252,7 @@ function test_lua_independent_errors_restore_stack_and_allow_reuse(
     assert_state_reusable(state)
   end)
   context:run("unsupported_table", function (_: test.Context)
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     common.assert_raises(function ()
       state:run("return 'copied before failure', {}")
@@ -260,7 +260,7 @@ function test_lua_independent_errors_restore_stack_and_allow_reuse(
     assert_state_reusable(state)
   end)
   context:run("unsupported_lua_function", function (_: test.Context)
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     common.assert_raises(function ()
       state:run("return function() end")
@@ -268,7 +268,7 @@ function test_lua_independent_errors_restore_stack_and_allow_reuse(
     assert_state_reusable(state)
   end)
   context:run("unsupported_c_closure", function (_: test.Context)
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     common.assert_raises(function ()
       state:run("return string.gmatch('abc', '.')")
@@ -279,9 +279,9 @@ end
 
 function test_lua_independent_result_capacity_and_discarded_result_validation(
     _context: test.Context)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local results: {async.TransferValue} = { state:run([[
+  const results: {async.TransferValue} = { state:run([[
     local values = {}
     for i = 1, 200 do values[i] = i end
     return table.unpack(values)
@@ -289,16 +289,16 @@ function test_lua_independent_result_capacity_and_discarded_result_validation(
   test.assert(#results == 200, "independent result count was truncated")
   test.assert(transfer_integer(results[1]) == 1 and
               transfer_integer(results[200]) == 200)
-  local wide_chunk = [[
+  const wide_chunk = [[
     local values = {}
     for i = 1, 201 do values[i] = i end
     return table.unpack(values)
   ]]
   common.assert_raises(function ()
-    local overflow: {async.TransferValue} = { state:run(wide_chunk) }
+    local _: {async.TransferValue} = { state:run(wide_chunk) }
   end)
   assert_state_reusable(state)
-  local first: async.TransferValue = state:run(wide_chunk)
+  const first: async.TransferValue = state:run(wide_chunk)
   test.assert(transfer_integer(first) == 1,
               "finite result demand rejected a wide independent result run")
   state:run(wide_chunk)
@@ -308,16 +308,16 @@ function test_lua_independent_result_capacity_and_discarded_result_validation(
   end)
   assert_state_reusable(state)
   common.assert_raises(function ()
-    local first: async.TransferValue = state:run("return 1, {}")
+    local _: async.TransferValue = state:run("return 1, {}")
   end)
   assert_state_reusable(state)
-  local empty: {async.TransferValue} = { state:run("return") }
+  const empty: {async.TransferValue} = { state:run("return") }
   test.assert(#empty == 0)
 end
 
 function test_lua_independent_close_and_gc_close_exactly_once(
     _context: test.Context)
-  local counter: owned int[] = foreign int.new_array(1)
+  const counter: owned int[] = foreign int.new_array(1)
   counter[0] = 0
   abandon_state(counter, true)
   test.assert(counter[0] == 1, "explicit close did not run Lua finalizers")
@@ -328,13 +328,13 @@ function test_lua_independent_close_and_gc_close_exactly_once(
   gclib.collect()
   gclib.collect()
   test.assert(counter[0] == 2, "unreachable Lua wrapper did not close its state")
-  local closed = tlua.new()
+  const closed = tlua.new()
   closed:close()
   common.assert_raises_contains(function ()
     closed:run("return 1")
   end, "closed")
-  local detached_wrapper = tlua.new()
-  local raw_state = detached_wrapper:detach()
+  const detached_wrapper = tlua.new()
+  const raw_state = detached_wrapper:detach()
   test.assert(raw_state ~= nil, "detach returned nil for live state")
   detached_wrapper:close()
   common.assert_raises_contains(function ()

@@ -1,7 +1,7 @@
 function test_transactions_follow_native_autocommit_without_restart(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
     execute_sql(connection, "CREATE TABLE item (value INTEGER)")
     test.assert(connection:get_autocommit(),
@@ -30,14 +30,14 @@ end
 function test_enabling_autocommit_commits_and_cursor_close_does_not_rollback(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
     execute_sql(connection, "CREATE TABLE item (value INTEGER)")
     connection:set_autocommit(false)
     execute_sql(connection, "INSERT INTO item VALUES (4)")
-    local statement = connection:prepare("SELECT value FROM item")
+    const statement = connection:prepare("SELECT value FROM item")
     defer statement:close()
-    local cursor = statement:query()
+    const cursor = statement:query()
     defer cursor:close()
     cursor:close()
     test.assert(not connection:get_autocommit(),
@@ -52,7 +52,7 @@ end
 function test_explicit_savepoints_use_sqlites_transaction_state(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
     execute_sql(connection, "CREATE TABLE item (value INTEGER)")
     execute_sql(connection, "SAVEPOINT outer_savepoint")
@@ -73,12 +73,12 @@ end
 function test_constraint_rollback_is_observed_as_native_autocommit(
     context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
     execute_sql(connection, "CREATE TABLE item (id INTEGER PRIMARY KEY)")
     connection:set_autocommit(false)
     execute_sql(connection, "INSERT INTO item VALUES (1)")
-    local statement = connection:prepare(
+    const statement = connection:prepare(
         "INSERT OR ROLLBACK INTO item VALUES (1)")
     defer statement:close()
     expect_native_error(function () statement:execute() end, 19)
@@ -91,24 +91,24 @@ end
 function test_failed_commit_preserves_active_transaction_and_native_busy_code(
     context: test.Context)
   runtime_test.run(function ()
-    local path = fs.tmpname()
+    const path = fs.tmpname()
     defer fs.unlink(path)
-    local writer = sqlite3.connect(path)
+    const writer = sqlite3.connect(path)
     defer writer:close()
     execute_sql(writer, "CREATE TABLE item (value INTEGER)")
     execute_sql(writer, "INSERT INTO item VALUES (1)")
-    local reader = sqlite3.connect(path)
+    const reader = sqlite3.connect(path)
     defer reader:close()
-    local statement = reader:prepare("SELECT value FROM item")
+    const statement = reader:prepare("SELECT value FROM item")
     defer statement:close()
-    local cursor = statement:query()
+    const cursor = statement:query()
     defer cursor:close()
     assert_integer_cell(required_row(cursor), 1, 1)
     -- The reader keeps a real SHARED lock after its first step. A writer can
     -- acquire RESERVED and modify, but COMMIT cannot become EXCLUSIVE yet.
     writer:set_autocommit(false)
     execute_sql(writer, "INSERT INTO item VALUES (2)")
-    local failure = expect_native_error(function () writer:commit() end, 5)
+    const failure = expect_native_error(function () writer:commit() end, 5)
     test.assert(failure.operation == "commit",
                 "contended COMMIT reported the wrong operation")
     test.assert(not writer:get_autocommit(),

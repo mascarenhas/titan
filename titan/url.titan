@@ -214,7 +214,7 @@ local function url_parse_detail(kind: string): string
 end
 
 local function url_parse_error(kind: string, position: integer): Error
-  local message = "URL parse error [" .. kind .. "] at byte " ..
+  const message = "URL parse error [" .. kind .. "] at byte " ..
     string.tostring(position) .. ": " .. url_parse_detail(kind)
   return Error { position = position, kind = kind, message = message }
 end
@@ -243,13 +243,13 @@ local HEX_UPPER = "0123456789ABCDEF"
 -- additionally use the case-insensitive normalization from lpeg_patterns.
 local function normalize_component(source: string,
                                    lowercase: boolean): string
-  local builder = string.writer()
+  const builder = string.writer()
   local index = 1
   while index <= #source do
     local byte = string.byte(source, index)
     if byte == 37 then
-      local high = hex_value(string.byte(source, index + 1))
-      local low = hex_value(string.byte(source, index + 2))
+      const high = hex_value(string.byte(source, index + 1))
+      const low = hex_value(string.byte(source, index + 2))
       local decoded = high * 16 + low
       if is_unreserved(decoded) then
         if lowercase and decoded >= 65 and decoded <= 90 then
@@ -275,32 +275,32 @@ end
 -- only for the connection address.
 local function normalize_host(raw: string): (string, string)
   -- Implementation notes: doc/implementation/url-library.md#normalization
-  local first = string.byte(raw, 1)
+  const first = string.byte(raw, 1)
   if first ~= 91 then
-    local host = normalize_component(raw, true)
+    const host = normalize_component(raw, true)
     return host, host
   end
 
-  local inner = string.sub(raw, 2, #raw - 1)
-  local inner_first = string.byte(inner, 1)
+  const inner = string.sub(raw, 2, #raw - 1)
+  const inner_first = string.byte(inner, 1)
   if inner_first == 118 or inner_first == 86 then
-    local dot = string.find(inner, ".") as integer
-    local version = normalize_component(
+    const dot = string.find(inner, ".") as integer
+    const version = normalize_component(
       string.sub(inner, 1, dot - 1), true)
-    local future = version .. string.sub(inner, dot)
+    const future = version .. string.sub(inner, dot)
     return future, "[" .. future .. "]"
   end
 
-  local zone_marker? = string.find(inner, "%25")
+  const zone_marker? = string.find(inner, "%25")
   if zone_marker then
-    local marker = zone_marker as integer
-    local address = normalize_component(
+    const marker = zone_marker as integer
+    const address = normalize_component(
       string.sub(inner, 1, marker - 1), true)
-    local zone = normalize_component(string.sub(inner, marker + 3), false)
+    const zone = normalize_component(string.sub(inner, marker + 3), false)
     return address .. "%" .. zone,
       "[" .. address .. "%25" .. zone .. "]"
   end
-  local address = normalize_component(inner, true)
+  const address = normalize_component(inner, true)
   return address, "[" .. address .. "]"
 end
 
@@ -309,7 +309,7 @@ local function parse_port(text: string, position: integer):
   local port = 0
   local index = 1
   while index <= #text do
-    local digit = string.byte(text, index) - 48
+    const digit = string.byte(text, index) - 48
     if port > (65535 - digit) // 10 then
       return nil, url_parse_error("port", position)
     end
@@ -338,22 +338,22 @@ function parse(source: string): (Url?, Error?)
     return nil, url_parse_error(label, position)
   end
 
-  local parts = captured as {value: value}
-  local scheme = normalize_component(parts["scheme"] as string, true)
+  const parts = captured as {value: value}
+  const scheme = normalize_component(parts["scheme"] as string, true)
   local default_port = 0
   if scheme == "http" or scheme == "ws" then
     default_port = 80
   elseif scheme == "https" or scheme == "wss" then
     default_port = 443
   else
-    local position = parts["scheme_position"] as integer
+    const position = parts["scheme_position"] as integer
     return nil, url_parse_error("scheme", position)
   end
 
   local host, authority_host =
     normalize_host(parts["host"] as string)
   local port = default_port
-  local port_text = parts["port"]
+  const port_text = parts["port"]
   if port_text ~= nil then
     local parsed_port?, port_error? = parse_port(
       port_text as string, parts["port_position"] as integer)
@@ -371,7 +371,7 @@ function parse(source: string): (Url?, Error?)
   local query: string?, target: string = (function (
       query_text: value, path: string): (string?, string)
     if query_text == nil then return nil, path end
-    local query = normalize_component(query_text as string, false)
+    const query = normalize_component(query_text as string, false)
     return query, path .. "?" .. query
   end)(parts["query"], path)
   return Url {
@@ -405,7 +405,7 @@ function parse_request(scheme: string, authority: string,
     return nil, url_parse_error(label, position)
   end
 
-  local source = scheme .. "://" .. authority .. target
+  const source = scheme .. "://" .. authority .. target
 
   local authority_match, authority_label, authority_position =
     request_authority_pattern:match(authority)

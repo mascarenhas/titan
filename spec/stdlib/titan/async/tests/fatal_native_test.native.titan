@@ -1,31 +1,29 @@
-local rollback_gc = import "titan.gc"
+local rollback_gc = import "gc"
 
 local function fatal_test_later(milliseconds: integer, action: function (): ())
-  local timer = uv.timer_t.new()
-  local handle = timer:as_handle_t()
-  local closed = function (_unused1: uv.handle_t) action() end
-  local fired = function (_unused1: uv.timer_t) uv.close(handle, closed) end
+  const timer = uv.timer_t()
+  const handle = timer:as_handle_t()
+  const closed = function (_: uv.handle_t) action() end
+  const fired = function (_: uv.timer_t) uv.close(handle, closed) end
   test.assert(uv.timer_init(async.current_loop(), timer) == 0, "timer init failed")
-  local status = uv.timer_start(timer, fired, milliseconds, 0)
+  const status = uv.timer_start(timer, fired, milliseconds, 0)
   if status < 0 then uv.close(handle); raise "timer start failed" end
 end
 
 
 local function fatal_test_terminal_failure(marker: FatalMarker, fatal: function (value, string): ())
-  do
-    fatal_test_fatal_origin(marker)
-  catch
-    marker.source_trace = traceback
-    fatal(error, traceback)
-    raise
-  end
+  fatal_test_fatal_origin(marker)
+catch
+  marker.source_trace = traceback
+  fatal(error, traceback)
+  raise
 end
 
 
 local function fatal_test_fs_cleanup(done: function (): (), resolve: function (integer): (), fatal: function (value, string): ())
-  local request = uv.fs_t.new()
-  local callback = function (_unused1: uv.fs_t)
-    local status = uv.fs_get_result(request)
+  const request = uv.fs_t()
+  const callback = function (_: uv.fs_t)
+    const status = uv.fs_get_result(request)
     uv.fs_req_cleanup(request)
     do
       test.assert(status == 0, "cleanup stat failed")
@@ -40,11 +38,11 @@ local function fatal_test_fs_cleanup(done: function (): (), resolve: function (i
 end
 
 function test_ready_queue_recovers_after_shared_wake_failure(context: test.Context)
-  local marker = FatalMarker(196, "")
-  local blocker = uv.timer_t.new()
-  local trigger = uv.timer_t.new()
+  const marker = FatalMarker(196, "")
+  const blocker = uv.timer_t()
+  const trigger = uv.timer_t()
   local cleanup_started, cleanup_closed = false, false
-  local keeper = async.run<|nil, value|>(function (): nil
+  const keeper = async.run<|nil, value|>(function (): nil
     test.assert(uv.timer_init(async.current_loop(), blocker) == 0, "blocker init failed")
     test.assert(uv.timer_start(blocker, function (_: uv.timer_t) end, 60000, 60000) == 0,
         "blocker start failed")
@@ -60,10 +58,10 @@ function test_ready_queue_recovers_after_shared_wake_failure(context: test.Conte
     while true do async.yield() end
     return nil
   end)
-  local origin = async.run<|nil, value|>(function (): nil
+  const origin = async.run<|nil, value|>(function (): nil
     async.await<|nil, nil|>(function (_resolve, _reject, fatal)
       test.assert(uv.timer_init(async.current_loop(), trigger) == 0, "failure trigger init failed")
-      local fired = function (owner: uv.timer_t)
+      const fired = function (owner: uv.timer_t)
         uv.timer_close(owner)
         -- Deliberate fault injection: ordinary clients may only manage their
         -- own handles on this borrowed loop. Close the sole other timer to
@@ -86,7 +84,7 @@ function test_ready_queue_recovers_after_shared_wake_failure(context: test.Conte
     end)
     return nil
   end)
-  local queued: {async.Task<|nil, nil|>} = {}
+  const queued: {async.Task<|nil, nil|>} = {}
   for index = 1, 130 do
     queued[index] = async.run<|nil, nil|>(function (): nil
       async.yield()
@@ -106,7 +104,7 @@ end
 
 
 local function fatal_test_exact_orphan_wait()
-  local marker = FatalMarker(2, "")
+  const marker = FatalMarker(2, "")
   local resolve_second: (function (integer): ())? = nil
   local first_waiting = false
   local second_waiting = false
@@ -114,7 +112,7 @@ local function fatal_test_exact_orphan_wait()
   local second_result = 0
   async.run<|value, value|>(function (): value
     defer do
-      local result = async.await_cleanup<|value, string|>(function (resolve: function (value): (), _unused1: function (string): (), _unused2: function (value, string): ())
+      const result = async.await_cleanup<|value, string|>(function (resolve: function (value): (), _unused1: function (string): (), _unused2: function (value, string): ())
         resolve_second(99)
         resolve(nil)
       end)
@@ -130,7 +128,7 @@ local function fatal_test_exact_orphan_wait()
   end)
   async.run<|value, value|>(function (): value
     defer do
-      local result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), fatal: function (value, string): ())
+      const result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), fatal: function (value, string): ())
         fatal_test_fs_cleanup(function () second_callback = true end, resolve, fatal)
       end)
       case result
@@ -158,23 +156,21 @@ end
 
 
 local function fatal_test_cleanup_timer(sticky: boolean)
-  local marker = FatalMarker(3, "")
+  const marker = FatalMarker(3, "")
   local delivered = false
   local result_value = 0
-  local task = async.run<|value, value|>(function (): value
+  const task = async.run<|value, value|>(function (): value
     if sticky then
       async.running():cancel(async.CancellationReason<|value|>.complex("sticky reason"))
     end
     defer do
-      local result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), fatal: function (value, string): ())
+      const result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), fatal: function (value, string): ())
         fatal_test_later(3, function ()
-          do
-            delivered = true
-            resolve(29)
-          catch
-            fatal(error, traceback)
-            raise
-          end
+          delivered = true
+          resolve(29)
+        catch
+          fatal(error, traceback)
+          raise
         end)
       end)
       case result
@@ -205,7 +201,7 @@ end
 
 
 local function fatal_test_settled_orphan_wait()
-  local marker = FatalMarker(6, "")
+  const marker = FatalMarker(6, "")
   local resolve_second: (function (integer): ())? = nil
   local first_waiting = false
   local second_waiting = false
@@ -220,7 +216,7 @@ local function fatal_test_settled_orphan_wait()
     return nil
   end)
   async.run<|value, value|>(function (): value
-    local result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), _unused2: function (value, string): ())
+    const result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), _unused2: function (value, string): ())
       resolve_second = resolve
       second_waiting = true
     end)
@@ -243,8 +239,8 @@ end
 
 
 local function fatal_test_after_settlement()
-  local marker = FatalMarker(4, "")
-  local second = FatalMarker(400, "")
+  const marker = FatalMarker(4, "")
+  const second = FatalMarker(400, "")
   local callback_completed = false
   local result_value = 0
   async.run<|value, value|>(function (): value
@@ -261,7 +257,7 @@ local function fatal_test_after_settlement()
         end
       end)
     end)
-    local result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), fatal: function (value, string): ())
+    const result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _unused1: function (string): (), fatal: function (value, string): ())
       fatal_test_fs_cleanup(function () callback_completed = true end, resolve, fatal)
     end)
     case result
@@ -276,21 +272,19 @@ end
 
 
 local function fatal_test_cancellable_fatal(sticky: boolean)
-  local marker = FatalMarker(7, "")
+  const marker = FatalMarker(7, "")
   local owner: async.Task<|value, value|>? = nil
   local observed = false
   local cleaned = false
   owner = async.run<|value, value|>(function (): value
     defer do
-      local result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _reject: function (string): (), fatal: function (value, string): ())
+      const result = async.await_cleanup<|integer, string|>(function (resolve: function (integer): (), _reject: function (string): (), fatal: function (value, string): ())
         fatal_test_later(2, function ()
-          do
-            cleaned = true
-            resolve(1)
-          catch
-            fatal(error, traceback)
-            raise
-          end
+          cleaned = true
+          resolve(1)
+        catch
+          fatal(error, traceback)
+          raise
         end)
       end)
       case result
@@ -300,8 +294,8 @@ local function fatal_test_cancellable_fatal(sticky: boolean)
     end
     do
       async.await_cancellable<|integer, string|>(function (_resolve: function (integer): (), _reject: function (string): (), fatal: function (value, string): ()): uv.req_t?
-        local request = uv.fs_t.new()
-        local callback = function (_request: uv.fs_t)
+        const request = uv.fs_t()
+        const callback = function (_: uv.fs_t)
           uv.fs_req_cleanup(request)
           if sticky then
             owner:cancel(async.CancellationReason<|value|>.complex("cancellable sticky"))
@@ -362,18 +356,18 @@ function test_subscription_callback_failure_drains_native_owner(context: test.Co
   context:log("BEGIN expected persistent callback diagnostic")
   local reader_entered, callback_failed, cleanup_started, native_closed = false, false, false, false
   local returned_normally, cleanup_completed = false, false
-  local task = async.run<|value, value|>(function (): value
-    local stream = async.BufferedSubscription<|value, value|>(function (_emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
-      local timer = uv.timer_t()
-      local handle = timer:as_handle_t()
+  const task = async.run<|value, value|>(function (): value
+    const stream = async.BufferedSubscription<|value, value|>(function (_emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
+      const timer = uv.timer_t()
+      const handle = timer:as_handle_t()
       local resolve_close: (function (value): ())? = nil
       local fail_close: (function (value, string): ())? = nil
-      local on_closed = function (_: uv.handle_t)
+      const on_closed = function (_: uv.handle_t)
         native_closed = true
         do resolve_close(nil)
         catch fail_close(error, traceback); raise end
       end
-      local on_tick = function (_: uv.timer_t)
+      const on_tick = function (_: uv.timer_t)
         test.assert(reader_entered, "producer callback ran before reader suspension")
         if not callback_failed then
           callback_failed = true
@@ -381,7 +375,7 @@ function test_subscription_callback_failure_drains_native_owner(context: test.Co
           raise "persistent producer callback failed"
         end
       end
-      local result = async.SubscriptionActions<|value|>(function () uv.timer_stop(timer) end,
+      const result = async.SubscriptionActions<|value|>(function () uv.timer_stop(timer) end,
         function (drain: function (): (async.SubscriptionBatch<|value|>))
           cleanup_started = true
           test.assert(drain().count == 0, "failure created an event")
@@ -393,7 +387,7 @@ function test_subscription_callback_failure_drains_native_owner(context: test.Co
           cleanup_completed = true
         end)
       test.assert(uv.timer_init(async.current_loop(), timer) == 0, "producer timer init failed")
-      local status = uv.timer_start(timer, on_tick, 0, 100)
+      const status = uv.timer_start(timer, on_tick, 0, 100)
       if status < 0 then uv.close(handle); raise status end
       return result
     end)
@@ -419,10 +413,10 @@ end
 
 function test_generic_await_fatal_keeps_dependency_wakes_runnable(context: test.Context)
   context:log("BEGIN expected dependent-worker fatal diagnostic")
-  local marker = FatalMarker(8, "inline fatal with dependent foreign work")
-  local fixture = new_foreign_work_fixture(41)
+  const marker = FatalMarker(8, "inline fatal with dependent foreign work")
+  const fixture = new_foreign_work_fixture(41)
   defer ffi.titan_async_work_fixture_destroy(fixture)
-  local release_token = ffi.titan_async_work_fixture_release_token(fixture) as integer
+  const release_token = ffi.titan_async_work_fixture_release_token(fixture) as integer
   local suspended, work_submitted, cleaned = false, false, false
   async.run<|value, value|>(function (): value
     defer do
@@ -485,8 +479,8 @@ end
 
 local function break_wake(repair: WakeRepair)
   uv.timer_close(repair.owner as uv.timer_t, function (owner: uv.timer_t)
-    local done = repair.ack as async.Completion<|WakeRepair, nil, nil|>
-    local number = repair.number
+    const done = repair.ack as async.Completion<|WakeRepair, nil, nil|>
+    const number = repair.number
     repair.ack = nil
     do
       test.assert(uv.timer_init(repair.loop as uv.loop_t, owner) == 0,
@@ -503,14 +497,14 @@ end
 
 local function start_repair_ack(
     done: async.Completion<|WakeRepair, nil, nil|>, number: integer): uv.req_t?
-  local repair = done:context(number)
+  const repair = done:context(number)
   repair.ack = done
   repair.number = number
   return nil
 end
 
 local function await_repair(repair: WakeRepair)
-  local result = async.await_cleanup_with<|WakeRepair, nil, nil|>(repair, start_repair_ack)
+  const result = async.await_cleanup_with<|WakeRepair, nil, nil|>(repair, start_repair_ack)
   case result
   when success(_) then
   else raise "native repair acknowledgment failed" end
@@ -520,20 +514,20 @@ end
 
 local function check_arm_failure(failure: value)
   test.assert(failure is async.OperationError, "wake rejection was not an OperationError")
-  local operation = failure as async.OperationError
+  const operation = failure as async.OperationError
   test.assert(operation.operation == "runtime.timer.start" and operation.code == (uv.EINVAL as integer),
       "fault did not reject the exact shared-wake arm")
   test.assert(not async.is_closing(), "caught admission failure fatally closed the Runtime")
 end
 
 function test_peer_completion_wake_failure_rolls_back_then_retries(_context: test.Context)
-  local repair = WakeRepair(nil, nil, nil, nil, 0, false, 0)
+  const repair = WakeRepair(nil, nil, nil, nil, 0, false, 0)
   local saved: async.Completion<|string, integer, string|>? = nil
   local number = 0
   local deliveries = 0
   local rejected = false
-  local consumer = async.run<|nil, nil|>(function (): nil
-    local result = async.await_with<|string, integer, string|>("original operation",
+  const consumer = async.run<|nil, nil|>(function (): nil
+    const result = async.await_with<|string, integer, string|>("original operation",
         function (done, operation_number): uv.req_t?
           saved = done
           number = operation_number
@@ -546,9 +540,9 @@ function test_peer_completion_wake_failure_rolls_back_then_retries(_context: tes
     else raise "failed success attempt was committed" end
     return nil
   end)
-  local injector = async.run<|nil, nil|>(function (): nil
+  const injector = async.run<|nil, nil|>(function (): nil
     test.assert(saved ~= nil and consumer:status():as_string() == "waiting", "consumer did not reserve its wait first")
-    local done = saved as async.Completion<|string, integer, string|>
+    const done = saved as async.Completion<|string, integer, string|>
     break_wake(repair)
     do done:resolve(number, 17)
     catch check_arm_failure(error); rejected = true end
@@ -570,13 +564,13 @@ function test_peer_completion_wake_failure_rolls_back_then_retries(_context: tes
 end
 
 local record PublicationItem
-  id: integer
+  const id: integer
   disposed: boolean
 end
 
 local function rejected_publication(send: function (PublicationItem): (boolean),
     weak_roots: {value: value}): boolean
-  local item = PublicationItem(1, false)
+  const item = PublicationItem(1, false)
   weak_roots["rejected"] = item
   local rejected = false
   do send(item)
@@ -590,10 +584,10 @@ local function rejected_publication(send: function (PublicationItem): (boolean),
 end
 
 function test_subscription_wake_failure_restores_publication_and_reservation(_context: test.Context)
-  local repair = WakeRepair(nil, nil, nil, nil, 0, false, 0)
+  const repair = WakeRepair(nil, nil, nil, nil, 0, false, 0)
   local publish: (function (PublicationItem): (boolean))? = nil
   local close_count = 0
-  local stream = async.BufferedSubscription<|PublicationItem, nil|>(
+  const stream = async.BufferedSubscription<|PublicationItem, nil|>(
       function (send, _fail, _finish): async.SubscriptionActions<|PublicationItem|>
         publish = send
         return async.SubscriptionActions<|PublicationItem|>(function () end,
@@ -602,12 +596,12 @@ function test_subscription_wake_failure_restores_publication_and_reservation(_co
               test.assert(drain().count == 0, "closed subscription still owned a publication")
             end)
       end)
-  local weak_roots: {value: value} = {}
+  const weak_roots: {value: value} = {}
   rollback_gc.weak(weak_roots)
-  local accepted_item = PublicationItem(2, false)
+  const accepted_item = PublicationItem(2, false)
   local deliveries = 0
   local rejected = false
-  local consumer = async.run<|nil, nil|>(function (): nil
+  const consumer = async.run<|nil, nil|>(function (): nil
     defer stream:close()
     case stream:next_batch()
     when batch(items) then
@@ -619,7 +613,7 @@ function test_subscription_wake_failure_restores_publication_and_reservation(_co
     else raise "subscription retry did not deliver its exact batch" end
     return nil
   end)
-  local injector = async.run<|nil, nil|>(function (): nil
+  const injector = async.run<|nil, nil|>(function (): nil
     test.assert(stream:has_waiter() and consumer:status():as_string() == "waiting", "reader did not reserve its wait first")
     break_wake(repair)
     rejected = rejected_publication(publish, weak_roots)

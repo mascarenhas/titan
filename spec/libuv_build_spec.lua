@@ -2338,7 +2338,7 @@ printf '%s/%s\n' "$directory" "$object"
         local async = async_sources_text()
         for _, contract in ipairs({
             'foreign import "async_signal_platform.h"',
-            "local native_error = ffi.titan_async_ignore_sigpipe_if_default()",
+            "const native_error = ffi.titan_async_ignore_sigpipe_if_default()",
             "if native_error ~= 0 then",
             'check_status(uv.translate_sys_error(native_error), "runtime.sigpipe")',
             "uv.setup_process_args()",
@@ -2414,8 +2414,8 @@ printf '%s/%s\n' "$directory" "$object"
             "function channel<|T|>(size: integer?):",
             "ResumeToken(\"channel\")",
             "local transfer: {T} = {}",
-            "local send: function (T): ()",
-            "local receive: function (): (T)",
+            "const send: function (T): ()",
+            "const receive: function (): (T)",
             "channel<|string|>(size)",
             "union AnyTwoResult<|A1, A2|>",
             "union AnyFiveResult<|A1, A2, A3, A4, A5|>",
@@ -2445,7 +2445,7 @@ printf '%s/%s\n' "$directory" "$object"
         local foreign_start = assert(foreign:find("function run_foreign(", 1, true))
         local work = foreign:sub(foreign_start)
         assert_ordered(work, 'if not f then raise "async.run_foreign callback must not be NULL" end',
-            "uv.work_t.new()", "await_with<|ForeignWork, value, OperationError|>")
+            "uv.work_t()", "await_with<|ForeignWork, value, OperationError|>")
         assert.truthy(async:find("uv.queue_work(current_loop()", 1, true))
         assert.falsy(work:find("await_cancellable", 1, true), work)
         assert.falsy(async:find("type Task = uv.", 1, true), async)
@@ -2897,19 +2897,19 @@ int main(void) {
         local first = assert(source:find("local function file_completed<|T|>", 1, true))
         local last = assert(source:find("local function start_file<|T|>", first, true))
         local completed = source:sub(first, last - 1)
-        assert_ordered(completed, "local done = operation.done", "local number = operation.number",
+        assert_ordered(completed, "const done = operation.done", "const number = operation.number",
             "request:set_data(nil)", "operation.done = nil",
-            "local copied = operation.decode(request, result)", "uv.fs_req_cleanup(request)",
+            "const copied = operation.decode(request, result)", "uv.fs_req_cleanup(request)",
             "done:resolve(number, copied)")
         assert_ordered(completed, "done:fatal(number, error, traceback)", "raise")
         assert_ordered(source, "local function perform<|T|>",
-            "FileOperation<|T|>(uv.fs_t.new(), submit, decode, nil, 0)",
+            "FileOperation<|T|>(uv.fs_t(), submit, decode, nil, 0)",
             "async.await_with<|FileOperation<|T|>, T, integer|>(context, start_file)")
         assert_ordered(source, "function realpath(path: string): string",
             'perform<|string|>("fs.realpath"', "uv.fs_realpath(loop, request, path, callback)",
             "uv.fs_get_string(request)")
         assert_ordered(source, "local function watch_closed(handle: uv.handle_t)",
-            "local number = registration.close_number", "registration.close_done = nil",
+            "const number = registration.close_number", "registration.close_done = nil",
             "uv.handle_set_data(handle, nil)", "done:resolve(number, true)")
         assert_ordered(source, "local function start_watch_close(",
             "uv.close(registration.view, watch_closed)",
@@ -3136,7 +3136,7 @@ int main(void) {
         assert.truthy(ssl:find(
             "explicit_client_context(fs.read_file(ca_file))", 1, true), ssl)
         assert.truthy(ssl:find(
-            "local certificate_data = fs.read_file", 1, true), ssl)
+            "const certificate_data = fs.read_file", 1, true), ssl)
         assert.truthy(ssl:find(
             "private_key_data = fs.read_file", 1, true), ssl)
         assert.truthy(ssl:find(
@@ -3548,7 +3548,7 @@ int main(void) {
                 "function lstat(path: string): Stat?", 1, true))
             assert_ordered(source,
                 "function tmpname(): string",
-                'local template = sized_path("fs.tmpname", uv.os_tmpdir)',
+                'const template = sized_path("fs.tmpname", uv.os_tmpdir)',
                 'defer file:close_with("fs.tmpname.close")',
                 "return uv.fs_mkstemp(loop, request, template, callback)",
                 "return uv.fs_get_path(request) as string",

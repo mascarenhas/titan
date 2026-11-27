@@ -21,7 +21,7 @@ foreign import "child.h"
 local type Value = browser.BrowserValue
 
 local function call_binding(name: string, ...: Value): Value
-  local target = browser.binding(name)
+  const target = browser.binding(name)
   defer target:close()
   return target:call(...)
 end
@@ -61,14 +61,14 @@ end
 -- Await the harness's `delay(ms, value)` request, which resolves `value` after
 -- `ms` milliseconds. A cleanup wait is shielded from cancellation.
 local function await_delay(ms: integer, value: integer, cleanup: boolean): integer
-  local source = browser.binding("delay")
+  const source = browser.binding("delay")
   defer source:close()
   local request: browser.BrowserRequest? = nil
   defer do
-    local open? = request
+    const open? = request
     if open ~= nil then open:close() end
   end
-  local start = function (resolve: function (integer): (), reject: function (string): (),
+  const start = function (resolve: function (integer): (), reject: function (string): (),
       _fatal: function (value, string): ())
     request = source:start(function (...: Value): Value
       resolve(integer_of(...[1]))
@@ -85,15 +85,15 @@ end
 -- Suspend on one host request: its settlement resumes this Task, and
 -- cancelling the Task cancels the request, as browser timer sleeps do.
 local function suspend_on(name: string, ...: Value)
-  local task = async.running()
-  local token = async.ResumeToken(name)
-  local source = browser.binding(name)
+  const task = async.running()
+  const token = async.ResumeToken(name)
+  const source = browser.binding(name)
   defer source:close()
-  local wake = function (...: Value): Value
+  const wake = function (...: Value): Value
     task:resume(token)
     return Value.is_nil()
   end
-  local request = source:start(wake, wake, ...)
+  const request = source:start(wake, wake, ...)
   defer request:close()
   async.suspend(token, function () request:cancel() catch end)
 end

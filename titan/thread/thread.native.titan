@@ -386,7 +386,7 @@ end
 
 local function render_error_text(err: value): string
   if err is async.OperationError then
-    local failure = err as async.OperationError
+    const failure = err as async.OperationError
     return failure.operation .. ": " .. failure.name ..
            " (" .. failure.code .. "): " .. failure.message
   end

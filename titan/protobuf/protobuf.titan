@@ -21,7 +21,7 @@ local function field_ordinal(number: integer): integer
 end
 
 local function require_depth(depth: integer)
-  local limit: integer = ffi.TITAN_CODEC_DEPTH_LIMIT
+  const limit: integer = ffi.TITAN_CODEC_DEPTH_LIMIT
   if depth > limit then
     raise "protobuf: nesting exceeds " .. limit .. " levels"
   end
@@ -29,10 +29,10 @@ end
 
 local function resolve_type(descriptor: reflect.Type): reflect.Type
   local current = descriptor
-  for index = 1, 128 do
+  for _ = 1, 128 do
     case current
     when is_named(named) then
-      local found? = reflect.find_nominal(named.name)
+      const found? = reflect.find_nominal(named.name)
       if found == nil then raise "protobuf: unknown nominal type " .. named.name end
       current = named:resolve()
     when is_foreign_named(named) then current = named:resolve()
@@ -91,12 +91,12 @@ end
 local function record_identity(candidate: value): value
   local raw: foreign TValue = candidate
   if ffi.lmacro_ttype(raw) ~= ffi.LUA_TUSERDATA then return nil end
-  local mt = ffi.lmacro_uvalue(raw).metatable
+  const mt = ffi.lmacro_uvalue(raw).metatable
   if mt == nil then return nil end
   local identity: foreign TValue = nil
   ffi.lmacro_sethvalue(L, identity, mt)
-  local fields: {value: value} = identity as value
-  local brand: integer? = fields[ffi.TITAN_BRAND]
+  const fields: {value: value} = identity as value
+  const brand: integer? = fields[ffi.TITAN_BRAND]
   if brand ~= (ffi.TITAN_RECORD as integer) then return nil end
   return identity as value
 end
@@ -108,13 +108,13 @@ end
 function register_resource_codec(candidate: value, descriptor: reflect.RecordType,
     encode: function (value, value): (integer),
     decode: function (value, foreign const *void, integer): (value))
-  local identity = record_identity(candidate)
+  const identity = record_identity(candidate)
   if identity == nil then raise "protobuf: resource codec requires a record" end
   resource_codecs[identity] = ResourceCodec(identity, descriptor, encode, decode)
 end
 
 function find_resource_codec(candidate: value): ResourceCodec?
-  local identity = record_identity(candidate)
+  const identity = record_identity(candidate)
   if identity == nil then return nil end
   return resource_codecs[identity]
 end
@@ -122,7 +122,7 @@ end
 -- Resolve names through the traced canonical nominal registry, never by
 -- interpreting a spelling as permission to attach or claim native resources.
 function find_resource_codec_by_name(name: string): ResourceCodec?
-  local identity? = resource_nominals[name]
+  const identity? = resource_nominals[name]
   if identity == nil then return nil end
   return resource_codecs[identity]
 end
@@ -184,7 +184,7 @@ end
 function find_transfer_hooks(
     descriptor: reflect.RecordType,
     prefix: string): (reflect.MethodType?, reflect.StaticFunctionType?)
-  local cached? = hook_cache[descriptor.name]
+  const cached? = hook_cache[descriptor.name]
   if cached ~= nil then
     if not cached.has_hooks then return nil, nil end
     return cached.encode, cached.decode
@@ -192,7 +192,7 @@ function find_transfer_hooks(
   local encode: reflect.MethodType? = nil
   local decode: reflect.StaticFunctionType? = nil
   for index = 1, #descriptor.methods do
-    local method = descriptor.methods[index]
+    const method = descriptor.methods[index]
     if method.name == "to_transfer_payload" then
       encode = method
     elseif method.name == "from_transfer_payload" then
@@ -200,7 +200,7 @@ function find_transfer_hooks(
     end
   end
   for index = 1, #descriptor.statics do
-    local static = descriptor.statics[index]
+    const static = descriptor.statics[index]
     if static.name == "from_transfer_payload" then
       decode = static
     elseif static.name == "to_transfer_payload" then
@@ -245,7 +245,7 @@ function encode_transfer_payload(
   if active_record_payloads[candidate] then raise err_msg end
   active_record_payloads[candidate] = true
   defer active_record_payloads[candidate] = nil
-  local payload: string = encode.callable(candidate)
+  const payload: string = encode.callable(candidate)
   return payload
 end
 
@@ -287,7 +287,7 @@ local function check_integer(number: integer, spelling: string,
   end
   if bits < 64 then
     if signed then
-      local maximum = (1 << (bits - 1)) - 1
+      const maximum = (1 << (bits - 1)) - 1
       if number < -maximum - 1 or number > maximum then
         raise "protobuf: signed integer out of range"
       end
@@ -339,7 +339,7 @@ local function write_float32(buf: foreign *titan_protobuf_buffer, number: intege
 end
 
 local function begin_nested(buf: foreign *titan_protobuf_buffer, number: integer): integer
-  local mark: integer = ffi.titan_protobuf_buf_begin_nested(buf, make_key(number, 2))
+  const mark: integer = ffi.titan_protobuf_buf_begin_nested(buf, make_key(number, 2))
   if mark < 0 then
     raise "protobuf: out of memory"
   end
@@ -347,7 +347,7 @@ local function begin_nested(buf: foreign *titan_protobuf_buffer, number: integer
 end
 
 local function end_nested(buf: foreign *titan_protobuf_buffer, mark: integer)
-  local rc: integer = ffi.titan_protobuf_buf_end_nested(buf, mark)
+  const rc: integer = ffi.titan_protobuf_buf_end_nested(buf, mark)
   if rc == 0 then raise "protobuf: out of memory" end
   if rc < 0 then raise "protobuf: message exceeds 2 GiB" end
 end
@@ -393,7 +393,7 @@ local codec_handoff_entry: value = nil
 -- @return The previous setting.
 -- @usage standard-library-protobuf.md#generated-codecs
 function use_generated_codecs(enabled: boolean): boolean
-  local previous = generated_codecs_enabled
+  const previous = generated_codecs_enabled
   generated_codecs_enabled = enabled
   return previous
 end
@@ -416,11 +416,11 @@ end
 local function find_named_codec(name: string,
     kind: integer): (foreign const *TitanTransferCodec, value)
   if generated_codecs_bypassed() then return nil, nil end
-  local identity? = resource_nominals[name]
+  const identity? = resource_nominals[name]
   if identity == nil then return nil, nil end
   local metatable: foreign TValue = identity as value
   local resources: foreign TValue = resource_codecs as value
-  local codec = ffi.titan_codec_find_metatable(L, resources, metatable, kind)
+  const codec = ffi.titan_codec_find_metatable(L, resources, metatable, kind)
   if codec == nil then return nil, nil end
   return codec, identity as value
 end
@@ -446,15 +446,15 @@ end
 local function find_field_codec(candidate: value, name: string,
     is_union: boolean): foreign const *TitanTransferCodec
   if generated_codecs_bypassed() then return nil end
-  local identity? = resource_nominals[name]
+  const identity? = resource_nominals[name]
   if identity == nil then return nil end
   local raw: foreign TValue = candidate
   if ffi.lmacro_ttype(raw) ~= ffi.LUA_TUSERDATA then return nil end
-  local mt = ffi.lmacro_uvalue(raw).metatable
+  const mt = ffi.lmacro_uvalue(raw).metatable
   if mt == nil then return nil end
   local actual: foreign TValue = nil
   ffi.lmacro_sethvalue(L, actual, mt)
-  local expected: value = identity
+  const expected: value = identity
   if (actual as value) ~= expected then return nil end
   local metatable: foreign TValue = expected
   local resources: foreign TValue = resource_codecs as value
@@ -470,7 +470,7 @@ local function decode_generated(codec: foreign const *TitanTransferCodec,
   local handoff: foreign TValue = codec_handoff_entry
   local held: foreign TValue = holder as value
   local nominal: foreign TValue = metatable
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if codec_trace ~= nil then codec_trace:enter_generated() end
   ffi.titan_codec_decode_nominal(L, resources, carried, handoff, held, codec, nominal,
@@ -482,7 +482,7 @@ end
 -- The hydrated descriptor of one declared field or variant part.
 local function handoff_descriptor(owner: string, variant: integer,
     index: integer): reflect.Type
-  local found? = reflect.find_nominal(owner)
+  const found? = reflect.find_nominal(owner)
   if found ~= nil then
     case found
     when is_record(record_type) then return record_type.fields[index].type
@@ -495,11 +495,11 @@ end
 -- The reflective resource branch of Encoder:field after its depth check.
 local function encode_resource_field(buf: foreign *titan_protobuf_buffer,
     codec: ResourceCodec, number: integer, candidate: value, context: value)
-  local identity = record_identity(candidate)
+  const identity = record_identity(candidate)
   if identity == nil then raise "protobuf: expected a record" end
   if identity ~= codec.identity then raise "protobuf: record type mismatch" end
   if codec_trace ~= nil then return end
-  local index = codec.encode(context, candidate)
+  const index = codec.encode(context, candidate)
   write_key(buf, number, 2)
   write_varint(buf, 4)
   if write_resource_index(buf as foreign *void, index as foreign unsigned int) == 0 then
@@ -518,16 +518,16 @@ end
 local function codec_handoff(request_value: value, item: value, context: value,
     kept: value): value
   -- Implementation notes: doc/implementation/protobuf-library.md#generated-nominal-codecs
-  local request = request_value as foreign *TitanCodecHandoff
-  local op: integer = request.op
-  local owner = request.owner as string
-  local number: integer = request.number
-  local depth: integer = request.depth
-  local variant: integer = request.variant
-  local index: integer = request.index
+  const request = request_value as foreign *TitanCodecHandoff
+  const op: integer = request.op
+  const owner = request.owner as string
+  const number: integer = request.number
+  const depth: integer = request.depth
+  const variant: integer = request.variant
+  const index: integer = request.index
   if op == ffi.TITAN_CODEC_ENCODE_RESOURCE then
     if request.lazy_context ~= 0 and codec_trace == nil then context = packet_context(true) end
-    local codec? = find_resource_codec_by_name(owner)
+    const codec? = find_resource_codec_by_name(owner)
     if codec == nil then raise "protobuf: unknown nominal type " .. owner end
     if context is PortableCodec then
       raise "protobuf: " .. owner .. " is a packet resource and is not portable"
@@ -544,14 +544,14 @@ local function codec_handoff(request_value: value, item: value, context: value,
     end
     -- An error abandons the whole root, so only a returning field restores
     -- the enclosing frame's path.
-    local enclosing = encoder.path
+    const enclosing = encoder.path
     encoder.path = request.path
     encoder:field(request.buf, number, item,
         handoff_descriptor(owner, variant, index), depth)
     encoder.path = enclosing
     return nil
   elseif op == ffi.TITAN_CODEC_DECODE_RESOURCE then
-    local codec? = find_resource_codec_by_name(owner)
+    const codec? = find_resource_codec_by_name(owner)
     if codec == nil then raise "protobuf: unknown nominal type " .. owner end
     if context is PortableCodec then
       raise "protobuf: " .. owner .. " is a packet resource and is not portable"
@@ -563,9 +563,9 @@ local function codec_handoff(request_value: value, item: value, context: value,
     return codec.decode(context, request.data as foreign const *void,
         request.length as integer)
   end
-  local holder: string? = item
+  const holder: string? = item
   if op == ffi.TITAN_CODEC_DECODE_FIELD then
-    local descriptor = handoff_descriptor(owner, variant, index)
+    const descriptor = handoff_descriptor(owner, variant, index)
     if request.field_count > 1 then
       return decode_field(read_message_slice(request.data, 0,
           request.length as integer, holder, context), number, descriptor, depth)
@@ -581,9 +581,9 @@ local function codec_handoff(request_value: value, item: value, context: value,
         request.field_length as integer)
     return decode_field(message, number, descriptor, depth)
   end
-  local message = read_message_slice(request.data, 0, request.length as integer,
+  const message = read_message_slice(request.data, 0, request.length as integer,
       holder, context)
-  local found? = reflect.find_nominal(owner)
+  const found? = reflect.find_nominal(owner)
   if found ~= nil then
     case found
     when is_union(union_type) then return decode_union(message, union_type, depth)
@@ -596,8 +596,8 @@ end
 -- before an error in place; both write identical bytes up to that point.
 local function encode_generated_root(buf: foreign *void,
     codec: foreign const *TitanTransferCodec, candidate: value, context: value)
-  local pbuf = buf as foreign *titan_protobuf_buffer
-  local start = pbuf.length as integer
+  const pbuf = buf as foreign *titan_protobuf_buffer
+  const start = pbuf.length as integer
   local resources: foreign TValue = resource_codecs as value
   local carried: foreign TValue = context
   local handoff: foreign TValue = codec_handoff_entry
@@ -607,7 +607,7 @@ local function encode_generated_root(buf: foreign *void,
   ffi.titan_codec_encode_root(L, resources, carried, lazy, handoff, pbuf, codec, raw)
   check_message_size((pbuf.length as integer) - start)
 catch
-  local located? = locate_encoding(error, candidate, nil, context, true)
+  const located? = locate_encoding(error, candidate, nil, context, true)
   if located ~= nil then raise located, traceback end
   raise
 end
@@ -626,7 +626,7 @@ function serialize_generated_to_buffer(buf: foreign *void, codec: foreign const 
     candidate: value, context: value): boolean
   local raw: foreign TValue = candidate
   local resources: foreign TValue = resource_codecs as value
-  local bound = ffi.titan_codec_find(L, resources, raw)
+  const bound = ffi.titan_codec_find(L, resources, raw)
   if codec == nil or bound ~= codec as foreign const *TitanTransferCodec then return false end
   encode_generated_root(buf, bound, candidate, context)
   return true
@@ -634,7 +634,7 @@ end
 
 local function serialize_generated(buf: foreign *void, candidate: value,
     context: value): boolean
-  local codec = find_generated_codec(candidate)
+  const codec = find_generated_codec(candidate)
   if codec == nil then return false end
   encode_generated_root(buf, codec as foreign const *TitanTransferCodec, candidate, context)
   return true
@@ -644,28 +644,28 @@ end
 -- resource, and size guards for everything a generated codec declined.
 local function encode_record_root(
     buf: foreign *void, candidate: reflect.RecordValue, context: value)
-  local pbuf = buf as foreign *titan_protobuf_buffer
-  local start = pbuf.length as integer
+  const pbuf = buf as foreign *titan_protobuf_buffer
+  const start = pbuf.length as integer
   if context == nil and codec_trace == nil then context = packet_context(true) end
-  local encoder = Encoder({}, context, nil)
+  const encoder = Encoder({}, context, nil)
   encoder:record_value(pbuf, candidate, 1)
   check_message_size((pbuf.length as integer) - start)
 catch
-  local located? = locate_encoding(error, candidate.value, nil, context, false)
+  const located? = locate_encoding(error, candidate.value, nil, context, false)
   if located ~= nil then raise located, traceback end
   raise
 end
 
 local function encode_union_root(
     buf: foreign *void, candidate: reflect.UnionValue, context: value)
-  local pbuf = buf as foreign *titan_protobuf_buffer
-  local start = pbuf.length as integer
+  const pbuf = buf as foreign *titan_protobuf_buffer
+  const start = pbuf.length as integer
   if context == nil and codec_trace == nil then context = packet_context(true) end
-  local encoder = Encoder({}, context, nil)
+  const encoder = Encoder({}, context, nil)
   encoder:union_value(pbuf, candidate, 1)
   check_message_size((pbuf.length as integer) - start)
 catch
-  local located? = locate_encoding(error, candidate.value, nil, context, false)
+  const located? = locate_encoding(error, candidate.value, nil, context, false)
   if located ~= nil then raise located, traceback end
   raise
 end
@@ -704,7 +704,7 @@ end
 -- @return Protocol Buffers wire bytes for the root message.
 -- @usage standard-library-protobuf.md#api
 function serialize(candidate: value): string
-  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  const buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
   ffi.titan_protobuf_buf_init_heap(buf, 0)
   defer ffi.titan_protobuf_buf_free_heap(buf)
   serialize_to_buffer(buf as foreign *void, candidate)
@@ -728,11 +728,11 @@ local function deserialize_record_buffer(
     return decode_generated(codec, metatable, data as foreign const *uint8_t,
         length, context, holder, 1)
   end
-  local message = read_message_slice(
+  const message = read_message_slice(
       data as foreign const *uint8_t, 0, length, holder, context)
   return decode_record(message, descriptor, 1)
 catch
-  local located? = locate_decoding { original = error, data = data, length = length,
+  const located? = locate_decoding { original = error, data = data, length = length,
       record_type = descriptor, union_type = nil, fields = nil, context = context, holder = holder }
   if located ~= nil then raise located, traceback end
   raise
@@ -749,11 +749,11 @@ local function deserialize_union_buffer(
     return decode_generated(codec, metatable, data as foreign const *uint8_t,
         length, context, holder, 1)
   end
-  local message = read_message_slice(
+  const message = read_message_slice(
       data as foreign const *uint8_t, 0, length, holder, context)
   return decode_union(message, descriptor, 1)
 catch
-  local located? = locate_decoding { original = error, data = data, length = length,
+  const located? = locate_decoding { original = error, data = data, length = length,
       record_type = nil, union_type = descriptor, fields = nil, context = context, holder = holder }
   if located ~= nil then raise located, traceback end
   raise
@@ -801,9 +801,9 @@ function serialize_fields_to_buffer_with_context(
     context: value,
     ...: value)
   if #... ~= #fields then raise "protobuf: anonymous field count mismatch" end
-  local pbuf = buf as foreign *titan_protobuf_buffer
-  local start = pbuf.length as integer
-  local encoder = Encoder({}, context, nil)
+  const pbuf = buf as foreign *titan_protobuf_buffer
+  const start = pbuf.length as integer
+  const encoder = Encoder({}, context, nil)
   for index = 1, #fields do
     if codec_trace ~= nil then codec_trace:index(index) end
     encoder:field(pbuf, field_number(index), ...[index], fields[index], 2)
@@ -811,7 +811,7 @@ function serialize_fields_to_buffer_with_context(
   end
   check_message_size((pbuf.length as integer) - start)
 catch
-  local located? = locate_encoding(error, nil, fields, context, false, ...)
+  const located? = locate_encoding(error, nil, fields, context, false, ...)
   if located ~= nil then raise located, traceback end
   raise
 end
@@ -824,7 +824,7 @@ end
 -- @return Protocol Buffers wire bytes for the anonymous message.
 -- @usage standard-library-protobuf.md#anonymous-messages
 function serialize_fields(fields: const {reflect.Type}, ...: value): string
-  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  const buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
   ffi.titan_protobuf_buf_init_heap(buf, 0)
   defer ffi.titan_protobuf_buf_free_heap(buf)
   serialize_fields_to_buffer(buf as foreign *void, fields, ...)
@@ -852,8 +852,8 @@ local function deserialize_fields_slice(
     fields: const {reflect.Type},
     context: value, holder: string?): (...: value)
   check_message_size(length)
-  local message = read_message_slice(base, 0, length, holder, context)
-  local values: {value} = {}
+  const message = read_message_slice(base, 0, length, holder, context)
+  const values: {value} = {}
   for index = 1, #fields do
     if codec_trace ~= nil then codec_trace:index(index) end
     values[index] = decode_field(message, field_number(index), fields[index], 2)
@@ -861,7 +861,7 @@ local function deserialize_fields_slice(
   end
   return ...values[1, #fields]
 catch
-  local located? = locate_decoding { original = error, data = base as foreign const *void,
+  const located? = locate_decoding { original = error, data = base as foreign const *void,
       length = length, record_type = nil, union_type = nil, fields = fields,
       context = context, holder = holder }
   if located ~= nil then raise located, traceback end
@@ -955,8 +955,8 @@ end
 -- @return A complete, pretty-printed proto3 schema with deterministic identifiers.
 -- @usage standard-library-protobuf.md#wire-mapping
 function schema(descriptor: reflect.Type): string
-  local builder = Schema({}, string.writer())
-  local resolved = resolve_type(descriptor)
+  const builder = Schema({}, string.writer())
+  const resolved = resolve_type(descriptor)
   case resolved
   when is_record() then
   when is_union() then
@@ -972,10 +972,10 @@ do
   -- into traced module storage, then restore the exact entry top. The table is
   -- the state's live registry, so later nominal registrations stay visible and
   -- a failed module initialization can be retried.
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then raise "protobuf: cannot reserve nominal registry stack" end
-  local registry = ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
+  const registry = ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
   if registry ~= ffi.LUA_TTABLE then
     raise "protobuf: Titan nominal registry is not a table"
   end
@@ -983,7 +983,7 @@ do
   gc.ephemeron(active_record_payloads as {value: value})
   -- Every TitanCodecState.handoff is this entry, so its exact function type
   -- is checked once here rather than on each generated-codec handoff.
-  local handoff: value = codec_handoff
+  const handoff: value = codec_handoff
   local raw_handoff: foreign TValue = handoff
   if ffi.titan_codec_handoff_valid(raw_handoff) == 0 then
     raise "protobuf: invalid codec handoff"

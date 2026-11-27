@@ -2,7 +2,7 @@ local browser_os = import "os"
 
 local function stock_profile_case(context: test.Context, name: string, source: string)
   context:run(name, function (_: test.Context)
-    local chunk = [[
+    const chunk = [[
       local function failure(operation)
         local values = table.pack(pcall(operation))
         if not values[1] then
@@ -14,7 +14,7 @@ local function stock_profile_case(context: test.Context, name: string, source: s
       end
     ]] .. source .. "\nreturn true"
     test.assert(tlua.load(chunk, "=browser-stock-" .. name)() == true)
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     assert_transfer_boolean(state:run(chunk, "=browser-state-stock-" .. name), true)
   end)
@@ -100,18 +100,18 @@ function test_lua_browser_stock_filesystem_failures(context: test.Context)
 end
 
 function test_lua_browser_require_misses_ignore_provider_environment(_: test.Context)
-  local name = "lua.tests.browser_missing"
-  local source = "no source search: the browser target has no filesystem"
-  local provider = "no Titan provider search: the browser target has no dynamic providers"
-  local miss = function (): string
+  const name = "lua.tests.browser_missing"
+  const source = "no source search: the browser target has no filesystem"
+  const provider = "no Titan provider search: the browser target has no dynamic providers"
+  const miss = function (): string
     tlua.require(name)
     raise "missing module unexpectedly loaded"
   catch
     return error as string
   end
-  local before = miss()
-  local previous? = browser_os.getenv("TITAN_PATH")
-  local versioned? = browser_os.getenv("TITAN_PATH_0_6")
+  const before = miss()
+  const previous? = browser_os.getenv("TITAN_PATH")
+  const versioned? = browser_os.getenv("TITAN_PATH_0_6")
   defer do
     if previous ~= nil then browser_os.setenv("TITAN_PATH", previous)
     else browser_os.unsetenv("TITAN_PATH") end
@@ -121,7 +121,7 @@ function test_lua_browser_require_misses_ignore_provider_environment(_: test.Con
   browser_os.setenv("TITAN_PATH", "/browser/provider/one")
   browser_os.setenv("TITAN_PATH_0_6", "/browser/provider/two")
   test.assert(miss() == before, "browser provider search read the environment")
-  local check = tlua.load([[
+  const check = tlua.load([[
     return function(message, source, provider)
       local preload = assert(message:find("no field package.preload['lua.tests.browser_missing']", 1, true))
       local source_at = assert(message:find(source, 1, true))
@@ -131,9 +131,9 @@ function test_lua_browser_require_misses_ignore_provider_environment(_: test.Con
     end
   ]])() as function (string, string, string): ()
   check(before, source, provider)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local result = state:run([[
+  const result = state:run([[
     local ok, message = pcall(require, 'lua.tests.browser_missing')
     assert(not ok and message:find('no Titan provider search: the browser target has no dynamic providers', 1, true))
     return true

@@ -46,10 +46,10 @@ record tcp_t
   local read_callback: read_cb?
   local read_buffer: buf_t?
   local close_callback: (function (handle_t): ())?
-  local connection_handler: function (tcp_t, loop_t, integer): ()
-  local alloc_handler: function (tcp_t, loop_t, integer, foreign *uv_buf_t): ()
-  local read_handler: function (tcp_t, loop_t, integer, foreign const *uv_buf_t): ()
-  local close_handler: function (tcp_t, loop_t): ()
+  local const connection_handler: function (tcp_t, loop_t, integer): ()
+  local const alloc_handler: function (tcp_t, loop_t, integer, foreign *uv_buf_t): ()
+  local const read_handler: function (tcp_t, loop_t, integer, foreign const *uv_buf_t): ()
+  local const close_handler: function (tcp_t, loop_t): ()
   local userdata: value
 end
 
@@ -84,7 +84,7 @@ local function tcp_t:valid(): boolean
 end
 
 local function tcp_connection_deliver(owner: tcp_t, loop: loop_t, status: integer)
-  local callback? = owner.connection_callback
+  const callback? = owner.connection_callback
   if callback ~= nil then callback(stream_t.tcp(owner), status) end
 catch
   if loop.failure_count == 0 then
@@ -99,9 +99,9 @@ local function tcp_alloc_deliver(owner: tcp_t, loop: loop_t,
                                     suggested_size: integer, output: foreign *uv_buf_t)
   output.base = nil
   output.len = 0
-  local callback? = owner.alloc_callback
+  const callback? = owner.alloc_callback
   if callback == nil then return end
-  local buffer = callback(handle_t.tcp(owner), suggested_size)
+  const buffer = callback(handle_t.tcp(owner), suggested_size)
   if not buffer.writable then raise "read allocation must be writable" end
   owner.read_buffer = buffer
   output[0] = buffer.native[0]
@@ -119,7 +119,7 @@ local function tcp_read_deliver(owner: tcp_t, loop: loop_t,
   -- Detach the allocation before user code can stop and restart reading.
   local buffer? = owner.read_buffer
   owner.read_buffer = nil
-  local callback? = owner.read_callback
+  const callback? = owner.read_callback
   if native == nil or native.base == nil then buffer = nil end
   if callback ~= nil then callback(stream_t.tcp(owner), nread, buffer) end
 catch
@@ -135,7 +135,7 @@ local function tcp_closed(owner: tcp_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
   -- Keep the original loop observable through close; init replaces it.
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.connection_callback = nil
   owner.alloc_callback = nil
   owner.read_callback = nil
@@ -219,10 +219,10 @@ record pipe_t
   local read_callback: read_cb?
   local read_buffer: buf_t?
   local close_callback: (function (handle_t): ())?
-  local connection_handler: function (pipe_t, loop_t, integer): ()
-  local alloc_handler: function (pipe_t, loop_t, integer, foreign *uv_buf_t): ()
-  local read_handler: function (pipe_t, loop_t, integer, foreign const *uv_buf_t): ()
-  local close_handler: function (pipe_t, loop_t): ()
+  local const connection_handler: function (pipe_t, loop_t, integer): ()
+  local const alloc_handler: function (pipe_t, loop_t, integer, foreign *uv_buf_t): ()
+  local const read_handler: function (pipe_t, loop_t, integer, foreign const *uv_buf_t): ()
+  local const close_handler: function (pipe_t, loop_t): ()
   local userdata: value
 end
 
@@ -258,7 +258,7 @@ local function pipe_t:valid(): boolean
 end
 
 local function pipe_connection_deliver(owner: pipe_t, loop: loop_t, status: integer)
-  local callback? = owner.connection_callback
+  const callback? = owner.connection_callback
   if callback ~= nil then callback(stream_t.pipe(owner), status) end
 catch
   if loop.failure_count == 0 then
@@ -273,9 +273,9 @@ local function pipe_alloc_deliver(owner: pipe_t, loop: loop_t,
                                     suggested_size: integer, output: foreign *uv_buf_t)
   output.base = nil
   output.len = 0
-  local callback? = owner.alloc_callback
+  const callback? = owner.alloc_callback
   if callback == nil then return end
-  local buffer = callback(handle_t.pipe(owner), suggested_size)
+  const buffer = callback(handle_t.pipe(owner), suggested_size)
   if not buffer.writable then raise "read allocation must be writable" end
   owner.read_buffer = buffer
   output[0] = buffer.native[0]
@@ -293,7 +293,7 @@ local function pipe_read_deliver(owner: pipe_t, loop: loop_t,
   -- Detach the allocation before user code can stop and restart reading.
   local buffer? = owner.read_buffer
   owner.read_buffer = nil
-  local callback? = owner.read_callback
+  const callback? = owner.read_callback
   if native == nil or native.base == nil then buffer = nil end
   if callback ~= nil then callback(stream_t.pipe(owner), nread, buffer) end
 catch
@@ -310,7 +310,7 @@ local function pipe_closed(owner: pipe_t, loop: loop_t)
   owner.phase = HANDLE_RETIRED
   owner.eligibility.available = 0
   -- Keep the original loop observable through close; init replaces it.
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.connection_callback = nil
   owner.alloc_callback = nil
   owner.read_callback = nil
@@ -392,9 +392,9 @@ record tty_t
   local read_callback: read_cb?
   local read_buffer: buf_t?
   local close_callback: (function (handle_t): ())?
-  local alloc_handler: function (tty_t, loop_t, integer, foreign *uv_buf_t): ()
-  local read_handler: function (tty_t, loop_t, integer, foreign const *uv_buf_t): ()
-  local close_handler: function (tty_t, loop_t): ()
+  local const alloc_handler: function (tty_t, loop_t, integer, foreign *uv_buf_t): ()
+  local const read_handler: function (tty_t, loop_t, integer, foreign const *uv_buf_t): ()
+  local const close_handler: function (tty_t, loop_t): ()
   local userdata: value
 end
 
@@ -432,9 +432,9 @@ local function tty_alloc_deliver(owner: tty_t, loop: loop_t,
                                     suggested_size: integer, output: foreign *uv_buf_t)
   output.base = nil
   output.len = 0
-  local callback? = owner.alloc_callback
+  const callback? = owner.alloc_callback
   if callback == nil then return end
-  local buffer = callback(handle_t.tty(owner), suggested_size)
+  const buffer = callback(handle_t.tty(owner), suggested_size)
   if not buffer.writable then raise "read allocation must be writable" end
   owner.read_buffer = buffer
   output[0] = buffer.native[0]
@@ -452,7 +452,7 @@ local function tty_read_deliver(owner: tty_t, loop: loop_t,
   -- Detach the allocation before user code can stop and restart reading.
   local buffer? = owner.read_buffer
   owner.read_buffer = nil
-  local callback? = owner.read_callback
+  const callback? = owner.read_callback
   if native == nil or native.base == nil then buffer = nil end
   if callback ~= nil then callback(stream_t.tty(owner), nread, buffer) end
 catch
@@ -468,7 +468,7 @@ local function tty_closed(owner: tty_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
   -- Keep the original loop observable through close; init replaces it.
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.alloc_callback = nil
   owner.read_callback = nil
   owner.read_buffer = nil
@@ -584,7 +584,7 @@ record connect_t
   local pending: boolean
   local stream: stream_t?
   local callback: connect_cb?
-  local handler: function (connect_t, loop_t, integer): ()
+  local const handler: function (connect_t, loop_t, integer): ()
   local userdata: value
 end
 
@@ -629,7 +629,7 @@ local function connect_deliver(owner: connect_t, loop: loop_t, status: integer)
   loop.requests[owner] = nil
   owner.pending = false
   owner.loop = nil
-  local callback? = owner.callback
+  const callback? = owner.callback
   owner.callback = nil
   if callback ~= nil then callback(owner, status) end
 catch
@@ -668,7 +668,7 @@ record write_t
   local string_data: string?
   local send_stream: handle_t?
   local callback: write_cb?
-  local handler: function (write_t, loop_t, integer): ()
+  local const handler: function (write_t, loop_t, integer): ()
   local userdata: value
 end
 
@@ -722,7 +722,7 @@ local function write_deliver(owner: write_t, loop: loop_t, status: integer)
   const buffers? = owner.buffers
   const native_buffers? = owner.native_buffers
   const string_data? = owner.string_data
-  local callback? = owner.callback
+  const callback? = owner.callback
   owner.callback = nil
   owner.buffers = nil
   owner.native_buffers = nil
@@ -762,7 +762,7 @@ record shutdown_t
   local pending: boolean
   local stream: stream_t?
   local callback: shutdown_cb?
-  local handler: function (shutdown_t, loop_t, integer): ()
+  local const handler: function (shutdown_t, loop_t, integer): ()
   local userdata: value
 end
 
@@ -807,7 +807,7 @@ local function shutdown_deliver(owner: shutdown_t, loop: loop_t, status: integer
   loop.requests[owner] = nil
   owner.pending = false
   owner.loop = nil
-  local callback? = owner.callback
+  const callback? = owner.callback
   owner.callback = nil
   if callback ~= nil then callback(owner, status) end
 catch

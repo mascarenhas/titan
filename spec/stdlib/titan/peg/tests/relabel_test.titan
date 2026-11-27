@@ -1,7 +1,7 @@
 local record RelabelCase
-  subject: string
-  source: string
-  expected: value
+  const subject: string
+  const source: string
+  const expected: value
 end
 
 local function anchored(subject: string, candidate: value,
@@ -26,7 +26,7 @@ local function add_values(accumulator: value,
 end
 
 local function decimal_value(candidate: value): integer
-  local text = candidate as string
+  const text = candidate as string
   if text == "3" then return 3
   elseif text == "401" then return 401
   elseif text == "50" then return 50
@@ -41,7 +41,7 @@ end
 local function tag_table(
     _: value, position: value,
     table_value: value, tag_name: value): (integer, value)
-  local result = table_value as {value: value}
+  const result = table_value as {value: value}
   result["tag"] = tag_name
   return position as integer, result
 end
@@ -60,25 +60,25 @@ function test_relabel_expressions_repetitions_and_grammars(
     context: test.Context)
   test.assert(pattern.gsub("aba", "'a'", bracket) == "[a]b[a]")
 
-  local cases: {RelabelCase} = {
-    RelabelCase.new("a", ".", 2),
-    RelabelCase.new("a", "''", 1),
-    RelabelCase.new("", " ! . ", 1),
-    RelabelCase.new("abcde", "  ( . . ) * ", 5),
-    RelabelCase.new("abbcde", " [a-c] +", 5),
-    RelabelCase.new("0abbc1de", "'0' [a-c]+ '1'", 7),
-    RelabelCase.new("0zz1dda", "'0' [^a-c]+ 'a'", 8),
-    RelabelCase.new("abbc--", " [a-c] + +", 5),
-    RelabelCase.new("abbc--", " [ac-] +", 2),
-    RelabelCase.new("abbc--", " [-acb] + ", 7),
-    RelabelCase.new("aaaaaaaa", "'a'^3", 4),
-    RelabelCase.new("aaaaaaaa", "'a'^0", 1),
-    RelabelCase.new("aaaaaaaa", "'a'^+3", 9),
-    RelabelCase.new("aaaaaaaa", "'a'^-5", 6),
+  const cases: {RelabelCase} = {
+    RelabelCase("a", ".", 2),
+    RelabelCase("a", "''", 1),
+    RelabelCase("", " ! . ", 1),
+    RelabelCase("abcde", "  ( . . ) * ", 5),
+    RelabelCase("abbcde", " [a-c] +", 5),
+    RelabelCase("0abbc1de", "'0' [a-c]+ '1'", 7),
+    RelabelCase("0zz1dda", "'0' [^a-c]+ 'a'", 8),
+    RelabelCase("abbc--", " [a-c] + +", 5),
+    RelabelCase("abbc--", " [ac-] +", 2),
+    RelabelCase("abbc--", " [-acb] + ", 7),
+    RelabelCase("aaaaaaaa", "'a'^3", 4),
+    RelabelCase("aaaaaaaa", "'a'^0", 1),
+    RelabelCase("aaaaaaaa", "'a'^+3", 9),
+    RelabelCase("aaaaaaaa", "'a'^-5", 6),
   }
   local index = 1
   while index <= #cases do
-    local item = cases[index]
+    const item = cases[index]
     test.assert(anchored(item.subject, item.source) == item.expected)
     index = index + 1
   end
@@ -86,18 +86,18 @@ function test_relabel_expressions_repetitions_and_grammars(
   test.assert(anchored(
     "01234567890123456789", "[0-9]^3+") == 19)
 
-  local balanced = "balanced <- '(' ([^()] / balanced)* ')'"
+  const balanced = "balanced <- '(' ([^()] / balanced)* ')'"
   test.assert(anchored("(a(b)((c) (d)))", balanced) ~= nil)
   test.assert(anchored("(a(b ((c) (d)))", balanced) == nil)
 
-  local grammar = [[
+  const grammar = [[
     S <- "0" B / "1" A / ""
     A <- "0" S / "1" A A
     B <- "1" S / "0" B B
   ]]
   test.assert(anchored("00011011", grammar) == 9)
 
-  local comments = pattern.compile([[
+  const comments = pattern.compile([[
     A <- _B   -- punctuation in comments: .<> <- -> --
     _B <- 'x'
   ]])
@@ -105,7 +105,7 @@ function test_relabel_expressions_repetitions_and_grammars(
 
   local result, label, position = anchored("", "%{0}")
   test.assert(result == nil and label == "0" and position == 1)
-  local recovered = pattern.compile([[
+  const recovered = pattern.compile([[
     S <- ('a'^recover) 'b'
     recover <- 'x'
   ]])
@@ -114,44 +114,44 @@ end
 
 function test_relabel_definition_arrays_and_dynamic_values(
     context: test.Context)
-  local supplied: {pattern.Definition} = {
+  const supplied: {pattern.Definition} = {
     pattern.define("letters", pattern.ranges("az")),
     pattern.define("digits", pattern.ranges("09")),
   }
-  local compiled = pattern.compile(
+  const compiled = pattern.compile(
     "%letters (%letters / %digits)*", supplied)
   test.assert(compiled:match("x123") == 5)
 
-  local converted = pattern.compile(
+  const converted = pattern.compile(
     "{[0-9]+'.'?[0-9]*} -> decimal", {
       pattern.define_value("decimal", decimal_value),
     })
   test.assert(converted:match("401") == 401)
 
-  local lookup: {value: value} = {}
+  const lookup: {value: value} = {}
   lookup["word"] = "<word>"
-  local queried = pattern.compile(
+  const queried = pattern.compile(
     "{%a+} -> lookup", {
       pattern.define_value("lookup", lookup),
     })
   test.assert(queried:match("word") == "<word>")
 
-  local templated = pattern.compile(
+  const templated = pattern.compile(
     "({.}{.}) -> swap", {
       pattern.define_value("swap", "%2%1"),
     })
   test.assert(templated:match("ab") == "ba")
-  local selected = pattern.compile(
+  const selected = pattern.compile(
     "({.}{.}) -> second", {
       pattern.define_value("second", 2),
     })
   test.assert(selected:match("ab") == "b")
 
-  local letters = pattern.compile("%letter+", {
+  const letters = pattern.compile("%letter+", {
     pattern.define("letter", pattern.ranges("az")),
   })
   test.assert(letters:match("abc") == 4)
-  local folded = pattern.compile([[
+  const folded = pattern.compile([[
     S <- (number (%s+ number)*) ~> add
     number <- {%d+} -> decimal
   ]], {
@@ -160,12 +160,12 @@ function test_relabel_definition_arrays_and_dynamic_values(
   })
   test.assert(folded:match("3 401 50") == 454)
 
-  local already = pattern.literal("x")
+  const already = pattern.literal("x")
   test.assert(pattern.compile(already, {
     pattern.define_value("ignored", "ignored"),
   }) == already)
 
-  local inert: {pattern.Definition} = {
+  const inert: {pattern.Definition} = {
     pattern.define("not-valid!", already),
     pattern.define("", already),
     pattern.define("1", already),
@@ -192,10 +192,10 @@ function test_relabel_capture_and_replacement_suffixes(
     "01234567890123456789",
     "({....}{...}) -> '%2%1'") == "4560123")
 
-  local values_value: value = anchored("0123456789", "{| {.}* |}")
-  local values = values_value as {integer: value}
+  const values_value: value = anchored("0123456789", "{| {.}* |}")
+  const values = values_value as {integer: value}
   test.assert(#values == 10)
-  local expected_digits: {string} = {
+  const expected_digits: {string} = {
     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
   }
   local index = 1
@@ -215,15 +215,15 @@ function test_relabel_capture_and_replacement_suffixes(
   test.assert(anchored(
     "abc", "{~ ({.} -> '[%1]')* ~}") == "[a][b][c]")
 
-  local captured_value: value = anchored("abc", "({.}{.}) -> {}")
-  local captured = captured_value as {integer: value}
+  const captured_value: value = anchored("abc", "({.}{.}) -> {}")
+  const captured = captured_value as {integer: value}
   test.assert(captured[1] == "a" and captured[2] == "b")
   test.assert(anchored(
     "abcdef", "{:x: ({.} {.} {.}) -> 2 :} =x") == nil)
   test.assert(anchored(
     "abcbef", "{:x: ({.} {.} {.}) -> 2 :} =x") ~= nil)
 
-  local folded = pattern.compile([[
+  const folded = pattern.compile([[
     S <- (number (%s+ number)*) ~> add
     number <- {%d+} -> decimal
   ]], {
@@ -232,7 +232,7 @@ function test_relabel_capture_and_replacement_suffixes(
   })
   test.assert(folded:match("3 401 50") == 454)
 
-  local document = pattern.compile([[
+  const document = pattern.compile([[
     doc <- block !.
     block <- (start {| (block / { [^<]+ })* |} end?) => tag
     start <- '<' {:tag: [a-z]+ :} '>'
@@ -240,25 +240,25 @@ function test_relabel_capture_and_replacement_suffixes(
   ]], {
     pattern.define_value("tag", tag_table),
   })
-  local tree_value: value = document:match(
+  const tree_value: value = document:match(
     "<x>hi<b>hello</b>but<b>totheend</x>")
-  local tree = tree_value as {value: value}
+  const tree = tree_value as {value: value}
   test.assert(tree["tag"] == "x" and tree[1] == "hi")
-  local nested_value: value = tree[2]
-  local nested = nested_value as {value: value}
+  const nested_value: value = tree[2]
+  const nested = nested_value as {value: value}
   test.assert(nested["tag"] == "b" and nested[1] == "hello")
 end
 
 function test_relabel_deferred_dynamic_callability(
     context: test.Context)
-  local bad_definitions: {pattern.Definition} = {
+  const bad_definitions: {pattern.Definition} = {
     pattern.define_value("callback", true),
   }
-  local bad_replacement = pattern.compile(
+  const bad_replacement = pattern.compile(
     "'x' ({.} -> callback)", bad_definitions)
-  local bad_match_time = pattern.compile(
+  const bad_match_time = pattern.compile(
     "'x' => callback", bad_definitions)
-  local bad_fold = pattern.compile(
+  const bad_fold = pattern.compile(
     "({.}{.}) ~> callback", bad_definitions)
 
   test.assert(bad_replacement:match("a") == nil)
@@ -275,7 +275,7 @@ function test_relabel_deferred_dynamic_callability(
     bad_fold:match("ab")
   end)
 
-  local float_selector = pattern.compile(
+  const float_selector = pattern.compile(
     "({.}{.}) -> selector", {
       pattern.define_value("selector", 2.0),
     })
@@ -322,11 +322,11 @@ function test_relabel_search_spans_captures_and_gsub(
   test.assert(found.first == 3)
   test.assert(pattern.match("abc", "'c'", 99) == nil)
 
-  local nil_callback: function (value, ...: value): (...: value) =
+  const nil_callback: function (value, ...: value): (...: value) =
     function(_, ...)
       return nil, "middle", nil
     end
-  local nil_pattern = pattern.function_capture(
+  const nil_pattern = pattern.function_capture(
     pattern.capture(pattern.literal("a")), nil_callback)
   found = support.require_match(pattern.match("za", nil_pattern))
   test.assert(found.first == 2 and found.last == 2)
@@ -344,33 +344,33 @@ function test_relabel_search_spans_captures_and_gsub(
     pattern.match("ab", "%{fail} / 'b'")).first == 2)
 
   local attempts = 0
-  local inspect_byte:
+  const inspect_byte:
       function (string, integer, value, ...: value): (...: value) =
     function(subject, position, byte, ...)
       attempts = attempts + 1
       return byte == "b"
     end
-  local inspected = pattern.match_time(
+  const inspected = pattern.match_time(
     pattern.capture(pattern.any()), inspect_byte)
   found = support.require_match(pattern.match("ab", inspected))
   test.assert(found.first == 2 and found.last == 2 and attempts == 2)
 
-  local replace_x: function (string): (string) =
+  const replace_x: function (string): (string) =
     function(_) return "x" end
-  local replace_dot: function (string): (string) =
+  const replace_dot: function (string): (string) =
     function(_) return "." end
   test.assert(pattern.gsub("alo alo", "[abc]", replace_x) == "xlo xlo")
   test.assert(pattern.gsub("alo alo", "%w+", replace_dot) == ". .")
   test.assert(pattern.gsub(
     "hi, how are you", "[aeiou]", upper_vowel) ==
     "hI, hOw ArE yOU")
-  local capital_x: function (string): (string) =
+  const capital_x: function (string): (string) =
     function(_) return "X" end
   test.assert(pattern.gsub(
     "abc", pattern.literal("b"), capital_x) == "aXc")
 
   local seen = ""
-  local bracket_whole: function (string): (string) =
+  const bracket_whole: function (string): (string) =
     function(found)
       seen = found
       return "[" .. found .. "]"
@@ -383,8 +383,8 @@ function test_relabel_search_spans_captures_and_gsub(
   found = support.require_match(pattern.match("abc", pattern.literal("b")))
   test.assert(found.first == 2 and found.last == 2)
 
-  local first_compile = pattern.compile("'cached'")
-  local second_compile = pattern.compile("'cached'")
+  const first_compile = pattern.compile("'cached'")
+  const second_compile = pattern.compile("'cached'")
   test.assert(first_compile == second_compile)
 end
 
@@ -404,13 +404,13 @@ function test_relabel_diagnostics_and_line_positions(
     "PEG syntax error [ExpPatt8] at L2:C5 (byte 15): " ..
     "expected a pattern after '<-'\nB <-\n    ^")
 
-  local sources: {string} = {
+  const sources: {string} = {
     "~", "'p'~", "!", "()", "{: *** :}", "{~~}", "{||}",
     "{0}", "'p' ^ n", "'p' -> {", "'p' =>", "=", "<>",
     "%{}", "% s", "('p'", "{: 'p'", "{~ 'p'", "{| 'p'",
     "{ 'p'", "<patt", "%{ a", "[", "\"unterminated",
   }
-  local labels: {string} = {
+  const labels: {string} = {
     "NoPatt", "ExtraChars", "ExpPatt3", "ExpPatt4", "ExpPatt5",
     "ExpPatt6", "ExpPatt7", "ExpPattOrClose", "ExpNumName",
     "ExpCap", "ExpName1", "ExpName2", "ExpName3", "ExpLab1",
@@ -423,9 +423,9 @@ function test_relabel_diagnostics_and_line_positions(
     support.assert_compile_error_contains(sources[index], "[" .. labels[index] .. "]")
     index = index + 1
   end
-  local syntax_first? = support.compile_error(" A <- %nosuch ('error'")
+  const syntax_first? = support.compile_error(" A <- %nosuch ('error'")
   test.assert(syntax_first ~= nil)
-  local actual: string = syntax_first
+  const actual: string = syntax_first
   test.assert(support.bytes_contain(actual, "[MisClose1]"))
   test.assert(not support.bytes_contain(actual, "undefined"))
 
@@ -445,7 +445,7 @@ end
 
 function test_relabel_locale_refresh_and_semantic_errors(
     context: test.Context)
-  local previous_locale = support.use_c_ctype_locale()
+  const previous_locale = support.use_c_ctype_locale()
   defer do
     support.restore_c_ctype_locale(previous_locale)
     pattern.update_locale()
@@ -457,9 +457,9 @@ function test_relabel_locale_refresh_and_semantic_errors(
   test.assert(anchored("7", "[_%w]") == 2)
   test.assert(anchored("!", "[^%w]") == 2)
 
-  local before = pattern.compile("%a+")
+  const before = pattern.compile("%a+")
   pattern.update_locale()
-  local after = pattern.compile("%a+")
+  const after = pattern.compile("%a+")
   test.assert(before ~= after)
   test.assert(after:match("abc") == 4)
 

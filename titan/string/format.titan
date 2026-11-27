@@ -18,9 +18,9 @@ local function StringWriter.new(): StringWriter
 end
 
 local function builder_append(builder: StringWriter, text: string)
-  local length = #text
+  const length = #text
   if length == 0 then return end
-  local maximum = MAXIMUM_STRING_BYTES
+  const maximum = MAXIMUM_STRING_BYTES
   if length > maximum - builder.length then
     raise "resulting string is too large"
   end
@@ -30,14 +30,14 @@ end
 
 local function builder_finish(builder: StringWriter): string
   if builder.length == 0 then return "" end
-  local storage = foreign char.new_array(builder.length)
-  local output = storage as foreign *char
+  const storage = foreign char.new_array(builder.length)
+  const output = storage as foreign *char
   local offset = 0
   local index = 1
   while index <= #builder.chunks do
-    local chunk = builder.chunks[index] as string
-    local length = #chunk
-    local source = chunk as foreign const *char
+    const chunk = builder.chunks[index] as string
+    const length = #chunk
+    const source = chunk as foreign const *char
     ffi.memcpy(output + offset, source,
                    length as foreign size_t)
     offset = offset + length
@@ -49,8 +49,8 @@ end
 local function zero_bytes(length: integer): string
   if length == 0 then return "" end
   if length < 0 then raise "resulting string is too large" end
-  local storage = foreign char.new_array(length)
-  local output = storage as foreign *char
+  const storage = foreign char.new_array(length)
+  const output = storage as foreign *char
   ffi.memset(output, 0, #storage as foreign size_t)
   return storage as string
 end
@@ -67,7 +67,7 @@ local function finish_snprintf_prefix(
     scratch: owned char[],
     required: integer, actual: integer): string
   if actual ~= required then raise "string formatting failed" end
-  local storage = foreign char.new_array(required)
+  const storage = foreign char.new_array(required)
   ffi.memcpy(
     storage as foreign *char,
     scratch as foreign const *char,
@@ -94,32 +94,32 @@ end
 local function render_signed(form: string,
                              number: foreign lua_Integer): string
   if foreign lua_Integer.sizeof <= foreign int.sizeof then
-    local converted = number as foreign int
-    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
-    local storage = foreign char.new_array(
+    const converted = number as foreign int
+    const required = ffi.titan_string_snprintf(nil, 0, form, converted)
+    const storage = foreign char.new_array(
       snprintf_allocation_length(required))
-    local output = storage as foreign *char
-    local actual = ffi.titan_string_snprintf(
+    const output = storage as foreign *char
+    const actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   elseif foreign lua_Integer.sizeof <= foreign long.sizeof then
-    local converted = number as foreign long
-    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
-    local storage = foreign char.new_array(
+    const converted = number as foreign long
+    const required = ffi.titan_string_snprintf(nil, 0, form, converted)
+    const storage = foreign char.new_array(
       snprintf_allocation_length(required))
-    local output = storage as foreign *char
-    local actual = ffi.titan_string_snprintf(
+    const output = storage as foreign *char
+    const actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   else
-    local converted = number as foreign long long
-    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
-    local storage = foreign char.new_array(
+    const converted = number as foreign long long
+    const required = ffi.titan_string_snprintf(nil, 0, form, converted)
+    const storage = foreign char.new_array(
       snprintf_allocation_length(required))
-    local output = storage as foreign *char
-    local actual = ffi.titan_string_snprintf(
+    const output = storage as foreign *char
+    const actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
@@ -129,32 +129,32 @@ end
 local function render_unsigned(form: string,
                                number: foreign lua_Integer): string
   if foreign lua_Integer.sizeof <= foreign int.sizeof then
-    local converted = number as foreign unsigned int
-    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
-    local storage = foreign char.new_array(
+    const converted = number as foreign unsigned int
+    const required = ffi.titan_string_snprintf(nil, 0, form, converted)
+    const storage = foreign char.new_array(
       snprintf_allocation_length(required))
-    local output = storage as foreign *char
-    local actual = ffi.titan_string_snprintf(
+    const output = storage as foreign *char
+    const actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   elseif foreign lua_Integer.sizeof <= foreign long.sizeof then
-    local converted = number as foreign unsigned long
-    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
-    local storage = foreign char.new_array(
+    const converted = number as foreign unsigned long
+    const required = ffi.titan_string_snprintf(nil, 0, form, converted)
+    const storage = foreign char.new_array(
       snprintf_allocation_length(required))
-    local output = storage as foreign *char
-    local actual = ffi.titan_string_snprintf(
+    const output = storage as foreign *char
+    const actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   else
-    local converted = number as foreign unsigned long long
-    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
-    local storage = foreign char.new_array(
+    const converted = number as foreign unsigned long long
+    const required = ffi.titan_string_snprintf(nil, 0, form, converted)
+    const storage = foreign char.new_array(
       snprintf_allocation_length(required))
-    local output = storage as foreign *char
-    local actual = ffi.titan_string_snprintf(
+    const output = storage as foreign *char
+    const actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
@@ -163,12 +163,12 @@ end
 
 local function render_character(form: string,
                                 number: foreign lua_Integer): string
-  local converted = number as foreign int
-  local required = ffi.titan_string_snprintf(nil, 0, form, converted)
-  local storage = foreign char.new_array(
+  const converted = number as foreign int
+  const required = ffi.titan_string_snprintf(nil, 0, form, converted)
+  const storage = foreign char.new_array(
     snprintf_allocation_length(required))
-  local output = storage as foreign *char
-  local actual = ffi.titan_string_snprintf(
+  const output = storage as foreign *char
+  const actual = ffi.titan_string_snprintf(
       output, #storage as foreign size_t,
       form, converted)
   return finish_snprintf_prefix(storage, required, actual)
@@ -176,46 +176,46 @@ end
 
 local function render_native_number(form: string,
                              number: foreign lua_Number): string
-  local converted = number as foreign double
-  local required = ffi.titan_string_snprintf(nil, 0, form, converted)
-  local storage = foreign char.new_array(
+  const converted = number as foreign double
+  const required = ffi.titan_string_snprintf(nil, 0, form, converted)
+  const storage = foreign char.new_array(
     snprintf_allocation_length(required))
-  local output = storage as foreign *char
-  local actual = ffi.titan_string_snprintf(
+  const output = storage as foreign *char
+  const actual = ffi.titan_string_snprintf(
       output, #storage as foreign size_t,
       form, converted)
   return finish_snprintf_prefix(storage, required, actual)
 end
 
 local function render_c_string(form: string, text: string): string
-  local required = ffi.titan_string_snprintf(nil, 0, form, text)
-  local storage = foreign char.new_array(
+  const required = ffi.titan_string_snprintf(nil, 0, form, text)
+  const storage = foreign char.new_array(
     snprintf_allocation_length(required))
-  local output = storage as foreign *char
-  local actual = ffi.titan_string_snprintf(
+  const output = storage as foreign *char
+  const actual = ffi.titan_string_snprintf(
       output, #storage as foreign size_t,
       form, text)
   return finish_snprintf_prefix(storage, required, actual)
 end
 
 local function render_pointer(form: string, candidate: value): string
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for pointer formatting"
   end
   ffi.lua_pushtvalue(L, candidate)
-  local pointer = ffi.lua_topointer(L, -1)
+  const pointer = ffi.lua_topointer(L, -1)
   if not pointer then
-    local string_form =
+    const string_form =
       copy_interval(form, 1, #form - 1) .. "s"
     return render_c_string(string_form, "(null)")
   else
-    local required = ffi.titan_string_snprintf(nil, 0, form, pointer)
-    local storage = foreign char.new_array(
+    const required = ffi.titan_string_snprintf(nil, 0, form, pointer)
+    const storage = foreign char.new_array(
       snprintf_allocation_length(required))
-    local output = storage as foreign *char
-    local actual = ffi.titan_string_snprintf(
+    const output = storage as foreign *char
+    const actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, pointer)
     return finish_snprintf_prefix(storage, required, actual)
@@ -240,20 +240,20 @@ local function render_lua_hex_number(form: string,
   else
     local exponent: foreign int = 0 as foreign int
     local fraction = ffi.frexp(number, exponent) as float
-    local builder = StringWriter()
+    const builder = StringWriter()
     if fraction < 0 then
       builder_append(builder, "-")
       fraction = -fraction
     end
     builder_append(builder, "0x")
-    local leading_bits = ffi.TITAN_STRING_HEX_LEADING_BITS as integer
+    const leading_bits = ffi.TITAN_STRING_HEX_LEADING_BITS as integer
     fraction = fraction * (1 << leading_bits)
     local digit = (ffi.floor(fraction) as float) as integer
     builder_append(builder, copy_interval("0123456789abcdef", digit + 1, 1))
     fraction = fraction - digit
     if fraction > 0 then
-      local locale = ffi.localeconv()
-      local decimal = locale.decimal_point[0] as foreign unsigned char
+      const locale = ffi.localeconv()
+      const decimal = locale.decimal_point[0] as foreign unsigned char
       builder_append(builder, char(decimal as integer))
       repeat
         fraction = fraction * 16
@@ -273,7 +273,7 @@ end
 local function render_number(form: string,
                              number: foreign lua_Number): string
   if ffi.TITAN_STRING_LUA_HEX_FALLBACK ~= 0 then
-    local conversion = copy_interval(form, #form, 1)
+    const conversion = copy_interval(form, #form, 1)
     if conversion == "a" or conversion == "A" then
       return render_lua_hex_number(form, number)
     end
@@ -287,13 +287,13 @@ end
 
 local function format_byte(text: string, index: integer): integer
   if index < 1 or index > #text then return 0 end
-  local bytes = text as foreign const *unsigned char
+  const bytes = text as foreign const *unsigned char
   return bytes[index - 1] as integer
 end
 
 local function contains_byte(text: string, octet: integer): boolean
   if #text == 0 then return false end
-  local bytes = text as foreign const *unsigned char
+  const bytes = text as foreign const *unsigned char
   local index = 0
   while index < #text do
     if bytes[index] == octet then return true end
@@ -310,7 +310,7 @@ local function decimal_escape(octet: integer,
   elseif octet >= 10 then
     length = 2
   end
-  local storage = foreign char.new_array(length)
+  const storage = foreign char.new_array(length)
   local remaining = octet
   local index = length - 1
   while index >= 0 do
@@ -323,17 +323,17 @@ local function decimal_escape(octet: integer,
 end
 
 local function locale_neutral_hex(number: foreign lua_Number): string
-  local rendered = render_number("%a", number)
-  local locale = ffi.localeconv()
-  local decimal = locale.decimal_point[0]
-  local decimal_octet =
+  const rendered = render_number("%a", number)
+  const locale = ffi.localeconv()
+  const decimal = locale.decimal_point[0]
+  const decimal_octet =
     (decimal as foreign unsigned char) as integer
   if decimal == (46 as foreign char) or
       not contains_byte(rendered, decimal_octet) then
     return rendered
   end
-  local storage = foreign char.new_array(#rendered)
-  local source = rendered as foreign const *char
+  const storage = foreign char.new_array(#rendered)
+  const source = rendered as foreign const *char
   local index = 0
   while index < #rendered do
     if source[index] == decimal then
@@ -351,9 +351,9 @@ local function append_quoted(builder: StringWriter, text: string)
   local run = 1
   local index = 1
   while index <= #text do
-    local octet = format_byte(text, index)
-    local special = octet == 34 or octet == 92 or octet == 10
-    local control =
+    const octet = format_byte(text, index)
+    const special = octet == 34 or octet == 92 or octet == 10
+    const control =
       ffi.iscntrl(octet as foreign int) ~= 0
     if special or control then
       if index > run then
@@ -364,7 +364,7 @@ local function append_quoted(builder: StringWriter, text: string)
         builder_append(builder, "\\")
         builder_append(builder, copy_interval(text, index, 1))
       else
-        local next_is_digit = index < #text and
+        const next_is_digit = index < #text and
           ffi.isdigit(
             format_byte(text, index + 1)
               as foreign int) ~= 0
@@ -384,7 +384,7 @@ local function append_quoted(builder: StringWriter, text: string)
 end
 
 local function render_literal(candidate: value): string
-  local builder = StringWriter()
+  const builder = StringWriter()
   if candidate is string then
     append_quoted(builder, candidate as string)
   elseif candidate == nil then
@@ -395,7 +395,7 @@ local function render_literal(candidate: value): string
     builder_append(builder, "false")
   elseif candidate is float then
     if candidate is integer then
-      local number =
+      const number =
         (candidate as integer) as foreign lua_Integer
       if number == ffi.LUA_MININTEGER then
         builder_append(builder, "0x")
@@ -410,7 +410,7 @@ local function render_literal(candidate: value): string
               add_integer_length("%d"), number))
       end
     else
-      local number =
+      const number =
         (candidate as float) as foreign lua_Number
       if number > 0 and number + number == number then
         builder_append(builder, "1e9999")
@@ -439,7 +439,7 @@ end
 
 local function signed_format_partial(
     prefix: string, form: string): FormatPartial
-  local integer_form = add_integer_length(form)
+  const integer_form = add_integer_length(form)
   return function(candidate: value): string
     return prefix ..
       render_signed(
@@ -450,7 +450,7 @@ end
 
 local function unsigned_format_partial(
     prefix: string, form: string): FormatPartial
-  local integer_form = add_integer_length(form)
+  const integer_form = add_integer_length(form)
   return function(candidate: value): string
     return prefix ..
       render_unsigned(
@@ -484,7 +484,7 @@ end
 local function string_format_partial(
     prefix: string, form: string): FormatPartial
   return function(candidate: value): string
-    local converted = tostring(candidate)
+    const converted = tostring(candidate)
     if #form == 2 then return prefix .. converted end
     if contains_byte(converted, 0) then
       raise "string contains zeros"
@@ -529,14 +529,14 @@ local function overlong_format_partial(
 end
 
 local function build_format_partial(fields_value: value): FormatPartial
-  local fields = fields_value as {integer: value}
+  const fields = fields_value as {integer: value}
   if #fields ~= 4 then
     raise "internal format parser capture is invalid"
   end
-  local prefix = fields[1] as string
-  local form = fields[2] as string
-  local factory = fields[3] as FormatFactory
-  local maximum = fields[4] as integer
+  const prefix = fields[1] as string
+  const form = fields[2] as string
+  const factory = fields[3] as FormatFactory
+  const maximum = fields[4] as integer
   if #form > maximum then
     return overlong_format_partial(prefix, form)
   end
@@ -544,17 +544,17 @@ local function build_format_partial(fields_value: value): FormatPartial
 end
 
 local record FormatPlan
-  local partials: {FormatPartial}
-  local trailer: string
+  local const partials: {FormatPartial}
+  local const trailer: string
 end
 
 local function build_format_plan(items_value: value): FormatPlan
-  local items = items_value as {integer: value}
-  local count = #items
+  const items = items_value as {integer: value}
+  const count = #items
   if count < 1 then
     raise "internal format parser result is empty"
   end
-  local partials: {FormatPartial} = {}
+  const partials: {FormatPartial} = {}
   local index = 1
   while index < count do
     partials[index] = items[index] as FormatPartial
@@ -567,8 +567,8 @@ local function format_specification(
     flags: string, zero_is_flag: boolean,
     precision: boolean,
     specifiers: string): peg.Pattern
-  local digits = peg.ranges("09")
-  local width = (function (digits: peg.Pattern, zero_is_flag: boolean): peg.Pattern
+  const digits = peg.ranges("09")
+  const width = (function (digits: peg.Pattern, zero_is_flag: boolean): peg.Pattern
     if zero_is_flag then return peg.at_most(digits, 2) end
     return peg.optional(peg.sequence(
       peg.ranges("19"), peg.optional(digits)))
@@ -595,17 +595,17 @@ end
 
 -- Implementation notes: doc/implementation/string-library.md#format-translation
 local function build_format_pattern(): peg.Pattern
-  local escaped_percent =
+  const escaped_percent =
     peg.template_capture(peg.literal("%%"), "%%")
-  local ordinary_byte =
+  const ordinary_byte =
     peg.difference(peg.any(), peg.literal("%"))
-  local literal_run = peg.substitution(peg.zero_or_more(
+  const literal_run = peg.substitution(peg.zero_or_more(
     peg.choice(escaped_percent, ordinary_byte)))
 
-  local modifier_bytes = peg.set("-+ #0123456789.")
-  local all_modifiers = peg.zero_or_more(modifier_bytes)
-  local valid_specifiers = "cdiuoxXaAeEfgGps"
-  local conversion = peg.choice(
+  const modifier_bytes = peg.set("-+ #0123456789.")
+  const all_modifiers = peg.zero_or_more(modifier_bytes)
+  const valid_specifiers = "cdiuoxXaAeEfgGps"
+  const conversion = peg.choice(
     format_conversion(
       format_specification("-", false, false, "c"),
       character_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
@@ -653,7 +653,7 @@ local function build_format_pattern(): peg.Pattern
       invalid_conversion_partial,
       MAXIMUM_FORMAT_SPECIFICATION_BYTES - 1))
 
-  local partial = peg.function_capture(
+  const partial = peg.function_capture(
     peg.table_capture(peg.sequence(literal_run, conversion)),
     build_format_partial)
   return peg.function_capture(

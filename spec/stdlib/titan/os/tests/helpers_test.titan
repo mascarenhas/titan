@@ -1,7 +1,7 @@
 function test_environment_helpers_preserve_real_values(
     _context: test.Context)
-  local name = "TITAN_OS_TEST_ENVIRONMENT_VALUE"
-  local original: string? = system.getenv(name)
+  const name = "TITAN_OS_TEST_ENVIRONMENT_VALUE"
+  const original: string? = system.getenv(name)
   defer support.restore_environment(name, original)
 
   system.unsetenv(name)
@@ -9,18 +9,18 @@ function test_environment_helpers_preserve_real_values(
               "missing environment variable did not return nil")
 
   system.setenv(name, "")
-  local empty: string? = system.getenv(name)
+  const empty: string? = system.getenv(name)
   test.assert(empty ~= nil and (empty as string) == "",
               "empty environment value was confused with absence")
 
-  local long_value = support.long_repeated("0123456789abcdef", 8192)
+  const long_value = support.long_repeated("0123456789abcdef", 8192)
   system.setenv(name, long_value)
-  local copied: string? = system.getenv(name)
+  const copied: string? = system.getenv(name)
   test.assert(copied ~= nil and (copied as string) == long_value,
               "long environment value was truncated during resize")
 
   support.restore_environment(name, original)
-  local restored: string? = system.getenv(name)
+  const restored: string? = system.getenv(name)
   if original then
     test.assert(restored ~= nil and
                 (restored as string) == (original as string),
@@ -33,8 +33,8 @@ end
 
 function test_text_helpers_reject_embedded_nul(
     _context: test.Context)
-  local name = "TITAN_OS_TEST_NUL_VALUE"
-  local original: string? = system.getenv(name)
+  const name = "TITAN_OS_TEST_NUL_VALUE"
+  const original: string? = system.getenv(name)
   defer support.restore_environment(name, original)
 
   support.assert_operation_error(function()

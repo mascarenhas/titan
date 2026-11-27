@@ -1,6 +1,6 @@
 -- Same-instance custom-resource scope retirement.
 record ScopeReuseRetainedContextProbe
-  local cell: foreign *void
+  local const cell: foreign *void
 end
 
 local scope_reuse_retained_context: value = nil
@@ -8,7 +8,7 @@ local scope_reuse_retained_context: value = nil
 local function scope_reuse_register_retained_context_probe(cell: foreign *void)
   transfer.register_resource(ScopeReuseRetainedContextProbe(cell),
     function (candidate: value): (foreign *void)
-      local probe: ScopeReuseRetainedContextProbe = candidate
+      const probe: ScopeReuseRetainedContextProbe = candidate
       return probe.cell
     end,
     tse_resource_retain, tse_resource_release,
@@ -22,12 +22,12 @@ end
 
 function test_scope_reuse_retained_context_rejects_claim_after_decode(
     _context: test.Context)
-  local counter: owned int[] = foreign int.new_array(1)
+  const counter: owned int[] = foreign int.new_array(1)
   counter[0] = 1
-  local cell = counter as foreign *void
+  const cell = counter as foreign *void
   scope_reuse_register_retained_context_probe(cell)
   defer do scope_reuse_retained_context = nil end
-  local restored: ScopeReuseRetainedContextProbe =
+  const restored: ScopeReuseRetainedContextProbe =
     tse_roundtrip_raw(ScopeReuseRetainedContextProbe(cell))
   test.assert(restored.cell == cell and counter[0] == 2,
               "registered constructor did not claim the attached counter")
@@ -37,7 +37,7 @@ function test_scope_reuse_retained_context_rejects_claim_after_decode(
 
   -- The retired frame is idle in the pool; its message is gone. Slot 0 was
   -- valid in the retired packet.
-  local index: owned int[] = foreign int.new_array(1)
+  const index: owned int[] = foreign int.new_array(1)
   index[0] = 0
   local outcome = "no error"
   do
@@ -45,7 +45,7 @@ function test_scope_reuse_retained_context_rejects_claim_after_decode(
       index as foreign const *void, 4, tse_resource_release)
   catch
     if error is string then
-      local text: string = error
+      const text: string = error
       outcome = text
     else
       outcome = "a non-string error"

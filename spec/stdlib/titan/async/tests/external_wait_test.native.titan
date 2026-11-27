@@ -4,16 +4,16 @@ local external_wait_thread = import "thread"
 foreign type ExternalWaitPointer = *void
 
 local record ExternalWaitTarget
-  pointer: foreign *void
+  const pointer: foreign *void
 end
 
 local record ExternalWaitComplexReason
-  code: integer
-  label: string
+  const code: integer
+  const label: string
 end
 
 local record ExternalWaitFatalMarker
-  id: integer
+  const id: integer
   source_trace: string
 end
 
@@ -84,10 +84,10 @@ end
 
 local function external_wait_prepare_retirement(
     ready: boolean): (async.ExternalWait, owned *titan_external_retirement_fixture)
-  local fixture: owned *titan_external_retirement_fixture =
+  const fixture: owned *titan_external_retirement_fixture =
     foreign titan_external_retirement_fixture.new()
   if ready then fixture.ready = 1 end
-  local owner = async.prepare_native_retirement(
+  const owner = async.prepare_native_retirement(
     fixture, fixture as foreign *void,
     external_retirement_register, external_retirement_unregister,
     external_retirement_poll)
@@ -134,13 +134,13 @@ end
 
 local function external_wait_later(milliseconds: integer,
                                    action: function (): ())
-  local timer_owner = uv.timer_t.new()
-  local handle = timer_owner:as_handle_t()
-  local closed = function (_: uv.handle_t) action() end
-  local fired = function (_: uv.timer_t) uv.close(handle, closed) end
+  const timer_owner = uv.timer_t()
+  const handle = timer_owner:as_handle_t()
+  const closed = function (_: uv.handle_t) action() end
+  const fired = function (_: uv.timer_t) uv.close(handle, closed) end
   test.assert(uv.timer_init(async.current_loop(), timer_owner) == 0,
       "external_wait timer init failed")
-  local status = uv.timer_start(timer_owner, fired, milliseconds, 0)
+  const status = uv.timer_start(timer_owner, fired, milliseconds, 0)
   if status < 0 then
     uv.close(handle)
     raise "external_wait timer start failed"
@@ -155,7 +155,7 @@ local function external_wait_retain_target(slot: {ExternalWaitTarget},
 end
 
 local function external_wait_release_target(slot: {ExternalWaitTarget})
-  local target? = slot[1]
+  const target? = slot[1]
   if target ~= nil then
     slot[1] = nil
     uv.native_external_wake_release(target.pointer)
@@ -197,14 +197,14 @@ local function external_wait_thread_channel_worker(
     tx: external_wait_thread.Sender<|integer|>,
     rx: external_wait_thread.Receiver<|integer|>): integer
   tx:send(314)
-  local echo = rx:receive()
+  const echo = rx:receive()
   return echo + 1
 end
 
 function test_external_wait_native_registrars(context: test.Context)
-  context:run("inline_ready_and_null_callback_rejection", function (_child: test.Context)
+  context:run("inline_ready_and_null_callback_rejection", function (_: test.Context)
     runtime_test.run(function ()
-      local fixture: owned *titan_external_retirement_fixture =
+      const fixture: owned *titan_external_retirement_fixture =
         foreign titan_external_retirement_fixture.new()
       fixture.ready = 1
       for _ = 1, 64 do
@@ -225,9 +225,9 @@ function test_external_wait_native_registrars(context: test.Context)
         "NULL callback rejection invoked the native domain")
     end)
   end)
-  context:run("native_notification_during_registration_is_not_lost", function (_child: test.Context)
+  context:run("native_notification_during_registration_is_not_lost", function (_: test.Context)
     runtime_test.run(function ()
-      local fixture: owned *titan_external_retirement_fixture =
+      const fixture: owned *titan_external_retirement_fixture =
         foreign titan_external_retirement_fixture.new()
       async.wait_external_native(fixture, fixture as foreign *void,
         external_wait_notify_during_native_registration, external_retirement_unregister)
@@ -236,9 +236,9 @@ function test_external_wait_native_registrars(context: test.Context)
         "notification before native registration returned was lost or rolled back")
     end)
   end)
-  context:run("negative_registration_retires_once", function (_child: test.Context)
+  context:run("negative_registration_retires_once", function (_: test.Context)
     runtime_test.run(function ()
-      local fixture: owned *titan_external_retirement_fixture =
+      const fixture: owned *titan_external_retirement_fixture =
         foreign titan_external_retirement_fixture.new()
       fixture.register_error = -22
       local caught = false
@@ -248,7 +248,7 @@ function test_external_wait_native_registrars(context: test.Context)
       catch
         caught = true
         test.assert(error is async.OperationError, "native registration lost its operation error")
-        local failure: async.OperationError = error
+        const failure: async.OperationError = error
         test.assert(failure.code == -22 and failure.operation == "async.external_wait.register",
           "native registration error used the retirement boundary")
       end
@@ -257,11 +257,11 @@ function test_external_wait_native_registrars(context: test.Context)
         "rejected native registration did not retire its exact wait")
     end)
   end)
-  context:run("notification_and_cancellation_use_distinct_exact_waits", function (_child: test.Context)
+  context:run("notification_and_cancellation_use_distinct_exact_waits", function (_: test.Context)
     runtime_test.run(function ()
-      local first: owned *titan_external_retirement_fixture =
+      const first: owned *titan_external_retirement_fixture =
         foreign titan_external_retirement_fixture.new()
-      local waiter = async.run<|nil, value|>(function (): nil
+      const waiter = async.run<|nil, value|>(function (): nil
         async.wait_external_native(first, first as foreign *void,
           external_retirement_register, external_retirement_unregister)
         return nil
@@ -271,10 +271,10 @@ function test_external_wait_native_registrars(context: test.Context)
       test.assert(first.register_calls == 1 and first.target ~= nil)
       -- Keep an independent producer reference through cancellation and a later
       -- wait; an old notification must not acquire that successor's identity.
-      local stale = first.target
+      const stale = first.target
       uv.native_external_wake_retain(stale)
       defer uv.native_external_wake_release(stale)
-      local reason: async.CancellationReason<|value|> =
+      const reason: async.CancellationReason<|value|> =
         async.CancellationReason.simple("native external cancellation")
       waiter:cancel(reason)
       waiter:cancel(async.CancellationReason.simple("later cancellation"))
@@ -284,9 +284,9 @@ function test_external_wait_native_registrars(context: test.Context)
       test.assert(cancelled and actual == reason and first.unregister_calls == 1,
         "native cancellation lost its first reason or unlinked twice on unwind")
 
-      local second: owned *titan_external_retirement_fixture =
+      const second: owned *titan_external_retirement_fixture =
         foreign titan_external_retirement_fixture.new()
-      local successor = async.run<|integer, value|>(function (): integer
+      const successor = async.run<|integer, value|>(function (): integer
         async.wait_external_native(second, second as foreign *void,
           external_retirement_register, external_retirement_unregister)
         return 255
@@ -308,7 +308,7 @@ end
 
 function test_external_wait_prepared_lifecycle_and_validation_errors(
     context: test.Context)
-  context:run("outside_runtime_and_outside_task_errors", function (_child: test.Context)
+  context:run("outside_runtime_and_outside_task_errors", function (_: test.Context)
     defer async.loop()
     external_wait_expect_rejected(function () async.current_loop() end,
         "current_loop before outside-Task convenience waits")
@@ -342,7 +342,7 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
     -- Enclose all post-bootstrap assertions in its supervisor so even an
     -- assertion failure retires the Runtime and its unused reservation.
     local bootstrap_calls = 0
-    local bootstrap_owner = async.prepare_external_wait(
+    const bootstrap_owner = async.prepare_external_wait(
       function (_: foreign *void): boolean
         bootstrap_calls = bootstrap_calls + 1
         return false
@@ -359,7 +359,7 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
 
     runtime_test.run(function ()
       local prepared_calls = 0
-      local prepared = async.prepare_external_wait(
+      const prepared = async.prepare_external_wait(
         function (_: foreign *void): boolean
           prepared_calls = prepared_calls + 1
           return false
@@ -369,33 +369,31 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
       local callback_checked = false
       async.await<|nil, nil|>(function (resolve, _reject, fatal)
         external_wait_later(0, function ()
-          do
-            external_wait_expect_rejected(function () prepared:wait() end,
-                "ExternalWait:wait outside Task")
-            external_wait_expect_rejected(function () prepared:wait_cleanup() end,
-                "ExternalWait:wait_cleanup outside Task")
-            external_wait_expect_rejected(function ()
-              async.wait_external(
-                function (_: foreign *void): boolean
-                  prepared_calls = prepared_calls + 1
-                  return false
-                end,
-                function () prepared_calls = prepared_calls + 1 end)
-            end, "wait_external outside Task in active Runtime")
-            external_wait_expect_rejected(function ()
-              async.wait_external_cleanup(
-                function (_: foreign *void): boolean
-                  prepared_calls = prepared_calls + 1
-                  return false
-                end,
-                function () prepared_calls = prepared_calls + 1 end)
-            end, "wait_external_cleanup outside Task in active Runtime")
-            callback_checked = true
-            resolve(nil)
-          catch
-            fatal(error, traceback)
-            raise
-          end
+          external_wait_expect_rejected(function () prepared:wait() end,
+              "ExternalWait:wait outside Task")
+          external_wait_expect_rejected(function () prepared:wait_cleanup() end,
+              "ExternalWait:wait_cleanup outside Task")
+          external_wait_expect_rejected(function ()
+            async.wait_external(
+              function (_: foreign *void): boolean
+                prepared_calls = prepared_calls + 1
+                return false
+              end,
+              function () prepared_calls = prepared_calls + 1 end)
+          end, "wait_external outside Task in active Runtime")
+          external_wait_expect_rejected(function ()
+            async.wait_external_cleanup(
+              function (_: foreign *void): boolean
+                prepared_calls = prepared_calls + 1
+                return false
+              end,
+              function () prepared_calls = prepared_calls + 1 end)
+          end, "wait_external_cleanup outside Task in active Runtime")
+          callback_checked = true
+          resolve(nil)
+        catch
+          fatal(error, traceback)
+          raise
         end)
       end)
       test.assert(callback_checked and prepared_calls == 0,
@@ -407,11 +405,11 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
     end)
   end)
 
-  context:run("idempotent_close_and_consumed_errors", function (_child: test.Context)
+  context:run("idempotent_close_and_consumed_errors", function (_: test.Context)
     runtime_test.run(function ()
       local registered = 0
       local unregistered = 0
-      local unused = async.prepare_external_wait(
+      const unused = async.prepare_external_wait(
         function (_: foreign *void): boolean
           registered = registered + 1
           return true
@@ -428,7 +426,7 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
       test.assert(registered == 0 and unregistered == 0,
           "waiting on a closed ExternalWait invoked callbacks")
 
-      local inline_owner = async.prepare_external_wait(
+      const inline_owner = async.prepare_external_wait(
         function (_: foreign *void): boolean
           registered = registered + 1
           return false
@@ -448,12 +446,12 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
     end)
   end)
 
-  context:run("active_close_and_register_error_unwind", function (_child: test.Context)
+  context:run("active_close_and_register_error_unwind", function (_: test.Context)
     runtime_test.run(function ()
       local unregistered = 0
-      local retained: {ExternalWaitTarget} = {}
+      const retained: {ExternalWaitTarget} = {}
       defer external_wait_release_target(retained)
-      local registrar_sentinel: {string} = {"registrar boom"}
+      const registrar_sentinel: {string} = {"registrar boom"}
       local active_owner: async.ExternalWait? = nil
       active_owner = async.prepare_external_wait(
         function (target: foreign *void): boolean
@@ -489,7 +487,7 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
 
   context:run(
       "shutdown_and_cross_runtime_rejection_without_false_proxy_completion",
-      function (_child: test.Context)
+      function (_: test.Context)
     local leaked_across_runtime: async.ExternalWait? = nil
     local stale_callbacks = 0
     local shutdown_callbacks = 0
@@ -554,7 +552,7 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
         "shutdown preparation failure invoked callbacks or created a false proxy Task")
 
     runtime_test.run(function ()
-      local stale = leaked_across_runtime as async.ExternalWait
+      const stale = leaked_across_runtime as async.ExternalWait
       external_wait_expect_rejected(function () stale:wait() end,
           "cross-Runtime ExternalWait:wait")
       external_wait_expect_rejected(function () stale:wait_cleanup() end,
@@ -570,13 +568,13 @@ function test_external_wait_inline_readiness_and_notify_before_suspension(
     context: test.Context)
   context:run(
       "inline_readiness_false_skips_suspension_and_unregister_with_bounded_stack",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
       local trace = ""
       local unregister_calls = 0
-      local retained: {ExternalWaitTarget} = {}
+      const retained: {ExternalWaitTarget} = {}
       defer external_wait_release_target(retained)
-      local peer = async.run<|nil, nil|>(function (): nil
+      const peer = async.run<|nil, nil|>(function (): nil
         trace = trace .. "peer>"
         return nil
       end)
@@ -614,7 +612,7 @@ function test_external_wait_inline_readiness_and_notify_before_suspension(
       test.assert(unregister_calls == 0,
           "inline readiness invoked unregister_fn")
 
-      local probe: owned *AsyncStackProbe = foreign AsyncStackProbe.new()
+      const probe: owned *AsyncStackProbe = foreign AsyncStackProbe.new()
       ffi.titan_async_stack_reset(probe)
       for _ = 1, 256 do
         async.wait_external(
@@ -632,11 +630,11 @@ function test_external_wait_inline_readiness_and_notify_before_suspension(
   end)
 
   context:run("notify_before_suspension_is_delivered_without_reentry",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
       local trace = ""
       local unregister_calls = 0
-      local sibling = async.run<|nil, nil|>(function (): nil
+      const sibling = async.run<|nil, nil|>(function (): nil
         trace = trace .. "sibling>"
         return nil
       end)
@@ -646,7 +644,7 @@ function test_external_wait_inline_readiness_and_notify_before_suspension(
         function (target: foreign *void): boolean
           uv.native_external_wake_retain(target)
           defer uv.native_external_wake_release(target)
-          local status = uv.native_external_wake_notify(target) as integer
+          const status = uv.native_external_wake_notify(target) as integer
           test.assert(status == 0,
               "notify inside register_fn failed on armed target")
           trace = trace .. "registered_ordinary>"
@@ -659,7 +657,7 @@ function test_external_wait_inline_readiness_and_notify_before_suspension(
         function (target: foreign *void): boolean
           uv.native_external_wake_retain(target)
           defer uv.native_external_wake_release(target)
-          local status = uv.native_external_wake_notify(target) as integer
+          const status = uv.native_external_wake_notify(target) as integer
           test.assert(status == 0,
               "cleanup notify inside register_fn failed on armed target")
           trace = trace .. "registered_cleanup>"
@@ -681,15 +679,15 @@ end
 function test_external_wait_callbacks_do_not_enter_tasks_reentrantly(
     context: test.Context)
   context:run("peer_task_and_timer_callback_notifications_defer_task_resumption",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
       local trace = ""
-      local target_a: {ExternalWaitTarget} = {}
-      local target_b: {ExternalWaitTarget} = {}
+      const target_a: {ExternalWaitTarget} = {}
+      const target_b: {ExternalWaitTarget} = {}
       defer external_wait_release_target(target_a)
       runtime_test.cleanup(function () external_wait_release_target(target_b) end)
 
-      local waiter_a = async.run<|nil, value|>(function (): nil
+      const waiter_a = async.run<|nil, value|>(function (): nil
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_a, target)
@@ -701,7 +699,7 @@ function test_external_wait_callbacks_do_not_enter_tasks_reentrantly(
       end)
       task_support.cleanup_task(waiter_a, "reentry waiter_a cleanup")
 
-      local waiter_b = async.run<|nil, value|>(function (): nil
+      const waiter_b = async.run<|nil, value|>(function (): nil
         async.wait_external_cleanup(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_b, target)
@@ -721,25 +719,23 @@ function test_external_wait_callbacks_do_not_enter_tasks_reentrantly(
       -- before the ready queue turn.
       async.await<|nil, nil|>(function (resolve, _reject, fatal)
         external_wait_later(0, function ()
-          do
-            trace = trace .. "cb_before>"
-            test.assert(
-                (uv.native_external_wake_notify(target_a[1].pointer) as integer) == 0,
-                "notify target_a failed")
-            trace = trace .. "cb_mid>"
-            test.assert(
-                (uv.native_external_wake_notify(target_b[1].pointer) as integer) == 0,
-                "notify target_b failed")
-            test.assert(
-                waiter_a:status():as_string() == "waiting" and
-                waiter_b:status():as_string() == "waiting",
-                "native_external_wake_notify entered or settled a Task inline")
-            trace = trace .. "cb_after>"
-            resolve(nil)
-          catch
-            fatal(error, traceback)
-            raise
-          end
+          trace = trace .. "cb_before>"
+          test.assert(
+              (uv.native_external_wake_notify(target_a[1].pointer) as integer) == 0,
+              "notify target_a failed")
+          trace = trace .. "cb_mid>"
+          test.assert(
+              (uv.native_external_wake_notify(target_b[1].pointer) as integer) == 0,
+              "notify target_b failed")
+          test.assert(
+              waiter_a:status():as_string() == "waiting" and
+              waiter_b:status():as_string() == "waiting",
+              "native_external_wake_notify entered or settled a Task inline")
+          trace = trace .. "cb_after>"
+          resolve(nil)
+        catch
+          fatal(error, traceback)
+          raise
         end)
       end)
       trace = trace .. "caller_resumed>"
@@ -755,13 +751,13 @@ end
 
 function test_external_wait_cancellation_and_signaled_baton_handoff(
     context: test.Context)
-  context:run("pre_cancelled_task_skips_registration", function (_child: test.Context)
+  context:run("pre_cancelled_task_skips_registration", function (_: test.Context)
     runtime_test.run(function ()
       local register_calls = 0
       local unregister_calls = 0
-      local first_reason = async.CancellationReason.simple("pre-cancelled external wait")
-      local task = async.run<|nil, value|>(function (): nil
-        local prepared = async.prepare_external_wait(
+      const first_reason = async.CancellationReason.simple("pre-cancelled external wait")
+      const task = async.run<|nil, value|>(function (): nil
+        const prepared = async.prepare_external_wait(
           function (_: foreign *void): boolean
             register_calls = register_calls + 1
             return true
@@ -789,16 +785,16 @@ function test_external_wait_cancellation_and_signaled_baton_handoff(
   end)
 
   context:run("active_cancellation_promptly_unregisters_exact_waiter",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
-      local target_1: {ExternalWaitTarget} = {}
-      local target_2: {ExternalWaitTarget} = {}
+      const target_1: {ExternalWaitTarget} = {}
+      const target_2: {ExternalWaitTarget} = {}
       defer external_wait_release_target(target_1)
       defer external_wait_release_target(target_2)
       local unregistered_1 = 0
       local unregistered_2 = 0
 
-      local waiter_1 = async.run<|nil, value|>(function (): nil
+      const waiter_1 = async.run<|nil, value|>(function (): nil
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_1, target)
@@ -809,7 +805,7 @@ function test_external_wait_cancellation_and_signaled_baton_handoff(
       end)
       task_support.cleanup_task(waiter_1, "active cancel waiter_1 cleanup")
 
-      local waiter_2 = async.run<|integer, value|>(function (): integer
+      const waiter_2 = async.run<|integer, value|>(function (): integer
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_2, target)
@@ -843,17 +839,17 @@ function test_external_wait_cancellation_and_signaled_baton_handoff(
   end)
 
   context:run("signaled_then_cancelled_before_bridge_drain_passes_baton",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
-      local target_1: {ExternalWaitTarget} = {}
-      local target_2: {ExternalWaitTarget} = {}
+      const target_1: {ExternalWaitTarget} = {}
+      const target_2: {ExternalWaitTarget} = {}
       defer external_wait_release_target(target_1)
       defer external_wait_release_target(target_2)
       local baton_holder = 0
       local unregistered_1 = 0
       local unregistered_2 = 0
 
-      local waiter_1 = async.run<|integer, value|>(function (): integer
+      const waiter_1 = async.run<|integer, value|>(function (): integer
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_1, target)
@@ -872,7 +868,7 @@ function test_external_wait_cancellation_and_signaled_baton_handoff(
       end)
       task_support.cleanup_task(waiter_1, "baton pre-drain waiter_1 cleanup")
 
-      local waiter_2 = async.run<|integer, value|>(function (): integer
+      const waiter_2 = async.run<|integer, value|>(function (): integer
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_2, target)
@@ -906,11 +902,11 @@ function test_external_wait_cancellation_and_signaled_baton_handoff(
 
   context:run(
       "signaled_then_cancelled_after_bridge_drain_before_delivery_passes_baton",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
-      local barrier_target: {ExternalWaitTarget} = {}
-      local target_1: {ExternalWaitTarget} = {}
-      local target_2: {ExternalWaitTarget} = {}
+      const barrier_target: {ExternalWaitTarget} = {}
+      const target_1: {ExternalWaitTarget} = {}
+      const target_2: {ExternalWaitTarget} = {}
       defer external_wait_release_target(barrier_target)
       defer external_wait_release_target(target_1)
       defer external_wait_release_target(target_2)
@@ -918,7 +914,7 @@ function test_external_wait_cancellation_and_signaled_baton_handoff(
       local unregistered_1 = 0
       local unregistered_2 = 0
 
-      local waiter_1 = async.run<|integer, value|>(function (): integer
+      const waiter_1 = async.run<|integer, value|>(function (): integer
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_1, target)
@@ -937,7 +933,7 @@ function test_external_wait_cancellation_and_signaled_baton_handoff(
       end)
       task_support.cleanup_task(waiter_1, "baton post-drain waiter_1 cleanup")
 
-      local waiter_2 = async.run<|integer, value|>(function (): integer
+      const waiter_2 = async.run<|integer, value|>(function (): integer
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_2, target)
@@ -952,7 +948,7 @@ function test_external_wait_cancellation_and_signaled_baton_handoff(
       -- barrier_target and then target_1 places both identities in the same
       -- bridge drain batch, so ExternalBridge:drain() enqueues canceller ahead
       -- of waiter_1 in the Runtime ready queue with waiter_1 already notified.
-      local canceller = async.run<|nil, value|>(function (): nil
+      const canceller = async.run<|nil, value|>(function (): nil
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(barrier_target, target)
@@ -991,16 +987,16 @@ function test_external_wait_replacement_suspension_and_duplicate_stale_notificat
     context: test.Context)
   context:run(
       "completed_wait_replacement_ignores_duplicate_and_stale_notifications",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
-      local target_1: {ExternalWaitTarget} = {}
-      local target_2: {ExternalWaitTarget} = {}
+      const target_1: {ExternalWaitTarget} = {}
+      const target_2: {ExternalWaitTarget} = {}
       defer external_wait_release_target(target_1)
       defer external_wait_release_target(target_2)
       local stage = 0
-      local follow_token = async.ResumeToken("post-external-wait suspend")
+      const follow_token = async.ResumeToken("post-external-wait suspend")
 
-      local task = async.run<|integer, value|>(function (): integer
+      const task = async.run<|integer, value|>(function (): integer
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_1, target)
@@ -1067,17 +1063,17 @@ function test_external_wait_replacement_suspension_and_duplicate_stale_notificat
   end)
 
   context:run("cancelled_wait_replacement_cleanup_ignores_stale_notifications",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
-      local target_1: {ExternalWaitTarget} = {}
-      local target_2: {ExternalWaitTarget} = {}
+      const target_1: {ExternalWaitTarget} = {}
+      const target_2: {ExternalWaitTarget} = {}
       defer external_wait_release_target(target_1)
       runtime_test.cleanup(function () external_wait_release_target(target_2) end)
       local in_cleanup_wait = false
       local cleanup_done = false
 
-      local task = async.run<|nil, value|>(function (): nil
-        local cleanup_owner = async.prepare_external_wait(
+      const task = async.run<|nil, value|>(function (): nil
+        const cleanup_owner = async.prepare_external_wait(
           function (target: foreign *void): boolean
             external_wait_retain_target(target_2, target)
             in_cleanup_wait = true
@@ -1130,30 +1126,30 @@ function test_external_wait_drains_batches_exceeding_ready_limit(
     _context: test.Context)
   runtime_test.run(function ()
     local const total_waiters = 150
-    local targets: {ExternalWaitTarget} = {}
+    const targets: {ExternalWaitTarget} = {}
     defer do
       for index = 1, #targets do
-        local ptr? = targets[index]
+        const ptr? = targets[index]
         if ptr ~= nil then
           targets[index] = nil
           uv.native_external_wake_release(ptr.pointer)
         end
       end
     end
-    local order: {integer} = {}
+    const order: {integer} = {}
     local unregister_calls = 0
-    local tasks: {async.Task<|integer, value|>} = {}
+    const tasks: {async.Task<|integer, value|>} = {}
 
     for index = 1, total_waiters do
-      local id = index
-      local owner = async.prepare_external_wait(
+      const id = index
+      const owner = async.prepare_external_wait(
         function (target: foreign *void): boolean
           targets[id] = ExternalWaitTarget(target)
           uv.native_external_wake_retain(target)
           return true
         end,
         function () unregister_calls = unregister_calls + 1 end)
-      local waiter = async.run<|integer, value|>(function (): integer
+      const waiter = async.run<|integer, value|>(function (): integer
         defer owner:close()
         owner:wait()
         order[#order + 1] = id
@@ -1170,7 +1166,7 @@ function test_external_wait_drains_batches_exceeding_ready_limit(
     -- Notify all 150 targets in one burst (> 2 * 64 drain capacity), with
     -- duplicate notifications on even targets to verify pending coalescing.
     for index = 1, total_waiters do
-      local target = targets[index].pointer
+      const target = targets[index].pointer
       test.assert((uv.native_external_wake_notify(target) as integer) == 0,
           "batch notify failed")
       if index % 2 == 0 then
@@ -1197,12 +1193,12 @@ function test_external_wait_liveness_and_sequential_runtime_sessions(
     context: test.Context)
   context:run(
       "unused_prepared_wait_retires_on_exit_and_does_not_mask_idle_loop_failure",
-      function (_child: test.Context)
+      function (_: test.Context)
     -- 1. A Task prepares an ExternalWait and finishes without calling :wait()
     -- or :close(). The Runtime retires the unused reservation and exits cleanly.
     local finished_without_close = false
     async.run<|nil, nil|>(function (): nil
-      local _unused = async.prepare_external_wait(
+      local _ = async.prepare_external_wait(
         function (_: foreign *void): boolean return true end,
         function () raise "unused reservation called unregister_fn" end)
       finished_without_close = true
@@ -1216,8 +1212,8 @@ function test_external_wait_liveness_and_sequential_runtime_sessions(
     -- mask an idle loop when a Task suspends with no active native handles.
     local unused_in_idle: async.ExternalWait? = nil
     local idle_unwound = false
-    local idle_token = async.ResumeToken("unused reserve idle detection")
-    local idle_task = async.run<|nil, value|>(function (): nil
+    const idle_token = async.ResumeToken("unused reserve idle detection")
+    const idle_task = async.run<|nil, value|>(function (): nil
       defer idle_unwound = true
       unused_in_idle = async.prepare_external_wait(
         function (_: foreign *void): boolean return true end,
@@ -1237,28 +1233,28 @@ function test_external_wait_liveness_and_sequential_runtime_sessions(
 
   context:run(
       "sole_external_wait_keeps_runtime_alive_until_native_thread_notifies",
-      function (_child: test.Context)
+      function (_: test.Context)
     -- Sole Task in the Runtime waits on ExternalWait:wait() with no timers or
     -- uv_work_t requests; only a dedicated OS uv.thread_t wakes it.
     local completed = false
     async.run<|nil, value|>(function (): nil
-      local gate = uv.sem_t.new()
+      const gate = uv.sem_t()
       test.assert(gate:init(0) == 0, "gate semaphore init failed")
       defer gate:destroy()
-      local worker = uv.thread_t.new()
-      local slots: owned ExternalWaitPointer[] =
+      const worker = uv.thread_t()
+      const slots: owned ExternalWaitPointer[] =
         foreign ExternalWaitPointer.new_array(2)
       local spawned = false
       defer if spawned then
         test.assert(worker:join() == 0, "worker thread join failed")
       end
 
-      local prepared = async.prepare_external_wait(
+      const prepared = async.prepare_external_wait(
         function (target: foreign *void): boolean
           uv.native_external_wake_retain(target)
           slots[0] = gate:borrow()
           slots[1] = target
-          local status = worker:create(
+          const status = worker:create(
             external_wait_gated_worker_notify,
             slots as foreign *void,
             slots)
@@ -1282,7 +1278,7 @@ function test_external_wait_liveness_and_sequential_runtime_sessions(
   end)
 
   context:run("sole_public_thread_channel_and_join_waits_keep_runtime_alive",
-      function (_child: test.Context)
+      function (_: test.Context)
     local joined_value = 0
     async.run<|nil, value|>(function (): nil
       local tx, rx = external_wait_thread.channel<|integer|>(1)
@@ -1292,12 +1288,12 @@ function test_external_wait_liveness_and_sequential_runtime_sessions(
       defer reply_tx:close()
       defer reply_rx:close()
 
-      local worker = external_wait_thread.spawn_two(
+      const worker = external_wait_thread.spawn_two(
         external_wait_thread_channel_worker, tx, reply_rx)
-      local first = rx:receive()
+      const first = rx:receive()
       test.assert(first == 314, "unexpected channel value from worker")
       reply_tx:send(85)
-      local status = worker:join()
+      const status = worker:join()
       local ok, result? = status:has_succeeded()
       test.assert(ok and result == 86, "worker join returned wrong status")
       joined_value = result as integer
@@ -1310,9 +1306,9 @@ function test_external_wait_liveness_and_sequential_runtime_sessions(
 
   context:run(
       "sequential_runtime_sessions_reject_retired_targets_from_prior_runtime",
-      function (_child: test.Context)
-    local stale_completed: {ExternalWaitTarget} = {}
-    local stale_cancelled: {ExternalWaitTarget} = {}
+      function (_: test.Context)
+    const stale_completed: {ExternalWaitTarget} = {}
+    const stale_cancelled: {ExternalWaitTarget} = {}
     defer external_wait_release_target(stale_completed)
     defer external_wait_release_target(stale_cancelled)
 
@@ -1328,7 +1324,7 @@ function test_external_wait_liveness_and_sequential_runtime_sessions(
         end,
         function () end)
 
-      local cancelled_task = async.run<|nil, value|>(function (): nil
+      const cancelled_task = async.run<|nil, value|>(function (): nil
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(stale_cancelled, target)
@@ -1355,10 +1351,10 @@ function test_external_wait_liveness_and_sequential_runtime_sessions(
     -- Session 2: fresh bridge starts identity numbering at 1 again; stale
     -- targets from Session 1 must not wake Session 2's waiter 1.
     runtime_test.run(function ()
-      local session_2_target: {ExternalWaitTarget} = {}
+      const session_2_target: {ExternalWaitTarget} = {}
       defer external_wait_release_target(session_2_target)
       local woken = false
-      local waiter = async.run<|nil, value|>(function (): nil
+      const waiter = async.run<|nil, value|>(function (): nil
         async.wait_external(
           function (target: foreign *void): boolean
             external_wait_retain_target(session_2_target, target)
@@ -1391,7 +1387,7 @@ end
 function test_run_with_cleanup_final_wait_capability_validation(
     context: test.Context)
   context:run("outside_task_native_binding_prearms_before_proxy_exposure",
-      function (_child: test.Context)
+      function (_: test.Context)
     defer async.loop()
     local owner, fixture = external_wait_prepare_retirement(true)
     defer do
@@ -1401,7 +1397,7 @@ function test_run_with_cleanup_final_wait_capability_validation(
     test.assert(fixture.register_calls == 0 and fixture.retire_calls == 0,
         "native preparation registered or retired before binding")
     local trace = ""
-    local task = async.run_with_cleanup<|integer, value|>(
+    const task = async.run_with_cleanup<|integer, value|>(
       function (): integer
         trace = trace .. "body>"
         return 19
@@ -1425,9 +1421,9 @@ function test_run_with_cleanup_final_wait_capability_validation(
   end)
 
   context:run("native_callbacks_must_be_non_null_before_domain_admission",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
-      local fixture: owned *titan_external_retirement_fixture =
+      const fixture: owned *titan_external_retirement_fixture =
         foreign titan_external_retirement_fixture.new()
       external_wait_expect_rejected(function ()
         async.prepare_native_retirement(
@@ -1451,18 +1447,18 @@ function test_run_with_cleanup_final_wait_capability_validation(
   end)
 
   context:run("ordinary_closed_and_retired_owners_do_not_expose_tasks",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
       local task_callbacks = 0
       local ordinary_callbacks = 0
-      local body = function (): nil
+      const body = function (): nil
         task_callbacks = task_callbacks + 1
         return nil
       end
-      local cleanup = function (_: async.CancellationReason<|value|>?)
+      const cleanup = function (_: async.CancellationReason<|value|>?)
         task_callbacks = task_callbacks + 1
       end
-      local ordinary = async.prepare_external_wait(
+      const ordinary = async.prepare_external_wait(
         function (_: foreign *void): boolean
           ordinary_callbacks = ordinary_callbacks + 1
           return false
@@ -1481,7 +1477,7 @@ function test_run_with_cleanup_final_wait_capability_validation(
 
       local retired, retired_fixture = external_wait_prepare_retirement(true)
       runtime_test.cleanup(function () retired:close() end)
-      local accepted = async.run_with_cleanup<|nil, value|>(
+      const accepted = async.run_with_cleanup<|nil, value|>(
         function (): nil return nil end,
         function (_: async.CancellationReason<|value|>?) end, retired)
       task_support.cleanup_task(accepted, "retired native capability cleanup")
@@ -1503,7 +1499,7 @@ function test_run_with_cleanup_final_wait_capability_validation(
   end)
 
   context:run("unbound_native_waits_reject_and_unused_close_has_no_domain_effect",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
       local owner, fixture = external_wait_prepare_retirement(false)
       defer owner:close()
@@ -1520,9 +1516,9 @@ function test_run_with_cleanup_final_wait_capability_validation(
   end)
 
   context:run("native_owner_from_previous_runtime_is_rejected",
-      function (_child: test.Context)
+      function (_: test.Context)
     local previous: async.ExternalWait? = nil
-    local fixture: owned *titan_external_retirement_fixture =
+    const fixture: owned *titan_external_retirement_fixture =
       foreign titan_external_retirement_fixture.new()
     runtime_test.run(function ()
       previous = async.prepare_native_retirement(
@@ -1558,7 +1554,7 @@ function test_run_with_cleanup_exact_prepared_owner_survives_unrelated_cleanup_w
     local terminal_observed = false
     local final_owner, fixture = external_wait_prepare_retirement(false)
     runtime_test.cleanup(function () final_owner:close() end)
-    local task = async.run_with_cleanup<|integer, value|>(
+    const task = async.run_with_cleanup<|integer, value|>(
       function (): integer
         trace = trace .. "body>"
         return 51
@@ -1569,7 +1565,7 @@ function test_run_with_cleanup_exact_prepared_owner_survives_unrelated_cleanup_w
           trace = trace .. "nested_await>"
           resolve(nil)
         end)
-        local unrelated = async.prepare_external_wait(
+        const unrelated = async.prepare_external_wait(
           function (_: foreign *void): boolean
             unrelated_registrations = unrelated_registrations + 1
             trace = trace .. "unrelated_prepared>"
@@ -1596,7 +1592,7 @@ function test_run_with_cleanup_exact_prepared_owner_survives_unrelated_cleanup_w
     external_wait_cleanup_native_task(task, fixture, "exact native final_wait Task cleanup")
     test.assert(fixture.register_calls == 1 and fixture.target ~= nil,
         "native retirement was not linked before exposing the Task")
-    local remove_listener = task:add_terminal_listener(
+    const remove_listener = task:add_terminal_listener(
       function (_: async.TaskStatus<|integer, value|>)
         terminal_observed = true
         trace = trace .. "terminal>"
@@ -1608,7 +1604,7 @@ function test_run_with_cleanup_exact_prepared_owner_survives_unrelated_cleanup_w
     test.assert(final_wait_entered and unrelated_registrations == 2 and
                 not final_completed and not terminal_observed,
         "designated native wait was stolen or terminal status preceded retirement")
-    local reason = async.CancellationReason.simple("cancel during final retirement")
+    const reason = async.CancellationReason.simple("cancel during final retirement")
     task:cancel(reason)
     external_wait_flush_bridge_turn()
     test.assert(not final_completed and not terminal_observed and
@@ -1637,9 +1633,9 @@ function test_run_with_cleanup_bound_owner_rejects_aliases_until_its_cleanup(
     local cleanup_entered = false
     local owner, fixture = external_wait_prepare_retirement(false)
     runtime_test.cleanup(function () owner:close() end)
-    local alias = owner
-    local body_token = async.ResumeToken("bound final owner body barrier")
-    local task = async.run_with_cleanup<|integer, value|>(
+    const alias = owner
+    const body_token = async.ResumeToken("bound final owner body barrier")
+    const task = async.run_with_cleanup<|integer, value|>(
       function (): integer
         external_wait_expect_rejected(function () alias:wait() end,
             "bound final_wait used by owner body")
@@ -1656,7 +1652,7 @@ function test_run_with_cleanup_bound_owner_rejects_aliases_until_its_cleanup(
       function (_: async.CancellationReason<|value|>?)
         external_wait_expect_rejected(function () alias:wait() end,
             "ordinary wait on final_wait during owner cleanup")
-        local result = async.await_cleanup_with<|async.ExternalWait, nil, nil|>(
+        const result = async.await_cleanup_with<|async.ExternalWait, nil, nil|>(
           alias,
           function (done: async.Completion<|async.ExternalWait, nil, nil|>,
                     number: integer): uv.req_t?
@@ -1693,7 +1689,7 @@ function test_run_with_cleanup_bound_owner_rejects_aliases_until_its_cleanup(
         end, alias)
     end, "same native final_wait bound to two Tasks")
     support.wait_until_waiting(task)
-    local peer = async.run<|nil, value|>(function (): nil
+    const peer = async.run<|nil, value|>(function (): nil
       external_wait_expect_rejected(function () alias:wait() end,
           "bound final_wait used by unrelated Task")
       peer_checks = peer_checks + 1
@@ -1735,18 +1731,18 @@ local function external_wait_add_native_terminal_case(
     runtime_test.run(function ()
       local owner, fixture = external_wait_prepare_retirement(false)
       runtime_test.cleanup(function () owner:close() end)
-      local marker: {string} = {"native terminal barrier sentinel"}
-      local cleanup_marker: {string} = {"later native cleanup failure"}
+      const marker: {string} = {"native terminal barrier sentinel"}
+      const cleanup_marker: {string} = {"later native cleanup failure"}
       local body_entered = false
       local cleanup_calls = 0
       local terminal_calls = 0
       local terminal_retired = false
-      local first_reason =
+      const first_reason =
         async.CancellationReason<|string|>.complex("first native prestart reason")
       if mode == 2 or mode == 3 or mode == 6 then
         child:log("BEGIN expected uncaught async Task diagnostics")
       end
-      local task = async.run_with_cleanup<|integer, string|>(
+      const task = async.run_with_cleanup<|integer, string|>(
         function (): integer
           body_entered = true
           if mode == 2 or mode == 6 then raise marker end
@@ -1764,7 +1760,7 @@ local function external_wait_add_native_terminal_case(
           -- remains an unconditional preterminal obligation, not user cleanup.
         end, owner)
       external_wait_cleanup_native_task(task, fixture, "unconditional native barrier cleanup")
-      local remove_listener = task:add_terminal_listener(
+      const remove_listener = task:add_terminal_listener(
         function (_: async.TaskStatus<|integer, string|>)
           terminal_calls = terminal_calls + 1
           terminal_retired = fixture.retirements == 1
@@ -1784,7 +1780,7 @@ local function external_wait_add_native_terminal_case(
                   terminal_calls == 0 and fixture.retirements == 0,
           "Task published terminal status without its accepted native retirement")
       test.assert((external_retirement_signal(fixture as foreign *void) as integer) == 0)
-      local status = async.join(task)
+      const status = async.join(task)
       if mode == 2 or mode == 3 or mode == 6 then
         child:log("END expected uncaught async Task diagnostics")
         case status
@@ -1841,7 +1837,7 @@ function test_run_with_cleanup_native_registration_failure_does_not_expose_task(
     catch
       test.assert(error is async.OperationError,
           "native registration did not report its status as an OperationError")
-      local failure: async.OperationError = error
+      const failure: async.OperationError = error
       test.assert(failure.code == uv.ENOMEM and
                   failure.operation == "async.native_retirement.register",
           "native registration changed the rejected native status")
@@ -1866,7 +1862,7 @@ function test_run_with_cleanup_native_retirement_error_preserves_runtime_for_exp
     _context: test.Context)
   defer async.loop()
   local owner, fixture = external_wait_prepare_retirement(false)
-  local loop_owner = async.current_loop()
+  const loop_owner = async.current_loop()
   -- This fixture's one-shot error belongs only to its own native retirement.
   -- An early test assertion still withdraws that fault and drains the Runtime.
   defer do
@@ -1878,7 +1874,7 @@ function test_run_with_cleanup_native_retirement_error_preserves_runtime_for_exp
   fixture.retire_error = uv.EIO as foreign int
   local cleanup_calls = 0
   local terminal_calls = 0
-  local task = async.run_with_cleanup<|integer, value|>(
+  const task = async.run_with_cleanup<|integer, value|>(
     function (): integer
       test.assert((external_retirement_signal(fixture as foreign *void) as integer) == 0)
       return 97
@@ -1886,7 +1882,7 @@ function test_run_with_cleanup_native_retirement_error_preserves_runtime_for_exp
     function (_: async.CancellationReason<|value|>?)
       cleanup_calls = cleanup_calls + 1
     end, owner)
-  local remove_listener = task:add_terminal_listener(
+  const remove_listener = task:add_terminal_listener(
     function (_: async.TaskStatus<|integer, value|>)
       terminal_calls = terminal_calls + 1
     end)
@@ -1897,7 +1893,7 @@ function test_run_with_cleanup_native_retirement_error_preserves_runtime_for_exp
   catch
     test.assert(error is async.OperationError,
         "native retirement failure did not return a driver OperationError")
-    local failure: async.OperationError = error
+    const failure: async.OperationError = error
     test.assert(failure.code == uv.EIO and
                 failure.operation == "async.native_retirement.retire",
         "driver changed the failed native retirement status")
@@ -1917,7 +1913,7 @@ function test_run_with_cleanup_native_retirement_error_preserves_runtime_for_exp
   catch
     test.assert(error is async.OperationError,
         "second retirement rejection did not return a driver OperationError")
-    local failure: async.OperationError = error
+    const failure: async.OperationError = error
     test.assert(failure.code == uv.EBUSY and
                 failure.operation == "async.native_retirement.retire",
         "explicit retry changed the second native error")
@@ -1939,15 +1935,15 @@ end
 
 -- Public only for the independent-state teardown test below.
 function external_wait_abandon_failed_driver(counts_raw: value)
-  local counts = counts_raw as foreign *void
-  local oracle = CoalescingReceiverLoopOracle(nil, counts)
+  const counts = counts_raw as foreign *void
+  const oracle = CoalescingReceiverLoopOracle(nil, counts)
   coalescing_receiver_gc.finalizable(oracle, coalescing_receiver_loop_oracle)
   coalescing_receiver_loop_probe = oracle
   local owner, fixture = external_wait_prepare_retirement(false)
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   oracle.loop = loop
   fixture.retire_error = uv.EIO as foreign int
-  local task = async.run_with_cleanup<|integer, value|>(
+  const task = async.run_with_cleanup<|integer, value|>(
     function (): integer
       test.assert((external_retirement_signal(fixture as foreign *void) as integer) == 0)
       return 103
@@ -1959,7 +1955,7 @@ function external_wait_abandon_failed_driver(counts_raw: value)
   local rejected = false
   do async.loop()
   catch
-    local failure: async.OperationError = error
+    const failure: async.OperationError = error
     test.assert(failure.code == uv.EIO and
       failure.operation == "async.native_retirement.retire")
     rejected = true
@@ -1973,9 +1969,9 @@ end
 
 function test_lua_close_abandons_runtime_after_native_retirement_driver_error(
     _: test.Context)
-  local counts: owned int[] = foreign int.new_array(6)
+  const counts: owned int[] = foreign int.new_array(6)
   for index = 0, 5 do counts[index] = 0 end
-  local state = coalescing_receiver_lua.new()
+  const state = coalescing_receiver_lua.new()
   defer state:close()
   state:run([[
     package.path, package.cpath = '', ''
@@ -1992,10 +1988,10 @@ end
 function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
     context: test.Context)
   context:run("prestart_simple_and_complex_first_reason_vs_ordinary_run",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
       local ordinary_entered = false
-      local ordinary_task = async.run<|integer, string|>(function (): integer
+      const ordinary_task = async.run<|integer, string|>(function (): integer
         ordinary_entered = true
         return 1
       end)
@@ -2005,9 +2001,9 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
       local simple_body_entered = false
       local simple_cleanup_runs = 0
       local simple_observed: async.CancellationReason<|string|>? = nil
-      local simple_first =
+      const simple_first =
         async.CancellationReason<|string|>.simple("first prestart simple")
-      local simple_task = async.run_with_cleanup<|integer, string|>(
+      const simple_task = async.run_with_cleanup<|integer, string|>(
         function (): integer
           simple_body_entered = true
           return 10
@@ -2026,10 +2022,10 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
       local complex_body_entered = false
       local complex_cleanup_runs = 0
       local complex_observed: async.CancellationReason<|ExternalWaitComplexReason|>? = nil
-      local complex_payload = ExternalWaitComplexReason(404, "first complex payload")
-      local complex_first =
+      const complex_payload = ExternalWaitComplexReason(404, "first complex payload")
+      const complex_first =
         async.CancellationReason<|ExternalWaitComplexReason|>.complex(complex_payload)
-      local complex_task =
+      const complex_task =
         async.run_with_cleanup<|string, ExternalWaitComplexReason|>(
           function (): string
             complex_body_entered = true
@@ -2082,17 +2078,17 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
   end)
 
   context:run("terminal_listeners_and_join_wait_for_cleanup_barrier",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
       -- Case A: pre-start cancellation with a preaccepted native barrier.
       local prestart_trace = ""
       local prestart_cleanup_entered = false
-      local prestart_reason =
+      const prestart_reason =
         async.CancellationReason<|integer|>.complex(901)
       local prestart_prepared, prestart_fixture = external_wait_prepare_retirement(false)
       runtime_test.cleanup(function () prestart_prepared:close() end)
 
-      local prestart_task = async.run_with_cleanup<|string, integer|>(
+      const prestart_task = async.run_with_cleanup<|string, integer|>(
         function (): string
           prestart_trace = prestart_trace .. "body>"
           return "never"
@@ -2110,7 +2106,7 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
       test.assert(prestart_fixture.register_calls == 1 and prestart_fixture.target ~= nil,
           "prestart cleanup barrier was not accepted before Task exposure")
 
-      local remove_prestart_listener = prestart_task:add_terminal_listener(
+      const remove_prestart_listener = prestart_task:add_terminal_listener(
         function (status: async.TaskStatus<|string, integer|>)
           test.assert(status:has_cancelled(), "terminal listener saw non-cancelled status")
           prestart_trace = prestart_trace .. "listener>"
@@ -2118,8 +2114,8 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
       defer remove_prestart_listener()
 
       prestart_task:cancel(prestart_reason)
-      local prestart_joiner = async.run<|nil, value|>(function (): nil
-        local st = async.join(prestart_task)
+      const prestart_joiner = async.run<|nil, value|>(function (): nil
+        const st = async.join(prestart_task)
         test.assert(st:has_cancelled(), "prestart joiner saw non-cancelled status")
         prestart_trace = prestart_trace .. "joiner"
         return nil
@@ -2154,15 +2150,15 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
 
       -- Case B: active mid-wait cancellation with a cleanup barrier.
       local active_trace = ""
-      local body_target: {ExternalWaitTarget} = {}
+      const body_target: {ExternalWaitTarget} = {}
       local active_cleanup_entered = false
       defer external_wait_release_target(body_target)
-      local active_reason =
+      const active_reason =
         async.CancellationReason<|string|>.simple("active cancel with cleanup barrier")
       local active_cleanup_prepared, active_fixture = external_wait_prepare_retirement(false)
       runtime_test.cleanup(function () active_cleanup_prepared:close() end)
 
-      local active_task = async.run_with_cleanup<|nil, string|>(
+      const active_task = async.run_with_cleanup<|nil, string|>(
         function (): nil
           active_trace = active_trace .. "body_enter>"
           async.wait_external(
@@ -2187,7 +2183,7 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
       external_wait_cleanup_native_task(
         active_task, active_fixture, "active barrier task cleanup")
 
-      local remove_active_listener = active_task:add_terminal_listener(
+      const remove_active_listener = active_task:add_terminal_listener(
         function (status: async.TaskStatus<|nil, string|>)
           test.assert(status:has_cancelled(), "active listener saw non-cancelled status")
           active_trace = active_trace .. "listener"
@@ -2223,10 +2219,10 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
   end)
 
   context:run("normal_success_and_uncaught_failure_run_cleanup_with_nil_reason",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
       local success_trace = ""
-      local success_task = async.run_with_cleanup<|string, string|>(
+      const success_task = async.run_with_cleanup<|string, string|>(
         function (): string
           success_trace = success_trace .. "body>"
           return "succeeded_payload"
@@ -2244,7 +2240,7 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
           success_trace = success_trace .. "cleanup>"
         end)
       task_support.cleanup_task(success_task, "success run_with_cleanup task")
-      local remove_success_listener = success_task:add_terminal_listener(
+      const remove_success_listener = success_task:add_terminal_listener(
         function (st: async.TaskStatus<|string, string|>)
           test.assert(st:has_succeeded(), "success listener status mismatch")
           success_trace = success_trace .. "listener"
@@ -2258,9 +2254,9 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
           "normal success run_with_cleanup trace mismatch: " .. success_trace)
 
       local failure_trace = ""
-      local failure_sentinel: {string} = {"boom in run_with_cleanup"}
+      const failure_sentinel: {string} = {"boom in run_with_cleanup"}
       context:log("BEGIN expected uncaught async Task diagnostics")
-      local failing_task = async.run_with_cleanup<|integer, string|>(
+      const failing_task = async.run_with_cleanup<|integer, string|>(
         function (): integer
           failure_trace = failure_trace .. "body_fail>"
           raise failure_sentinel
@@ -2270,7 +2266,7 @@ function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
           test.assert(reason == nil, "failing non-cancelled Task passed reason to cleanup")
           failure_trace = failure_trace .. "cleanup>"
         end)
-      local remove_fail_listener = failing_task:add_terminal_listener(
+      const remove_fail_listener = failing_task:add_terminal_listener(
         function (st: async.TaskStatus<|integer, string|>)
           test.assert(st:has_failed(), "failing listener status mismatch")
           failure_trace = failure_trace .. "listener"
@@ -2290,15 +2286,15 @@ end
 function test_external_wait_cleanup_shielded_across_cancel_and_shutdown(
     context: test.Context)
   context:run("cleanup_wait_ignores_prior_and_concurrent_cancellation",
-      function (_child: test.Context)
+      function (_: test.Context)
     runtime_test.run(function ()
-      local cleanup_target: {ExternalWaitTarget} = {}
+      const cleanup_target: {ExternalWaitTarget} = {}
       runtime_test.cleanup(function () external_wait_release_target(cleanup_target) end)
       local unregister_calls = 0
       local cleanup_completed = false
-      local first_reason = async.CancellationReason.simple("first sticky reason")
+      const first_reason = async.CancellationReason.simple("first sticky reason")
 
-      local task = async.run_with_cleanup<|nil, value|>(
+      const task = async.run_with_cleanup<|nil, value|>(
         function (): nil
           return nil
         end,
@@ -2339,19 +2335,19 @@ function test_external_wait_cleanup_shielded_across_cancel_and_shutdown(
   end)
 
   context:run("cleanup_wait_completes_during_request_exit_and_fatal_shutdown",
-      function (_child: test.Context)
+      function (_: test.Context)
     -- 1. Prepared cleanup wait completes across async.request_exit.
     local exit_cleanup_completed = false
     async.run<|nil, value|>(function (): nil
-      local worker = uv.thread_t.new()
+      const worker = uv.thread_t()
       local spawned = false
       defer if spawned then
         test.assert(worker:join() == 0, "exit cleanup worker join failed")
       end
-      local cleanup_owner = async.prepare_external_wait(
+      const cleanup_owner = async.prepare_external_wait(
         function (target: foreign *void): boolean
           uv.native_external_wake_retain(target)
-          local status = worker:create(external_wait_worker_notify, target, nil)
+          const status = worker:create(external_wait_worker_notify, target, nil)
           if status < 0 then
             uv.native_external_wake_release(target)
             raise "exit cleanup worker create failed"
@@ -2373,19 +2369,19 @@ function test_external_wait_cleanup_shielded_across_cancel_and_shutdown(
         "request_exit prevented prepared cleanup ExternalWait from completing")
 
     -- 2. Prepared cleanup wait completes across fatal callback Runtime shutdown.
-    local marker = ExternalWaitFatalMarker(505, "")
+    const marker = ExternalWaitFatalMarker(505, "")
     local fatal_cleanup_completed = false
     local keeper_unregistered = false
-    local keeper = async.run<|nil, value|>(function (): nil
-      local worker = uv.thread_t.new()
+    const keeper = async.run<|nil, value|>(function (): nil
+      const worker = uv.thread_t()
       local spawned = false
       defer if spawned then
         test.assert(worker:join() == 0, "fatal cleanup worker join failed")
       end
-      local cleanup_owner = async.prepare_external_wait(
+      const cleanup_owner = async.prepare_external_wait(
         function (target: foreign *void): boolean
           uv.native_external_wake_retain(target)
-          local status = worker:create(external_wait_worker_notify, target, nil)
+          const status = worker:create(external_wait_worker_notify, target, nil)
           if status < 0 then
             uv.native_external_wake_release(target)
             raise "fatal cleanup worker create failed"
@@ -2407,17 +2403,15 @@ function test_external_wait_cleanup_shielded_across_cancel_and_shutdown(
         end)
       return nil
     end)
-    local _origin = async.run<|nil, value|>(function (): nil
+    local _ = async.run<|nil, value|>(function (): nil
       support.wait_until_waiting(keeper)
       async.await<|nil, nil|>(function (_resolve, _reject, fatal)
         external_wait_later(0, function ()
-          do
-            raise marker
-          catch
-            marker.source_trace = traceback
-            fatal(error, traceback)
-            raise
-          end
+          raise marker
+        catch
+          marker.source_trace = traceback
+          fatal(error, traceback)
+          raise
         end)
       end)
       return nil
@@ -2454,7 +2448,7 @@ local record ExternalWaitWindow
   unregisters: integer
   null_targets: integer
   early_unregisters: integer
-  target: {ExternalWaitTarget}
+  const target: {ExternalWaitTarget}
   completed: boolean
 end
 
@@ -2481,7 +2475,7 @@ local function external_wait_window_notify(window: ExternalWaitWindow)
     if window.target[1] ~= nil then break end
     timer.yield()
   end
-  local target? = window.target[1]
+  const target? = window.target[1]
   if target ~= nil then
     test.assert((uv.native_external_wake_notify(target.pointer) as integer) == 0,
       "the external wait notification failed")
@@ -2496,8 +2490,8 @@ end
 local function external_wait_cancel_window(driver: boolean)
   runtime_test.run(function ()
     task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
-      local window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
-      local owner = external_wait_window_owner(window)
+      const window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
+      const owner = external_wait_window_owner(window)
       return task_support.WakeCase(function (): value
         owner:wait()
         return "notified"
@@ -2528,7 +2522,7 @@ end
 local function external_wait_native_cancel_window(driver: boolean)
   runtime_test.run(function ()
     task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
-      local fixture: owned *titan_external_retirement_fixture =
+      const fixture: owned *titan_external_retirement_fixture =
         foreign titan_external_retirement_fixture.new()
       return task_support.WakeCase(function (): value
         async.wait_external_native(fixture, fixture as foreign *void,
@@ -2553,9 +2547,9 @@ end
 local function external_wait_cleanup_cancel_window(driver: boolean)
   runtime_test.run(function ()
     task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
-      local window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
-      local owner = external_wait_window_owner(window)
-      local drive = function (probe: task_support.WakeWindow, _: async.Task)
+      const window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
+      const owner = external_wait_window_owner(window)
+      const drive = function (probe: task_support.WakeWindow, _: async.Task)
         timer.yield()
         if driver then probe.open = false end
         external_wait_window_notify(window)
@@ -2599,9 +2593,9 @@ end
 function test_resume_during_external_wait_registration_is_discarded(_: test.Context)
   runtime_test.run(function ()
     task_support.each_wake_offset(true, nil, function (): task_support.WakeCase
-      local window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
-      local owner = external_wait_window_owner(window)
-      local drive = function (probe: task_support.WakeWindow, _: async.Task)
+      const window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
+      const owner = external_wait_window_owner(window)
+      const drive = function (probe: task_support.WakeWindow, _: async.Task)
         timer.yield()
         probe.open = false
         external_wait_window_notify(window)

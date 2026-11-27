@@ -6,14 +6,14 @@ local precision_one = 1
 -- Windows starts new threads at reduced x87 precision, where 1 + LDBL_EPSILON
 -- rounds to 1. Thread entries restore the main thread's precision first.
 function test_thread_long_double_precision_matches_the_main_thread(_context: test.Context)
-  local main_one = precision_one as foreign long double
-  local main_precise: foreign long double = main_one + ffi.LDBL_EPSILON
-  local expected = main_precise ~= main_one
+  const main_one = precision_one as foreign long double
+  const main_precise: foreign long double = main_one + ffi.LDBL_EPSILON
+  const expected = main_precise ~= main_one
   test.assert(expected, "the main thread rounded 1 + LDBL_EPSILON to 1")
   runtime_test.run(function ()
-    local worker = thread.spawn_one(function (one: integer): boolean
-      local base = one as foreign long double
-      local precise: foreign long double = base + ffi.LDBL_EPSILON
+    const worker = thread.spawn_one(function (one: integer): boolean
+      const base = one as foreign long double
+      const precise: foreign long double = base + ffi.LDBL_EPSILON
       return precise ~= base
     end, precision_one)
     local ok, observed? = worker:join():has_succeeded()

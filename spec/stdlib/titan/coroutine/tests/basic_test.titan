@@ -4,7 +4,7 @@ end
 
 function test_creates_coroutine_and_returns_callback_result(
     _context: test.Context)
-  local co = coroutine.create(create_body, "tag")
+  const co = coroutine.create(create_body, "tag")
   test.assert(co:resume("hello") == "hello")
 end
 
@@ -13,7 +13,7 @@ local function yield_body(arg: value): value
               "matching coroutine tag was not yieldable")
   test.assert(not coroutine.is_yieldable("other"),
               "unmatched coroutine tag was yieldable")
-  local back = coroutine.yield(arg, "tag")
+  const back = coroutine.yield(arg, "tag")
   return back
 end
 
@@ -22,12 +22,12 @@ local function outside(): boolean
 end
 
 local function yield_run(): string
-  local co = coroutine.create(yield_body, "tag")
-  local s0 = co:status()
-  local first = co:resume("out")
-  local s1 = co:status()
-  local second = co:resume("in")
-  local s2 = co:status()
+  const co = coroutine.create(yield_body, "tag")
+  const s0 = co:status()
+  const first = co:resume("out")
+  const s1 = co:status()
+  const second = co:resume("in")
+  const s2 = co:status()
   return s0 .. ":" .. (first as string) .. ":" .. s1 ..
          ":" .. (second as string) .. ":" .. s2
 end
@@ -39,27 +39,27 @@ function test_yields_resumes_reports_status_and_checks_yieldability(
 end
 
 local function default_resume(): string
-  local co = coroutine.create(function(arg: value): value
-    local got = coroutine.yield(arg, "default")
+  const co = coroutine.create(function(arg: value): value
+    const got = coroutine.yield(arg, "default")
     return got
   end, "default")
-  local first = co:resume("out", nil)
-  local second = co:resume("in", nil)
+  const first = co:resume("out", nil)
+  const second = co:resume("in", nil)
   return (first as string) .. ":" .. (second as string)
 end
 
 local function override_resume(): string
-  local co = coroutine.create(function(arg: value): value
-    local got = coroutine.yield(arg, "override")
+  const co = coroutine.create(function(arg: value): value
+    const got = coroutine.yield(arg, "override")
     return got
   end, "default")
-  local first = co:resume("out", "override")
-  local second = co:resume("in", "override")
+  const first = co:resume("out", "override")
+  const second = co:resume("in", "override")
   return (first as string) .. ":" .. (second as string)
 end
 
 local function default_error(): string
-  local co = coroutine.create(function(_: value): value
+  const co = coroutine.create(function(_: value): value
     do
       coroutine.yield("ready", "default")
     catch
@@ -67,13 +67,13 @@ local function default_error(): string
     end
     return "missed"
   end, "default")
-  local first = co:resume(nil, nil)
-  local second = co:error("oops", nil)
+  const first = co:resume(nil, nil)
+  const second = co:error("oops", nil)
   return (first as string) .. ":" .. (second as string)
 end
 
 local function override_error(): string
-  local co = coroutine.create(function(_: value): value
+  const co = coroutine.create(function(_: value): value
     do
       coroutine.yield("ready", "override")
     catch
@@ -81,8 +81,8 @@ local function override_error(): string
     end
     return "missed"
   end, "default")
-  local first = co:resume(nil, "override")
-  local second = co:error("oops", "override")
+  const first = co:resume(nil, "override")
+  const second = co:error("oops", "override")
   return (first as string) .. ":" .. (second as string)
 end
 
@@ -114,10 +114,10 @@ function test_reports_running_and_normal_statuses(_context: test.Context)
 end
 
 function test_raw_tag_mismatch_does_not_call_lua_eq(_context: test.Context)
-  local calls: {string: value} = { ["count"] = 0 }
-  local resume_tag: value = { ["kind"] = "resume" }
-  local yield_tag: value = { ["kind"] = "yield" }
-  local install_eq = common.lua_helper([==[
+  const calls: {string: value} = { ["count"] = 0 }
+  const resume_tag: value = { ["kind"] = "resume" }
+  const yield_tag: value = { ["kind"] = "yield" }
+  const install_eq = common.lua_helper([==[
     return function(tag, counter)
       setmetatable(tag, {
         __eq = function()
@@ -130,7 +130,7 @@ function test_raw_tag_mismatch_does_not_call_lua_eq(_context: test.Context)
   install_eq(resume_tag, calls)
   install_eq(yield_tag, calls)
 
-  local co = coroutine.create(function (_: value): value
+  const co = coroutine.create(function (_: value): value
     return coroutine.yield("unmatched", yield_tag)
   end, resume_tag)
   common.assert_raises(function ()

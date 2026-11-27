@@ -57,7 +57,7 @@ end
 
 
 record TransferPayloadNative
-  local policies: {async.TransferValue}
+  local const policies: {async.TransferValue}
 end
 
 local function transfer_policy_fields(): const {transfer_reflect.Type}
@@ -70,18 +70,18 @@ function TransferPayloadNative:to_transfer_payload(): string
 end
 
 function TransferPayloadNative.from_transfer_payload(payload: string): TransferPayloadNative
-  local policies: {async.TransferValue} =
+  const policies: {async.TransferValue} =
     transfer_protobuf.deserialize_fields(payload, transfer_policy_fields())
   return { policies = policies }
 end
 
 
 record TransferPayloadClosureCycle
-  local marker: integer
+  local const marker: integer
 end
 
 function TransferPayloadClosureCycle:to_transfer_payload(): string
-  local packet = async.TransferValue.from_value(function (): value return self end)
+  local _ = async.TransferValue.from_value(function (): value return self end)
   return ""
 end
 
@@ -91,7 +91,7 @@ end
 
 
 record TransferPayloadMutator
-  local mutate: function (): ()
+  local const mutate: function (): ()
 end
 
 function TransferPayloadMutator:read(): integer
@@ -122,10 +122,10 @@ end
 
 function test_receiver_copies_custom_record_payload_and_retains_policy(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local source: TransferPayloadRecord = { secret = 211 }
-    local packet = async.TransferValue.from_value(source)
+    const source: TransferPayloadRecord = { secret = 211 }
+    const packet = async.TransferValue.from_value(source)
     async.send(receiver:handle(), packet)
     source.secret = -1
     support.collect_garbage()
@@ -134,18 +134,18 @@ function test_receiver_copies_custom_record_payload_and_retains_policy(_context:
       test.assert(module == "async.tests" and name == "async.tests.TransferPayloadRecord" and #payload > 0)
     else raise "TransferValue.from_value unwrapped the custom record policy"
     end
-    local restored: TransferPayloadRecord = receiver:wait()
+    const restored: TransferPayloadRecord = receiver:wait()
     test.assert(restored.secret == 211, "Receiver retained source payload storage")
-    local policy_restored: TransferPayloadRecord = packet:to_value()
+    const policy_restored: TransferPayloadRecord = packet:to_value()
     test.assert(policy_restored.secret == 211, "sending a TransferValue policy mutated it")
   end)
 end
 
 function test_receiver_rejects_custom_record_closure_cycle(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local source: TransferPayloadClosureCycle = { marker = 1 }
+    const source: TransferPayloadClosureCycle = { marker = 1 }
     transfer_payload_error(function () async.TransferValue.from_value(source) end,
                            "cyclic")
     transfer_payload_error(function () async.send(receiver:handle(), source) end,
@@ -158,32 +158,32 @@ end
 
 function test_receiver_copies_opaque_payload_with_preconverted_native_policies(_context: test.Context)
   runtime_test.run(function ()
-    local state = ffi.luaL_newstate()
+    const state = ffi.luaL_newstate()
     test.assert(state ~= nil, "could not allocate borrowed payload state")
     defer ffi.lua_close(state)
-    local memory: owned int[] = foreign int.new_array(1)
+    const memory: owned int[] = foreign int.new_array(1)
     memory[0] = 137
-    local null_pointer: foreign *void = nil
-    local null_state: foreign *lua_State = nil
-    local callback: foreign function (*lua_State): int = receiver_test_callback
-    local inner: TransferPayloadNative = { policies = {
+    const null_pointer: foreign *void = nil
+    const null_state: foreign *lua_State = nil
+    const callback: foreign function (*lua_State): int = receiver_test_callback
+    const inner: TransferPayloadNative = { policies = {
       async.TransferValue.is_pointer(null_pointer),
       async.TransferValue.is_pointer(memory as foreign *void),
       async.TransferValue.is_lua_state(null_state),
       async.TransferValue.is_lua_state(state),
       async.TransferValue.is_function(callback)
     } }
-    local outer: TransferPayloadNative = {
+    const outer: TransferPayloadNative = {
       policies = { async.TransferValue.from_value(inner) }
     }
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
     async.send(receiver:handle(), async.TransferValue.from_value(outer))
     support.collect_garbage()
-    local outer_copy: TransferPayloadNative = receiver:wait()
+    const outer_copy: TransferPayloadNative = receiver:wait()
     test.assert(#outer_copy.policies == 1)
-    local inner_copy: TransferPayloadNative = outer_copy.policies[1]:to_value()
-    local policies = inner_copy.policies
+    const inner_copy: TransferPayloadNative = outer_copy.policies[1]:to_value()
+    const policies = inner_copy.policies
     test.assert(#policies == 5)
     case policies[1]
     when is_pointer(pointer) then test.assert(pointer == nil)
@@ -200,7 +200,7 @@ function test_receiver_copies_opaque_payload_with_preconverted_native_policies(_
     case policies[5]
     when is_function(entry) then test.assert(entry == callback)
     else raise "nested native function policy changed variant" end
-    local native: function (...: value): (...: value) = policies[5]:to_value()
+    const native: function (...: value): (...: value) = policies[5]:to_value()
     test.assert(native(139) == 139, "nested native function lost callability")
     test.assert(memory[0] == 137, "nested pointer policy changed borrowed storage")
   end)
@@ -231,7 +231,7 @@ local function transfer_drain_saved_sender(
     peer: transfer_thread.Receiver<|integer|>,
     payload: integer,
     label: string): (boolean, integer?)
-  local adopted: (transfer_thread.Sender<|integer|>)? = transfer_hook_saved_sender
+  const adopted: (transfer_thread.Sender<|integer|>)? = transfer_hook_saved_sender
   test.assert(adopted ~= nil and not peer:is_closed(), label)
   if adopted == nil then return false, nil end
   test.assert(adopted:try_send(payload))
@@ -244,7 +244,7 @@ local function transfer_drain_saved_receiver(
     peer: transfer_thread.Sender<|integer|>,
     payload: integer,
     label: string): (boolean, integer?)
-  local adopted: (transfer_thread.Receiver<|integer|>)? = transfer_hook_saved_receiver
+  const adopted: (transfer_thread.Receiver<|integer|>)? = transfer_hook_saved_receiver
   test.assert(adopted ~= nil and not peer:is_closed(), label)
   if adopted == nil then return false, nil end
   test.assert(peer:try_send(payload))
@@ -315,9 +315,9 @@ local foreign function transfer_limited_lua_alloc(
 end
 
 record TransferPayloadHookStep
-  local label: string
-  local fail_encode: boolean
-  local fail_decode: boolean
+  local const label: string
+  local const fail_encode: boolean
+  local const fail_decode: boolean
 end
 
 local function transfer_hook_step_fields(): const {transfer_reflect.Type}
@@ -350,15 +350,15 @@ record TransferPayloadStashingSender
 end
 
 function TransferPayloadStashingSender:to_transfer_payload(): string
-  local sender = self.tx as transfer_thread.Sender<|integer|>
-  local bytes = sender:to_transfer_payload()
+  const sender = self.tx as transfer_thread.Sender<|integer|>
+  const bytes = sender:to_transfer_payload()
   self.index_bytes = bytes
   return bytes
 end
 
 function TransferPayloadStashingSender.from_transfer_payload(
     payload: string): TransferPayloadStashingSender
-  local adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(payload)
+  const adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(payload)
   transfer_hook_saved_sender = adopted
   return { tx = adopted, index_bytes = payload }
 end
@@ -369,15 +369,15 @@ record TransferPayloadStashingReceiver
 end
 
 function TransferPayloadStashingReceiver:to_transfer_payload(): string
-  local receiver = self.rx as transfer_thread.Receiver<|integer|>
-  local bytes = receiver:to_transfer_payload()
+  const receiver = self.rx as transfer_thread.Receiver<|integer|>
+  const bytes = receiver:to_transfer_payload()
   self.index_bytes = bytes
   return bytes
 end
 
 function TransferPayloadStashingReceiver.from_transfer_payload(
     payload: string): TransferPayloadStashingReceiver
-  local adopted = transfer_thread.Receiver<|integer|>.from_transfer_payload(payload)
+  const adopted = transfer_thread.Receiver<|integer|>.from_transfer_payload(payload)
   transfer_hook_saved_receiver = adopted
   return { rx = adopted, index_bytes = payload }
 end
@@ -457,16 +457,16 @@ record TransferPayloadLargeAndSender
 end
 
 record TransferPayloadForbiddenDecode
-  local tx: (transfer_thread.Sender<|integer|>)?
-  local rx: (transfer_thread.Receiver<|transfer_thread.Sender<|integer|>|>)?
+  local const tx: (transfer_thread.Sender<|integer|>)?
+  local const rx: (transfer_thread.Receiver<|transfer_thread.Sender<|integer|>|>)?
 end
 
 function TransferPayloadForbiddenDecode:to_transfer_payload(): string
-  local sender = self.tx as transfer_thread.Sender<|integer|>
-  local tx_bytes = sender:to_transfer_payload()
+  const sender = self.tx as transfer_thread.Sender<|integer|>
+  const tx_bytes = sender:to_transfer_payload()
   local rx_bytes = ""
   if self.rx ~= nil then
-    local receiver = self.rx as transfer_thread.Receiver<|transfer_thread.Sender<|integer|>|>
+    const receiver = self.rx as transfer_thread.Receiver<|transfer_thread.Sender<|integer|>|>
     rx_bytes = receiver:to_transfer_payload()
   end
   return tx_bytes .. rx_bytes
@@ -492,7 +492,7 @@ local function encode_sender_composite_raw(
     fail_after: boolean): (foreign *void, transfer_thread.Receiver<|integer|>, transfer_thread.Receiver<|integer|>)
   local tx1, rx1 = transfer_thread.channel<|integer|>(1)
   local tx2, rx2 = transfer_thread.channel<|integer|>(1)
-  local item = TransferPayloadSenderComposite(
+  const item = TransferPayloadSenderComposite(
     TransferPayloadHookStep("b", false, fail_before),
     tx1,
     TransferPayloadHookStep("m", false, fail_middle),
@@ -516,7 +516,7 @@ local function encode_receiver_composite_raw(
   test.assert(tx1:try_send(51))
   test.assert(tx2:try_send(52))
   msg_rx:close()
-  local item = TransferPayloadReceiverComposite(
+  const item = TransferPayloadReceiverComposite(
     TransferPayloadHookStep("b", false, fail_before),
     rx1,
     TransferPayloadHookStep("m", false, fail_middle),
@@ -529,7 +529,7 @@ local function encode_partial_adopted_sender_raw(): (
     foreign *void, transfer_thread.Receiver<|integer|>, transfer_thread.Receiver<|integer|>)
   local tx1, rx1 = transfer_thread.channel<|integer|>(1)
   local tx2, rx2 = transfer_thread.channel<|integer|>(1)
-  local item = TransferPayloadPartialAdoptedSender(
+  const item = TransferPayloadPartialAdoptedSender(
     TransferPayloadStashingSender(tx1, ""),
     TransferPayloadHookStep("m", false, true),
     tx2)
@@ -541,7 +541,7 @@ local function encode_partial_adopted_receiver_raw(): (
   local tx1, rx1 = transfer_thread.channel<|integer|>(1)
   local tx2, rx2 = transfer_thread.channel<|integer|>(1)
   test.assert(tx1:try_send(81))
-  local item = TransferPayloadPartialAdoptedReceiver(
+  const item = TransferPayloadPartialAdoptedReceiver(
     TransferPayloadStashingReceiver(rx1, ""),
     TransferPayloadHookStep("m", false, true),
     rx2)
@@ -549,7 +549,7 @@ local function encode_partial_adopted_receiver_raw(): (
 end
 
 function test_transfer_resource_decoder_order_and_partial_adoption(context: test.Context)
-  context:run("sender-success", function (_context: test.Context)
+  context:run("sender-success", function (_: test.Context)
     reset_transfer_hook_state()
     local raw, rx1, rx2 = encode_sender_composite_raw(false, false, false)
     defer transfer_mod.discard_message(raw)
@@ -559,7 +559,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     support.collect_garbage()
     test.assert(not rx1:is_closed() and not rx2:is_closed(),
                 "encoded packet did not retain encoded Senders after source GC")
-    local decoded: TransferPayloadSenderComposite = transfer_mod.decode_message(raw)
+    const decoded: TransferPayloadSenderComposite = transfer_mod.decode_message(raw)
     test.assert(#transfer_hook_log == 6 and
                 transfer_hook_log[1] == "enc:b" and transfer_hook_log[2] == "enc:m" and
                 transfer_hook_log[3] == "enc:a" and transfer_hook_log[4] == "dec:b" and
@@ -571,7 +571,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     test.assert(ok1 and v1 == 101 and ok2 and v2 == 202)
   end)
 
-  context:run("sender-fail-before", function (_context: test.Context)
+  context:run("sender-fail-before", function (_: test.Context)
     reset_transfer_hook_state()
     local raw, rx1, rx2 = encode_sender_composite_raw(true, false, false)
     defer transfer_mod.discard_message(raw)
@@ -594,7 +594,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     test.assert(#transfer_hook_log == 4 and transfer_hook_log[4] == "dec:b")
   end)
 
-  context:run("sender-fail-middle-partial", function (_context: test.Context)
+  context:run("sender-fail-middle-partial", function (_: test.Context)
     reset_transfer_hook_state()
     local raw, rx1, rx2 = encode_sender_composite_raw(false, true, false)
     defer transfer_mod.discard_message(raw)
@@ -618,7 +618,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     test.assert(rx1:is_closed(), "partially adopted first Sender wrapper leaked")
   end)
 
-  context:run("sender-distinguish-adopted-from-unclaimed", function (_context: test.Context)
+  context:run("sender-distinguish-adopted-from-unclaimed", function (_: test.Context)
     reset_transfer_hook_state()
     defer reset_transfer_hook_state()
     local raw, rx1, rx2 = encode_partial_adopted_sender_raw()
@@ -648,7 +648,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     test.assert(rx1:is_closed(), "adopted Sender did not close peer after finalization")
   end)
 
-  context:run("receiver-success-and-failures", function (_context: test.Context)
+  context:run("receiver-success-and-failures", function (_: test.Context)
     reset_transfer_hook_state()
     local raw_ok, tx1_ok, tx2_ok, _ = encode_receiver_composite_raw(false, false, false)
     defer transfer_mod.discard_message(raw_ok)
@@ -657,7 +657,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     support.collect_garbage()
     support.collect_garbage()
     test.assert(not tx1_ok:is_closed() and not tx2_ok:is_closed())
-    local decoded: TransferPayloadReceiverComposite = transfer_mod.decode_message(raw_ok)
+    const decoded: TransferPayloadReceiverComposite = transfer_mod.decode_message(raw_ok)
     local ok1, v1? = decoded.first:try_receive()
     local ok2, v2? = decoded.second:try_receive()
     test.assert(ok1 and v1 == 51 and ok2 and v2 == 52)
@@ -728,8 +728,8 @@ local function encode_nested_graph_and_closure(): (
   local ptx2, prx2 = transfer_thread.channel<|integer|>(2)
   local ptx3, prx3 = transfer_thread.channel<|integer|>(2)
   test.assert(ptx1:try_send(11) and ptx2:try_send(22) and ptx3:try_send(33))
-  local frozen_tx: const {transfer_thread.Sender<|integer|>} = {tx4}
-  local graph = TransferPayloadEndpointGraph(
+  const frozen_tx: const {transfer_thread.Sender<|integer|>} = {tx4}
+  const graph = TransferPayloadEndpointGraph(
     tx1,
     prx1,
     TransferPayloadEndpointUnion.both(tx2, prx2),
@@ -739,12 +739,12 @@ local function encode_nested_graph_and_closure(): (
     TransferPayloadStashingSender(tx5, ""))
   local graph_raw = transfer_mod.encode_message(graph)
   defer transfer_mod.discard_message(graph_raw)
-  local captured_tx = tx6
-  local closure_raw = transfer_mod.encode_message(function (): integer
+  const captured_tx = tx6
+  const closure_raw = transfer_mod.encode_message(function (): integer
     test.assert(captured_tx:try_send(66))
     return 66
   end)
-  local out_graph = graph_raw
+  const out_graph = graph_raw
   graph_raw = nil
   return out_graph, closure_raw, {rx1, rx2, rx3, rx4, rx5, rx6}, {ptx1, ptx2, ptx3}
 end
@@ -757,13 +757,13 @@ local function encode_duplicate_endpoints(): (
     string)
   local tx, rx_peer = transfer_thread.channel<|integer|>(4)
   local tx_peer, rx = transfer_thread.channel<|integer|>(4)
-  local left_tx = TransferPayloadStashingSender(tx, "")
-  local right_tx = TransferPayloadStashingSender(tx, "")
-  local left_rx = TransferPayloadStashingReceiver(rx, "")
-  local right_rx = TransferPayloadStashingReceiver(rx, "")
-  local dup = TransferPayloadDuplicateEndpoints(
+  const left_tx = TransferPayloadStashingSender(tx, "")
+  const right_tx = TransferPayloadStashingSender(tx, "")
+  const left_rx = TransferPayloadStashingReceiver(rx, "")
+  const right_rx = TransferPayloadStashingReceiver(rx, "")
+  const dup = TransferPayloadDuplicateEndpoints(
     left_tx, right_tx, {tx}, left_rx, right_rx)
-  local raw = transfer_mod.encode_message(dup)
+  const raw = transfer_mod.encode_message(dup)
   return raw, rx_peer, tx_peer, left_tx.index_bytes, right_tx.index_bytes
 end
 
@@ -773,8 +773,8 @@ end
 -- must run in a frame that never read a wrapper value itself.
 local function extract_duplicate_holders(
     candidate: value): TransferPayloadDuplicateHolders
-  local decoded: TransferPayloadDuplicateEndpoints = candidate
-  local holders = TransferPayloadDuplicateHolders {
+  const decoded: TransferPayloadDuplicateEndpoints = candidate
+  const holders = TransferPayloadDuplicateHolders {
     tx1 = decoded.left_tx.tx,
     tx2 = decoded.right_tx.tx,
     tx3 = decoded.tx_pair[1],
@@ -793,7 +793,7 @@ local function transfer_duplicate_use_last_sender(
     holders: TransferPayloadDuplicateHolders): boolean
   -- An explicitly optional local avoids the checker's inference-time option
   -- force, which would turn a nil field into a runtime error.
-  local tx: (transfer_thread.Sender<|integer|>)? = holders.tx3
+  const tx: (transfer_thread.Sender<|integer|>)? = holders.tx3
   holders.tx3 = nil
   if tx == nil then return false end
   return tx:try_send(303)
@@ -801,7 +801,7 @@ end
 
 local function transfer_duplicate_receive_last(
     holders: TransferPayloadDuplicateHolders): (boolean, integer?)
-  local rx: (transfer_thread.Receiver<|integer|>)? = holders.rx2
+  const rx: (transfer_thread.Receiver<|integer|>)? = holders.rx2
   holders.rx2 = nil
   if rx == nil then return false, nil end
   return rx:try_receive()
@@ -846,7 +846,7 @@ end
 
 function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
     context: test.Context)
-  context:run("nested-graph-and-closure", function (_context: test.Context)
+  context:run("nested-graph-and-closure", function (_: test.Context)
     reset_transfer_hook_state()
     defer reset_transfer_hook_state()
     local graph_raw, closure_raw, rx_peers, tx_peers = encode_nested_graph_and_closure()
@@ -865,8 +865,8 @@ function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
       test.assert(not tx_peers[i]:is_closed(), "nested Receiver was not retained in packet")
     end
 
-    local decoded_graph: TransferPayloadEndpointGraph = transfer_mod.decode_message(graph_raw)
-    local decoded_closure: function (): integer = transfer_mod.decode_message(closure_raw)
+    const decoded_graph: TransferPayloadEndpointGraph = transfer_mod.decode_message(graph_raw)
+    const decoded_closure: function (): integer = transfer_mod.decode_message(closure_raw)
 
     reset_transfer_hook_state()
     test.assert(decoded_graph.direct_tx:try_send(1))
@@ -894,7 +894,7 @@ function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
     test.assert(ok6 and item6 == 66)
   end)
 
-  context:run("duplicate-occurrences-independent-retains", function (_context: test.Context)
+  context:run("duplicate-occurrences-independent-retains", function (_: test.Context)
     reset_transfer_hook_state()
     local raw, rx_peer, tx_peer, idx0, idx1 = encode_duplicate_endpoints()
     defer transfer_mod.discard_message(raw)
@@ -907,14 +907,14 @@ function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
     support.collect_garbage()
     support.collect_garbage()
     test.assert(not rx_peer:is_closed() and not tx_peer:is_closed())
-    local holders = extract_duplicate_holders(transfer_mod.decode_message(raw))
+    const holders = extract_duplicate_holders(transfer_mod.decode_message(raw))
     check_duplicate_adoption_release(holders, rx_peer, tx_peer)
   end)
 
-  context:run("top-level-array-rejected-without-leaking", function (_context: test.Context)
-    local make_rejected_array = function (): transfer_thread.Receiver<|integer|>
+  context:run("top-level-array-rejected-without-leaking", function (_: test.Context)
+    const make_rejected_array = function (): transfer_thread.Receiver<|integer|>
       local tx, rx = transfer_thread.channel<|integer|>(1)
-      local top_array: {transfer_thread.Sender<|integer|>} = {tx}
+      const top_array: {transfer_thread.Sender<|integer|>} = {tx}
       transfer_payload_error(function ()
         async.TransferValue.from_value(top_array)
       end, "transfer: unsupported value")
@@ -923,7 +923,7 @@ function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
       transfer_payload_error(function ()
         rejected_raw = transfer_mod.encode_message(top_array)
       end, "transfer: unsupported value")
-      local const_array: const {integer} = {1, 2, 3}
+      const const_array: const {integer} = {1, 2, 3}
       local rejected_const_raw: foreign *void = nil
       defer do transfer_mod.discard_message(rejected_const_raw) end
       transfer_payload_error(function ()
@@ -931,7 +931,7 @@ function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
       end, "transfer: unsupported value")
       return rx
     end
-    local rx = make_rejected_array()
+    const rx = make_rejected_array()
     defer rx:close()
     support.collect_garbage()
     support.collect_garbage()
@@ -940,7 +940,7 @@ function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
 end
 
 record TransferPayloadNestedScopeProbe
-  local mode: string
+  local const mode: string
 end
 
 local nested_scope_peer_rxs: {transfer_thread.Receiver<|integer|>} = {}
@@ -954,18 +954,18 @@ function TransferPayloadNestedScopeProbe:to_transfer_payload(): string
   -- decode-from-encode claims that inner slot while rejecting attach_resource.
   local inner_tx, inner_rx = transfer_thread.channel<|integer|>(1)
   nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = inner_rx
-  local inner_decoded: TransferPayloadStashingSender =
+  const inner_decoded: TransferPayloadStashingSender =
     transfer_roundtrip_value(TransferPayloadStashingSender(inner_tx, ""))
   test.assert(inner_decoded.index_bytes == "\0\0\0\0",
               "nested encode did not start at its own slot 0")
-  local inner_sender: transfer_thread.Sender<|integer|> = inner_decoded.tx
+  const inner_sender: transfer_thread.Sender<|integer|> = inner_decoded.tx
   test.assert(inner_sender:try_send(91))
   inner_sender:close()
   transfer_hook_saved_sender = nil
 
   -- 3. Nested failing encode-from-encode rolls back its own attachment and
   -- restores the outer encode scope.
-  local fail_enc_rx = (function (): transfer_thread.Receiver<|integer|>
+  const fail_enc_rx = (function (): transfer_thread.Receiver<|integer|>
     local ftx, frx = transfer_thread.channel<|integer|>(1)
     transfer_payload_error(function ()
       transfer_roundtrip_value(TransferPayloadManySenders(
@@ -994,7 +994,7 @@ function TransferPayloadNestedScopeProbe:to_transfer_payload(): string
 end
 
 record TransferPayloadDecodeInsideEncodeProbe
-  local dummy: integer
+  local const dummy: integer
 end
 
 function TransferPayloadDecodeInsideEncodeProbe:to_transfer_payload(): string
@@ -1005,14 +1005,14 @@ function TransferPayloadDecodeInsideEncodeProbe:to_transfer_payload(): string
   end, "nested encode scope allowed claiming from paused outer decode scope")
   local tx, rx = transfer_thread.channel<|integer|>(1)
   nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = rx
-  local idx = tx:to_transfer_payload()
+  const idx = tx:to_transfer_payload()
   test.assert(idx == "\0\0\0\0", "encode-from-decode did not use its own table")
   return idx
 end
 
 function TransferPayloadDecodeInsideEncodeProbe.from_transfer_payload(
     payload: string): TransferPayloadDecodeInsideEncodeProbe
-  local adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(payload)
+  const adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(payload)
   test.assert(adopted:try_send(92))
   adopted:close()
   return { dummy = 92 }
@@ -1031,12 +1031,12 @@ function TransferPayloadNestedScopeProbe.from_transfer_payload(
   -- 2. Nested encode-from-decode pushes an encode scope (blocking claims against
   -- the paused outer decode scope), then Nested decode-from-decode decodes it,
   -- and both restore the exact outer decode scope.
-  local nested_out: TransferPayloadDecodeInsideEncodeProbe =
+  const nested_out: TransferPayloadDecodeInsideEncodeProbe =
     transfer_roundtrip_value(TransferPayloadDecodeInsideEncodeProbe(1))
   test.assert(nested_out.dummy == 92)
 
   -- 3. Nested failing encode-from-decode rolls back and restores outer decode scope.
-  local fail_enc_rx = (function (): transfer_thread.Receiver<|integer|>
+  const fail_enc_rx = (function (): transfer_thread.Receiver<|integer|>
     local ftx, frx = transfer_thread.channel<|integer|>(1)
     transfer_payload_error(function ()
       transfer_roundtrip_value(TransferPayloadManySenders(
@@ -1071,10 +1071,10 @@ end
 
 function test_transfer_resource_nested_scopes_table_growth_and_frontier(
     context: test.Context)
-  context:run("table-growth-and-post-attach-encode-rollback", function (_context: test.Context)
-    local make_failing_many = function (): {transfer_thread.Receiver<|integer|>}
-      local txs: {transfer_thread.Sender<|integer|>} = {}
-      local rxs: {transfer_thread.Receiver<|integer|>} = {}
+  context:run("table-growth-and-post-attach-encode-rollback", function (_: test.Context)
+    const make_failing_many = function (): {transfer_thread.Receiver<|integer|>}
+      const txs: {transfer_thread.Sender<|integer|>} = {}
+      const rxs: {transfer_thread.Receiver<|integer|>} = {}
       for i = 1, 12 do
         local tx, rx = transfer_thread.channel<|integer|>(1)
         txs[i] = tx
@@ -1086,7 +1086,7 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
       end, "hook-encode-boom:after-twelve")
       return rxs
     end
-    local rxs = make_failing_many()
+    const rxs = make_failing_many()
     defer do for i = 1, #rxs do rxs[i]:close() end end
     support.collect_garbage()
     support.collect_garbage()
@@ -1096,7 +1096,7 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
     end
   end)
 
-  context:run("nested-encode-decode-restores-exact-outer-scope", function (_context: test.Context)
+  context:run("nested-encode-decode-restores-exact-outer-scope", function (_: test.Context)
     reset_transfer_hook_state()
     nested_scope_peer_rxs = {}
     defer do
@@ -1104,7 +1104,7 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
       nested_scope_peer_rxs = {}
       reset_transfer_hook_state()
     end
-    local make_outer = function (): (
+    const make_outer = function (): (
         foreign *void,
         transfer_thread.Receiver<|integer|>,
         transfer_thread.Receiver<|integer|>,
@@ -1112,11 +1112,11 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
         string)
       local tx1, rx1 = transfer_thread.channel<|integer|>(1)
       local tx2, rx2 = transfer_thread.channel<|integer|>(1)
-      local s1 = TransferPayloadStashingSender(tx1, "")
-      local s2 = TransferPayloadStashingSender(tx2, "")
-      local env = TransferPayloadOuterScopeEnvelope(
+      const s1 = TransferPayloadStashingSender(tx1, "")
+      const s2 = TransferPayloadStashingSender(tx2, "")
+      const env = TransferPayloadOuterScopeEnvelope(
         s1, TransferPayloadNestedScopeProbe("nested-ok"), s2)
-      local raw = transfer_mod.encode_message(env)
+      const raw = transfer_mod.encode_message(env)
       return raw, rx1, rx2, s1.index_bytes, s2.index_bytes
     end
     local outer_raw, outer_rx1, outer_rx2, idx1, idx2 = make_outer()
@@ -1130,7 +1130,7 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
     support.collect_garbage()
     test.assert(not outer_rx1:is_closed() and not outer_rx2:is_closed())
 
-    local decoded: TransferPayloadOuterScopeEnvelope = transfer_mod.decode_message(outer_raw)
+    const decoded: TransferPayloadOuterScopeEnvelope = transfer_mod.decode_message(outer_raw)
     test.assert(decoded.probe.mode == "nested-ok")
     test.assert((decoded.first.tx as transfer_thread.Sender<|integer|>):try_send(111))
     test.assert((decoded.second.tx as transfer_thread.Sender<|integer|>):try_send(222))
@@ -1152,19 +1152,19 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
   end)
 
   context:run("packet-encode-projects-capture-frontier-and-calls-hooks-once",
-    function (_context: test.Context)
+    function (_: test.Context)
       reset_transfer_hook_state()
       local first_val = 10
       local second_val = 20
       local step2 = TransferPayloadHookStep("capture-second", false, false)
-      local mutator = TransferPayloadMutator(function ()
+      const mutator = TransferPayloadMutator(function ()
         transfer_hook_log[#transfer_hook_log + 1] = "enc:capture-first"
         first_val = 900
         second_val = 800
         step2 = TransferPayloadHookStep("replaced-after-projection", true, true)
       end)
-      local closure = function (): integer
-        local base = mutator:read() + first_val + second_val
+      const closure = function (): integer
+        const base = mutator:read() + first_val + second_val
         if step2.fail_encode then return -1 end
         return base
       end
@@ -1175,7 +1175,7 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
                   transfer_hook_log[1] == "enc:capture-first" and
                   transfer_hook_log[2] == "enc:capture-second",
                   "packet closure encode did not project captures before hooks or called hooks twice")
-      local restored: function (): integer = transfer_mod.decode_message(raw)
+      const restored: function (): integer = transfer_mod.decode_message(raw)
       test.assert(restored() == 30,
                   "packet closure encode observed post-hook mutated capture cells")
       test.assert(#transfer_hook_log == 3 and transfer_hook_log[3] == "dec:capture-second")
@@ -1183,14 +1183,14 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
 end
 
 record TransferPayloadClaimProbe
-  local mode: string
-  local custom_bytes: string
+  local const mode: string
+  local const custom_bytes: string
 end
 
 function TransferPayloadClaimProbe:to_transfer_payload(): string
   local tx, rx = transfer_thread.channel<|integer|>(1)
   nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = rx
-  local idx = tx:to_transfer_payload()
+  const idx = tx:to_transfer_payload()
   test.assert(idx == "\0\0\0\0")
   return self.mode
 end
@@ -1210,14 +1210,14 @@ function TransferPayloadClaimProbe.from_transfer_payload(
   elseif payload == "kind-mismatch-receiver" then
     transfer_thread.Receiver<|integer|>.from_transfer_payload("\0\0\0\0")
   elseif payload == "kind-mismatch-null-release" then
-    local null_release: foreign function(*void): void = nil
+    const null_release: foreign function(*void): void = nil
     transfer_mod.claim_resource("\0\0\0\0", null_release)
   elseif payload == "kind-mismatch-other-release" then
     transfer_mod.claim_resource("\0\0\0\0", test_resource_other_release)
   elseif payload == "repeated-claim" then
-    local first = transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+    const first = transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
     transfer_hook_saved_sender = first
-    local _second = transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+    local _ = transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
   end
   return { mode = payload, custom_bytes = "" }
 end
@@ -1228,7 +1228,7 @@ local function encode_claim_probe_raw(mode: string): foreign *void
 end
 
 function test_transfer_resource_validation_and_claim_errors(context: test.Context)
-  context:run("no-active-scope-and-invalid-attach", function (_context: test.Context)
+  context:run("no-active-scope-and-invalid-attach", function (_: test.Context)
 
     local tx, rx = transfer_thread.channel<|integer|>(1)
     defer tx:close()
@@ -1251,7 +1251,7 @@ function test_transfer_resource_validation_and_claim_errors(context: test.Contex
 
   end)
 
-  context:run("index-width-bounds-kind-and-repeated-claim", function (_context: test.Context)
+  context:run("index-width-bounds-kind-and-repeated-claim", function (_: test.Context)
     reset_transfer_hook_state()
     nested_scope_peer_rxs = {}
     defer do
@@ -1259,7 +1259,7 @@ function test_transfer_resource_validation_and_claim_errors(context: test.Contex
       nested_scope_peer_rxs = {}
       reset_transfer_hook_state()
     end
-    local modes = {
+    const modes = {
       "width-empty",
       "width-short",
       "width-long",
@@ -1270,10 +1270,10 @@ function test_transfer_resource_validation_and_claim_errors(context: test.Contex
       "kind-mismatch-other-release",
     }
     for i = 1, #modes do
-      local mode = modes[i]
+      const mode = modes[i]
       local raw = encode_claim_probe_raw(mode)
       defer transfer_mod.discard_message(raw)
-      local peer_rx = nested_scope_peer_rxs[#nested_scope_peer_rxs]
+      const peer_rx = nested_scope_peer_rxs[#nested_scope_peer_rxs]
       support.collect_garbage()
       support.collect_garbage()
       test.assert(not peer_rx:is_closed())
@@ -1291,7 +1291,7 @@ function test_transfer_resource_validation_and_claim_errors(context: test.Contex
     -- Repeated claim of slot 0 raises on second claim without double-releasing the first.
     local rep_raw = encode_claim_probe_raw("repeated-claim")
     defer transfer_mod.discard_message(rep_raw)
-    local rep_rx = nested_scope_peer_rxs[#nested_scope_peer_rxs]
+    const rep_rx = nested_scope_peer_rxs[#nested_scope_peer_rxs]
     support.collect_garbage()
     support.collect_garbage()
     test.assert(not rep_rx:is_closed())
@@ -1324,7 +1324,7 @@ local function make_recursive_receiver_raw(): (
   local tx_a, rx_a = transfer_thread.channel<|transfer_thread.Sender<|integer|>|>(2)
   test.assert(tx_a:try_send(tx_b))
   tx_a:close()
-  local raw = transfer_mod.encode_message(
+  const raw = transfer_mod.encode_message(
     TransferPayloadForbiddenDecode(tx_c, rx_a))
   return raw, rx_b, rx_c
 end
@@ -1336,8 +1336,8 @@ local foreign function transfer_count_module_load(state: *lua_State): int
 end
 
 function test_transfer_discard_skips_decoders_and_module_loaders(context: test.Context)
-  context:run("no-runtime-and-post-runtime-recursive-discard", function (_context: test.Context)
-    local decoder_calls_before = transfer_forbidden_decode_calls
+  context:run("no-runtime-and-post-runtime-recursive-discard", function (_: test.Context)
+    const decoder_calls_before = transfer_forbidden_decode_calls
     -- 1. Outside any Runtime (before runtime_test.run): discard_message recursively drains.
     local raw1, rx1_b, rx1_c = make_recursive_receiver_raw()
     defer transfer_mod.discard_message(raw1)
@@ -1353,7 +1353,7 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
                 "discard_message outside Runtime did not recursively drain and release endpoints")
 
     -- 2. Created inside an active Runtime, then discarded after Runtime shutdown.
-    local post_slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+    const post_slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
     defer do
       transfer_mod.discard_message(post_slot[0])
       post_slot[0] = nil
@@ -1366,8 +1366,8 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
       post_rx_b = rb
       post_rx_c = rc
     end)
-    local rb_after = post_rx_b as transfer_thread.Receiver<|integer|>
-    local rc_after = post_rx_c as transfer_thread.Receiver<|integer|>
+    const rb_after = post_rx_b as transfer_thread.Receiver<|integer|>
+    const rc_after = post_rx_c as transfer_thread.Receiver<|integer|>
     defer rb_after:close()
     defer rc_after:close()
     support.collect_garbage()
@@ -1381,7 +1381,7 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
                 "runtime-free or post-shutdown discard entered a user decoder")
   end)
 
-  context:run("zero-decoder-calls-across-all-packet-kinds", function (_context: test.Context)
+  context:run("zero-decoder-calls-across-all-packet-kinds", function (_: test.Context)
     reset_transfer_hook_state()
     -- 1. Root custom hook record payload
     local raw1, rx1_b, rx1_c = make_recursive_receiver_raw()
@@ -1391,7 +1391,7 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
     -- 2. Structural record containing custom hook record
     local raw2, rx2 = (function (): (foreign *void, transfer_thread.Receiver<|integer|>)
       local tx, rx = transfer_thread.channel<|integer|>(1)
-      local env = TransferPayloadForbiddenEnvelope(TransferPayloadForbiddenDecode(tx, nil))
+      const env = TransferPayloadForbiddenEnvelope(TransferPayloadForbiddenDecode(tx, nil))
       return transfer_mod.encode_message(env), rx
     end)()
     defer transfer_mod.discard_message(raw2)
@@ -1399,7 +1399,7 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
     -- 3. Structural union containing custom hook record
     local raw3, rx3 = (function (): (foreign *void, transfer_thread.Receiver<|integer|>)
       local tx, rx = transfer_thread.channel<|integer|>(1)
-      local u = TransferPayloadForbiddenUnion.item(TransferPayloadForbiddenDecode(tx, nil))
+      const u = TransferPayloadForbiddenUnion.item(TransferPayloadForbiddenDecode(tx, nil))
       return transfer_mod.encode_message(u), rx
     end)()
     defer transfer_mod.discard_message(raw3)
@@ -1407,7 +1407,7 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
     -- 4. Closure capturing custom hook record
     local raw4, rx4 = (function (): (foreign *void, transfer_thread.Receiver<|integer|>)
       local tx, rx = transfer_thread.channel<|integer|>(1)
-      local item = TransferPayloadForbiddenDecode(tx, nil)
+      const item = TransferPayloadForbiddenDecode(tx, nil)
       return transfer_mod.encode_message(function (): value return item end), rx
     end)()
     defer transfer_mod.discard_message(raw4)
@@ -1431,12 +1431,12 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
   end)
 
   context:run("unavailable-nominal-module-and-zero-preload-calls-on-discard",
-    function (_context: test.Context)
+    function (_: test.Context)
       reset_transfer_hook_state()
       local raw, rx_b, rx_c = make_recursive_receiver_raw()
       defer rx_b:close()
       defer rx_c:close()
-      local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+      const slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
       defer do
         transfer_mod.discard_message(slot[0])
         slot[0] = nil
@@ -1444,9 +1444,9 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
       slot[0] = raw
       support.collect_garbage()
       support.collect_garbage()
-      local state = transfer_lua.new()
+      const state = transfer_lua.new()
       defer state:close()
-      local loader_calls: owned int[] = foreign int.new_array(1)
+      const loader_calls: owned int[] = foreign int.new_array(1)
       -- Remove async.tests from package.preload and install a trap on any remaining preload lookup.
       state:run([[
         local slot, counter, count_loader, discard = ...
@@ -1474,7 +1474,7 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
       local raw_missing, rx_m_b, rx_m_c = make_recursive_receiver_raw()
       defer rx_m_b:close()
       defer rx_m_c:close()
-      local missing_slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+      const missing_slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
       defer do
         transfer_mod.discard_message(missing_slot[0])
         missing_slot[0] = nil
@@ -1498,8 +1498,8 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
 end
 
 record TransferPayloadAttachOomProbe
-  local ptr: foreign *void
-  local ctrl: foreign *size_t
+  local const ptr: foreign *void
+  local const ctrl: foreign *size_t
 end
 
 function TransferPayloadAttachOomProbe:to_transfer_payload(): string
@@ -1523,15 +1523,15 @@ end
 -- Public only so the fresh-state native preload can call it. This is test
 -- infrastructure, not a production allocation hook or a discovered test.
 function transfer_attach_string_oom_isolated(): integer
-  local counter: owned int[] = foreign int.new_array(1)
+  const counter: owned int[] = foreign int.new_array(1)
   counter[0] = 1
-  local ctrl: owned size_t[] = foreign size_t.new_array(3)
+  const ctrl: owned size_t[] = foreign size_t.new_array(3)
   local previous_data: foreign *void = nil
-  local previous = ffi.lua_getallocf(L, previous_data)
+  const previous = ffi.lua_getallocf(L, previous_data)
   ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
   local caught = false
   do
-    local raw = transfer_mod.encode_message(
+    const raw = transfer_mod.encode_message(
       TransferPayloadAttachOomProbe(counter as foreign *void, ctrl))
     defer transfer_mod.discard_message(raw)
   catch
@@ -1546,10 +1546,10 @@ function transfer_attach_string_oom_isolated(): integer
 end
 
 function test_transfer_resource_allocation_and_finalizer_failures(context: test.Context)
-  context:run("attach-resource-post-retain-string-oom", function (_context: test.Context)
-    local state = transfer_lua.new()
+  context:run("attach-resource-post-retain-string-oom", function (_: test.Context)
+    const state = transfer_lua.new()
     defer state:close()
-    local receipt = state:run([[
+    const receipt = state:run([[
       return require('async.tests').transfer_attach_string_oom_isolated()
     ]], "=isolated-attachment-string-oom")
     case receipt
@@ -1558,15 +1558,15 @@ function test_transfer_resource_allocation_and_finalizer_failures(context: test.
     end
   end)
 
-  context:run("decode-large-payload-copy-oom-releases-endpoints", function (_context: test.Context)
-    local make_large = function (): (
+  context:run("decode-large-payload-copy-oom-releases-endpoints", function (_: test.Context)
+    const make_large = function (): (
         foreign *void,
         transfer_thread.Receiver<|integer|>,
         transfer_thread.Receiver<|integer|>)
       local tx1, rx1 = transfer_thread.channel<|integer|>(1)
       local tx2, rx2 = transfer_thread.channel<|integer|>(1)
-      local big = receiver_string.rep("payload-oom-bytes-", 4096)
-      local item = TransferPayloadLargeAndSender(tx1, big, tx2)
+      const big = receiver_string.rep("payload-oom-bytes-", 4096)
+      const item = TransferPayloadLargeAndSender(tx1, big, tx2)
       return transfer_mod.encode_message(item), rx1, rx2
     end
     local raw, rx1, rx2 = make_large()
@@ -1577,12 +1577,12 @@ function test_transfer_resource_allocation_and_finalizer_failures(context: test.
     support.collect_garbage()
     test.assert(not rx1:is_closed() and not rx2:is_closed())
 
-    local ctrl: owned size_t[] = foreign size_t.new_array(3)
+    const ctrl: owned size_t[] = foreign size_t.new_array(3)
     ctrl[0] = 2 as foreign size_t
     ctrl[1] = 32768 as foreign size_t
     ctrl[2] = 0 as foreign size_t
     local prev_ud: foreign *void = nil
-    local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+    const prev_alloc = ffi.lua_getallocf(L, prev_ud)
     ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
     local caught = false
     do
@@ -1637,13 +1637,13 @@ end
 
 local function make_closure_8_captures(base: integer): function (integer): integer
   local c1 = base + 1
-  local c2 = base + 2
-  local c3 = base + 3
-  local c4 = base + 4
-  local c5 = base + 5
-  local c6 = base + 6
-  local c7 = base + 7
-  local c8 = base + 8
+  const c2 = base + 2
+  const c3 = base + 3
+  const c4 = base + 4
+  const c5 = base + 5
+  const c6 = base + 6
+  const c7 = base + 7
+  const c8 = base + 8
   return function (x: integer): integer
     c1 = c1 + x
     return c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8
@@ -1671,20 +1671,20 @@ local function make_closure_64_captures(base: integer): function (): integer
     v1 = v1 + 100
     v64 = v64 + 200
     -- Keep all 64 captures without deeply nested C macro expansions.
-    local sum1 = v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8
-    local sum2 = v9 + v10 + v11 + v12 + v13 + v14 + v15 + v16
-    local sum3 = v17 + v18 + v19 + v20 + v21 + v22 + v23 + v24
-    local sum4 = v25 + v26 + v27 + v28 + v29 + v30 + v31 + v32
-    local sum5 = v33 + v34 + v35 + v36 + v37 + v38 + v39 + v40
-    local sum6 = v41 + v42 + v43 + v44 + v45 + v46 + v47 + v48
-    local sum7 = v49 + v50 + v51 + v52 + v53 + v54 + v55 + v56
-    local sum8 = v57 + v58 + v59 + v60 + v61 + v62 + v63 + v64
+    const sum1 = v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8
+    const sum2 = v9 + v10 + v11 + v12 + v13 + v14 + v15 + v16
+    const sum3 = v17 + v18 + v19 + v20 + v21 + v22 + v23 + v24
+    const sum4 = v25 + v26 + v27 + v28 + v29 + v30 + v31 + v32
+    const sum5 = v33 + v34 + v35 + v36 + v37 + v38 + v39 + v40
+    const sum6 = v41 + v42 + v43 + v44 + v45 + v46 + v47 + v48
+    const sum7 = v49 + v50 + v51 + v52 + v53 + v54 + v55 + v56
+    const sum8 = v57 + v58 + v59 + v60 + v61 + v62 + v63 + v64
     return sum1 + sum2 + sum3 + sum4 + sum5 + sum6 + sum7 + sum8
   end
 end
 
 record TransferPayloadReflectInHook
-  local value: integer
+  local const value: integer
 end
 
 function TransferPayloadReflectInHook:to_transfer_payload(): string
@@ -1703,7 +1703,7 @@ function TransferPayloadReflectInHook.from_transfer_payload(
     test.assert(#tf_type.param_descriptors == 2 and #tf_type.return_descriptors == 1)
   else raise "reflect.inspect inside from_transfer_payload failed"
   end
-  local v: integer = transfer_protobuf.deserialize_fields(
+  const v: integer = transfer_protobuf.deserialize_fields(
     payload, {transfer_reflect.Type.is_integer()})
   return { value = v }
 end
@@ -1712,61 +1712,61 @@ end
 function test_transfer_closure_avoids_signature_hydration_while_reflection_stays_eager(
     context: test.Context)
   context:run("captures-0-1-8-64-adjusted-shared-sig-generic-foreign-and-source-close",
-    function (_context: test.Context)
+    function (_: test.Context)
       -- 0, 1, 8, and 64 captures through both TransferValue and encode_message/decode_message.
-      local c0 = transfer_shared_sig_add
-      local c0_dec: function (integer, integer): integer =
+      const c0 = transfer_shared_sig_add
+      const c0_dec: function (integer, integer): integer =
         transfer_roundtrip_value(c0)
-      local c0_mul: function (integer, integer): integer =
+      const c0_mul: function (integer, integer): integer =
         transfer_roundtrip_value(transfer_shared_sig_mul)
       test.assert(c0_dec(6, 7) == 13 and c0_mul(6, 7) == 42,
                   "distinct functions sharing a signature collided during transfer")
 
       local cell1 = 10
-      local c1 = function (x: integer): integer
+      const c1 = function (x: integer): integer
         cell1 = cell1 + x
         return cell1
       end
-      local c1_pkt: function (integer): integer = transfer_roundtrip_value(c1)
-      local c1_pol: function (integer): integer = async.TransferValue.from_value(c1):to_value()
+      const c1_pkt: function (integer): integer = transfer_roundtrip_value(c1)
+      const c1_pol: function (integer): integer = async.TransferValue.from_value(c1):to_value()
       test.assert(c1_pkt(5) == 15 and c1_pol(5) == 15 and c1(1) == 11)
 
-      local c8 = make_closure_8_captures(10)
-      local c8_pkt: function (integer): integer = transfer_roundtrip_value(c8)
-      local c8_pol: function (integer): integer = async.TransferValue.from_value(c8):to_value()
+      const c8 = make_closure_8_captures(10)
+      const c8_pkt: function (integer): integer = transfer_roundtrip_value(c8)
+      const c8_pol: function (integer): integer = async.TransferValue.from_value(c8):to_value()
       -- Sum of (11..18) = 116; + 4 = 120.
       test.assert(c8_pkt(4) == 120 and c8_pol(4) == 120 and c8(0) == 116)
 
-      local c64 = make_closure_64_captures(0)
-      local c64_pkt: function (): integer = transfer_roundtrip_value(c64)
-      local c64_pol: function (): integer = async.TransferValue.from_value(c64):to_value()
+      const c64 = make_closure_64_captures(0)
+      const c64_pkt: function (): integer = transfer_roundtrip_value(c64)
+      const c64_pol: function (): integer = async.TransferValue.from_value(c64):to_value()
       -- Sum of 1..64 = 2080; + 100 + 200 = 2380.
       test.assert(c64_pkt() == 2380 and c64_pol() == 2380 and c64() == 2380)
 
       -- Adjusted closure, raw vs pre-converted policy capture, generic erasure,
       -- and foreign declaration-origin signature preservation.
       local adj_count = 20
-      local adj_base = function (n: integer): integer
+      const adj_base = function (n: integer): integer
         adj_count = adj_count + n
         return adj_count
       end
-      local adjusted: function (integer, string): (value, value) = adj_base
-      local raw_cap = function (): integer return 31 end
-      local policy_cap = async.TransferValue.from_value(function (): integer return 37 end)
-      local raw_vs_policy = function (): integer
+      const adjusted: function (integer, string): (value, value) = adj_base
+      const raw_cap = function (): integer return 31 end
+      const policy_cap = async.TransferValue.from_value(function (): integer return 37 end)
+      const raw_vs_policy = function (): integer
         case policy_cap
         when is_closure(_m, _e, _d) then
-          local fn: function (): integer = policy_cap:to_value()
+          const fn: function (): integer = policy_cap:to_value()
           return raw_cap() + fn()
         else raise "pre-converted closure policy was unwrapped during capture transfer"
         end
       end
-      local hooked_reflect: TransferPayloadReflectInHook =
+      const hooked_reflect: TransferPayloadReflectInHook =
         transfer_roundtrip_value(TransferPayloadReflectInHook(77))
       test.assert(hooked_reflect.value == 77)
 
-      local gen_fn = transfer_generic_echo
-      local gen_restored: function (value): value =
+      const gen_fn = transfer_generic_echo
+      const gen_restored: function (value): value =
         transfer_roundtrip_value(gen_fn)
       test.assert(gen_restored("erased-ok") as string == "erased-ok")
       case transfer_reflect.inspect(gen_restored)
@@ -1778,10 +1778,10 @@ function test_transfer_closure_avoids_signature_hydration_while_reflection_stays
       else raise "expected reflected generic Titan function"
       end
 
-      local foreign_fn = transfer_foreign_origin_signature
-      local foreign_restored: function (owned *div_t): foreign int =
+      const foreign_fn = transfer_foreign_origin_signature
+      const foreign_restored: function (owned *div_t): foreign int =
         transfer_roundtrip_value(foreign_fn)
-      local div_owner: owned *div_t = foreign div_t.new()
+      const div_owner: owned *div_t = foreign div_t.new()
       div_owner.quot = 29
       div_owner.rem = 3
       test.assert(foreign_restored(div_owner) == (29 as foreign int))
@@ -1800,7 +1800,7 @@ function test_transfer_closure_avoids_signature_hydration_while_reflection_stays
       end
 
       -- Cross-state closure transfer surviving source-state close.
-      local state = transfer_lua.new()
+      const state = transfer_lua.new()
       defer state:close()
       local adj_carrier, rvp_carrier, c64_carrier = state:run([[
         local adj, rvp, c64 = ...
@@ -1812,14 +1812,14 @@ function test_transfer_closure_avoids_signature_hydration_while_reflection_stays
       state:close()
       support.collect_garbage()
       support.collect_garbage()
-      local adj_after: function (integer, string): (value, value) =
+      const adj_after: function (integer, string): (value, value) =
         transfer_roundtrip_value(adj_carrier)
       local r1, r2 = adj_after(7, "extra")
       test.assert(r1 as integer == 27 and r2 == nil and adj_count == 20)
-      local rvp_after: function (): integer =
+      const rvp_after: function (): integer =
         transfer_roundtrip_value(rvp_carrier)
       test.assert(rvp_after() == 68)
-      local c64_after: function (): integer =
+      const c64_after: function (): integer =
         transfer_roundtrip_value(c64_carrier)
       test.assert(c64_after() == 2680)
     end)
@@ -1829,7 +1829,7 @@ end
 
 local function transfer_native_oom_case(context: test.Context, workspace: string,
                                       scenario: string)
-  context:run(scenario, function (_context: test.Context)
+  context:run(scenario, function (_: test.Context)
     local output, why, code = transfer_command.capture({
       transfer_command.program(workspace, "transfer_alloc_fault_app"), scenario,
     }, workspace)
@@ -1884,7 +1884,7 @@ end
 
 local function check_raw_child_has_no_transfer_authority(
     sender: transfer_thread.Sender<|integer|>, parent_index: string)
-  local child = transfer_coroutine.create(function (_: value): value
+  const child = transfer_coroutine.create(function (_: value): value
     transfer_payload_raises(function () sender:to_transfer_payload() end,
       "raw child coroutine inherited parent encode authority")
     transfer_payload_raises(function ()
@@ -1893,7 +1893,7 @@ local function check_raw_child_has_no_transfer_authority(
 
     -- A child may open its own packet scope, but leaving either its successful
     -- or failed operation must restore the child's absent top, not the parent.
-    local own_sender: transfer_thread.Sender<|integer|> = transfer_roundtrip_value(sender)
+    const own_sender: transfer_thread.Sender<|integer|> = transfer_roundtrip_value(sender)
     test.assert(not own_sender:is_closed())
     transfer_payload_raises(function () own_sender:to_transfer_payload() end,
       "child packet completion retained an encode scope")
@@ -1926,13 +1926,13 @@ local function check_raw_child_has_no_transfer_authority(
 end
 
 record TransferPayloadSynchronousChildScope
-  local sender: (transfer_thread.Sender<|integer|>)?
+  local const sender: (transfer_thread.Sender<|integer|>)?
 end
 
 function TransferPayloadSynchronousChildScope:to_transfer_payload(): string
-  local first = self.sender:to_transfer_payload()
+  const first = self.sender:to_transfer_payload()
   check_raw_child_has_no_transfer_authority(self.sender, first)
-  local second = self.sender:to_transfer_payload()
+  const second = self.sender:to_transfer_payload()
   test.assert(first == "\0\0\0\0" and second == "\1\0\0\0",
               "raw child operations changed the parent encode packet")
   return first .. second
@@ -1940,10 +1940,10 @@ end
 
 function TransferPayloadSynchronousChildScope.from_transfer_payload(
     payload: string): TransferPayloadSynchronousChildScope
-  local first = transfer_thread.Sender<|integer|>.from_transfer_payload(
+  const first = transfer_thread.Sender<|integer|>.from_transfer_payload(
     receiver_string.sub(payload, 1, 4))
   check_raw_child_has_no_transfer_authority(first, receiver_string.sub(payload, 5, 8))
-  local second = transfer_thread.Sender<|integer|>.from_transfer_payload(
+  const second = transfer_thread.Sender<|integer|>.from_transfer_payload(
     receiver_string.sub(payload, 5, 8))
   test.assert(first:try_send(711) and second:try_send(712),
               "raw child operations changed the parent decode packet")
@@ -1952,14 +1952,14 @@ end
 
 function test_transfer_synchronous_hooks_isolate_raw_child_scope_authority(
     _context: test.Context)
-  local make_raw = function (): (foreign *void, transfer_thread.Receiver<|integer|>)
+  const make_raw = function (): (foreign *void, transfer_thread.Receiver<|integer|>)
     local tx, rx = transfer_thread.channel<|integer|>(4)
     return transfer_mod.encode_message(TransferPayloadSynchronousChildScope(tx)), rx
   end
   local raw, peer = make_raw()
   defer transfer_mod.discard_message(raw)
   defer peer:close()
-  local decoded: TransferPayloadSynchronousChildScope = transfer_mod.decode_message(raw)
+  const decoded: TransferPayloadSynchronousChildScope = transfer_mod.decode_message(raw)
   local first_ok, first? = peer:try_receive()
   local second_ok, second? = peer:try_receive()
   test.assert(first_ok and first == 711 and second_ok and second == 712)
@@ -1972,12 +1972,12 @@ end
 -- isolation when an execution stack is abandoned. This is fault injection,
 -- not a supported yielding-hook protocol, and no paused hook is resumed.
 record TransferPayloadAbandonedScopeFault
-  local sender: (transfer_thread.Sender<|integer|>)?
-  local phase: string
+  local const sender: (transfer_thread.Sender<|integer|>)?
+  local const phase: string
 end
 
 function TransferPayloadAbandonedScopeFault:to_transfer_payload(): string
-  local index = self.sender:to_transfer_payload()
+  const index = self.sender:to_transfer_payload()
   if self.phase == "encode" then
     transfer_coroutine.yield("unfinished-encode", "transfer-abandoned-scope-fault")
   end
@@ -1986,11 +1986,11 @@ end
 
 function TransferPayloadAbandonedScopeFault.from_transfer_payload(
     payload: string): TransferPayloadAbandonedScopeFault
-  local phase = receiver_string.sub(payload, 5)
+  const phase = receiver_string.sub(payload, 5)
   if phase == "decode" then
     transfer_coroutine.yield("unfinished-decode", "transfer-abandoned-scope-fault")
   end
-  local adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(
+  const adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(
     receiver_string.sub(payload, 1, 4))
   return { sender = adopted, phase = phase }
 end
@@ -1998,21 +1998,21 @@ end
 local function abandon_transfer_scope_fault(phase: string): transfer_thread.Receiver<|integer|>
   local tx, rx = transfer_thread.channel<|integer|>(1)
   if phase == "encode" then
-    local encoder = transfer_coroutine.create(function (_: value): value
-      local raw = transfer_mod.encode_message(TransferPayloadAbandonedScopeFault(tx, phase))
+    const encoder = transfer_coroutine.create(function (_: value): value
+      const raw = transfer_mod.encode_message(TransferPayloadAbandonedScopeFault(tx, phase))
       transfer_mod.discard_message(raw)
       return nil
     end, "transfer-abandoned-scope-fault")
     test.assert(encoder:resume(nil) == "unfinished-encode")
     test.assert(encoder:status() == "suspended")
   else
-    local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+    const slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
     defer do
       transfer_mod.discard_message(slot[0])
       slot[0] = nil
     end
     slot[0] = transfer_mod.encode_message(TransferPayloadAbandonedScopeFault(tx, phase))
-    local decoder = transfer_coroutine.create(function (_: value): value
+    const decoder = transfer_coroutine.create(function (_: value): value
       return transfer_mod.decode_message(slot)
     end, "transfer-abandoned-scope-fault")
     test.assert(decoder:resume(nil) == "unfinished-decode")
@@ -2025,15 +2025,15 @@ local function abandon_transfer_scope_fault(phase: string): transfer_thread.Rece
   transfer_payload_raises(function ()
     transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
   end, "paused fault stack authorized an unrelated decoder")
-  local independent = transfer_mod.encode_message(tx)
+  const independent = transfer_mod.encode_message(tx)
   transfer_mod.discard_message(independent)
   return rx
 end
 
 function test_transfer_abandoned_scope_fault_reclaims_native_ownership(
     context: test.Context)
-  context:run("unfinished-encode", function (_context: test.Context)
-    local peer = abandon_transfer_scope_fault("encode")
+  context:run("unfinished-encode", function (_: test.Context)
+    const peer = abandon_transfer_scope_fault("encode")
     defer peer:close()
     transfer_gc.collect()
     transfer_gc.collect()
@@ -2042,8 +2042,8 @@ function test_transfer_abandoned_scope_fault_reclaims_native_ownership(
       transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
     end, "abandoned encoder authorized an unrelated execution")
   end)
-  context:run("unfinished-decode", function (_context: test.Context)
-    local peer = abandon_transfer_scope_fault("decode")
+  context:run("unfinished-decode", function (_: test.Context)
+    const peer = abandon_transfer_scope_fault("decode")
     defer peer:close()
     transfer_gc.collect()
     transfer_gc.collect()
@@ -2058,8 +2058,8 @@ end
 local transfer_adoption_oom_ctrl: foreign *size_t = nil
 
 record TransferPayloadAdoptionOom
-  local sender: (transfer_thread.Sender<|integer|>)?
-  local receiver: (transfer_thread.Receiver<|integer|>)?
+  local const sender: (transfer_thread.Sender<|integer|>)?
+  local const receiver: (transfer_thread.Receiver<|integer|>)?
 end
 
 function TransferPayloadAdoptionOom:to_transfer_payload(): string
@@ -2069,8 +2069,8 @@ end
 
 function TransferPayloadAdoptionOom.from_transfer_payload(
     payload: string): TransferPayloadAdoptionOom
-  local index = receiver_string.sub(payload, 2)
-  local sender_kind = receiver_string.sub(payload, 1, 1) == "S"
+  const index = receiver_string.sub(payload, 2)
+  const sender_kind = receiver_string.sub(payload, 1, 1) == "S"
   -- Scope creation, module resolution, and payload copying have finished.
   -- Arm only at the public endpoint-adoption boundary, before constructing
   -- its inert wrapper/finalizer, rather than counting unrelated decode setup.
@@ -2078,23 +2078,23 @@ function TransferPayloadAdoptionOom.from_transfer_payload(
     transfer_adoption_oom_ctrl[0] = 1 as foreign size_t
   end
   if sender_kind then
-    local sender = transfer_thread.Sender<|integer|>.from_transfer_payload(index)
+    const sender = transfer_thread.Sender<|integer|>.from_transfer_payload(index)
     return { sender = sender, receiver = nil }
   end
-  local receiver = transfer_thread.Receiver<|integer|>.from_transfer_payload(index)
+  const receiver = transfer_thread.Receiver<|integer|>.from_transfer_payload(index)
   return { sender = nil, receiver = receiver }
 end
 
 local function transfer_adoption_failure_case(
     context: test.Context, kind: string, step: integer)
-  context:run(kind .. "-allocation-" .. step, function (_context: test.Context)
+  context:run(kind .. "-allocation-" .. step, function (_: test.Context)
     -- Warm both endpoint nominal/finalizer paths before installing the allocator.
     local warm_tx, warm_rx = transfer_thread.channel<|integer|>(1)
     defer warm_tx:close()
     defer warm_rx:close()
-    local warm_sender: TransferPayloadAdoptionOom =
+    const warm_sender: TransferPayloadAdoptionOom =
       transfer_roundtrip_value(TransferPayloadAdoptionOom(warm_tx, nil))
-    local warm_receiver: TransferPayloadAdoptionOom =
+    const warm_receiver: TransferPayloadAdoptionOom =
       transfer_roundtrip_value(TransferPayloadAdoptionOom(nil, warm_rx))
     test.assert(warm_sender.sender ~= nil and warm_receiver.receiver ~= nil)
 
@@ -2118,12 +2118,12 @@ local function transfer_adoption_failure_case(
     support.collect_garbage()
     if peer_rx ~= nil then test.assert(not peer_rx:is_closed()) end
     if peer_tx ~= nil then test.assert(not peer_tx:is_closed()) end
-    local ctrl: owned size_t[] = foreign size_t.new_array(3)
+    const ctrl: owned size_t[] = foreign size_t.new_array(3)
     ctrl[1] = step as foreign size_t
     transfer_adoption_oom_ctrl = ctrl
     defer do transfer_adoption_oom_ctrl = nil end
     local previous_data: foreign *void = nil
-    local previous = ffi.lua_getallocf(L, previous_data)
+    const previous = ffi.lua_getallocf(L, previous_data)
     ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
     local failed = false
     do
@@ -2156,7 +2156,7 @@ end
 
 
 function test_transfer_decoder_failure_after_last_endpoint(context: test.Context)
-  context:run("sender", function (_context: test.Context)
+  context:run("sender", function (_: test.Context)
     reset_transfer_hook_state()
     defer reset_transfer_hook_state()
     local raw, peer1, peer2 = encode_sender_composite_raw(false, false, true)
@@ -2180,7 +2180,7 @@ function test_transfer_decoder_failure_after_last_endpoint(context: test.Context
     test.assert(peer1:is_closed() and peer2:is_closed(),
                 "post-Sender decoder failure stranded already-adopted owners")
   end)
-  context:run("receiver", function (_context: test.Context)
+  context:run("receiver", function (_: test.Context)
     reset_transfer_hook_state()
     defer reset_transfer_hook_state()
     local raw, peer1, peer2, nested = encode_receiver_composite_raw(false, false, true)
@@ -2208,8 +2208,8 @@ function test_transfer_decoder_failure_after_last_endpoint(context: test.Context
 end
 
 record TransferPayloadReceiverClaimFault
-  local receiver: (transfer_thread.Receiver<|integer|>)?
-  local mode: string
+  local const receiver: (transfer_thread.Receiver<|integer|>)?
+  local const mode: string
 end
 
 function TransferPayloadReceiverClaimFault:to_transfer_payload(): string
@@ -2218,8 +2218,8 @@ end
 
 function TransferPayloadReceiverClaimFault.from_transfer_payload(
     payload: string): TransferPayloadReceiverClaimFault
-  local index = receiver_string.sub(payload, 1, 4)
-  local mode = receiver_string.sub(payload, 5)
+  const index = receiver_string.sub(payload, 1, 4)
+  const mode = receiver_string.sub(payload, 5)
   if mode == "wrong-kind" then
     transfer_thread.Sender<|integer|>.from_transfer_payload(index)
   else
@@ -2231,7 +2231,7 @@ function TransferPayloadReceiverClaimFault.from_transfer_payload(
 end
 
 local function transfer_receiver_claim_case(context: test.Context, mode: string)
-  context:run(mode, function (_context: test.Context)
+  context:run(mode, function (_: test.Context)
     reset_transfer_hook_state()
     defer reset_transfer_hook_state()
     local raw, peer = (function (): (foreign *void, transfer_thread.Sender<|integer|>)
@@ -2274,7 +2274,7 @@ function test_transfer_throwing_module_loader_releases_packet(_context: test.Con
   local raw, peer1, peer2 = make_recursive_receiver_raw()
   defer peer1:close()
   defer peer2:close()
-  local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+  const slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
   defer do
     transfer_mod.discard_message(slot[0])
     slot[0] = nil
@@ -2282,9 +2282,9 @@ function test_transfer_throwing_module_loader_releases_packet(_context: test.Con
   slot[0] = raw
   support.collect_garbage()
   support.collect_garbage()
-  local state = transfer_lua.new()
+  const state = transfer_lua.new()
   defer state:close()
-  local calls: owned int[] = foreign int.new_array(1)
+  const calls: owned int[] = foreign int.new_array(1)
   transfer_payload_error(function ()
     state:run([[
       local slot, counter, count_loader = ...
@@ -2334,23 +2334,23 @@ end
 -- caller's guard, are covered by the scalar-envelope stack scan.
 function test_transfer_raw_decode_scope_preparation_oom_consumes_owner(
     context: test.Context)
-  context:run("body-scope-preparation-oom", function (_context: test.Context)
+  context:run("body-scope-preparation-oom", function (_: test.Context)
     local raw, peer1, peer2 = make_recursive_receiver_raw()
     defer transfer_mod.discard_message(raw)
     defer peer1:close()
     defer peer2:close()
     support.collect_garbage()
     support.collect_garbage()
-    local top = ffi.lua_gettop(L)
+    const top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
     -- Reserve decode's own frame first so the armed failure is the scope
     -- preparation inside its protected body, not stack growth at entry.
     test.assert(ffi.lua_checkstack(L, 64) ~= 0)
-    local ctrl: owned size_t[] = foreign size_t.new_array(3)
+    const ctrl: owned size_t[] = foreign size_t.new_array(3)
     ctrl[0] = 1 as foreign size_t
     ctrl[1] = 1 as foreign size_t
     local previous_data: foreign *void = nil
-    local previous = ffi.lua_getallocf(L, previous_data)
+    const previous = ffi.lua_getallocf(L, previous_data)
     ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
     local failed = false
     do

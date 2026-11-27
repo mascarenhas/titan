@@ -4,7 +4,7 @@ function test_caller_output_capacity_and_error_names(_context: test.Context)
   local full_status, full_path?, length = uv.cwd(required)
   success(full_status)
   test.assert(full_path ~= nil and #full_path == length and length + 1 == required)
-  local empty_status, empty?, _size = uv.cwd(0)
+  local empty_status, empty?, _ = uv.cwd(0)
   test.assert(empty_status == uv.EINVAL and empty == nil)
   test.assert(uv.err_name(uv.ENOENT) == "ENOENT")
   test.assert(#uv.strerror(uv.ENOENT) > 0)
@@ -17,9 +17,9 @@ function test_copied_native_snapshot_survives_gc(_context: test.Context)
   local status, cpus?, count = uv.cpu_info()
   success(status)
   test.assert(cpus ~= nil and count > 0 and #cpus == count)
-  local first: uv.cpu_info_t = cpus[1]
-  local model? = first.model
-  local speed = first.speed
+  const first: uv.cpu_info_t = cpus[1]
+  const model? = first.model
+  const speed = first.speed
   test.assert(speed >= 0 and first.cpu_times.user >= 0 and first.cpu_times.sys >= 0)
   local next_status, next_cpus?, next_count = uv.cpu_info()
   success(next_status)
@@ -29,7 +29,7 @@ function test_copied_native_snapshot_survives_gc(_context: test.Context)
 end
 
 function test_unicode_lengths_binary_data_and_native_truncation(_context: test.Context)
-  local units: {integer} = {65, 0, 66}
+  const units: {integer} = {65, 0, 66}
   test.assert(uv.utf16_length_as_wtf8(units, 3) == 3)
   test.assert(uv.utf16_length_as_wtf8(units, -1) == 1)
   local measured, no_text?, required = uv.utf16_to_wtf8(units, 3, nil)
@@ -50,7 +50,7 @@ function test_unicode_lengths_binary_data_and_native_truncation(_context: test.C
   success(lone_status)
   test.assert(lone == "\xED\xA0\x80" and lone_size == 3)
   test.assert(uv.wtf8_length_as_utf16("A\0B") == 2)
-  local prefix = uv.wtf8_to_utf16("A\0B", 2)
+  const prefix = uv.wtf8_to_utf16("A\0B", 2)
   test.assert(#prefix == 2 and prefix[1] == 65 and prefix[2] == 0)
   test.assert(uv.wtf8_length_as_utf16("\xFF") == uv.EINVAL,
       "malformed WTF-8 must return EINVAL")
@@ -58,12 +58,12 @@ function test_unicode_lengths_binary_data_and_native_truncation(_context: test.C
 end
 
 function test_failed_library_open_retains_copied_error_and_requires_close(_context: test.Context)
-  local path = fixture_file()
+  const path = fixture_file()
   defer remove_file(path)
-  local library = uv.lib_t()
+  const library = uv.lib_t()
   defer uv.dlclose(library)
   test.assert(uv.dlopen(path .. ".missing", library) < 0)
-  local copied = uv.dlerror(library)
+  const copied = uv.dlerror(library)
   test.assert(#copied > 0 and copied ~= "no error")
   expect_error(function () uv.dlsym(library, "absent") end,
                "lib_t:dlsym requires an open library")
@@ -75,17 +75,17 @@ function test_failed_library_open_retains_copied_error_and_requires_close(_conte
                "lib_t:dlopen requires a fresh library owner")
 end
 function test_has_api_reports_only_canonical_native_wrappers(context: test.Context)
-  context:run("canonical_wrappers", function (_child: test.Context)
+  context:run("canonical_wrappers", function (_: test.Context)
     test.assert(uv.has_api("timer_start") and uv.has_api("write") and
         uv.has_api("req_get_data"), "canonical native wrapper is unavailable")
   end)
-  context:run("supplemental_helpers", function (_child: test.Context)
+  context:run("supplemental_helpers", function (_: test.Context)
     test.assert(not uv.has_api("buf_check_length") and
         not uv.has_api("timer_close") and not uv.has_api("timer_get_data") and
         not uv.has_api("timer_set_data") and not uv.has_api("write_string"),
         "supplemental helper was reported as a canonical native wrapper")
   end)
-  context:run("concrete_data_methods", function (_child: test.Context)
+  context:run("concrete_data_methods", function (_: test.Context)
     test.assert(not uv.has_api("fs_t:get_data") and not uv.has_api("fs_t:set_data") and
         not uv.has_api("work_t:get_data") and not uv.has_api("work_t:set_data") and
         not uv.has_api("getaddrinfo_t:get_data") and not uv.has_api("getaddrinfo_t:set_data") and

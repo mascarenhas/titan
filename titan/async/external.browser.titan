@@ -4,7 +4,7 @@
 
 -- The private field keeps the record from being literal-constructible.
 record ExternalWait
-  local unavailable: boolean
+  local const unavailable: boolean
 end
 
 local const NO_CONSTRUCTOR = "internal error: ExternalWait has no browser constructor"

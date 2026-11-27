@@ -2,12 +2,12 @@
 -- @module titan.fs
 -- @usage standard-library-fs.md
 
-local async = import "titan.async"
-local uv = import "titan.uv"
-local string = import "titan.string"
-local protobuf = import "titan.protobuf"
-local reflect = import "titan.reflect"
-local gc = import "titan.gc"
+local async = import "async"
+local uv = import "uv"
+local string = import "string"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+local gc = import "gc"
 foreign import "fs_platform.h"
 foreign import "titan/ffi.h"
 
@@ -63,30 +63,30 @@ end
 -- Each accepted request owns its continuation and borrowed inputs until its
 -- callback. Copy all results before cleaning the public request owner.
 local record FileOperation<|T|>
-  local request: uv.fs_t
-  local submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer)
-  local decode: function (uv.fs_t, integer): (T)
+  local const request: uv.fs_t
+  local const submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer)
+  local const decode: function (uv.fs_t, integer): (T)
   local done: async.Completion<|FileOperation<|T|>, T, integer|>?
   local number: integer
 end
 
 local function file_completed<|T|>(request: uv.fs_t)
-  local operation: FileOperation<|T|> = request:get_data()
-  local done = operation.done as async.Completion<|FileOperation<|T|>, T, integer|>
-  local number = operation.number
+  const operation: FileOperation<|T|> = request:get_data()
+  const done = operation.done as async.Completion<|FileOperation<|T|>, T, integer|>
+  const number = operation.number
   request:set_data(nil)
   operation.done = nil
   do
     local copying = false
     do
-      local result = uv.fs_get_result(request)
+      const result = uv.fs_get_result(request)
       if result < 0 then
         uv.fs_req_cleanup(request)
         done:reject(number, result)
         return
       end
       copying = true
-      local copied = operation.decode(request, result)
+      const copied = operation.decode(request, result)
       copying = false
       uv.fs_req_cleanup(request)
       done:resolve(number, copied)
@@ -106,11 +106,11 @@ local function file_completed<|T|>(request: uv.fs_t)
 end
 
 local function start_file<|T|>(done: async.Completion<|FileOperation<|T|>, T, integer|>, number: integer): uv.req_t?
-  local operation = done:context(number)
+  const operation = done:context(number)
   operation.done = done
   operation.number = number
   operation.request:set_data(operation)
-  local status = operation.submit(async.current_loop(), operation.request, file_completed)
+  const status = operation.submit(async.current_loop(), operation.request, file_completed)
   if status < 0 then
     operation.request:set_data(nil)
     operation.done = nil
@@ -123,8 +123,8 @@ end
 local function perform<|T|>(operation: string,
     submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer),
     decode: function (uv.fs_t, integer): (T)): T
-  local context = FileOperation<|T|>(uv.fs_t.new(), submit, decode, nil, 0)
-  local outcome = async.await_with<|FileOperation<|T|>, T, integer|>(context, start_file)
+  const context = FileOperation<|T|>(uv.fs_t(), submit, decode, nil, 0)
+  const outcome = async.await_with<|FileOperation<|T|>, T, integer|>(context, start_file)
   case outcome
   when success(result) then return result
   when error(code) then raise operation_error(code, operation)
@@ -134,28 +134,28 @@ end
 -- Resource-producing completions attach the descriptor to an existing File
 -- before calling a decoder whose prologue or result copy may allocate.
 local record AcquireOperation<|T|>
-  local file: File
-  local request: uv.fs_t
-  local submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer)
-  local decode: function (uv.fs_t): (T)
+  local const file: File
+  local const request: uv.fs_t
+  local const submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer)
+  local const decode: function (uv.fs_t): (T)
   local done: async.Completion<|AcquireOperation<|T|>, T, integer|>?
   local number: integer
 end
 
 local function acquired<|T|>(request: uv.fs_t)
-  local operation: AcquireOperation<|T|> = request:get_data()
-  local done = operation.done as async.Completion<|AcquireOperation<|T|>, T, integer|>
-  local number = operation.number
+  const operation: AcquireOperation<|T|> = request:get_data()
+  const done = operation.done as async.Completion<|AcquireOperation<|T|>, T, integer|>
+  const number = operation.number
   request:set_data(nil)
   operation.done = nil
   do
-    local result = uv.fs_get_result(request)
+    const result = uv.fs_get_result(request)
     if result >= 0 then operation.file.handle = result end
     if result < 0 then
       uv.fs_req_cleanup(request)
       done:reject(number, result)
     else
-      local copied = operation.decode(request)
+      const copied = operation.decode(request)
       uv.fs_req_cleanup(request)
       done:resolve(number, copied)
     end
@@ -167,11 +167,11 @@ local function acquired<|T|>(request: uv.fs_t)
 end
 
 local function start_acquire<|T|>(done: async.Completion<|AcquireOperation<|T|>, T, integer|>, number: integer): uv.req_t?
-  local operation = done:context(number)
+  const operation = done:context(number)
   operation.done = done
   operation.number = number
   operation.request:set_data(operation)
-  local status = operation.submit(async.current_loop(), operation.request, acquired)
+  const status = operation.submit(async.current_loop(), operation.request, acquired)
   if status < 0 then
     operation.request:set_data(nil)
     operation.done = nil
@@ -184,8 +184,8 @@ end
 local function acquire<|T|>(file: File, operation: string,
     submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer),
     decode: function (uv.fs_t): (T)): T
-  local context = AcquireOperation<|T|>(file, uv.fs_t.new(), submit, decode, nil, 0)
-  local outcome = async.await_with<|AcquireOperation<|T|>, T, integer|>(context, start_acquire)
+  const context = AcquireOperation<|T|>(file, uv.fs_t(), submit, decode, nil, 0)
+  const outcome = async.await_with<|AcquireOperation<|T|>, T, integer|>(context, start_acquire)
   case outcome
   when success(result) then return result
   when error(code) then raise operation_error(code, operation)
@@ -235,7 +235,7 @@ local function File:perform<|T|>(operation: string,
   local pending = true
   defer if pending then self.abandoned = true end
   do
-    local result = perform<|T|>(operation, submit, decode)
+    const result = perform<|T|>(operation, submit, decode)
     pending = false
     return result
   catch
@@ -248,7 +248,7 @@ end
 -- collection leaves the descriptor to its owner.
 local function finalize_file(candidate: value)
   if ffi.titan_state_closing(L) == 0 then return end
-  local file: File = candidate
+  const file: File = candidate
   file:close_with("fs.close")
 end
 
@@ -259,8 +259,8 @@ end
 -- @usage standard-library-fs.md
 function open(path: string, mode: string): File
   checked_path(path, "fs.open")
-  local flags = open_flags(mode)
-  local file = File(-1, "", 0, false)
+  const flags = open_flags(mode)
+  const file = File(-1, "", 0, false)
   gc.finalizable<|value|>(file, finalize_file)
   do
     return acquire<|File|>(file, "fs.open", function (loop: uv.loop_t,
@@ -294,11 +294,11 @@ function File:read(max_bytes: integer?): string?
   if #self.excess > 0 then
     local length = requested
     if length > #self.excess then length = #self.excess end
-    local result = string.sub(self.excess, 1, length)
+    const result = string.sub(self.excess, 1, length)
     self.excess = string.sub(self.excess, length + 1)
     return result
   end
-  local buffer = uv.buf_t.allocate(requested)
+  const buffer = uv.buf_t.allocate(requested)
   return self:perform<|string?|>("fs.read", function (loop: uv.loop_t,
       request: uv.fs_t, callback: function (uv.fs_t): ()): integer
     return uv.fs_read(loop, request, self.handle, {buffer}, -1, callback)
@@ -325,15 +325,15 @@ function File:read_until(delimiter: string,
     raise "read delimiter must not be empty"
   end
 
-  local builder = string.writer()
+  const builder = string.writer()
   local tail = ""
   for chunk in self:read do
     local boundary = chunk
     if #tail > 0 then boundary = tail .. chunk end
-    local match: integer? = string.find(boundary, delimiter)
+    const match: integer? = string.find(boundary, delimiter)
     if match then
-      local match_first = match
-      local match_end = match_first + #delimiter - 1
+      const match_first = match
+      const match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
@@ -344,7 +344,7 @@ function File:read_until(delimiter: string,
     end
     local keep = #delimiter - 1
     if keep > #boundary then keep = #boundary end
-    local committed = #boundary - keep
+    const committed = #boundary - keep
     if committed > 0 then
       if committed == #boundary then
         builder:write(boundary)
@@ -355,7 +355,7 @@ function File:read_until(delimiter: string,
     tail = string.sub(boundary, committed + 1)
   end
   if #tail > 0 then builder:write(tail) end
-  local result = builder:drain()
+  const result = builder:drain()
   if #result == 0 then return nil end
   return result
 end
@@ -368,13 +368,13 @@ function File:write(data: string): integer
   self.pending_operations = self.pending_operations + 1
   defer self.pending_operations = self.pending_operations - 1
   self:require_open()
-  local length = #data
+  const length = #data
   if length == 0 then return 0 end
-  local buffer = uv.buf_t.from_string(data)
+  const buffer = uv.buf_t.from_string(data)
   local offset = 0
   while offset < length do
-    local remainder = buffer:slice(offset + 1, length - offset)
-    local written = self:perform<|integer|>("fs.write", function (loop: uv.loop_t,
+    const remainder = buffer:slice(offset + 1, length - offset)
+    const written = self:perform<|integer|>("fs.write", function (loop: uv.loop_t,
         request: uv.fs_t, callback: function (uv.fs_t): ()): integer
       return uv.fs_write(loop, request, self.handle, {remainder}, -1, callback)
     end, count_result)
@@ -396,21 +396,21 @@ function File:flush()
 end
 
 local record FileClose
-  local request: uv.fs_t
-  local descriptor: integer
+  local const request: uv.fs_t
+  local const descriptor: integer
   local accepted: boolean
   local done: async.Completion<|FileClose, integer, integer|>?
   local number: integer
 end
 
 local function file_closed(request: uv.fs_t)
-  local close: FileClose = request:get_data()
-  local done = close.done as async.Completion<|FileClose, integer, integer|>
-  local number = close.number
+  const close: FileClose = request:get_data()
+  const done = close.done as async.Completion<|FileClose, integer, integer|>
+  const number = close.number
   request:set_data(nil)
   close.done = nil
   do
-    local result = uv.fs_get_result(request)
+    const result = uv.fs_get_result(request)
     uv.fs_req_cleanup(request)
     if result < 0 then done:reject(number, result) else done:resolve(number, result) end
   catch
@@ -421,11 +421,11 @@ local function file_closed(request: uv.fs_t)
 end
 
 local function start_file_close(done: async.Completion<|FileClose, integer, integer|>, number: integer): uv.req_t?
-  local close = done:context(number)
+  const close = done:context(number)
   close.done = done
   close.number = number
   close.request:set_data(close)
-  local status = uv.fs_close(async.current_loop(), close.request, close.descriptor, file_closed)
+  const status = uv.fs_close(async.current_loop(), close.request, close.descriptor, file_closed)
   if status < 0 then
     close.request:set_data(nil)
     close.done = nil
@@ -450,18 +450,18 @@ local function File:close_with(operation: string)
   -- the operation still counts itself; leave the descriptor open then.
   if ffi.titan_state_closing(L) ~= 0 then
     if self.abandoned or self.pending_operations > 1 then return end
-    local descriptor = self.handle
+    const descriptor = self.handle
     self.handle = -1
-    local request = uv.fs_t.new()
-    local status = uv.fs_close(nil, request, descriptor)
+    const request = uv.fs_t()
+    const status = uv.fs_close(nil, request, descriptor)
     uv.fs_req_cleanup(request)
     if status < 0 then raise operation_error(status, operation) end
     return
   end
-  local close = FileClose(uv.fs_t.new(), self.handle, false, nil, 0)
+  const close = FileClose(uv.fs_t(), self.handle, false, nil, 0)
   self.handle = -1
   do
-    local outcome = async.await_cleanup_with<|FileClose, integer, integer|>(close, start_file_close)
+    const outcome = async.await_cleanup_with<|FileClose, integer, integer|>(close, start_file_close)
     case outcome
     when success() then
     when error(code) then raise operation_error(code, operation)
@@ -494,7 +494,7 @@ function File:to_transfer_payload(): string
   if self.pending_operations ~= 0 then
     raise "cannot transfer a File with a pending operation"
   end
-  local payload = protobuf.serialize_fields(file_transfer_fields, self.handle, self.excess)
+  const payload = protobuf.serialize_fields(file_transfer_fields, self.handle, self.excess)
   self.handle = -1
   self.excess = ""
   return payload
@@ -510,7 +510,7 @@ function File.from_transfer_payload(payload: string): File
   if descriptor < 0 or descriptor > 2147483647 then
     raise "invalid File transfer descriptor"
   end
-  local file = File(-1, excess, 0, false)
+  const file = File(-1, excess, 0, false)
   gc.finalizable<|value|>(file, finalize_file)
   file.handle = descriptor
   return file
@@ -521,10 +521,10 @@ end
 -- @return Entire file contents.
 -- @usage standard-library-fs.md
 function read_file(path: string): string
-  local file = open(path, "r")
+  const file = open(path, "r")
   defer file:close()
 
-  local builder = string.writer()
+  const builder = string.writer()
   for bytes in file:read do
     builder:write(bytes)
   end
@@ -536,7 +536,7 @@ end
 -- @param data Complete replacement contents.
 -- @usage standard-library-fs.md
 function write_file(path: string, data: string)
-  local file = open(path, "w")
+  const file = open(path, "w")
   defer file:close()
   file:write(data)
 end
@@ -549,9 +549,9 @@ local function missing_path(failure: value): boolean
 end
 
 local function stat_result(request: uv.fs_t, _: integer): Stat
-  local info = uv.fs_get_statbuf(request)
+  const info = uv.fs_get_statbuf(request)
   local kind = "other"
-  local file_type = info.st_mode & (uv.S_IFMT as integer)
+  const file_type = info.st_mode & (uv.S_IFMT as integer)
   if file_type == uv.S_IFREG as integer then kind = "file"
   elseif file_type == uv.S_IFDIR as integer then kind = "directory"
   elseif uv.S_IFLNK ~= nil and file_type == uv.S_IFLNK as integer then kind = "symlink"
@@ -611,8 +611,8 @@ end
 -- @return Temporary path whose file must be removed by the caller.
 -- @usage standard-library-fs.md
 function tmpname(): string
-  local template = sized_path("fs.tmpname", uv.os_tmpdir) .. "/titan-fs-XXXXXX"
-  local file = File(-1, "", 0, false)
+  const template = sized_path("fs.tmpname", uv.os_tmpdir) .. "/titan-fs-XXXXXX"
+  const file = File(-1, "", 0, false)
   defer file:close_with("fs.tmpname.close")
   return acquire<|string|>(file, "fs.tmpname", function (loop: uv.loop_t,
       request: uv.fs_t, callback: function (uv.fs_t): ()): integer
@@ -706,7 +706,7 @@ function list(path: string): {string}
       request: uv.fs_t, callback: function (uv.fs_t): ()): integer
     return uv.fs_scandir(loop, request, path, 0, callback)
   end, function (request: uv.fs_t, _: integer): {string}
-    local names: {string} = {}
+    const names: {string} = {}
     while true do
       local status, entry? = uv.fs_scandir_next(request)
       if status == uv.EOF as integer then break end
@@ -732,20 +732,20 @@ function realpath(path: string): string
 end
 
 local record WatchRegistration
-  local handle: uv.fs_event_t
-  local view: uv.handle_t
-  local path: string
-  local directory: boolean
+  local const handle: uv.fs_event_t
+  local const view: uv.handle_t
+  local const path: string
+  local const directory: boolean
   local index: integer
   local close_done: async.Completion<|WatchRegistration, boolean, integer|>?
   local close_number: integer
 end
 
 local record WatcherNotification
-  local registration: WatchRegistration
-  local filename: string?
-  local events: integer
-  local status: integer
+  local const registration: WatchRegistration
+  local const filename: string?
+  local const events: integer
+  local const status: integer
 end
 
 local WATCHER_IDLE = 0
@@ -756,11 +756,11 @@ local WATCHER_POLLING_CLEARING = 3
 --- Runtime-bound change watcher; Tasks must coordinate mutations externally.
 -- @usage standard-library-fs.md
 record Watcher
-  local loop: uv.loop_t
-  local registrations: {WatchRegistration}
-  local paths: {string: WatchRegistration}
-  local subscription: async.BufferedSubscription<|WatcherNotification, integer|>
-  local publish: function (WatcherNotification): (boolean)
+  local const loop: uv.loop_t
+  local const registrations: {WatchRegistration}
+  local const paths: {string: WatchRegistration}
+  local const subscription: async.BufferedSubscription<|WatcherNotification, integer|>
+  local const publish: function (WatcherNotification): (boolean)
   local operation_state: integer
 end
 
@@ -789,9 +789,9 @@ local function Watcher:remove_registration(
     registration: WatchRegistration)
   if registration.index == 0 then return end
   self.paths[registration.path] = nil
-  local index = registration.index
-  local last_index = #self.registrations
-  local last = self.registrations[last_index]
+  const index = registration.index
+  const last_index = #self.registrations
+  const last = self.registrations[last_index]
   self.registrations[index] = last
   last.index = index
   self.registrations[last_index] = nil
@@ -804,9 +804,9 @@ local function WatchRegistration:stop()
 end
 
 local function watch_closed(handle: uv.handle_t)
-  local registration: WatchRegistration = uv.handle_get_data(handle)
-  local done = registration.close_done as async.Completion<|WatchRegistration, boolean, integer|>
-  local number = registration.close_number
+  const registration: WatchRegistration = uv.handle_get_data(handle)
+  const done = registration.close_done as async.Completion<|WatchRegistration, boolean, integer|>
+  const number = registration.close_number
   registration.close_done = nil
   uv.handle_set_data(handle, nil)
   do done:resolve(number, true)
@@ -814,7 +814,7 @@ local function watch_closed(handle: uv.handle_t)
 end
 
 local function start_watch_close(done: async.Completion<|WatchRegistration, boolean, integer|>, number: integer): uv.req_t?
-  local registration = done:context(number)
+  const registration = done:context(number)
   registration.close_done = done
   registration.close_number = number
   uv.handle_set_data(registration.view, registration)
@@ -842,10 +842,10 @@ end
 
 local function Watcher:new_registration(
     path: string, directory: boolean): WatchRegistration
-  local handle = uv.fs_event_t.new()
-  local registration = WatchRegistration(handle, handle:as_handle_t(), path,
+  const handle = uv.fs_event_t()
+  const registration = WatchRegistration(handle, handle:as_handle_t(), path,
                                           directory, #self.registrations + 1, nil, 0)
-  local callback = function (_: uv.fs_event_t, filename: string?,
+  const callback = function (_: uv.fs_event_t, filename: string?,
                              events: integer, status: integer)
     self.publish(WatcherNotification(registration, filename, events, status))
   end
@@ -860,10 +860,10 @@ local function Watcher:new_registration(
   end
   local initialized = false
   do
-    local init_status = uv.fs_event_init(self.loop, handle)
+    const init_status = uv.fs_event_init(self.loop, handle)
     if init_status < 0 then raise operation_error(init_status, "fs.watcher.init") end
     initialized = true
-    local start_status = uv.fs_event_start(handle, callback, path, 0)
+    const start_status = uv.fs_event_start(handle, callback, path, 0)
     if start_status < 0 then raise operation_error(start_status, "fs.watcher.watch") end
   catch
     defer if initialized then registration:close(false) end
@@ -874,17 +874,15 @@ local function Watcher:new_registration(
 end
 
 local function optional_realpath(path: string): string?
-  do
-    return realpath(path)
-  catch
-    if missing_path(error) then return nil end
-    raise
-  end
+  return realpath(path)
+catch
+  if missing_path(error) then return nil end
+  raise
 end
 
 local function Watcher:find_registration(
     path: string): WatchRegistration?
-  local canonical? = optional_realpath(path)
+  const canonical? = optional_realpath(path)
   if not canonical then return nil end
   return self.paths[canonical]
 end
@@ -895,7 +893,7 @@ end
 function watcher(): Watcher
   async.running()
   local publish: (function (WatcherNotification): (boolean))? = nil
-  local subscription = async.BufferedSubscription<|WatcherNotification, integer|>(
+  const subscription = async.BufferedSubscription<|WatcherNotification, integer|>(
       function (send: function (WatcherNotification): (boolean),
           _fail: function (integer): (boolean), _finish: function (): (boolean)):
           async.SubscriptionActions<|WatcherNotification|>
@@ -903,7 +901,7 @@ function watcher(): Watcher
         -- Registrations are dynamic domain resources. clear retires those
         -- handles but keeps this notification transport reusable.
         return async.SubscriptionActions<|WatcherNotification|>(function () end,
-            function (_drain: function (): (async.SubscriptionBatch<|WatcherNotification|>)) end)
+            function (_: function (): (async.SubscriptionBatch<|WatcherNotification|>)) end)
       end)
   return Watcher(async.current_loop(), {}, {}, subscription, publish,
                  WATCHER_IDLE)
@@ -914,11 +912,11 @@ end
 -- @usage standard-library-fs.md
 function Watcher:watch(path: string)
   self:require_running_task()
-  local canonical = realpath(path)
-  local existing? = self.paths[canonical]
+  const canonical = realpath(path)
+  const existing? = self.paths[canonical]
   if existing then return end
 
-  local info? = stat(canonical)
+  const info? = stat(canonical)
   if not info then
     raise operation_error(uv.ENOENT as integer,
                         "fs.watcher.watch")
@@ -932,7 +930,7 @@ end
 function Watcher:stop(path: string)
   self:require_running_task()
   if #self.registrations == 0 then return end
-  local registration? = self:find_registration(path)
+  const registration? = self:find_registration(path)
   if not registration then return end
   registration:stop()
   self:retire_registration(registration)
@@ -945,7 +943,7 @@ end
 function Watcher:is_watching(path: string): boolean
   self:require_running_task()
   if #self.registrations == 0 then return false end
-  local registration? = self:find_registration(path)
+  const registration? = self:find_registration(path)
   return registration ~= nil
 end
 
@@ -976,7 +974,7 @@ function Watcher:clear()
   self:begin_clear()
   defer self:finish_clear()
   while #self.registrations > 0 do
-    local registration = self.registrations[#self.registrations]
+    const registration = self.registrations[#self.registrations]
     registration:stop()
     self:retire_registration(registration)
   end
@@ -985,7 +983,7 @@ end
 local function WatchRegistration:event_path(
     filename: string?): string
   if not self.directory or not filename then return self.path end
-  local separator = ffi.TITAN_FS_DIRSEP as string
+  const separator = ffi.TITAN_FS_DIRSEP as string
   if string.sub(self.path, -1) == separator then return self.path .. filename end
   return self.path .. separator .. filename
 end
@@ -993,57 +991,55 @@ end
 -- Implementation notes: doc/implementation/filesystem-library.md#one-to-one-drain-mapping
 local function Watcher:map_notification(
     notification: WatcherNotification): WatcherEvent
-  do
-    local registration = notification.registration
-    if notification.status < 0 then
-      if registration.index > 0 then
-        self:retire_registration(registration)
-      end
-      return WatcherEvent.error(
-          operation_error(notification.status, "fs.watcher"))
-    end
-
-    local path = registration:event_path(notification.filename)
-    local renamed =
-      (notification.events & (uv.RENAME as integer)) ~= 0
-    local exists = true
-    if registration.directory then
-      if not lstat(registration.path) then
-        path = registration.path
-        exists = false
-      elseif renamed then
-        exists = lstat(path) ~= nil
-      end
-    else
-      exists = lstat(path) ~= nil
-    end
-    if not exists and path == registration.path and
-       registration.index > 0 then
-      registration:stop()
+  const registration = notification.registration
+  if notification.status < 0 then
+    if registration.index > 0 then
       self:retire_registration(registration)
     end
-    if not exists then return WatcherEvent.deleted(path) end
-    if renamed then return WatcherEvent.created(path) end
-    return WatcherEvent.modified(path)
-  catch
-    if error is async.OperationError then
-      return WatcherEvent.error(error as async.OperationError)
-    end
-    raise
+    return WatcherEvent.error(
+        operation_error(notification.status, "fs.watcher"))
   end
+
+  local path = registration:event_path(notification.filename)
+  const renamed =
+    (notification.events & (uv.RENAME as integer)) ~= 0
+  local exists = true
+  if registration.directory then
+    if not lstat(registration.path) then
+      path = registration.path
+      exists = false
+    elseif renamed then
+      exists = lstat(path) ~= nil
+    end
+  else
+    exists = lstat(path) ~= nil
+  end
+  if not exists and path == registration.path and
+     registration.index > 0 then
+    registration:stop()
+    self:retire_registration(registration)
+  end
+  if not exists then return WatcherEvent.deleted(path) end
+  if renamed then return WatcherEvent.created(path) end
+  return WatcherEvent.modified(path)
+catch
+  if error is async.OperationError then
+    return WatcherEvent.error(error as async.OperationError)
+  end
+  raise
 end
 
 -- Implementation notes: doc/implementation/filesystem-library.md#one-to-one-drain-mapping
 local function Watcher:drain_notifications(
     notifications: async.SubscriptionBatch<|WatcherNotification|>): {WatcherEvent}
-  local events: {WatcherEvent} = {}
+  const events: {WatcherEvent} = {}
   while notifications.count > 0 do
     for index = 1, notifications.count do
       events[#events + 1] = self:map_notification(notifications:get(index))
     end
     -- Pull the entire follow-on FIFO only if any callback crossed retirement;
     -- live-only notifications stay queued for the next poll.
-    local following? = self.subscription:drain_if(function (item: WatcherNotification): boolean
+    const following? = self.subscription:drain_if(function (item: WatcherNotification): boolean
       return item.registration.index == 0
     end)
     if following == nil then return events end

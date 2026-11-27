@@ -1,10 +1,10 @@
 function test_incremental_read_and_delimiter_streaming(_: test.Context)
   runtime_test.run(function ()
     for variant = 1, 2 do
-      local response = http.get(raw_server() .. "/stream")
+      const response = http.get(raw_server() .. "/stream")
       defer response:close()
       if variant == 1 then
-        local first = response:read() or ""
+        const first = response:read() or ""
         test.assert(#first > 0 and string.sub("first|", 1, #first) == first,
           "read waited for response completion or changed its first bytes")
         if first ~= "first|" then
@@ -25,18 +25,18 @@ end
 
 function test_gzip_wire_headers_cookies_and_mid_body_reset(_: test.Context)
   runtime_test.run(function ()
-    local response = http.get(raw_server() .. "/gzip")
+    const response = http.get(raw_server() .. "/gzip")
     defer response:close()
-    local expected = "decoded\0" .. string.rep("response-body-", 256) .. "\255"
-    local compressed? = math.tointeger(response.headers:get("Content-Length") or "")
+    const expected = "decoded\0" .. string.rep("response-body-", 256) .. "\255"
+    const compressed? = math.tointeger(response.headers:get("Content-Length") or "")
     test.assert(compressed ~= nil and compressed < #expected and response.headers:get("Content-Encoding") == "gzip",
       "Fetch did not preserve the compressed wire metadata")
     test.assert(all(response) == expected, "decoded Fetch body was truncated to compressed Content-Length")
-    local cookies = http.get(server() .. "/cookies")
+    const cookies = http.get(server() .. "/cookies")
     defer cookies:close()
     test.assert(cookies.headers:get("Set-Cookie") == nil and cookies.headers:get("Set-Cookie2") == nil and
       all(cookies) == "cookies", "Fetch exposed response cookie headers")
-    local reset = http.get(raw_server() .. "/reset")
+    const reset = http.get(raw_server() .. "/reset")
     defer reset:close()
     test.assert(reset:read_until("partial") == "partial", "reset peer did not expose its first bytes")
     test.assert(get_body(raw_server() .. "/reset-now", nil) == "")

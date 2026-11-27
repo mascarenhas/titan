@@ -4,8 +4,8 @@ local function open_pipe_pair(loop: uv.loop_t): (uv.pipe_t, uv.pipe_t)
   success(status)
   defer if rd >= 0 then close_file(rd) end
   defer if wr >= 0 then close_file(wr) end
-  local reader = uv.pipe_t()
-  local writer = uv.pipe_t()
+  const reader = uv.pipe_t()
+  const writer = uv.pipe_t()
   success(uv.pipe_init(loop, reader, 0))
   success(uv.pipe_init(loop, writer, 0))
   success(uv.pipe_open(reader, rd))
@@ -16,15 +16,15 @@ local function open_pipe_pair(loop: uv.loop_t): (uv.pipe_t, uv.pipe_t)
 end
 
 local record ScalarWriteState
-  writer: uv.pipe_t
-  stream: uv.stream_t
-  request: uv.write_t
+  const writer: uv.pipe_t
+  const stream: uv.stream_t
+  const request: uv.write_t
   completions: integer
 end
 
 local function scalar_write_completed(request: uv.write_t, status: integer)
   success(status)
-  local state = request:get_data() as ScalarWriteState
+  const state = request:get_data() as ScalarWriteState
   test.assert(request == state.request and request:handle() == state.stream)
   state.completions = state.completions + 1
   if state.completions == 1 then
@@ -62,14 +62,14 @@ function test_scalar_write_length_validation(_context: test.Context)
 end
 
 function test_scalar_write_binary_gc_and_request_reuse(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local reader, writer = open_pipe_pair(loop)
-  local request = uv.write_t()
+  const request = uv.write_t()
   test.assert(request:get_data() == nil)
   request:set_data(false)
   test.assert(request:as_req_t():get_data() == false)
-  local state = ScalarWriteState(writer, writer:as_stream_t(), request, 0)
+  const state = ScalarWriteState(writer, writer:as_stream_t(), request, 0)
   request:as_req_t():set_data(state)
   test.assert(request:get_data() == state)
   local received = ""
@@ -102,12 +102,12 @@ function test_scalar_write_binary_gc_and_request_reuse(_context: test.Context)
 end
 
 function test_scalar_write_rejection_does_not_claim_request(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local request = uv.write_t()
-  local invalid = uv.pipe_t()
+  const request = uv.write_t()
+  const invalid = uv.pipe_t()
   local calls = 0
-  local callback: uv.write_cb = function (_request: uv.write_t, status: integer)
+  const callback: uv.write_cb = function (_request: uv.write_t, status: integer)
     success(status)
     calls = calls + 1
   end
@@ -116,7 +116,7 @@ function test_scalar_write_rejection_does_not_claim_request(_context: test.Conte
   test.assert(uv.write_string(request, invalid:as_stream_t(), "unopened", callback) < 0)
   test.assert(calls == 0 and request:handle() == nil)
   uv.close(invalid:as_handle_t())
-  local reader, writer = open_pipe_pair(loop)
+  local _, writer = open_pipe_pair(loop)
   success(uv.write_string(request, writer:as_stream_t(), "", callback))
   collect()
   success(uv.run(loop))
@@ -124,11 +124,11 @@ function test_scalar_write_rejection_does_not_claim_request(_context: test.Conte
 end
 
 function test_scalar_write_callback_failure_preserves_successor(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local reader, writer = open_pipe_pair(loop)
-  local stream = writer:as_stream_t()
-  local request = uv.write_t()
+  const stream = writer:as_stream_t()
+  const request = uv.write_t()
   local received = ""
   local calls = 0
   success(uv.read_start(reader:as_stream_t(),
@@ -165,17 +165,17 @@ end
 local function write_weak_buffer(request: uv.write_t, stream: uv.stream_t,
                                  weak: {value: value}, key: integer,
                                  callback: uv.write_cb)
-  local buffer = uv.buf_t.from_string("vector")
+  const buffer = uv.buf_t.from_string("vector")
   weak[key] = buffer
   success(uv.write(request, stream, {buffer}, callback))
 end
 
 function test_vector_write_keeps_old_buffers_through_callback_reuse(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local _, writer = open_pipe_pair(loop)
-  local stream = writer:as_stream_t()
-  local weak: {value: value} = {}
+  const stream = writer:as_stream_t()
+  const weak: {value: value} = {}
   gc.weak(weak)
   local calls = 0
   write_weak_buffer(uv.write_t(), stream, weak, 1,
@@ -201,9 +201,9 @@ function test_vector_write_keeps_old_buffers_through_callback_reuse(_context: te
 end
 
 function test_tcp_public_views_write_shutdown_and_eof(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local listener = uv.tcp_t()
+  const listener = uv.tcp_t()
   success(uv.tcp_init(loop, listener))
   local address_status, address? = uv.ip4_addr("127.0.0.1", 0)
   success(address_status)
@@ -213,11 +213,11 @@ function test_tcp_public_views_write_shutdown_and_eof(_context: test.Context)
   success(uv.listen(listener:as_stream_t(), 1, function (server, status)
     success(status)
     accepts = accepts + 1
-    local peer = uv.tcp_t()
+    const peer = uv.tcp_t()
     success(uv.tcp_init(loop, peer))
     success(uv.accept(server, peer:as_handle_t()))
     uv.close(listener:as_handle_t())
-    local named, remote?, _size = uv.tcp_getpeername(peer)
+    local named, remote?, _ = uv.tcp_getpeername(peer)
     success(named)
     test.assert(remote:family() == uv.AF_INET and remote:port() > 0)
     success(uv.read_start(peer:as_stream_t(),
@@ -234,17 +234,17 @@ function test_tcp_public_views_write_shutdown_and_eof(_context: test.Context)
         collect()
       end))
   end))
-  local named, actual?, _size = uv.tcp_getsockname(listener)
+  local named, actual?, _ = uv.tcp_getsockname(listener)
   success(named)
   test.assert(actual:port() > 0)
-  local client = uv.tcp_t()
+  const client = uv.tcp_t()
   success(uv.tcp_init(loop, client))
   success(uv.tcp_nodelay(client, 1))
   success(uv.tcp_connect(uv.connect_t(), client, actual,
     function (_connected: uv.connect_t, status: integer)
       success(status)
       connects = connects + 1
-      local buffers = {uv.buf_t.from_string("TCP\0bytes")}
+      const buffers = {uv.buf_t.from_string("TCP\0bytes")}
       success(uv.write(uv.write_t(), client:as_stream_t(), buffers,
         function (_written: uv.write_t, write_status: integer)
           success(write_status)
@@ -265,14 +265,14 @@ function test_tcp_public_views_write_shutdown_and_eof(_context: test.Context)
 end
 
 function test_pipe_read_restart_preserves_paired_buffer(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local reader, writer = open_pipe_pair(loop)
-  local input = reader:as_stream_t()
-  local output = writer:as_stream_t()
+  const input = reader:as_stream_t()
+  const output = writer:as_stream_t()
   local first_allocs, first_reads, next_reads = 0, 0, 0
   local seen = ""
-  local next_read: uv.read_cb = function (handle, count, buffer)
+  const next_read: uv.read_cb = function (handle, count, buffer)
     test.assert(count > 0, "unexpected restarted read status")
     seen = seen .. buffer:to_string(count)
     next_reads = next_reads + 1
@@ -284,7 +284,7 @@ function test_pipe_read_restart_preserves_paired_buffer(_context: test.Context)
   test.assert(uv.read_start(input,
     function (handle, suggested)
       first_allocs = first_allocs + 1
-      local buffer = uv.buf_t.allocate(3)
+      const buffer = uv.buf_t.allocate(3)
       gc.collect()
       return buffer
     end,
@@ -325,7 +325,7 @@ local function allocate(handle: uv.handle_t, suggested: integer): uv.buf_t
 end
 
 local function bound(loop: uv.loop_t, flags: integer): (uv.udp_t, uv.sockaddr_t)
-  local receiver = uv.udp_t.new()
+  const receiver = uv.udp_t()
   test.assert(uv.udp_init_ex(loop, receiver, flags) == 0)
   local status, address? = uv.ip4_addr("127.0.0.1", 0)
   test.assert(status == 0)
@@ -336,10 +336,10 @@ local function bound(loop: uv.loop_t, flags: integer): (uv.udp_t, uv.sockaddr_t)
 end
 
 function test_empty_datagram_and_reused_request(context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local receiver, address = bound(loop, 0)
-  local sender = uv.udp_t.new()
+  const sender = uv.udp_t()
   test.assert(uv.udp_init(loop, sender) == 0)
   local seen = 0
   local sends = 0
@@ -355,12 +355,12 @@ function test_empty_datagram_and_reused_request(context: test.Context)
         else
           test.assert(nread == 4 and buffer:to_string(nread) == "\0A\255B")
           test.assert(uv.udp_recv_stop(owner) == 0)
-          uv.close(owner:as_handle_t(), function (view: uv.handle_t) closed = closed + 1 end)
+          uv.close(owner:as_handle_t(), function (_: uv.handle_t) closed = closed + 1 end)
         end
       end
     end) == 0)
-  local request = uv.udp_send_t.new()
-  local buffers = {uv.buf_t.from_string("")}
+  const request = uv.udp_send_t()
+  const buffers = {uv.buf_t.from_string("")}
   test.assert(uv.udp_send(request, sender, {}, address, nil) == uv.EINVAL)
   test.assert(uv.udp_get_send_queue_count(sender) == 0)
   -- NULL destination on an unconnected handle must reject without callback.
@@ -370,13 +370,13 @@ function test_empty_datagram_and_reused_request(context: test.Context)
       test.assert(status == 0 and completed:get_handle() == sender)
       sends = sends + 1
       gc.collect()
-      local second_buffers = {uv.buf_t.from_string("_\0A\255B_"):slice(2, 4)}
+      const second_buffers = {uv.buf_t.from_string("_\0A\255B_"):slice(2, 4)}
       test.assert(uv.udp_send(completed, sender, second_buffers, address,
         function (again: uv.udp_send_t, result: integer)
           test.assert(result == 0 and again == request and again:get_handle() == sender)
           sends = sends + 1
           gc.collect()
-          uv.close(sender:as_handle_t(), function (view: uv.handle_t) closed = closed + 1 end)
+          uv.close(sender:as_handle_t(), function (_: uv.handle_t) closed = closed + 1 end)
         end) == 0)
       second_buffers[1] = uv.buf_t.from_string("mutated second vector")
       gc.collect()
@@ -391,21 +391,21 @@ end
 local function send_weak_buffer(request: uv.udp_send_t, sender: uv.udp_t,
                                 address: uv.sockaddr_t, weak: {value: value},
                                 key: integer, callback: uv.udp_send_cb)
-  local buffer = uv.buf_t.from_string("datagram")
+  const buffer = uv.buf_t.from_string("datagram")
   weak[key] = buffer
   success(uv.udp_send(request, sender, {buffer}, address, callback))
 end
 
 function test_udp_send_keeps_old_buffers_through_callback_reuse(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local _, address = bound(loop, 0)
-  local sender = uv.udp_t.new()
+  const sender = uv.udp_t()
   success(uv.udp_init(loop, sender))
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   local calls = 0
-  send_weak_buffer(uv.udp_send_t.new(), sender, address, weak, 1,
+  send_weak_buffer(uv.udp_send_t(), sender, address, weak, 1,
     function (completed: uv.udp_send_t, status: integer)
       success(status)
       calls = calls + 1

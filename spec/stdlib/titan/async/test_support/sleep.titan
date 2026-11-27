@@ -10,7 +10,7 @@ local function sleeping(milliseconds: integer,
 end
 
 local function cancelled(reason: string): async.Task
-  local task = sleeping(60000, "unexpected cancellation return")
+  const task = sleeping(60000, "unexpected cancellation return")
   task:cancel(async.CancellationReason.simple(reason))
   return task
 end

@@ -14,20 +14,20 @@ local foreign function retirement_poll_native(state: *titan_async_retirement): i
 end
 
 local record ExternalBridge
-  runtime: Runtime
-  wake: uv.external_wake_t
-  waits: {integer: ExternalWait}
+  const runtime: Runtime
+  const wake: uv.external_wake_t
+  const waits: {integer: ExternalWait}
   next_identity: integer
   closed: boolean
 end
 
 record ExternalWait
-  local bridge: ExternalBridge
-  local identity: integer
+  local const bridge: ExternalBridge
+  local const identity: integer
   local target: foreign *void
   local register_fn: (function (foreign *void): boolean)?
   local unregister_fn: (function (): ())?
-  local token: ResumeToken
+  local const token: ResumeToken
   local cancel_action: (function (): ())?
   local done: Wait?
   local number: integer
@@ -74,17 +74,17 @@ local function ExternalWait:admit_cleanup()
     "async.native_retirement.activate")
   -- All callbacks and their traced owner exist before native admission.
   -- The register contract has no linked waiter/ref on a negative result.
-  local status = self.native.register_wait(
+  const status = self.native.register_wait(
     self.native.context, self.target)
   if status < 0 then check_status(status, "async.native_retirement.register") end
   self.native.armed = 1
   self.used = true
   self.registered = status ~= 0
   if status == 0 then
-    local retired = retirement_poll_native(self.native)
+    const retired = retirement_poll_native(self.native)
     if retired > 0 then raise "native retirement is not complete" end
     check_status(retired, "async.native_retirement.retire")
-    local target = self.target
+    const target = self.target
     self.target = nil
     self.bridge.waits[self.identity] = nil
     self.bridge.wake:unregister(target)
@@ -98,7 +98,7 @@ local function ExternalWait:rollback_cleanup()
     self.registered = false
     self.native.unregister_wait(self.native.context)
   end
-  local target = self.target
+  const target = self.target
   self.target = nil
   self.bridge.waits[self.identity] = nil
   if target ~= nil then self.bridge.wake:unregister(target) end
@@ -113,7 +113,7 @@ end
 -- comparisons here and in unaccepted are identity-preserving and cannot
 -- allocate a callable adapter.
 local function ExternalWait:designates(task: Task, operation: Wait?): boolean
-  local registrar: value = start_native_retirement_wait
+  const registrar: value = start_native_retirement_wait
   return task.cleanup_active and operation ~= nil and
     operation.policy == WAIT_CLEANUP and operation.stored_context == self and
     operation.register == registrar
@@ -126,7 +126,7 @@ end
 -- The bound Task's publication gate: false while native retirement is pending
 -- or has failed.
 local function ExternalWait:complete_retirement(task: Task): boolean
-  local status = retirement_poll_native(self.native)
+  const status = retirement_poll_native(self.native)
   if status > 0 then return false end
   if status < 0 then
     if task.runtime.retirement_error == nil then task.runtime.retirement_error = self end
@@ -135,7 +135,7 @@ local function ExternalWait:complete_retirement(task: Task): boolean
   end
   -- Native retirement is complete before clearing the map/borrow and
   -- consuming the registration. There is no ordinary entry in this interval.
-  local target = self.target
+  const target = self.target
   self.target = nil
   self.bridge.waits[self.identity] = nil
   self.registered = false
@@ -147,11 +147,11 @@ end
 -- The driver's emergency poll of an armed barrier.
 local function ExternalWait:poll_retirement(task: Task)
   if self.native.armed ~= 0 and self.native.ready == 0 then
-    local notified = uv.native_external_wake_is_notified(self.target) ~= 0
+    const notified = uv.native_external_wake_is_notified(self.target) ~= 0
     if notified or task.root_done or self.awaited then
-      local status = retirement_poll_native(self.native)
+      const status = retirement_poll_native(self.native)
       if status == 0 then
-        local target = self.target
+        const target = self.target
         self.target = nil
         self.bridge.waits[self.identity] = nil
         self.registered = false
@@ -168,7 +168,7 @@ local function ExternalWait:notify_if_ready()
 end
 
 local function ExternalWait:unaccepted(waiting: Wait): boolean
-  local registrar: value = start_native_retirement_wait
+  const registrar: value = start_native_retirement_wait
   return waiting.phase == WAIT_REGISTERING and waiting.stored_context == self and
     waiting.register == registrar
 end
@@ -192,7 +192,7 @@ local function ExternalWait:retire()
     return
   end
   self.retired = true
-  local target = self.target
+  const target = self.target
   self.target = nil
   self.bridge.waits[self.identity] = nil
   -- No target borrow survives unregister: it consumes the registration ref.
@@ -220,7 +220,7 @@ end
 
 function ExternalWait:close()
   if self.retired then return end
-  local bound? = self.cleanup_task
+  const bound? = self.cleanup_task
   if bound ~= nil and bound.phase ~= TASK_FINISHED then
     if bound.runtime.current_task ~= bound or not bound.cleanup_active then
       raise "external wait is reserved for its Task cleanup"
@@ -237,15 +237,15 @@ end
 local function ExternalWait:notify()
   if self.retired or self.notified then return end
   if self.native.retire ~= nil and self.native.ready == 0 then return end
-  local bound? = self.cleanup_task
+  const bound? = self.cleanup_task
   if bound ~= nil and bound.root_done and bound.terminal_kind ~= TERMINAL_NONE then
     if not bound.ready_queued then enqueue_ready(bound, READY_TERMINAL, nil) end
     self.notified = true
     return
   end
-  local done? = self.done
+  const done? = self.done
   if done == nil then return end
-  local task = done.task
+  const task = done.task
   if done.epoch ~= self.number or task.epoch ~= self.number or
       task.wait ~= done or done.phase ~= WAIT_PENDING then return end
   if done.policy == WAIT_CLEANUP then
@@ -265,15 +265,15 @@ local function ExternalBridge:drain()
   -- reporting status; valid live libuv async handles have no recoverable send failure.
   local failed = false
   for index = 0, (count as integer) - 1 do
-    local identity: integer = identities[index]
-    local owner? = self.waits[identity]
+    const identity: integer = identities[index]
+    const owner? = self.waits[identity]
     if owner ~= nil then
       if owner.native.retire ~= nil then
         -- The durable native receipt is retired/latching-ready before entering
         -- any ordinary notification method which could grow the Lua stack.
-        local retired = retirement_poll_native(owner.native)
+        const retired = retirement_poll_native(owner.native)
         if retired == 0 then
-          local target = owner.target
+          const target = owner.target
           owner.target = nil
           self.waits[owner.identity] = nil
           owner.registered = false
@@ -298,13 +298,13 @@ local function ExternalBridge:drain()
 end
 
 local function external_bridge(runtime: Runtime): ExternalBridge
-  local existing? = runtime.backend.external
+  const existing? = runtime.backend.external
   if existing ~= nil then return existing end
-  local bridge = ExternalBridge {
-    runtime = runtime, wake = uv.external_wake_t.new(), waits = {},
+  const bridge = ExternalBridge {
+    runtime = runtime, wake = uv.external_wake_t(), waits = {},
     next_identity = 1, closed = false
   }
-  local callback = function (_: uv.external_wake_t) bridge:drain() end
+  const callback = function (_: uv.external_wake_t) bridge:drain() end
   check_status(uv.external_wake_init(runtime.backend.loop, bridge.wake, callback),
     "async.external_wait.init")
   runtime.backend.external = bridge
@@ -318,16 +318,16 @@ local function prepare_wait(
     native_register: foreign function (*void, *void): int,
     native_unregister: foreign function (*void): void,
     native_retire: foreign function (*void): int): ExternalWait
-  local runtime = ensure_runtime()
+  const runtime = ensure_runtime()
   if runtime.closing or runtime.exit_code ~= nil then
     raise "cannot prepare an external wait while async Runtime is shutting down"
   end
-  local bridge = external_bridge(runtime)
-  local identity = bridge.next_identity
+  const bridge = external_bridge(runtime)
+  const identity = bridge.next_identity
   if identity == 0 then raise "async external wait identity exhausted" end
   if identity == (ffi.LUA_MAXINTEGER as integer) then bridge.next_identity = 0
   else bridge.next_identity = identity + 1 end
-  local owner = ExternalWait {
+  const owner = ExternalWait {
     bridge = bridge, identity = identity, target = nil,
     register_fn = register_fn, unregister_fn = unregister_fn,
     token = ResumeToken("async.external_wait"), cancel_action = nil,
@@ -384,8 +384,8 @@ end
 
 local function start_external_wait(
     done: Completion<|ExternalWait, nil, value|>, number: integer): uv.req_t?
-  local owner = done:context(number)
-  local task = done.task
+  const owner = done:context(number)
+  const task = done.task
   owner.done = done as Wait
   owner.number = number
   if done.policy ~= WAIT_CLEANUP then
@@ -403,7 +403,7 @@ local function start_external_wait(
   local waiting = false
   do
     if owner.native.register_wait ~= nil then
-      local status = owner.native.register_wait(owner.native.context, owner.target)
+      const status = owner.native.register_wait(owner.native.context, owner.target)
       if status < 0 then check_status(status, "async.external_wait.register") end
       waiting = status ~= 0
     else
@@ -424,7 +424,7 @@ end
 
 local function start_native_retirement_wait(
     done: Completion<|ExternalWait, nil, value|>, number: integer): uv.req_t?
-  local owner = done:context(number)
+  const owner = done:context(number)
   owner.done = done as Wait
   owner.number = number
   if owner.native.ready ~= 0 then done:resolve(number, nil) end
@@ -432,12 +432,12 @@ local function start_native_retirement_wait(
 end
 
 local function ExternalWait:await(policy: integer)
-  local task = running()
+  const task = running()
   if task.runtime ~= self.bridge.runtime then
     raise "external wait belongs to another async Runtime"
   end
   if self.retired then raise "external wait is consumed or closed" end
-  local bound? = self.cleanup_task
+  const bound? = self.cleanup_task
   if bound ~= nil and (bound ~= task or not task.cleanup_active or policy ~= WAIT_CLEANUP) then
     raise "external wait is reserved for its Task cleanup"
   end
@@ -451,9 +451,9 @@ local function ExternalWait:await(policy: integer)
     end
     -- This exact cleanup boundary follows the domain's ordinary forwarding
     -- attempt. The native callback may begin approved reasonless retirement.
-    local status = retirement_poll_native(self.native)
+    const status = retirement_poll_native(self.native)
     if status == 0 then
-      local target = self.target
+      const target = self.target
       self.target = nil
       self.bridge.waits[self.identity] = nil
       self.registered = false
@@ -464,7 +464,7 @@ local function ExternalWait:await(policy: integer)
       if task.runtime.retirement_error == nil then task.runtime.retirement_error = self end
       uv.stop(task.runtime.backend.loop)
     end
-    local result = coroutine.yield(
+    const result = coroutine.yield(
       completion<|ExternalWait, nil, value|>(self, start_native_retirement_wait, WAIT_CLEANUP),
       ASYNC_TAG) as Result<|nil, value|>
     case result
@@ -481,7 +481,7 @@ local function ExternalWait:await(policy: integer)
     self:retire()
     clear_suspension(task)
   end
-  local result = coroutine.yield(
+  const result = coroutine.yield(
     completion<|ExternalWait, nil, value|>(self, start_external_wait, policy),
     ASYNC_TAG) as Result<|nil, value|>
   case result
@@ -505,7 +505,7 @@ end
 function wait_external(register_fn: function (foreign *void): boolean,
                        unregister_fn: function (): ())
   running()
-  local owner = prepare_external_wait(register_fn, unregister_fn)
+  const owner = prepare_external_wait(register_fn, unregister_fn)
   defer owner:close()
   owner:wait()
 end
@@ -524,7 +524,7 @@ function wait_external_native(owner: value, context: foreign *void,
   if register_fn == nil or unregister_fn == nil then
     raise "native external wait callbacks must not be NULL"
   end
-  local wait = prepare_wait(nil, nil, owner, context, register_fn, unregister_fn, nil)
+  const wait = prepare_wait(nil, nil, owner, context, register_fn, unregister_fn, nil)
   defer wait:close()
   wait:wait()
 end
@@ -533,7 +533,7 @@ end
 function wait_external_cleanup(register_fn: function (foreign *void): boolean,
                                unregister_fn: function (): ())
   running()
-  local owner = prepare_external_wait(register_fn, unregister_fn)
+  const owner = prepare_external_wait(register_fn, unregister_fn)
   defer owner:close()
   owner:wait_cleanup()
 end

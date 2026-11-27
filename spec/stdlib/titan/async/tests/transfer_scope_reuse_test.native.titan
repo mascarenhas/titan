@@ -19,8 +19,8 @@ end
 
 local function scope_reuse_channels(count: integer): (
     {scope_reuse_thread.Sender<|integer|>}, {scope_reuse_thread.Receiver<|integer|>})
-  local txs: {scope_reuse_thread.Sender<|integer|>} = {}
-  local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
+  const txs: {scope_reuse_thread.Sender<|integer|>} = {}
+  const rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
   for i = 1, count do
     local tx, rx = scope_reuse_thread.channel<|integer|>(1)
     txs[i] = tx
@@ -107,10 +107,10 @@ end
 
 local function scope_reuse_stash_holder_coroutines(): scope_reuse_thread.Receiver<|integer|>
   local hold_tx, r_hold = scope_reuse_thread.channel<|integer|>(1)
-  local list: {scope_reuse_coroutine.Coroutine} = {}
+  const list: {scope_reuse_coroutine.Coroutine} = {}
   for i = 1, 10 do
-    local co = scope_reuse_coroutine.create(function (_: value): value
-      local held = scope_reuse_transfer.encode_message(
+    const co = scope_reuse_coroutine.create(function (_: value): value
+      const held = scope_reuse_transfer.encode_message(
         ScopeReuseAbandonedSpillFault({hold_tx}, "abandon-encode"))
       scope_reuse_transfer.discard_message(held)
       return nil
@@ -127,8 +127,8 @@ end
 local function scope_reuse_roundtrip(candidate: value): value
   local raw = scope_reuse_transfer.encode_message(candidate)
   defer scope_reuse_transfer.discard_message(raw)
-  local top = ffi.lua_gettop(L)
-  local result = scope_reuse_transfer.decode_message(raw)
+  const top = ffi.lua_gettop(L)
+  const result = scope_reuse_transfer.decode_message(raw)
   test.assert(raw == nil, "decode_message did not clear its owned local slot")
   test.assert(ffi.lua_gettop(L) == top,
               "decode_message changed the caller's Lua stack top")
@@ -136,18 +136,18 @@ local function scope_reuse_roundtrip(candidate: value): value
 end
 
 local function scope_reuse_u32_le(index: integer): string
-  local b0 = index & 255
-  local b1 = (index >> 8) & 255
-  local b2 = (index >> 16) & 255
-  local b3 = (index >> 24) & 255
+  const b0 = index & 255
+  const b1 = (index >> 8) & 255
+  const b2 = (index >> 16) & 255
+  const b3 = (index >> 24) & 255
   return scope_reuse_string.char(b0, b1, b2, b3)
 end
 
 record ScopeReuseDirectionProbe
-  local senders: {scope_reuse_thread.Sender<|integer|>}
-  local fail_encode: boolean
-  local fail_decode_after: integer
-  local tag: integer
+  local const senders: {scope_reuse_thread.Sender<|integer|>}
+  local const fail_encode: boolean
+  local const fail_decode_after: integer
+  local const tag: integer
 end
 
 function ScopeReuseDirectionProbe:to_transfer_payload(): string
@@ -159,7 +159,7 @@ function ScopeReuseDirectionProbe:to_transfer_payload(): string
 
   local out = ""
   for i = 1, #self.senders do
-    local idx = self.senders[i]:to_transfer_payload()
+    const idx = self.senders[i]:to_transfer_payload()
     test.assert(idx == scope_reuse_u32_le(i - 1),
                 "reused encode scope did not assign dense zero-based slot index")
     out = out .. idx
@@ -167,7 +167,7 @@ function ScopeReuseDirectionProbe:to_transfer_payload(): string
   if self.fail_encode then
     raise "scope-reuse-encode-fail:" .. self.tag
   end
-  local header = scope_reuse_string.char(#self.senders, self.fail_decode_after, self.tag)
+  const header = scope_reuse_string.char(#self.senders, self.fail_decode_after, self.tag)
   return header .. out
 end
 
@@ -182,19 +182,19 @@ function ScopeReuseDirectionProbe.from_transfer_payload(
     tmp_tx:to_transfer_payload()
   end, "transfer: resource attachment requires an encode scope")
 
-  local count = scope_reuse_string.byte(payload, 1) or 0
-  local fail_after = scope_reuse_string.byte(payload, 2) or 0
-  local tag = scope_reuse_string.byte(payload, 3) or 0
+  const count = scope_reuse_string.byte(payload, 1) or 0
+  const fail_after = scope_reuse_string.byte(payload, 2) or 0
+  const tag = scope_reuse_string.byte(payload, 3) or 0
   -- Verify previous packet's attachment count did not survive into this frame.
   scope_reuse_expect_error(function ()
     scope_reuse_thread.Sender<|integer|>.from_transfer_payload(scope_reuse_u32_le(count))
   end, "transfer: resource attachment index is out of bounds")
 
-  local claimed: {scope_reuse_thread.Sender<|integer|>} = {}
+  const claimed: {scope_reuse_thread.Sender<|integer|>} = {}
   for i = 1, count do
-    local offset = 4 + (i - 1) * 4
-    local idx = scope_reuse_string.sub(payload, offset, offset + 3)
-    local tx = scope_reuse_thread.Sender<|integer|>.from_transfer_payload(idx)
+    const offset = 4 + (i - 1) * 4
+    const idx = scope_reuse_string.sub(payload, offset, offset + 3)
+    const tx = scope_reuse_thread.Sender<|integer|>.from_transfer_payload(idx)
     claimed[i] = tx
     if fail_after > 0 and i == fail_after then
       scope_reuse_saved_senders[#scope_reuse_saved_senders + 1] = tx
@@ -211,29 +211,29 @@ end
 
 function test_scope_reuse_task_per_message_and_direction_reset(context: test.Context)
   context:run("task-per-message-churn-across-inline-and-spilled-scopes",
-    function (_context: test.Context)
+    function (_: test.Context)
       scope_reuse_reset_state()
       defer scope_reuse_reset_state()
       runtime_test.run(function ()
-        local tasks: {async.Task<|integer, value|>} = {}
+        const tasks: {async.Task<|integer, value|>} = {}
         for worker_id = 1, 12 do
-          local id = worker_id
-          local t = async.run<|integer, value|>(function (): integer
-            local inline_count = scope_reuse_inline()
-            local counts: {integer} = {1, inline_count, inline_count + 1, 2 * inline_count + 1}
-            local count = counts[(id % 4) + 1]
+          const id = worker_id
+          const t = async.run<|integer, value|>(function (): integer
+            const inline_count = scope_reuse_inline()
+            const counts: {integer} = {1, inline_count, inline_count + 1, 2 * inline_count + 1}
+            const count = counts[(id % 4) + 1]
             -- 1. Failing encode after attaching `count` endpoints (inline, full
             -- inline, first spill, or grown spill).
-            local fail_enc_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
-              local txs: {scope_reuse_thread.Sender<|integer|>} = {}
-              local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
+            const fail_enc_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
+              const txs: {scope_reuse_thread.Sender<|integer|>} = {}
+              const rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
               for i = 1, count do
                 local tx, rx = scope_reuse_thread.channel<|integer|>(1)
                 txs[i] = tx
                 rxs[i] = rx
               end
               scope_reuse_expect_error(function ()
-                local raw = scope_reuse_transfer.encode_message(
+                const raw = scope_reuse_transfer.encode_message(
                   ScopeReuseDirectionProbe(txs, true, 0, id))
                 scope_reuse_transfer.discard_message(raw)
               end, "scope-reuse-encode-fail:" .. id)
@@ -258,8 +258,8 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
             async.yield()
 
             -- 2. Successful round trip on the next Task continuation turn.
-            local ok_txs: {scope_reuse_thread.Sender<|integer|>} = {}
-            local ok_rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
+            const ok_txs: {scope_reuse_thread.Sender<|integer|>} = {}
+            const ok_rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
             for i = 1, count do
               local tx, rx = scope_reuse_thread.channel<|integer|>(1)
               ok_txs[i] = tx
@@ -268,7 +268,7 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
             defer do
               for i = 1, #ok_rxs do ok_rxs[i]:close() end
             end
-            local restored: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
+            const restored: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
               ScopeReuseDirectionProbe(ok_txs, false, 0, id))
             for i = 1, count do
               test.assert(restored.senders[i]:try_send(id * 100 + i))
@@ -287,7 +287,7 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
         end
 
         for id = 1, #tasks do
-          local status = async.join(tasks[id])
+          const status = async.join(tasks[id])
           local ok, val? = status:has_succeeded()
           test.assert(ok and val == id, "Task-per-message scope reuse worker failed")
         end
@@ -295,7 +295,7 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
     end)
 
   context:run("alternating-encode-decode-errors-scrub-message-and-direction",
-    function (_context: test.Context)
+    function (_: test.Context)
       scope_reuse_reset_state()
       defer scope_reuse_reset_state()
       -- Step 1: encode one endpoint past the inline scratch (spilling it), then
@@ -304,7 +304,7 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
       local raw1, rxs1 = (function (): (
           foreign *void, {scope_reuse_thread.Receiver<|integer|>})
         local txs, rxs = scope_reuse_channels(scope_reuse_inline() + 1)
-        local raw = scope_reuse_transfer.encode_message(
+        const raw = scope_reuse_transfer.encode_message(
           ScopeReuseDirectionProbe(txs, false, 1, 77))
         return raw, rxs
       end)()
@@ -341,10 +341,10 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
       -- Step 2: immediately reuse the retired decode frame for a failing encode
       -- that fills its first spill exactly, then reuse that retired encode frame
       -- for a 1-endpoint decode.
-      local fail_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
+      const fail_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
         local txs, rxs = scope_reuse_channels(2 * scope_reuse_inline())
         scope_reuse_expect_error(function ()
-          local raw = scope_reuse_transfer.encode_message(
+          const raw = scope_reuse_transfer.encode_message(
             ScopeReuseDirectionProbe(txs, true, 0, 88))
           scope_reuse_transfer.discard_message(raw)
         end, "scope-reuse-encode-fail:88")
@@ -368,7 +368,7 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
       local tx_final, rx_final = scope_reuse_thread.channel<|integer|>(1)
       defer tx_final:close()
       defer rx_final:close()
-      local restored_final: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
+      const restored_final: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
         ScopeReuseDirectionProbe({tx_final}, false, 0, 99))
       test.assert(#restored_final.senders == 1 and restored_final.senders[1]:try_send(991))
       local got_f, vf? = rx_final:try_receive()
@@ -377,18 +377,18 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
 end
 
 record ScopeReuseDeepNestNode
-  local depth: integer
-  local total: integer
+  local const depth: integer
+  local const total: integer
 end
 
 local function scope_reuse_attach_counter(): string
-  local ptr = scope_reuse_custom_counter as foreign *void
+  const ptr = scope_reuse_custom_counter as foreign *void
   return scope_reuse_transfer.attach_resource(
     ptr, scope_reuse_counter_retain, scope_reuse_counter_release)
 end
 
 local function scope_reuse_claim_counter(idx: string)
-  local claimed = scope_reuse_transfer.claim_resource(idx, scope_reuse_counter_release)
+  const claimed = scope_reuse_transfer.claim_resource(idx, scope_reuse_counter_release)
   test.assert(claimed == (scope_reuse_custom_counter as foreign *void),
               "claimed counter pointer mismatch")
   scope_reuse_counter_release(claimed)
@@ -396,10 +396,10 @@ end
 
 function ScopeReuseDeepNestNode:to_transfer_payload(): string
   -- With the post attachment, depths cycle through inline and spilled scratch.
-  local pre_count = (self.depth % (scope_reuse_inline() + 1)) + 1
+  const pre_count = (self.depth % (scope_reuse_inline() + 1)) + 1
   local prefix = ""
   for i = 1, pre_count do
-    local idx = scope_reuse_attach_counter()
+    const idx = scope_reuse_attach_counter()
     test.assert(idx == scope_reuse_u32_le(i - 1),
                 "deep nest pre-attachment index drifted at depth " .. self.depth)
     prefix = prefix .. idx
@@ -409,27 +409,27 @@ function ScopeReuseDeepNestNode:to_transfer_payload(): string
   if self.depth > 1 then
     if self.depth == 10 then
       -- A failing inner encode must roll back without disturbing depth 10's frame.
-      local before_fail = scope_reuse_custom_counter[0]
+      const before_fail = scope_reuse_custom_counter[0]
       local ftx, frx = scope_reuse_thread.channel<|integer|>(1)
       scope_reuse_nested_peers[#scope_reuse_nested_peers + 1] = frx
-      local spilled: {scope_reuse_thread.Sender<|integer|>} = {}
+      const spilled: {scope_reuse_thread.Sender<|integer|>} = {}
       for i = 1, scope_reuse_inline() + 1 do spilled[i] = ftx end
       scope_reuse_expect_error(function ()
-        local raw = scope_reuse_transfer.encode_message(
+        const raw = scope_reuse_transfer.encode_message(
           ScopeReuseDirectionProbe(spilled, true, 0, 10))
         scope_reuse_transfer.discard_message(raw)
       end, "scope-reuse-encode-fail:10")
       test.assert(scope_reuse_custom_counter[0] == before_fail,
                   "failing inner encode at depth 10 disturbed outer custom counter")
     end
-    local child: ScopeReuseDeepNestNode = scope_reuse_roundtrip(
+    const child: ScopeReuseDeepNestNode = scope_reuse_roundtrip(
       ScopeReuseDeepNestNode(self.depth - 1, 0))
     nested_value = child.total
   end
 
   -- After nested encode+decode unwinds, this outer frame must still be the exact
   -- top encode scope and its next attachment index must continue at `pre_count`.
-  local post_idx = scope_reuse_attach_counter()
+  const post_idx = scope_reuse_attach_counter()
   test.assert(post_idx == scope_reuse_u32_le(pre_count),
               "deep nest post-attachment index drifted after child unwind at depth " .. self.depth)
   return scope_reuse_string.char(self.depth, pre_count, nested_value) .. prefix .. post_idx
@@ -437,9 +437,9 @@ end
 
 function ScopeReuseDeepNestNode.from_transfer_payload(
     payload: string): ScopeReuseDeepNestNode
-  local depth = scope_reuse_string.byte(payload, 1) or 0
-  local pre_count = scope_reuse_string.byte(payload, 2) or 0
-  local nested_value = scope_reuse_string.byte(payload, 3) or 0
+  const depth = scope_reuse_string.byte(payload, 1) or 0
+  const pre_count = scope_reuse_string.byte(payload, 2) or 0
+  const nested_value = scope_reuse_string.byte(payload, 3) or 0
 
   local pos = 4
   for _ = 1, pre_count do
@@ -452,9 +452,9 @@ function ScopeReuseDeepNestNode.from_transfer_payload(
     local verify_tx, verify_rx = scope_reuse_thread.channel<|integer|>(1)
     defer verify_tx:close()
     defer verify_rx:close()
-    local spilled: {scope_reuse_thread.Sender<|integer|>} = {}
+    const spilled: {scope_reuse_thread.Sender<|integer|>} = {}
     for i = 1, scope_reuse_inline() + 1 do spilled[i] = verify_tx end
-    local probe: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
+    const probe: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
       ScopeReuseDirectionProbe(spilled, false, 0, depth))
     test.assert(#probe.senders == #spilled)
   end
@@ -466,19 +466,19 @@ end
 
 function test_scope_reuse_deep_nesting_beyond_pool_bound(context: test.Context)
   context:run("twelve-level-nested-encode-decode-overflow-and-gc",
-    function (_context: test.Context)
+    function (_: test.Context)
       scope_reuse_reset_state()
       defer do
         for i = 1, #scope_reuse_nested_peers do scope_reuse_nested_peers[i]:close() end
         scope_reuse_reset_state()
       end
-      local counter: owned int[] = foreign int.new_array(1)
+      const counter: owned int[] = foreign int.new_array(1)
       counter[0] = 1
       scope_reuse_custom_counter = counter
 
       -- Depth 12 holds more frames than the state-local idle bound; overflow
       -- frames retire unpooled and are finalized during subsequent collections.
-      local result: ScopeReuseDeepNestNode = scope_reuse_roundtrip(
+      const result: ScopeReuseDeepNestNode = scope_reuse_roundtrip(
         ScopeReuseDeepNestNode(12, 0))
       test.assert(result.depth == 12 and result.total == 78,
                   "12-level nested round trip returned wrong sum")
@@ -497,7 +497,7 @@ function test_scope_reuse_deep_nesting_beyond_pool_bound(context: test.Context)
       end
 
       -- Warm pool after overflow GC must still round-trip inline and spilled packets.
-      local after_gc: ScopeReuseDeepNestNode = scope_reuse_roundtrip(
+      const after_gc: ScopeReuseDeepNestNode = scope_reuse_roundtrip(
         ScopeReuseDeepNestNode(4, 0))
       test.assert(after_gc.total == 10 and counter[0] == 1)
     end)
@@ -507,8 +507,8 @@ end
 -- scratch attachments or partially claiming a decoded packet, testing that a
 -- previously pooled/reused ResourceScope still runs its GC finalizer when abandoned.
 record ScopeReuseAbandonedSpillFault
-  local senders: {scope_reuse_thread.Sender<|integer|>}
-  local phase: string
+  local const senders: {scope_reuse_thread.Sender<|integer|>}
+  local const phase: string
 end
 
 function ScopeReuseAbandonedSpillFault:to_transfer_payload(): string
@@ -526,7 +526,7 @@ function ScopeReuseAbandonedSpillFault.from_transfer_payload(
     payload: string): ScopeReuseAbandonedSpillFault
   -- Claim slot 0 into a rooted wrapper, leaving every later slot unclaimed in
   -- the packet when the coroutine yields and is abandoned.
-  local first = scope_reuse_thread.Sender<|integer|>.from_transfer_payload(
+  const first = scope_reuse_thread.Sender<|integer|>.from_transfer_payload(
     scope_reuse_string.sub(payload, 1, 4))
   scope_reuse_saved_senders[#scope_reuse_saved_senders + 1] = first
   scope_reuse_coroutine.yield("paused-decode", "scope-reuse-abandon-tag")
@@ -535,11 +535,11 @@ end
 
 function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.Context)
   context:run("abandoned-coroutine-reclaims-reused-pooled-frame-with-spilled-attachments",
-    function (_context: test.Context)
+    function (_: test.Context)
       scope_reuse_reset_state()
       defer scope_reuse_reset_state()
 
-      local spill_count = scope_reuse_inline() + 1
+      const spill_count = scope_reuse_inline() + 1
       -- 1. Warm the idle scope pool with a spilled round trip so the frame
       -- popped by the next coroutine is a reused frame, not a fresh allocation.
       do
@@ -547,7 +547,7 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
         defer do
           for i = 1, #wrxs do wrxs[i]:close() end
         end
-        local warm: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
+        const warm: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
           ScopeReuseDirectionProbe(wtxs, false, 0, 1))
         test.assert(#warm.senders == spill_count)
         for i = 1, #wtxs do wtxs[i]:close() end
@@ -555,10 +555,10 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
 
       -- 2. Pop the reused scope in a child coroutine, attach one Sender past the
       -- inline scratch (spilling it to the heap), and abandon the coroutine.
-      local enc_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
+      const enc_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
         local txs, rxs = scope_reuse_channels(spill_count)
-        local co = scope_reuse_coroutine.create(function (_: value): value
-          local raw = scope_reuse_transfer.encode_message(
+        const co = scope_reuse_coroutine.create(function (_: value): value
+          const raw = scope_reuse_transfer.encode_message(
             ScopeReuseAbandonedSpillFault(txs, "abandon-encode"))
           scope_reuse_transfer.discard_message(raw)
           return nil
@@ -578,11 +578,11 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
 
       -- 3. Warm the pool again, then pop the reused frame in a decode coroutine
       -- that claims slot 0 and yields before claiming any later slot.
-      local dec_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
+      const dec_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
         local txs, rxs = scope_reuse_channels(spill_count)
-        local raw = scope_reuse_transfer.encode_message(
+        const raw = scope_reuse_transfer.encode_message(
           ScopeReuseAbandonedSpillFault(txs, "encode-ok"))
-        local co = scope_reuse_coroutine.create(function (_: value): value
+        const co = scope_reuse_coroutine.create(function (_: value): value
           local local_raw = raw
           defer scope_reuse_transfer.discard_message(local_raw)
           return scope_reuse_transfer.decode_message(local_raw)
@@ -612,10 +612,10 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
     end)
 
   context:run("independent-state-close-with-full-idle-pool-and-abandoned-active-scope",
-    function (_context: test.Context)
-      local state = scope_reuse_lua.new()
+    function (_: test.Context)
+      const state = scope_reuse_lua.new()
       defer state:close()
-      local slots: foreign *ScopeReuseMessageSlot =
+      const slots: foreign *ScopeReuseMessageSlot =
         foreign ScopeReuseMessageSlot.new_array(9)
       defer do
         for i = 0, 8 do
@@ -692,7 +692,7 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
     end)
 
   context:run("depleted-pool-decode-scope-preparation-oom-consumes-slot",
-    function (_context: test.Context)
+    function (_: test.Context)
       for step = 1, 2 do
         local rx1, rx2, raw = (function (): (
             scope_reuse_thread.Receiver<|integer|>,
@@ -700,7 +700,7 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
             foreign *void)
           local tx1, r1 = scope_reuse_thread.channel<|integer|>(1)
           local tx2, r2 = scope_reuse_thread.channel<|integer|>(1)
-          local pkt = scope_reuse_transfer.encode_message(
+          const pkt = scope_reuse_transfer.encode_message(
             ScopeReuseDirectionProbe({tx1, tx2}, false, 0, step))
           return r1, r2, pkt
         end)()
@@ -714,13 +714,13 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
         -- Hold more scopes active than the state-local idle bound while denying
         -- Lua allocations in protected decode. Abandon and collect the holder
         -- coroutines afterward rather than resuming a yielded transfer hook.
-        local hold_rx = scope_reuse_stash_holder_coroutines()
+        const hold_rx = scope_reuse_stash_holder_coroutines()
         defer do
           scope_reuse_holder_coros = {}
         end
         defer hold_rx:close()
 
-        local slot: foreign *ScopeReuseMessageSlot =
+        const slot: foreign *ScopeReuseMessageSlot =
           foreign ScopeReuseMessageSlot.new_array(1)
         defer do
           scope_reuse_transfer.discard_message(slot[0])
@@ -729,16 +729,16 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
         slot[0] = raw
         raw = nil
 
-        local top = ffi.lua_gettop(L)
+        const top = ffi.lua_gettop(L)
         defer ffi.lua_settop(L, top)
         -- Reserve decode's entry frame so each armed failure lands inside its
         -- protected body rather than in stack growth at entry.
         test.assert(ffi.lua_checkstack(L, 64) ~= 0)
-        local ctrl: owned size_t[] = foreign size_t.new_array(3)
+        const ctrl: owned size_t[] = foreign size_t.new_array(3)
         ctrl[0] = 1 as foreign size_t
         ctrl[1] = step as foreign size_t
         local prev_ud: foreign *void = nil
-        local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+        const prev_alloc = ffi.lua_getallocf(L, prev_ud)
         ffi.lua_setallocf(L, scope_reuse_limited_lua_alloc, ctrl as foreign *void)
         local failed = false
         do
@@ -766,11 +766,11 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
     end)
 
   context:run("warm-pool-post-gc-structural-decode-oom-retires-scope",
-    function (_context: test.Context)
+    function (_: test.Context)
       -- Warm-pool + full GC + structural decode OOM under allocator denial:
       -- compiler-rooted recovery strings keep defer unwinding allocation-free,
       -- restoring execution authority and releasing trailing attachments.
-      local warm_check: ScopeReuseStructuralCarrier = scope_reuse_roundtrip(
+      const warm_check: ScopeReuseStructuralCarrier = scope_reuse_roundtrip(
         ScopeReuseStructuralCarrier("warm-pool", {}, {}))
       test.assert(warm_check.padding == "warm-pool")
       local wrx1, wrx2, wraw = (function (): (
@@ -779,7 +779,7 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
           foreign *void)
         local tx1, r1 = scope_reuse_thread.channel<|integer|>(1)
         local tx2, r2 = scope_reuse_thread.channel<|integer|>(1)
-        local pkt = scope_reuse_transfer.encode_message(
+        const pkt = scope_reuse_transfer.encode_message(
           ScopeReuseStructuralCarrier(
             scope_reuse_string.rep("warm\0decode\0oom\0", 64), {tx1, tx2}, {}))
         return r1, r2, pkt
@@ -787,7 +787,7 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
       defer scope_reuse_transfer.discard_message(wraw)
       defer wrx1:close()
       defer wrx2:close()
-      local wslot: foreign *ScopeReuseMessageSlot =
+      const wslot: foreign *ScopeReuseMessageSlot =
         foreign ScopeReuseMessageSlot.new_array(1)
       defer do
         scope_reuse_transfer.discard_message(wslot[0])
@@ -799,14 +799,14 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
       scope_reuse_gc.collect()
       test.assert(not wrx1:is_closed() and not wrx2:is_closed())
 
-      local wtop = ffi.lua_gettop(L)
+      const wtop = ffi.lua_gettop(L)
       defer ffi.lua_settop(L, wtop)
       test.assert(ffi.lua_checkstack(L, 64) ~= 0)
-      local wctrl: owned size_t[] = foreign size_t.new_array(3)
+      const wctrl: owned size_t[] = foreign size_t.new_array(3)
       wctrl[0] = 1 as foreign size_t
       wctrl[1] = 1 as foreign size_t
       local wprev_ud: foreign *void = nil
-      local wprev_alloc = ffi.lua_getallocf(L, wprev_ud)
+      const wprev_alloc = ffi.lua_getallocf(L, wprev_ud)
       ffi.lua_setallocf(L, scope_reuse_limited_lua_alloc, wctrl as foreign *void)
       local wfailed = false
       do
@@ -844,12 +844,12 @@ union ScopeReuseUnionCarrier
 end
 
 record ScopeReuseOpaqueCarrier
-  local padding: string
-  local senders: {scope_reuse_thread.Sender<|integer|>}
+  local const padding: string
+  local const senders: {scope_reuse_thread.Sender<|integer|>}
 end
 
 function ScopeReuseOpaqueCarrier:to_transfer_payload(): string
-  local head = scope_reuse_string.char(#self.senders)
+  const head = scope_reuse_string.char(#self.senders)
   local indices = ""
   for i = 1, #self.senders do
     indices = indices .. self.senders[i]:to_transfer_payload()
@@ -859,32 +859,32 @@ end
 
 function ScopeReuseOpaqueCarrier.from_transfer_payload(
     payload: string): ScopeReuseOpaqueCarrier
-  local count = scope_reuse_string.byte(payload, 1) or 0
-  local list: {scope_reuse_thread.Sender<|integer|>} = {}
+  const count = scope_reuse_string.byte(payload, 1) or 0
+  const list: {scope_reuse_thread.Sender<|integer|>} = {}
   local pos = 2
   for i = 1, count do
     list[i] = scope_reuse_thread.Sender<|integer|>.from_transfer_payload(
       scope_reuse_string.sub(payload, pos, pos + 3))
     pos = pos + 4
   end
-  local pad = scope_reuse_string.sub(payload, pos)
+  const pad = scope_reuse_string.sub(payload, pos)
   return { padding = pad, senders = list }
 end
 
 record ScopeReuseNilSentinelProbe
-  local s0: scope_reuse_thread.Sender<|integer|>
-  local r1: scope_reuse_thread.Receiver<|integer|>
-  local s2: scope_reuse_thread.Sender<|integer|>
-  local r3: scope_reuse_thread.Receiver<|integer|>
-  local s4: scope_reuse_thread.Sender<|integer|>
+  local const s0: scope_reuse_thread.Sender<|integer|>
+  local const r1: scope_reuse_thread.Receiver<|integer|>
+  local const s2: scope_reuse_thread.Sender<|integer|>
+  local const r3: scope_reuse_thread.Receiver<|integer|>
+  local const s4: scope_reuse_thread.Sender<|integer|>
 end
 
 function ScopeReuseNilSentinelProbe:to_transfer_payload(): string
-  local i0 = self.s0:to_transfer_payload()
-  local i1 = self.r1:to_transfer_payload()
-  local i2 = self.s2:to_transfer_payload()
-  local i3 = self.r3:to_transfer_payload()
-  local i4 = self.s4:to_transfer_payload()
+  const i0 = self.s0:to_transfer_payload()
+  const i1 = self.r1:to_transfer_payload()
+  const i2 = self.s2:to_transfer_payload()
+  const i3 = self.r3:to_transfer_payload()
+  const i4 = self.s4:to_transfer_payload()
   test.assert(i0 == "\0\0\0\0" and i1 == "\1\0\0\0" and i2 == "\2\0\0\0" and
               i3 == "\3\0\0\0" and i4 == "\4\0\0\0")
   return i0 .. i1 .. i2 .. i3 .. i4
@@ -892,13 +892,13 @@ end
 
 function ScopeReuseNilSentinelProbe.from_transfer_payload(
     payload: string): ScopeReuseNilSentinelProbe
-  local i0 = scope_reuse_string.sub(payload, 1, 4)
-  local i1 = scope_reuse_string.sub(payload, 5, 8)
-  local i3 = scope_reuse_string.sub(payload, 13, 16)
+  const i0 = scope_reuse_string.sub(payload, 1, 4)
+  const i1 = scope_reuse_string.sub(payload, 5, 8)
+  const i3 = scope_reuse_string.sub(payload, 13, 16)
 
   -- 1. Claim slot 0 (Sender); this sets entry.resource = nil (consumed sentinel)
   -- while retaining entry.release == channel_release_sender_native.
-  local claimed_s0 = scope_reuse_thread.Sender<|integer|>.from_transfer_payload(i0)
+  const claimed_s0 = scope_reuse_thread.Sender<|integer|>.from_transfer_payload(i0)
   scope_reuse_saved_senders[#scope_reuse_saved_senders + 1] = claimed_s0
 
   -- 2. Claiming the ALREADY-CONSUMED slot 0 with Receiver's release callback
@@ -909,7 +909,7 @@ function ScopeReuseNilSentinelProbe.from_transfer_payload(
 
   -- 3. Claiming the ALREADY-CONSUMED slot 0 with a nil release callback must
   -- also raise kind mismatch before duplicate!
-  local null_release: foreign function(*void): void = nil
+  const null_release: foreign function(*void): void = nil
   scope_reuse_expect_error(function ()
     scope_reuse_transfer.claim_resource(i0, null_release)
   end, "transfer: resource attachment kind mismatch")
@@ -922,8 +922,8 @@ function ScopeReuseNilSentinelProbe.from_transfer_payload(
 
   -- 5. Claim slots 1 and 3 (Receivers), leave slots 2 and 4 (Senders) unclaimed,
   -- and raise to verify partial-claim disposal of the spilled trailing array.
-  local claimed_r1 = scope_reuse_thread.Receiver<|integer|>.from_transfer_payload(i1)
-  local claimed_r3 = scope_reuse_thread.Receiver<|integer|>.from_transfer_payload(i3)
+  const claimed_r1 = scope_reuse_thread.Receiver<|integer|>.from_transfer_payload(i1)
+  const claimed_r3 = scope_reuse_thread.Receiver<|integer|>.from_transfer_payload(i3)
   scope_reuse_saved_receivers[#scope_reuse_saved_receivers + 1] = claimed_r1
   scope_reuse_saved_receivers[#scope_reuse_saved_receivers + 1] = claimed_r3
   raise "scope-reuse-partial-spill-abort"
@@ -941,7 +941,7 @@ local function scope_reuse_verify_producer_packet(
   defer scope_reuse_transfer.discard_message(copied)
   if expected_count == 0 then
     test.assert(copied ~= nil, label .. ": copy_message rejected an attachment-free packet")
-    local val_c = scope_reuse_transfer.decode_message(copied)
+    const val_c = scope_reuse_transfer.decode_message(copied)
     test.assert(copied == nil,
                 label .. ": attachment-free copy did not decode and consume its slot")
     verify_decoded(val_c)
@@ -957,7 +957,7 @@ local function scope_reuse_verify_producer_packet(
                 label .. ": trailing attachment #" .. i .. " was not retained in packet")
   end
 
-  local decoded = scope_reuse_transfer.decode_message(raw)
+  const decoded = scope_reuse_transfer.decode_message(raw)
   test.assert(raw == nil, label .. ": decode did not consume its raw slot")
   verify_decoded(decoded)
 end
@@ -977,9 +977,9 @@ local function scope_reuse_add_producer_cases(
     -- Zero, inline, full-inline, first-spill, and growth counts; padding
     -- includes odd byte lengths and opposite sides of an aligned boundary
     -- without repeating every residue.
-    local inline_count = scope_reuse_inline()
-    local counts = {0, 1, inline_count, inline_count + 1, 2 * inline_count + 1}
-    local pads = {0, 1, 7}
+    const inline_count = scope_reuse_inline()
+    const counts = {0, 1, inline_count, inline_count + 1, 2 * inline_count + 1}
+    const pads = {0, 1, 7}
     for c_idx = 1, #counts do
       for p_idx = 1, #pads do
         scope_reuse_add_producer_cell(producer, counts[c_idx], pads[p_idx], exercise)
@@ -991,11 +991,11 @@ end
 function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
     context: test.Context)
   context:run("registered-root-sender", function (child: test.Context)
-    local r_rx = (function (): scope_reuse_thread.Receiver<|integer|>
+    const r_rx = (function (): scope_reuse_thread.Receiver<|integer|>
       local tx, rx = scope_reuse_thread.channel<|integer|>(1)
-      local raw = scope_reuse_transfer.encode_message(tx)
+      const raw = scope_reuse_transfer.encode_message(tx)
       scope_reuse_verify_producer_packet(raw, 1, {rx}, child:name(), function (decoded: value)
-        local adopted: scope_reuse_thread.Sender<|integer|> = decoded
+        const adopted: scope_reuse_thread.Sender<|integer|> = decoded
         test.assert(adopted:try_send(401), child:name() .. ": adopted Sender could not send")
       end)
       return rx
@@ -1010,10 +1010,10 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
 
   scope_reuse_add_producer_cases(context, "structural-record",
     function (count: integer, pad_len: integer, label: string)
-      local pad = scope_reuse_string.rep("x", pad_len)
-      local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
-      local raw = (function (): foreign *void
-        local txs: {scope_reuse_thread.Sender<|integer|>} = {}
+      const pad = scope_reuse_string.rep("x", pad_len)
+      const rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
+      const raw = (function (): foreign *void
+        const txs: {scope_reuse_thread.Sender<|integer|>} = {}
         for i = 1, count do
           local tx, rx = scope_reuse_thread.channel<|integer|>(1)
           txs[i] = tx
@@ -1023,7 +1023,7 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
       end)()
       defer do for i = 1, #rxs do rxs[i]:close() end end
       scope_reuse_verify_producer_packet(raw, count, rxs, label, function (decoded: value)
-        local rec: ScopeReuseStructuralCarrier = decoded
+        const rec: ScopeReuseStructuralCarrier = decoded
         test.assert(rec.padding == pad and #rec.senders == count,
                     label .. ": structural fields did not round-trip")
         for i = 1, count do
@@ -1040,10 +1040,10 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
 
   scope_reuse_add_producer_cases(context, "structural-union",
     function (count: integer, pad_len: integer, label: string)
-      local pad = scope_reuse_string.rep("x", pad_len)
-      local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
-      local raw = (function (): foreign *void
-        local txs: {scope_reuse_thread.Sender<|integer|>} = {}
+      const pad = scope_reuse_string.rep("x", pad_len)
+      const rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
+      const raw = (function (): foreign *void
+        const txs: {scope_reuse_thread.Sender<|integer|>} = {}
         for i = 1, count do
           local tx, rx = scope_reuse_thread.channel<|integer|>(1)
           txs[i] = tx
@@ -1053,7 +1053,7 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
       end)()
       defer do for i = 1, #rxs do rxs[i]:close() end end
       scope_reuse_verify_producer_packet(raw, count, rxs, label, function (decoded: value)
-        local u: ScopeReuseUnionCarrier = decoded
+        const u: ScopeReuseUnionCarrier = decoded
         case u
         when batch(out_pad, senders) then
           test.assert(out_pad == pad and #senders == count,
@@ -1074,17 +1074,17 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
 
   scope_reuse_add_producer_cases(context, "closure-snapshot",
     function (count: integer, pad_len: integer, label: string)
-      local pad = scope_reuse_string.rep("x", pad_len)
-      local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
-      local raw = (function (): foreign *void
-        local txs: {scope_reuse_thread.Sender<|integer|>} = {}
+      const pad = scope_reuse_string.rep("x", pad_len)
+      const rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
+      const raw = (function (): foreign *void
+        const txs: {scope_reuse_thread.Sender<|integer|>} = {}
         for i = 1, count do
           local tx, rx = scope_reuse_thread.channel<|integer|>(1)
           txs[i] = tx
           rxs[i] = rx
         end
-        local carrier = ScopeReuseStructuralCarrier(pad, txs, {})
-        local fn = function (): integer
+        const carrier = ScopeReuseStructuralCarrier(pad, txs, {})
+        const fn = function (): integer
           for i = 1, #carrier.senders do
             carrier.senders[i]:try_send(3000 + #carrier.padding * 10 + i)
           end
@@ -1094,7 +1094,7 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
       end)()
       defer do for i = 1, #rxs do rxs[i]:close() end end
       scope_reuse_verify_producer_packet(raw, count, rxs, label, function (decoded: value)
-        local fn: function (): integer = decoded
+        const fn: function (): integer = decoded
         test.assert(fn() == pad_len + count * 100,
                     label .. ": closure captures did not round-trip")
       end)
@@ -1107,10 +1107,10 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
 
   scope_reuse_add_producer_cases(context, "opaque-hook",
     function (count: integer, pad_len: integer, label: string)
-      local pad = scope_reuse_string.rep("x", pad_len)
-      local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
-      local raw = (function (): foreign *void
-        local txs: {scope_reuse_thread.Sender<|integer|>} = {}
+      const pad = scope_reuse_string.rep("x", pad_len)
+      const rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
+      const raw = (function (): foreign *void
+        const txs: {scope_reuse_thread.Sender<|integer|>} = {}
         for i = 1, count do
           local tx, rx = scope_reuse_thread.channel<|integer|>(1)
           txs[i] = tx
@@ -1120,7 +1120,7 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
       end)()
       defer do for i = 1, #rxs do rxs[i]:close() end end
       scope_reuse_verify_producer_packet(raw, count, rxs, label, function (decoded: value)
-        local op: ScopeReuseOpaqueCarrier = decoded
+        const op: ScopeReuseOpaqueCarrier = decoded
         test.assert(op.padding == pad and #op.senders == count,
                     label .. ": opaque payload did not round-trip")
         for i = 1, count do
@@ -1136,7 +1136,7 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
     end)
 
   context:run("nil-sentinel-preserves-kind-before-duplicate-and-partial-spill-claim-unwind",
-    function (_context: test.Context)
+    function (_: test.Context)
       scope_reuse_reset_state()
       defer scope_reuse_reset_state()
 
@@ -1152,7 +1152,7 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
         local s2, r2 = scope_reuse_thread.channel<|integer|>(1)
         local s3, r3 = scope_reuse_thread.channel<|integer|>(1)
         local s4, r4 = scope_reuse_thread.channel<|integer|>(1)
-        local pkt = scope_reuse_transfer.encode_message(
+        const pkt = scope_reuse_transfer.encode_message(
           ScopeReuseNilSentinelProbe(s0, r1, s2, r3, s4))
         return pkt, r0, s1, r2, s3, r4
       end)()
@@ -1199,7 +1199,7 @@ end
 -- Root hook records whose only purpose is nested packet frames: a failing
 -- encode, and a successful encode whose decode fails.
 record ScopeReuseNestedFailure
-  local fail_encode: boolean
+  local const fail_encode: boolean
 end
 
 function ScopeReuseNestedFailure:to_transfer_payload(): string
@@ -1224,7 +1224,7 @@ local scope_reuse_count_attached = 0
 -- one nested round trip: three nested frames, each followed by `check`.
 local function scope_reuse_nested_frames(check: function (): ())
   scope_reuse_expect_error(function ()
-    local failed = scope_reuse_transfer.encode_message(ScopeReuseNestedFailure(true))
+    const failed = scope_reuse_transfer.encode_message(ScopeReuseNestedFailure(true))
     scope_reuse_transfer.discard_message(failed)
   end, "scope-reuse-nested-encode-fail")
   check()
@@ -1246,11 +1246,11 @@ end
 -- The encode hook converts its endpoint through TransferValue, which resolves
 -- only the exact top frame of this execution, after every nested frame.
 record ScopeReuseCountProbe
-  local sender: scope_reuse_thread.Sender<|integer|>
+  local const sender: scope_reuse_thread.Sender<|integer|>
 end
 
 function ScopeReuseCountProbe:to_transfer_payload(): string
-  local sender = self.sender
+  const sender = self.sender
   scope_reuse_count_attached = 0
   for _ = 1, scope_reuse_count_rounds do
     scope_reuse_nested_frames(function ()
@@ -1272,7 +1272,7 @@ function ScopeReuseCountProbe.from_transfer_payload(
     payload: string): ScopeReuseCountProbe
   -- The packet holds one attachment per encode check, so this index is its
   -- bound; a lost frame would report a missing decode scope instead.
-  local bound = scope_reuse_u32_le(3 * scope_reuse_count_rounds)
+  const bound = scope_reuse_u32_le(3 * scope_reuse_count_rounds)
   for _ = 1, scope_reuse_count_rounds do
     scope_reuse_nested_frames(function ()
       scope_reuse_expect_error(function ()
@@ -1280,7 +1280,7 @@ function ScopeReuseCountProbe.from_transfer_payload(
       end, "transfer: resource attachment index is out of bounds")
     end)
   end
-  local sender: scope_reuse_thread.Sender<|integer|> =
+  const sender: scope_reuse_thread.Sender<|integer|> =
     scope_reuse_transfer.TransferValue.is_record_payload(
       "titan.thread", "titan.thread.Sender", payload):to_value()
   return { sender = sender }
@@ -1289,12 +1289,12 @@ end
 function test_scope_reuse_frame_count_neither_grants_nor_drops_authority(
     context: test.Context)
   context:run("abandoned-frames-grant-no-authority-to-another-execution",
-    function (_context: test.Context)
+    function (_: test.Context)
       scope_reuse_reset_state()
       defer scope_reuse_reset_state()
       -- Suspended holder frames keep the state's frame count positive while
       -- this execution has none; every standalone resolution still rejects.
-      local hold_rx = scope_reuse_stash_holder_coroutines()
+      const hold_rx = scope_reuse_stash_holder_coroutines()
       defer hold_rx:close()
       local tx, rx = scope_reuse_thread.channel<|integer|>(1)
       defer tx:close()
@@ -1321,10 +1321,10 @@ function test_scope_reuse_frame_count_neither_grants_nor_drops_authority(
     end)
 
   context:run("nested-failures-keep-the-enclosing-frame-authority",
-    function (_context: test.Context)
+    function (_: test.Context)
       local tx, rx = scope_reuse_thread.channel<|integer|>(1)
       defer rx:close()
-      local restored: ScopeReuseCountProbe = scope_reuse_roundtrip(ScopeReuseCountProbe(tx))
+      const restored: ScopeReuseCountProbe = scope_reuse_roundtrip(ScopeReuseCountProbe(tx))
       test.assert(restored.sender:try_send(128),
                   "Sender adopted through the carried decode context could not send")
       local got, item? = rx:try_receive()

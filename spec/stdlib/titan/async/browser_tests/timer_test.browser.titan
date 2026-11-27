@@ -12,9 +12,9 @@ end
 -- with host requests keep their own order across hundreds of turns.
 function test_timers_and_requests_across_relinquishes(_: test.Context)
   runtime_test.run(function ()
-    local workers: {async.Task<|integer, value|>} = {}
+    const workers: {async.Task<|integer, value|>} = {}
     for worker = 1, 24 do
-      local task = async.run<|integer, value|>(function (): integer
+      const task = async.run<|integer, value|>(function (): integer
         local total = 0
         for step = 1, 5 do
           if (worker + step) % 2 == 0 then
@@ -29,7 +29,7 @@ function test_timers_and_requests_across_relinquishes(_: test.Context)
       task_support.cleanup_task(task, "timer worker cleanup")
       workers[worker] = task
     end
-    local yielder = async.run<|integer, value|>(function (): integer
+    const yielder = async.run<|integer, value|>(function (): integer
       for _ = 1, 300 do timer.yield() end
       return 300
     end)
@@ -72,7 +72,7 @@ end
 
 function test_cancelled_sleeps_and_closed_tickers_clear_host_timers(_: test.Context)
   runtime_test.run(function ()
-    local sleeper = async.run<|nil, value|>(function (): nil
+    const sleeper = async.run<|nil, value|>(function (): nil
       timer.sleep(60000)
       return nil
     end)
@@ -83,7 +83,7 @@ function test_cancelled_sleeps_and_closed_tickers_clear_host_timers(_: test.Cont
     async.join(sleeper)
     test.assert(host_timers(60000) == 0, "a cancelled sleep left its JavaScript timer armed")
 
-    local ticker = timer.ticker(55000)
+    const ticker = timer.ticker(55000)
     defer ticker:close()
     test.assert(host_timers(55000) == 1, "a ticker armed no JavaScript timer")
     ticker:close()
@@ -116,7 +116,7 @@ local function fire_host_timer(milliseconds: integer)
 end
 
 local function long_sleep(): async.Task<|nil, value|>
-  local sleeper = async.run<|nil, value|>(function (): nil
+  const sleeper = async.run<|nil, value|>(function (): nil
     timer.sleep(LONG_PERIOD)
     return nil
   end)
@@ -150,7 +150,7 @@ end
 
 local function long_ticker_wait(...: Value): Value
   -- Intentionally left open: disposal must retire it through Runtime close.
-  local ticker = timer.ticker(LONG_PERIOD)
+  const ticker = timer.ticker(LONG_PERIOD)
   ticker:tick()
   return Value.is_nil()
 end
@@ -159,7 +159,7 @@ function test_long_tickers_rearm_whole_periods_and_close(_: test.Context)
   runtime_test.run(function ()
     local ticks = 0
     local ticking = async.run<|nil, value|>(function (): nil
-      local ticker = timer.ticker(LONG_PERIOD)
+      const ticker = timer.ticker(LONG_PERIOD)
       defer ticker:close()
       for _ = 1, 2 do
         test.assert(ticker:tick(), "a long ticker closed before its tick")
@@ -184,7 +184,7 @@ function test_long_tickers_rearm_whole_periods_and_close(_: test.Context)
       "a closed long ticker left a host timer")
 
     ticking = async.run<|nil, value|>(function (): nil
-      local ticker = timer.ticker(LONG_PERIOD)
+      const ticker = timer.ticker(LONG_PERIOD)
       defer ticker:close()
       ticker:tick()
       return nil

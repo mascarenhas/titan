@@ -100,7 +100,7 @@ end
 -- Whether the registry slot behind titan.backtrace() holds a trace in this
 -- state.
 function unwind_has_backtrace(): boolean
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack" end
   ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)

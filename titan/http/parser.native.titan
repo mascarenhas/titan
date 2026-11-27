@@ -15,14 +15,14 @@ local EVENT_BODY = 7
 local EVENT_MESSAGE_COMPLETE = 8
 
 local record Event
-  local kind: integer
-  local text: string
-  local method: integer
-  local status: integer
-  local major: integer
-  local minor: integer
-  local keep_alive: boolean
-  local upgrade: boolean
+  local const kind: integer
+  local const text: string
+  local const method: integer
+  local const status: integer
+  local const major: integer
+  local const minor: integer
+  local const keep_alive: boolean
+  local const upgrade: boolean
 end
 
 -- The Parser owns stable inline llhttp storage and the exact traced closures
@@ -31,15 +31,15 @@ local record Parser
   local native: foreign llhttp_t
   local settings: foreign llhttp_settings_t
   local callback_state: foreign *lua_State
-  local url_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
-  local status_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
-  local header_field_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
-  local header_value_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
-  local header_value_complete_callback: function (Parser): (foreign int)
-  local headers_complete_callback: function (Parser): (foreign int)
-  local body_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
-  local message_complete_callback: function (Parser): (foreign int)
-  local connection: io.ReaderWriterCloser
+  local const url_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
+  local const status_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
+  local const header_field_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
+  local const header_value_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
+  local const header_value_complete_callback: function (Parser): (foreign int)
+  local const headers_complete_callback: function (Parser): (foreign int)
+  local const body_callback: function (Parser, foreign const *char, foreign size_t): (foreign int)
+  local const message_complete_callback: function (Parser): (foreign int)
+  local const connection: io.ReaderWriterCloser
   local response_to_head: boolean
   local allow_upgrade: boolean
   local upgrade: boolean
@@ -205,7 +205,7 @@ end
 local function native_bytes(pointer: foreign const *char,
                             length: integer): string
   if length == 0 then return "" end
-  local storage = foreign char.new_array(length)
+  const storage = foreign char.new_array(length)
   ffi.memcpy(storage as foreign *char, pointer,
                  length as foreign size_t)
   return storage as string
@@ -239,13 +239,11 @@ end
 local function append_text_event(parser: Parser, kind: integer,
                                  pointer: foreign const *char,
                                  length: foreign size_t): foreign int
-  do
-    parser.events[#parser.events + 1] =
-      event(kind, native_bytes(pointer, length as integer))
-    return ffi.HPE_OK as foreign int
-  catch
-    return callback_failure(parser, error)
-  end
+  parser.events[#parser.events + 1] =
+    event(kind, native_bytes(pointer, length as integer))
+  return ffi.HPE_OK as foreign int
+catch
+  return callback_failure(parser, error)
 end
 
 local function url_callback(parser: Parser,
@@ -274,35 +272,31 @@ end
 
 local function header_value_complete_callback(
     parser: Parser): foreign int
-  do
-    parser.events[#parser.events + 1] =
-      event(EVENT_HEADER_VALUE_COMPLETE, "")
-    return ffi.HPE_OK as foreign int
-  catch
-    return callback_failure(parser, error)
-  end
+  parser.events[#parser.events + 1] =
+    event(EVENT_HEADER_VALUE_COMPLETE, "")
+  return ffi.HPE_OK as foreign int
+catch
+  return callback_failure(parser, error)
 end
 
 local function headers_complete_callback(
     parser: Parser): foreign int
-  do
-    parser.events[#parser.events + 1] = Event {
-      kind = EVENT_HEADERS_COMPLETE,
-      text = "",
-      method = ffi.llhttp_get_method(parser.native) as integer,
-      status = ffi.llhttp_get_status_code(parser.native) as integer,
-      major = ffi.llhttp_get_http_major(parser.native) as integer,
-      minor = ffi.llhttp_get_http_minor(parser.native) as integer,
-      keep_alive = ffi.llhttp_should_keep_alive(parser.native) ~= 0,
-      upgrade = ffi.llhttp_get_upgrade(parser.native) ~= 0,
-    }
-    -- llhttp's documented return 1 makes a response to HEAD bodyless. Its
-    -- message-complete callback is still the synchronous pause boundary.
-    if parser.response_to_head then return 1 as foreign int end
-    return ffi.HPE_PAUSED as foreign int
-  catch
-    return callback_failure(parser, error)
-  end
+  parser.events[#parser.events + 1] = Event {
+    kind = EVENT_HEADERS_COMPLETE,
+    text = "",
+    method = ffi.llhttp_get_method(parser.native) as integer,
+    status = ffi.llhttp_get_status_code(parser.native) as integer,
+    major = ffi.llhttp_get_http_major(parser.native) as integer,
+    minor = ffi.llhttp_get_http_minor(parser.native) as integer,
+    keep_alive = ffi.llhttp_should_keep_alive(parser.native) ~= 0,
+    upgrade = ffi.llhttp_get_upgrade(parser.native) ~= 0,
+  }
+  -- llhttp's documented return 1 makes a response to HEAD bodyless. Its
+  -- message-complete callback is still the synchronous pause boundary.
+  if parser.response_to_head then return 1 as foreign int end
+  return ffi.HPE_PAUSED as foreign int
+catch
+  return callback_failure(parser, error)
 end
 
 local function body_callback(parser: Parser,
@@ -313,27 +307,25 @@ end
 
 local function message_complete_callback(
     parser: Parser): foreign int
-  do
-    parser.events[#parser.events + 1] = Event {
-      kind = EVENT_MESSAGE_COMPLETE,
-      text = "",
-      method = 0,
-      status = 0,
-      major = 0,
-      minor = 0,
-      keep_alive = ffi.llhttp_should_keep_alive(parser.native) ~= 0,
-      upgrade = false,
-    }
-    return ffi.HPE_PAUSED as foreign int
-  catch
-    return callback_failure(parser, error)
-  end
+  parser.events[#parser.events + 1] = Event {
+    kind = EVENT_MESSAGE_COMPLETE,
+    text = "",
+    method = 0,
+    status = 0,
+    major = 0,
+    minor = 0,
+    keep_alive = ffi.llhttp_should_keep_alive(parser.native) ~= 0,
+    upgrade = false,
+  }
+  return ffi.HPE_PAUSED as foreign int
+catch
+  return callback_failure(parser, error)
 end
 
 local function new_parser(connection: io.ReaderWriterCloser,
                           parser_type: foreign llhttp_type_t,
                           response_to_head: boolean): Parser
-  local parser = Parser {
+  const parser = Parser {
     native = foreign llhttp_t.new(),
     settings = foreign llhttp_settings_t.new(),
     callback_state = L,
@@ -378,7 +370,7 @@ local function new_parser(connection: io.ReaderWriterCloser,
     paused = false,
     closed = false,
   }
-  local settings = parser.settings
+  const settings = parser.settings
   ffi.llhttp_settings_init(settings)
   settings.on_url = llhttp_url_cb
   settings.on_status = llhttp_status_cb
@@ -395,7 +387,7 @@ end
 
 local function new_request_parser(
     connection: io.ReaderWriterCloser): Parser
-  local parser = new_parser(connection, ffi.HTTP_REQUEST, false)
+  const parser = new_parser(connection, ffi.HTTP_REQUEST, false)
   parser.allow_upgrade = true
   parser.header_limit = 65536
   return parser
@@ -407,9 +399,9 @@ local function new_response_parser(connection: io.ReaderWriterCloser,
 end
 
 local function parser_error(parser: Parser): string
-  local code = parser.last_error as foreign llhttp_errno_t
+  const code = parser.last_error as foreign llhttp_errno_t
   local name = native_string(ffi.llhttp_errno_name(code))
-  local reason = native_string(
+  const reason = native_string(
     ffi.llhttp_get_error_reason(parser.native))
   if #name == 0 then name = "HPE_UNKNOWN" end
   if #reason == 0 then return "HTTP parse error " .. name end
@@ -417,11 +409,11 @@ local function parser_error(parser: Parser): string
 end
 
 local function drain_events(parser: Parser)
-  local events = parser.events
+  const events = parser.events
   parser.events = {}
   local index = 1
   while index <= #events do
-    local queued = events[index]
+    const queued = events[index]
     if queued.kind == EVENT_URL then
       parser.target_text = parser.target_text .. queued.text
     elseif queued.kind == EVENT_STATUS then
@@ -462,7 +454,7 @@ end
 
 local function raise_callback_failure(parser: Parser)
   if not parser.callback_failed then return end
-  local failure = parser.callback_error
+  const failure = parser.callback_error
   parser.events = {}
   raise failure
 end
@@ -484,23 +476,23 @@ local function execute_input(parser: Parser, input: string)
   end
   -- llhttp borrows the input bytes while callbacks may allocate. The caller
   -- keeps this parameter reachable for the whole call.
-  local bytes = input as foreign const *char
+  const bytes = input as foreign const *char
   -- Limit the native span before callbacks copy attacker-controlled text.
   -- Count punctuation and leading lines as well as callback text. A headers
   -- pause stops counting before any coalesced upgraded-protocol suffix.
   local span = #input
-  local opening = not parser.headers_complete
+  const opening = not parser.headers_complete
   if opening and span > parser.header_limit - parser.header_bytes then
     span = parser.header_limit - parser.header_bytes
   end
-  local status = ffi.llhttp_execute(
+  const status = ffi.llhttp_execute(
     parser.native, bytes, span as foreign size_t)
   parser.last_error = status as integer
-  local consumed = (function (
+  const consumed = (function (
       parser: Parser, input: string, bytes: foreign const *char,
       status: foreign llhttp_errno_t, span: integer): integer
     if status == ffi.HPE_OK then return span end
-    local position = ffi.llhttp_get_error_pos(parser.native)
+    const position = ffi.llhttp_get_error_pos(parser.native)
     if position == nil then return 0 end
     if position < bytes or position > bytes + span then
       raise "HTTP parser reported an invalid consumed offset"
@@ -536,7 +528,7 @@ local function finish_input(parser: Parser)
   if ffi.lua_checkstack(L, ffi.LUA_MINSTACK) == 0 then
     raise "cannot reserve stack for HTTP parser callbacks"
   end
-  local status = ffi.llhttp_finish(parser.native)
+  const status = ffi.llhttp_finish(parser.native)
   parser.last_error = status as integer
   parser.transport_eof = true
   raise_callback_failure(parser)
@@ -568,7 +560,7 @@ local function advance_parser(parser: Parser)
     end
   end
   if #parser.input_excess > 0 then
-    local input = parser.input_excess
+    const input = parser.input_excess
     parser.input_excess = ""
     execute_input(parser, input)
     return
@@ -579,7 +571,7 @@ local function advance_parser(parser: Parser)
     end
     return
   end
-  local input? = parser.connection:read()
+  const input? = parser.connection:read()
   if not input then
     finish_input(parser)
   else
@@ -609,7 +601,7 @@ end
 
 local function parser_read(parser: Parser): string?
   if #parser.body_excess > 0 then
-    local result = parser.body_excess
+    const result = parser.body_excess
     parser.body_excess = ""
     parser.body_consumed = parser.body_consumed + #result
     return result
@@ -618,7 +610,7 @@ local function parser_read(parser: Parser): string?
     if parser.message_complete then return nil end
     advance_parser(parser)
   end
-  local result = parser.body_chunks[parser.body_index]
+  const result = parser.body_chunks[parser.body_index]
   parser.body_consumed = parser.body_consumed + #result
   parser.body_index = parser.body_index + 1
   if parser.body_index > #parser.body_chunks then
@@ -631,21 +623,21 @@ end
 local function parser_read_until(parser: Parser, delimiter: string,
                                   chop: boolean?): string?
   if #delimiter == 0 then raise "read delimiter must not be empty" end
-  local builder = string.writer()
+  const builder = string.writer()
   local tail = ""
   while true do
-    local chunk? = parser_read(parser)
+    const chunk? = parser_read(parser)
     if not chunk then
       if #tail > 0 then builder:write(tail) end
-      local result = builder:drain()
+      const result = builder:drain()
       if #result == 0 then return nil end
       return result
     end
-    local boundary = tail .. (chunk as string)
-    local match? = string.find(boundary, delimiter)
+    const boundary = tail .. (chunk as string)
+    const match? = string.find(boundary, delimiter)
     if match then
-      local match_first = match as integer
-      local match_end = match_first + #delimiter - 1
+      const match_first = match as integer
+      const match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
@@ -657,7 +649,7 @@ local function parser_read_until(parser: Parser, delimiter: string,
     end
     local keep = #delimiter - 1
     if keep > #boundary then keep = #boundary end
-    local committed = #boundary - keep
+    const committed = #boundary - keep
     if committed > 0 then
       builder:write(string.sub(boundary, 1, committed))
     end

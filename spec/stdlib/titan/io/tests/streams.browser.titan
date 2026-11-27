@@ -2,19 +2,19 @@ local async = import "async"
 
 function test_browser_standard_streams_satisfy_io_interfaces(_context: test.Context)
   runtime_test.run(function ()
-    local writer: stream.WriterCloser = system.stdout
+    const writer: stream.WriterCloser = system.stdout
     writer:write("browser io WriterCloser\n")
     writer:close()
-    local errors: stream.Writer = system.stderr
+    const errors: stream.Writer = system.stderr
     errors:write("browser io Writer\n")
-    local reader: stream.ReaderCloser = system.stdin
+    const reader: stream.ReaderCloser = system.stdin
     reader:close()
     local caught = false
     do
       reader:read()
     catch
       if not (error is async.OperationError) then raise end
-      local failure: async.OperationError = error
+      const failure: async.OperationError = error
       caught = true
       test.assert(failure.name == "ENOSYS" and failure.operation == "os.InputStream.read",
         "ReaderCloser changed the input-source error")

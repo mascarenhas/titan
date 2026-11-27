@@ -117,16 +117,16 @@ end
 function addrinfo_result_t:entries(): {addrinfo_t}
   if self.released then raise "addrinfo result was released" end
   if self.copied ~= nil then return self.copied as {addrinfo_t} end
-  local entries: {addrinfo_t} = {}
+  const entries: {addrinfo_t} = {}
   local node = self.native
   while node ~= nil do
     local address: sockaddr_t? = nil
     local bytes: string? = nil
     local canonical: string? = nil
-    local size = node.ai_addrlen as integer
+    const size = node.ai_addrlen as integer
     if node.ai_addr ~= nil then
       -- Do not infer all addresses are IPv4/IPv6 or truncate opaque outputs.
-      local raw: owned unsigned char[] = foreign unsigned char.new_array(size)
+      const raw: owned unsigned char[] = foreign unsigned char.new_array(size)
       ffi.memcpy(raw, node.ai_addr, size as foreign size_t)
       bytes = raw as string
       address = sockaddr_copy_sized(node.ai_addr, size)
@@ -151,7 +151,7 @@ end
 -- @usage uv/functions/dns.md#freeaddrinfo
 function freeaddrinfo(result: addrinfo_result_t?)
   if result == nil then return end
-  local owner = result as addrinfo_result_t
+  const owner = result as addrinfo_result_t
   if owner.released then return end
   ffi.uv_freeaddrinfo(owner.native)
   owner.native = nil
@@ -175,12 +175,12 @@ local function getaddrinfo_deliver(owner: getaddrinfo_t, loop: loop_t,
                                    status: integer, native: foreign *addrinfo)
   -- Commit the independently owned native allocation before anything can raise.
   -- It remains reachable from request:addrinfo() even if copying fails.
-  local result = owner.result as addrinfo_result_t
+  const result = owner.result as addrinfo_result_t
   result.native = native
   owner.result_status = status
   loop.requests[owner] = nil
   owner.pending = false
-  local callback? = owner.callback
+  const callback? = owner.callback
   owner.callback = nil
   local output: addrinfo_result_t? = nil
   if status == 0 then
@@ -287,7 +287,7 @@ function getaddrinfo(loop: loop_t, request: getaddrinfo_t,
     native_hints.ai_protocol = hints.ai_protocol as foreign int
     hints_pointer = native_hints
   end
-  local result = addrinfo_result_t(nil, nil, false)
+  const result = addrinfo_result_t(nil, nil, false)
   local native_callback: foreign uv_getaddrinfo_cb = nil
   if callback ~= nil then
     native_callback = getaddrinfo_callback
@@ -295,13 +295,13 @@ function getaddrinfo(loop: loop_t, request: getaddrinfo_t,
   end
   request.result = result
   request.result_status = 0
-  local previous_loop? = request.loop
+  const previous_loop? = request.loop
   request.loop = loop
   request.callback = callback
   request.pending = callback ~= nil
   ffi.uv_req_set_data(request.native as foreign *uv_req_t,
                       request as foreign *void)
-  local status = ffi.uv_getaddrinfo(loop.native, request.native,
+  const status = ffi.uv_getaddrinfo(loop.native, request.native,
       native_callback, native_node, native_service, hints_pointer) as integer
   -- No allocating helper/callable adaptation after native acceptance.
   if callback == nil then
@@ -340,7 +340,7 @@ local function getnameinfo_deliver(owner: getnameinfo_t, loop: loop_t,
   owner.pending = false
   owner.completed = true
   owner.result_status = status
-  local callback? = owner.callback
+  const callback? = owner.callback
   owner.callback = nil
   -- Copy both request-borrowed strings before user code may reuse request.
   local copied_host: string? = nil
@@ -424,21 +424,21 @@ function getnameinfo(loop: loop_t, request: getnameinfo_t,
     address: sockaddr_t, flags: integer): integer
   if not loop.initialized then return ffi.UV_EINVAL end
   if request.pending then return ffi.UV_EBUSY end
-  local native_flags = flags as foreign int
-  local native_address = address:pointer()
+  const native_flags = flags as foreign int
+  const native_address = address:pointer()
   local native_callback: foreign uv_getnameinfo_cb = nil
   if callback ~= nil then
     native_callback = getnameinfo_callback
     loop.requests[request] = true
   end
-  local previous_loop? = request.loop
+  const previous_loop? = request.loop
   request.loop = loop
   request.callback = callback
   request.pending = callback ~= nil
   request.completed = false
   ffi.uv_req_set_data(request.native as foreign *uv_req_t,
                       request as foreign *void)
-  local status = ffi.uv_getnameinfo(loop.native, request.native,
+  const status = ffi.uv_getnameinfo(loop.native, request.native,
       native_callback, native_address, native_flags) as integer
   if callback == nil then
     request.result_status = status

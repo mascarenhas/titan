@@ -1,11 +1,11 @@
 foreign import "time.h"
 
 local function coverage_locale_has_empty_ampm(): boolean
-  local instant = 0 as foreign time_t
-  local calendar = ffi.gmtime(instant)
+  const instant = 0 as foreign time_t
+  const calendar = ffi.gmtime(instant)
   if not calendar then raise "gmtime could not represent the epoch" end
   local storage = foreign char.new_array(256)
-  local written = ffi.strftime(storage as foreign *char,
+  const written = ffi.strftime(storage as foreign *char,
     256 as foreign size_t, "[%p]", calendar)
   return written == 2 and storage[0] == 91 and storage[1] == 93 and
          storage[2] == 0
@@ -46,11 +46,11 @@ end
 
 function test_locale_query_change_restore_and_validation(
     _context: test.Context)
-  local previous: string? = system.setlocale(nil, "time")
+  const previous: string? = system.setlocale(nil, "time")
   test.assert(previous ~= nil, "could not query LC_TIME")
-  local saved = previous as string
+  const saved = previous as string
   defer do
-    local restored: string? = system.setlocale(saved, "time")
+    const restored: string? = system.setlocale(saved, "time")
     test.assert(restored ~= nil, "could not restore LC_TIME")
   end
 
@@ -72,11 +72,11 @@ function test_locale_query_change_restore_and_validation(
 end
 
 function test_date_accepts_empty_locale_conversion(_context: test.Context)
-  local previous: string? = system.setlocale(nil, "time")
+  const previous: string? = system.setlocale(nil, "time")
   test.assert(previous ~= nil, "could not query LC_TIME")
-  local saved = previous as string
+  const saved = previous as string
   defer do
-    local restored: string? = system.setlocale(saved, "time")
+    const restored: string? = system.setlocale(saved, "time")
     test.assert(restored ~= nil, "could not restore LC_TIME")
   end
 
@@ -84,7 +84,7 @@ function test_date_accepts_empty_locale_conversion(_context: test.Context)
   test.assert(support.c_utc_format("%p") == "AM" and
               support.as_string(system.date("!%p", 0), "C-locale AM/PM") == "AM",
               "C-locale control did not render AM")
-  local candidates = {
+  const candidates = {
     "fr_FR.UTF-8", "fr_FR.utf8", "fr_FR", "fr-FR", "French_France.1252",
     "en_DK.UTF-8", "en_DK.utf8", "en_DK",
     "da_DK.UTF-8", "da_DK.utf8", "da_DK", "da-DK",
@@ -103,9 +103,9 @@ function test_date_accepts_empty_locale_conversion(_context: test.Context)
 end
 
 function test_date_constructor_builds_the_utc_epoch_fields(_context: test.Context)
-  local built = system.Date { year = 1970, month = 1, day = 1, hour = 0, min = 0, sec = 0,
+  const built = system.Date { year = 1970, month = 1, day = 1, hour = 0, min = 0, sec = 0,
     wday = 5, yday = 1, isdst = false }
-  local epoch: system.Date = system.date("!*t", 0)
+  const epoch: system.Date = system.date("!*t", 0)
   test.assert(built.year == epoch.year and built.month == epoch.month and built.day == epoch.day and
     built.hour == epoch.hour and built.min == epoch.min and built.sec == epoch.sec and
     built.wday == epoch.wday and built.yday == epoch.yday,

@@ -13,7 +13,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
       end
     end
     local detached_deadline_marker_done = false
-    local handler: http.Handler = function (request: http.Request,
+    const handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
       handled = handled + 1
       if request.target == "/boundary" then
@@ -25,7 +25,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
         -- The header deadline is gone before the handler starts reading the
         -- body. A delayed body therefore remains an application-level wait.
         body_read_started = true
-        local body? = request:read()
+        const body? = request:read()
         test.assert(body == "x",
               "handler-side body read received the wrong contents")
         response:set_header("Content-Length", "1")
@@ -58,18 +58,18 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     -- Zero preserves the original indefinite header wait.
     local zero_server, zero_port = support.http_listen(first_port, handler, nil)
     defer zero_server:close()
-    local zero_serving = async.run<|value, value|>(function (): value
+    const zero_serving = async.run<|value, value|>(function (): value
       zero_server:serve()
       return nil
     end)
     defer task_support.cancel_and_join_task(zero_serving, "nested HTTP zero serving cleanup")
-    local delayed = net.connect("127.0.0.1", zero_port)
+    const delayed = net.connect("127.0.0.1", zero_port)
     defer delayed:close()
     timer.sleep(75)
     delayed:write(
       "GET /zero HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
-    local delayed_response? = delayed:read_until("\r\n\r\n", false)
+    const delayed_response? = delayed:read_until("\r\n\r\n", false)
     test.assert(delayed_response ~= nil,
           "zero idle timeout closed a delayed request")
     test.assert(delayed:read() == nil,
@@ -83,7 +83,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
 
     local server, port = support.http_listen(first_port + 101, handler, 30)
     defer server:close()
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -94,10 +94,10 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     -- reader cancellation or join waits for unrelated live work, it records
     -- the delay before providing that later wakeup. Sending a complete request
     -- also bounds the failure mode where the timeout never closes the peer.
-    local prompt = net.connect("127.0.0.1", port)
+    const prompt = net.connect("127.0.0.1", port)
     defer prompt:close()
     local prompt_watchdog_fired = false
-    local prompt_watchdog = async.run<|value, value|>(function (): value
+    const prompt_watchdog = async.run<|value, value|>(function (): value
       timer.sleep(1000)
       prompt_watchdog_fired = true
       do
@@ -122,7 +122,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     -- Exercise repeated reader/check/timer loser cleanup. None of these idle
     -- connections may dispatch a handler.
     for _ = 1, 2 do
-      local idle = net.connect("127.0.0.1", port)
+      const idle = net.connect("127.0.0.1", port)
       defer idle:close()
       timer.sleep(90)
       test.assert(idle:read() == nil,
@@ -138,10 +138,10 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     -- implementation would dispatch the deliberately late request instead.
     test.assert(server:idle_timeout(200) == 30,
           "HTTP Server did not expose the previous timeout")
-    local partial = net.connect("127.0.0.1", port)
+    const partial = net.connect("127.0.0.1", port)
     defer partial:close()
     partial:write("GET /partial HTTP/1.1\r\nHost: local")
-    local partial_feeder = async.run<|value, value|>(function (): value
+    const partial_feeder = async.run<|value, value|>(function (): value
       timer.sleep(70)
       do partial:write("h") catch end
       timer.sleep(70)
@@ -151,7 +151,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     defer task_support.cancel_and_join_task(
       partial_feeder, "nested HTTP partial feeder cleanup")
     local partial_late = false
-    local partial_watchdog = async.run<|value, value|>(function (): value
+    const partial_watchdog = async.run<|value, value|>(function (): value
       timer.sleep(250)
       partial_late = true
       do
@@ -179,7 +179,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     -- already-terminal failure and closes the peer without raising it again.
     -- The retained child-output supervisor requires exactly one uncaught Task
     -- report, catching either suppression or duplicate reporting.
-    local malformed = net.connect("127.0.0.1", port)
+    const malformed = net.connect("127.0.0.1", port)
     defer malformed:close()
     malformed:write(
       "GET /malformed HTTP/1.1\r\nBad Header: value\r\n\r\n")
@@ -193,16 +193,16 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     -- the timer even though each request gets its own absolute deadline. The
     -- scheduling marker also proves the reader-wins path only requests
     -- cancellation of that deadline; it does not wait for deadline cleanup.
-    local buffered = net.connect("127.0.0.1", port)
+    const buffered = net.connect("127.0.0.1", port)
     defer buffered:close()
     buffered:write(
       "GET /buffered-one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
       "GET /buffered-two HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
-    local buffered_output = string.writer()
+    const buffered_output = string.writer()
     for chunk in buffered:read do buffered_output:write(chunk) end
-    local rendered = buffered_output:drain()
-    local first_response? = string.find(rendered, "HTTP/1.1 200 OK")
+    const rendered = buffered_output:drain()
+    const first_response? = string.find(rendered, "HTTP/1.1 200 OK")
     local second_response: integer? = nil
     if first_response then
       second_response = string.find(
@@ -217,7 +217,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     -- A handler-side body read is also outside the header deadline. Delay the
     -- sole body byte for three complete timeout intervals before allowing the
     -- handler and response to finish.
-    local body_read = net.connect("127.0.0.1", port)
+    const body_read = net.connect("127.0.0.1", port)
     defer body_read:close()
     body_read:write(
       "POST /body-read HTTP/1.1\r\nHost: localhost\r\n" ..
@@ -225,7 +225,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     while not body_read_started do timer.yield() end
     timer.sleep(90)
     body_read:write("x")
-    local body_headers? = body_read:read_until("\r\n\r\n", false)
+    const body_headers? = body_read:read_until("\r\n\r\n", false)
     test.assert(body_headers ~= nil and support.read_exact(body_read, 1) == "R",
           "idle timeout covered a handler-side request-body read")
     test.assert(body_read:read() == nil,
@@ -236,19 +236,19 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
 
     -- The handler may outlive the idle deadline, and automatic request-body
     -- draining remains application-controlled rather than deadline-bound.
-    local boundary = net.connect("127.0.0.1", port)
+    const boundary = net.connect("127.0.0.1", port)
     defer boundary:close()
     boundary:write(
       "POST /boundary HTTP/1.1\r\nHost: localhost\r\n" ..
       "Content-Length: 1\r\n\r\n")
-    local boundary_headers? = boundary:read_until("\r\n\r\n", false)
+    const boundary_headers? = boundary:read_until("\r\n\r\n", false)
     test.assert(boundary_headers ~= nil and support.read_exact(boundary, 1) == "B",
           "idle timeout covered handler or response work")
     timer.sleep(90)
     boundary:write(
       "xGET /after-drain HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
-    local after_drain? = boundary:read_until("\r\n\r\n", false)
+    const after_drain? = boundary:read_until("\r\n\r\n", false)
     test.assert(after_drain ~= nil,
           "idle timeout covered automatic request-body draining")
     test.assert(boundary:read() == nil,
@@ -267,13 +267,13 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
     local snapshot_server, snapshot_port =
       support.http_listen(first_port + 202, handler, nil)
     defer snapshot_server:close()
-    local snapshot_serving = async.run<|value, value|>(function (): value
+    const snapshot_serving = async.run<|value, value|>(function (): value
       snapshot_server:serve()
       return nil
     end)
     defer task_support.cancel_and_join_task(
       snapshot_serving, "nested HTTP snapshot serving cleanup")
-    local snapshot = net.connect("127.0.0.1", snapshot_port)
+    const snapshot = net.connect("127.0.0.1", snapshot_port)
     defer snapshot:close()
     snapshot:write(
       "GET /snapshot-prime HTTP/1.1\r\nHost: localhost\r\n\r\nG")
@@ -309,7 +309,7 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
   support.outcome = "running"
   return async.run<|value, value|>(function (): value
     local handled = 0
-    local handler: http.Handler = function (_: http.Request,
+    const handler: http.Handler = function (_: http.Request,
                                             response: http.Response)
       handled = handled + 1
       response:set_header("Content-Length", "0")
@@ -324,18 +324,18 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
     defer server:close()
     test.assert(server:idle_timeout(nil) == idle_timeout,
           "HTTPS listener did not retain its idle timeout")
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
     defer task_support.cancel_and_join_task(serving, "nested HTTP serving cleanup")
 
-    local expect_tls_timeout = function (connection: ssl.Connection,
+    const expect_tls_timeout = function (connection: ssl.Connection,
                                          label: string)
       local observed = "not-read"
-      local reader = async.run<|value, value|>(function (): value
+      const reader = async.run<|value, value|>(function (): value
         do
-          local chunk? = connection:read()
+          const chunk? = connection:read()
           if chunk then
             observed = "unexpected TLS data"
           else
@@ -352,7 +352,7 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
       end)
       defer task_support.cancel_and_join_task(reader, "nested HTTP reader cleanup")
       local watchdog_fired = false
-      local watchdog = async.run<|value, value|>(function (): value
+      const watchdog = async.run<|value, value|>(function (): value
         timer.sleep(1000)
         watchdog_fired = true
         reader:cancel(async.CancellationReason.simple(
@@ -360,7 +360,7 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
         return nil
       end)
       defer task_support.cancel_and_join_task(watchdog, "nested HTTP watchdog cleanup")
-      local reader_status = async.join(reader)
+      const reader_status = async.join(reader)
       watchdog:cancel(async.CancellationReason.simple(
         label .. " completed promptly"))
       async.join(watchdog)
@@ -372,7 +372,7 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
             label .. " reported " .. observed)
     end
 
-    local idle = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
+    const idle = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
     defer idle:close()
     expect_tls_timeout(idle, "initial HTTPS idle timeout")
     idle:close()
@@ -382,11 +382,11 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
     -- Apply the same policy after one successful keep-alive request. Reading
     -- immediately leaves the listener as unrelated live I/O while the next
     -- request's deadline cancels and joins its SSL reader.
-    local keep_alive = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
+    const keep_alive = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
     defer keep_alive:close()
     keep_alive:write(
       "GET /secure-keep-alive HTTP/1.1\r\nHost: localhost\r\n\r\n")
-    local keep_alive_response? = keep_alive:read_until("\r\n\r\n", false)
+    const keep_alive_response? = keep_alive:read_until("\r\n\r\n", false)
     test.assert(keep_alive_response ~= nil,
           "HTTPS keep-alive request received no response")
     expect_tls_timeout(keep_alive, "HTTPS keep-alive idle timeout")
@@ -395,7 +395,7 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
           "HTTPS keep-alive timeout dispatched an extra handler")
 
     -- Header bytes do not exempt TLS connections from the same deadline.
-    local partial = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
+    const partial = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
     defer partial:close()
     partial:write("GET /secure-partial HTTP/1.1\r\nHost: local")
     expect_tls_timeout(partial, "partial-header HTTPS idle timeout")
@@ -403,12 +403,12 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
     test.assert(handled == 1,
           "partial HTTPS headers dispatched a handler")
 
-    local immediate = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
+    const immediate = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
     defer immediate:close()
     immediate:write(
       "GET /secure-timeout HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
-    local response? = immediate:read_until("\r\n\r\n", false)
+    const response? = immediate:read_until("\r\n\r\n", false)
     test.assert(response ~= nil,
           "HTTPS idle timeout rejected an immediate request")
     test.assert(immediate:read() == nil,
@@ -430,7 +430,7 @@ local function start_https(first_port: integer): async.Task
   support.outcome = "running"
   return async.run<|value, value|>(function (): value
     local handled = false
-    local handler: http.Handler = function (request: http.Request,
+    const handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
       handled = true
       test.assert(request.method == "GET" and request.url.scheme == "https" and
@@ -440,7 +440,7 @@ local function start_https(first_port: integer): async.Task
       response:set_header("Content-Length", "7")
       response:write("secure\0")
     end
-    local certificate_bundle = fs.tmpname()
+    const certificate_bundle = fs.tmpname()
     defer fs.unlink(certificate_bundle)
     fs.write_file(certificate_bundle,
                   fs.read_file(support.CERTIFICATE) .. "\n" ..
@@ -451,25 +451,23 @@ local function start_https(first_port: integer): async.Task
       if server ~= nil then (server as http.Server):close() end
     end
     for _ = 1, 100 do
-      do
-        server = http.listen_tls("127.0.0.1",
-                                 certificate_bundle, handler, nil, port)
-        break
-      catch
-        if error is async.OperationError and
-           (error as async.OperationError).name == "EADDRINUSE" then
-          port = port + 1
-        else
-          raise
-        end
+      server = http.listen_tls("127.0.0.1",
+                               certificate_bundle, handler, nil, port)
+      break
+    catch
+      if error is async.OperationError and
+         (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else
+        raise
       end
     end
     if server == nil then raise "could not find an HTTPS loopback port" end
-    local exact_server = server as http.Server
+    const exact_server = server as http.Server
     defer exact_server:close()
     test.assert(exact_server:idle_timeout(nil) == 0,
           "HTTPS Server default idle timeout was not zero")
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       exact_server:serve()
       return nil
     end)
@@ -478,13 +476,13 @@ local function start_https(first_port: integer): async.Task
     local response_status = 0
     local body = ""
     local client_failure = ""
-    local requesting = async.run<|value, value|>(function (): value
+    const requesting = async.run<|value, value|>(function (): value
       -- This fixture owns both ends; retire its default idle client before
       -- waiting for the accepted HTTPS server Task to leave the Runtime.
       defer http.close_idle_connections()
       support.outcome = "https-requesting"
       do
-        local response = http.get(
+        const response = http.get(
           "https://localhost:" .. string.tostring(port) ..
           "/secure?value=1", http.RequestOptions { ca_file = support.TRUST_ROOT })
         defer response:close()
@@ -492,7 +490,7 @@ local function start_https(first_port: integer): async.Task
         body = support.read_response(response)
       catch
         if error is async.OperationError then
-          local failure = error as async.OperationError
+          const failure = error as async.OperationError
           client_failure = failure.name .. ": " .. failure.message ..
             " (" .. failure.operation .. ")"
         else
@@ -503,7 +501,7 @@ local function start_https(first_port: integer): async.Task
     end)
     defer task_support.cancel_and_join_task(requesting, "nested HTTP requesting cleanup")
     local timed_out = false
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       requesting:cancel(async.CancellationReason.simple(

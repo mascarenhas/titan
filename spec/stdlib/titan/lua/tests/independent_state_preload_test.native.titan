@@ -1,12 +1,12 @@
 function test_lua_independent_async_requires_executable_only_titan_module(
     _context: test.Context)
   runtime_test.run(function ()
-    local original = independent_preload.counter
+    const original = independent_preload.counter
     defer independent_preload.counter = original
     independent_preload.counter = 700
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
-    local values: {async.TransferValue} = { state:run_async([[
+    const values: {async.TransferValue} = { state:run_async([[
       package.path, package.cpath = '', ''
       local fixture = require('lua.preload_fixture')
       return fixture.counter, fixture.increment(1)
@@ -16,14 +16,14 @@ function test_lua_independent_async_requires_executable_only_titan_module(
                 "native preload did not initialize independent module state")
     test.assert(independent_preload.counter == 700,
                 "native preload reused the host module's mutable state")
-    local repeated: async.TransferValue = state:run_async([[
+    const repeated: async.TransferValue = state:run_async([[
       return require('lua.preload_fixture').increment(1)
     ]])
     test.assert(transfer_integer(repeated) == 43,
                 "repeated native require did not preserve independent state")
-    local other = tlua.new()
+    const other = tlua.new()
     defer other:close()
-    local fresh: async.TransferValue = other:run_async([[
+    const fresh: async.TransferValue = other:run_async([[
       package.path, package.cpath = '', ''
       return require('lua.preload_fixture').counter
     ]])
@@ -35,12 +35,12 @@ end
 function test_lua_independent_nested_state_keeps_uninitialized_native_providers(
     _context: test.Context)
   runtime_test.run(function ()
-    local original = independent_preload.counter
+    const original = independent_preload.counter
     defer independent_preload.counter = original
     independent_preload.counter = 700
-    local intermediate = tlua.new()
+    const intermediate = tlua.new()
     defer intermediate:close()
-    local result: async.TransferValue = intermediate:run_async([=[
+    const result: async.TransferValue = intermediate:run_async([=[
       package.path, package.cpath = '', ''
       local tlua = require('titan.lua')
       local registry = debug.getregistry()

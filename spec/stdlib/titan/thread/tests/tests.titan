@@ -17,7 +17,7 @@ local thread_fault_command = import "support.command.titan"
 local thread_fault_common = import "support.common.titan"
 
 local function spawn_task<|T|>(entry: function (): (T), label: string): async.Task<|T, value|>
-  local t = async.run(entry)
+  const t = async.run(entry)
   task_support.cleanup_task(t, label)
   return t
 end
@@ -65,7 +65,7 @@ local function check_poll_deadline(deadline: integer, progress: string)
 end
 
 local function wait_until_waiting<|T|>(task: async.Task<|T, value|>)
-  local deadline = poll_deadline()
+  const deadline = poll_deadline()
   while task:status():as_string() ~= "waiting" and
         not task:status():has_finished() do
     check_poll_deadline(deadline, "the Task reaching waiting")
@@ -78,11 +78,11 @@ end
 -- slot fails after the poll deadline instead of hanging the test. Cleanups
 -- call this too, so it does not register a cleanup through spawn_task.
 local function drain_group(group: thread.Group, progress: string)
-  local observer = async.run<|nil, value|>(function (): nil
+  const observer = async.run<|nil, value|>(function (): nil
     group:wait()
     return nil
   end)
-  local deadline = poll_deadline()
+  const deadline = poll_deadline()
   while not observer:status():has_finished() and uv.hrtime() <= deadline do
     timer.sleep(1)
   end
@@ -99,18 +99,18 @@ local function expect_error(action: function (): (), expected: string)
   catch
     failed = true
     if error is thread.Error then
-      local err: thread.Error = error
-      local msg = err.error is string and (err.error as string) or ""
+      const err: thread.Error = error
+      const msg = err.error is string and (err.error as string) or ""
       test.assert(
         strings.find(msg, expected) ~= nil or
         strings.find(err.traceback, expected) ~= nil,
         msg .. "\n" .. err.traceback)
     elseif error is async.CancellationReason<|value|> then
-      local reason: async.CancellationReason<|value|> = error
-      local text = reason_text(reason)
+      const reason: async.CancellationReason<|value|> = error
+      const text = reason_text(reason)
       test.assert(strings.find(text, expected) ~= nil, text)
     elseif error is string then
-      local msg: string = error
+      const msg: string = error
       test.assert(strings.find(msg, expected) ~= nil, msg)
     else
       raise "unexpected error value type"
@@ -135,7 +135,7 @@ record JobPacket
 end
 
 record PrivateNonTransferable
-  local secret: integer
+  local const secret: integer
 end
 
 union PipeEnvelope
@@ -172,7 +172,7 @@ function test_default_capacity_and_try_operations(_context: test.Context)
     test.assert(ok1 and val1 == 10)
 
     -- Receiver waits first, then try_send wakes it.
-    local recv_task = spawn_task(function (): integer
+    const recv_task = spawn_task(function (): integer
       return rx:receive()
     end, "recv_task")
     wait_until_waiting(recv_task)
@@ -181,7 +181,7 @@ function test_default_capacity_and_try_operations(_context: test.Context)
 
     -- Fill buffer (1) and queue a blocked sender, then try_receive drains and wakes sender.
     test.assert(tx:try_send(88))
-    local send_task = spawn_task(function (): boolean
+    const send_task = spawn_task(function (): boolean
       tx:send(99)
       return true
     end, "send_task")
@@ -202,7 +202,7 @@ function test_buffered_fifo_backpressure_and_close_drain(_context: test.Context)
     test.assert(not tx:try_send("overflow"))
 
     local third_sent = false
-    local blocked_sender = spawn_task(function (): boolean
+    const blocked_sender = spawn_task(function (): boolean
       tx:send("third")
       third_sent = true
       tx:close()
@@ -216,7 +216,7 @@ function test_buffered_fifo_backpressure_and_close_drain(_context: test.Context)
     test.assert(third_sent)
     test.assert(tx:is_closed())
 
-    local items: {string} = {}
+    const items: {string} = {}
     for _, item? in rx:incoming() do
       items[#items + 1] = item
     end
@@ -324,7 +324,7 @@ function test_incoming_nil_payloads_cross_threads_with_backpressure(_context: te
     local ready_tx, ready_rx = thread.channel<|boolean|>(1)
     defer ready_tx:close()
     defer ready_rx:close()
-    local worker = thread.spawn_two(function (
+    const worker = thread.spawn_two(function (
         output: thread.Sender<|value|>, ready: thread.Sender<|boolean|>): integer
       defer output:close()
       output:send(nil)
@@ -341,7 +341,7 @@ function test_incoming_nil_payloads_cross_threads_with_backpressure(_context: te
       worker:cancel()
       worker:join()
     end)
-    local reader = spawn_task(function (): integer
+    const reader = spawn_task(function (): integer
       test.assert(ready_rx:receive(), "producer did not confirm backpressure")
       local count = 0
       for _, item? in rx:incoming() do
@@ -352,7 +352,7 @@ function test_incoming_nil_payloads_cross_threads_with_backpressure(_context: te
       end
       return count
     end, "cross-thread nullable iterator")
-    local deadline = spawn_task(function (): nil
+    const deadline = spawn_task(function (): nil
       timer.sleep(5000)
       return nil
     end, "cross-thread nullable iterator deadline")
@@ -365,7 +365,7 @@ function test_incoming_nil_payloads_cross_threads_with_backpressure(_context: te
       end
     when second() then raise "cross-thread nullable iterator timed out"
     end
-    local joining = spawn_task(function (): thread.ThreadStatus<|integer|>
+    const joining = spawn_task(function (): thread.ThreadStatus<|integer|>
       return worker:join()
     end, "cross-thread nullable producer join")
     case async.race_two(joining, deadline)
@@ -390,7 +390,7 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Cont
   runtime_test.run(function ()
     local tx, rx = thread.channel<|integer|>(1)
     tx:send(1)
-    local sender_task = spawn_task(function (): boolean
+    const sender_task = spawn_task(function (): boolean
       tx:send(2)
       return true
     end, "sender_task")
@@ -409,9 +409,9 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Cont
     -- Receiver:close() also wakes a parked receiver clone.
     local tx2, rx2 = thread.channel<|integer|>(1)
     defer tx2:close()
-    local rx2_clone = rx2:clone()
+    const rx2_clone = rx2:clone()
     defer rx2_clone:close()
-    local parked_recv = spawn_task(function (): boolean
+    const parked_recv = spawn_task(function (): boolean
       case rx2_clone:receive_result()
       when closed() then return true
       else return false
@@ -425,7 +425,7 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Cont
     -- Sender:close() wakes a parked receiver and a parked sender.
     local tx3, rx3 = thread.channel<|integer|>(1)
     defer rx3:close()
-    local parked_rx3 = spawn_task(function (): boolean
+    const parked_rx3 = spawn_task(function (): boolean
       case rx3:receive_result()
       when closed() then return true
       else return false
@@ -439,7 +439,7 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Cont
     local tx4, rx4 = thread.channel<|integer|>(1)
     defer rx4:close()
     tx4:send(10)
-    local parked_tx4 = spawn_task(function (): boolean
+    const parked_tx4 = spawn_task(function (): boolean
       tx4:send(20)
       return true
     end, "parked_tx4")
@@ -460,7 +460,7 @@ function test_waiter_cancellation_preserves_subsequent_messages(_context: test.C
     defer tx:close()
     defer rx:close()
 
-    local cancelled_recv = spawn_task(function (): integer
+    const cancelled_recv = spawn_task(function (): integer
       return rx:receive()
     end, "cancelled_recv")
     wait_until_waiting(cancelled_recv)
@@ -472,7 +472,7 @@ function test_waiter_cancellation_preserves_subsequent_messages(_context: test.C
 
     -- Fill buffer so the next send suspends, then cancel the suspended sender.
     tx:send(100)
-    local cancelled_send = spawn_task(function (): boolean
+    const cancelled_send = spawn_task(function (): boolean
       tx:send(111)
       return true
     end, "cancelled_send")
@@ -487,10 +487,10 @@ function test_waiter_cancellation_preserves_subsequent_messages(_context: test.C
 
     -- Lost-wakeup baton handoff: queue two receivers, signal the first via try_send,
     -- and cancel the first before it runs so it hands the wakeup baton to the second.
-    local recv1 = spawn_task(function (): integer
+    const recv1 = spawn_task(function (): integer
       return rx:receive()
     end, "recv1")
-    local recv2 = spawn_task(function (): integer
+    const recv2 = spawn_task(function (): integer
       return rx:receive()
     end, "recv2")
     wait_until_waiting(recv1)
@@ -504,11 +504,11 @@ function test_waiter_cancellation_preserves_subsequent_messages(_context: test.C
 
     -- Same baton handoff for overflow waiters when a signaled sender is cancelled.
     test.assert(tx:try_send(400))
-    local send1 = spawn_task(function (): boolean
+    const send1 = spawn_task(function (): boolean
       tx:send(401)
       return true
     end, "send1")
-    local send2 = spawn_task(function (): boolean
+    const send2 = spawn_task(function (): boolean
       tx:send(402)
       return true
     end, "send2")
@@ -527,9 +527,9 @@ end
 function test_cross_thread_channels_nested_endpoints_and_clones(_context: test.Context)
   runtime_test.run(function ()
     local jobs_tx, jobs_rx = thread.channel<|JobPacket|>(4)
-    local rx_clone = jobs_rx:clone()
+    const rx_clone = jobs_rx:clone()
 
-    local worker1 = thread.spawn_one(function (inbox: thread.Receiver<|JobPacket|>): integer
+    const worker1 = thread.spawn_one(function (inbox: thread.Receiver<|JobPacket|>): integer
       local handled = 0
       for _, job? in inbox:incoming() do
         job.reply:send("w1:" .. job.id)
@@ -539,7 +539,7 @@ function test_cross_thread_channels_nested_endpoints_and_clones(_context: test.C
       return handled
     end, jobs_rx)
 
-    local worker2 = thread.spawn_one(function (inbox: thread.Receiver<|JobPacket|>): integer
+    const worker2 = thread.spawn_one(function (inbox: thread.Receiver<|JobPacket|>): integer
       local handled = 0
       for _, job? in inbox:incoming() do
         job.reply:send("w2:" .. job.id)
@@ -549,7 +549,7 @@ function test_cross_thread_channels_nested_endpoints_and_clones(_context: test.C
       return handled
     end, rx_clone)
 
-    local replies: {thread.Receiver<|string|>} = {}
+    const replies: {thread.Receiver<|string|>} = {}
     for i = 1, 6 do
       local rtx, rrx = thread.channel<|string|>(1)
       replies[i] = rrx
@@ -559,15 +559,15 @@ function test_cross_thread_channels_nested_endpoints_and_clones(_context: test.C
 
     local seen = 0
     for i = 1, 6 do
-      local msg = replies[i]:receive()
+      const msg = replies[i]:receive()
       test.assert(strings.find(msg, ":" .. i) ~= nil, msg)
       replies[i]:close()
       seen = seen + 1
     end
     test.assert(seen == 6)
 
-    local st1 = worker1:join()
-    local st2 = worker2:join()
+    const st1 = worker1:join()
+    const st2 = worker2:join()
     local ok1, c1? = st1:has_succeeded()
     local ok2, c2? = st2:has_succeeded()
     test.assert(ok1 and ok2 and (c1 as integer) + (c2 as integer) == 6)
@@ -589,8 +589,8 @@ function test_nested_endpoint_transfer_over_channel(_context: test.Context)
     outer_tx:send(PipeEnvelope.sender_end(inner_tx, "nested-tx"))
     outer_tx:send(PipeEnvelope.receiver_end(inner_rx, "nested-rx"))
 
-    local worker = thread.spawn_one(function (rx: thread.Receiver<|PipeEnvelope|>): integer
-      local env1 = rx:receive()
+    const worker = thread.spawn_one(function (rx: thread.Receiver<|PipeEnvelope|>): integer
+      const env1 = rx:receive()
       case env1
       when sender_end(tx, tag) then
         test.assert(tag == "nested-tx")
@@ -598,18 +598,18 @@ function test_nested_endpoint_transfer_over_channel(_context: test.Context)
       else
         raise "expected sender_end"
       end
-      local env2 = rx:receive()
+      const env2 = rx:receive()
       case env2
       when receiver_end(inner, rx_tag) then
         test.assert(rx_tag == "nested-rx")
-        local v = inner:receive()
+        const v = inner:receive()
         return v + 500
       else
         raise "expected receiver_end"
       end
     end, outer_rx)
 
-    local st = worker:join()
+    const st = worker:join()
     local ok, total = st:has_succeeded()
     test.assert(ok and total == 623)
   end)
@@ -624,26 +624,26 @@ function test_thread_spawn_arities_status_task_and_failure(_context: test.Contex
     defer ready_tx:close()
     defer ready_rx:close()
 
-    local t0 = thread.spawn(function (): integer
+    const t0 = thread.spawn(function (): integer
       ready_tx:send(true)
       return gate_rx:receive()
     end)
     test.assert(ready_rx:receive())
-    local running_st = t0:status()
+    const running_st = t0:status()
     test.assert(not running_st:has_finished() and running_st:as_string() == "running")
     gate_tx:send(10)
 
-    local t2 = thread.spawn_two(function (a: integer, b: integer): integer
+    const t2 = thread.spawn_two(function (a: integer, b: integer): integer
       return a * b
     end, 6, 7)
-    local t3 = thread.spawn_three(function (a: integer, b: integer, c: integer): integer
+    const t3 = thread.spawn_three(function (a: integer, b: integer, c: integer): integer
       return a + b + c
     end, 10, 20, 30)
-    local t4 = thread.spawn_four(
+    const t4 = thread.spawn_four(
       function (a: integer, b: integer, c: integer, d: integer): integer
         return a + b + c + d
       end, 1, 2, 3, 4)
-    local t5 = thread.spawn_five(
+    const t5 = thread.spawn_five(
       function (a: integer, b: integer, c: integer, d: integer, e: integer): integer
         return a + b + c + d + e
       end, 1, 2, 3, 4, 5)
@@ -654,22 +654,22 @@ function test_thread_spawn_arities_status_task_and_failure(_context: test.Contex
     test.assert(await_task(t3:task()) == 60)
     test.assert(await_task(t4:task()) == 10)
 
-    local st0 = t0:join()
-    local st0_again = t0:join()
+    const st0 = t0:join()
+    const st0_again = t0:join()
     test.assert(st0 == st0_again)
     test.assert(st0:has_finished() and not st0:has_failed() and not st0:has_cancelled())
     local ok0, val0? = st0:has_succeeded()
     test.assert(ok0 and val0 == 10)
     test.assert(st0:as_string() == "succeeded")
 
-    local failing = thread.spawn(function (): integer
+    const failing = thread.spawn(function (): integer
       raise "boom from worker thread"
     end)
-    local st_fail = failing:join()
+    const st_fail = failing:join()
     test.assert(st_fail:has_finished() and st_fail:as_string() == "failed")
     local has_err, err_obj? = st_fail:has_failed()
     test.assert(has_err and err_obj ~= nil)
-    local thread_err = err_obj as thread.Error
+    const thread_err = err_obj as thread.Error
     test.assert(
       thread_err.error is string and
       strings.find(thread_err.error as string, "boom from worker thread") ~= nil)
@@ -688,7 +688,7 @@ function test_thread_renders_unobserved_string_failure_before_join(_context: tes
     local retired_tx, retired_rx = thread.channel<|boolean|>(1)
     defer retired_tx:close()
     defer retired_rx:close()
-    local worker = thread.spawn_one(function (retired: thread.Sender<|boolean|>): integer
+    const worker = thread.spawn_one(function (retired: thread.Sender<|boolean|>): integer
       -- Runtime retirement follows failure rendering. Do not observe the Thread
       -- until this signal: join/status/task would otherwise bypass rendering.
       async.add_close_listener(function ()
@@ -713,8 +713,8 @@ end
 -- An error value that cannot cross threads reaches the parent as the text the
 -- worker rendered for it.
 local function rendered_worker_failure(source: string): value
-  local worker = thread.spawn_one(function (chunk: string): integer
-    local failure: value = lua.load(chunk, nil, nil)()
+  const worker = thread.spawn_one(function (chunk: string): integer
+    const failure: value = lua.load(chunk, nil, nil)()
     raise failure
   end, source)
   case worker:join()
@@ -727,7 +727,7 @@ end
 
 local function add_rendering_case(context: test.Context, name: string,
                                   source: string, expected: string)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     runtime_test.run(function ()
       test.assert(rendered_worker_failure(source) == expected,
                   "worker failure was rendered as different text")
@@ -753,7 +753,7 @@ function test_thread_cancellation_propagates_to_worker(_context: test.Context)
     defer hold_tx:close()
     defer hold_rx:close()
 
-    local handle = thread.spawn(function (): integer
+    const handle = thread.spawn(function (): integer
       ready_tx:send(true)
       return hold_rx:receive()
     end)
@@ -762,7 +762,7 @@ function test_thread_cancellation_propagates_to_worker(_context: test.Context)
     handle:cancel(async.CancellationReason.simple("stop worker"))
     handle:cancel(async.CancellationReason.simple("second reason ignored"))
 
-    local st = handle:join()
+    const st = handle:join()
     handle:cancel(async.CancellationReason.simple("after finish ignored"))
     test.assert(st:has_finished() and st:as_string() == "cancelled")
     local has_c, reason? = st:has_cancelled()
@@ -770,12 +770,12 @@ function test_thread_cancellation_propagates_to_worker(_context: test.Context)
     test.assert(strings.find(reason_text(reason as async.CancellationReason<|value|>), "stop worker") ~= nil)
 
     -- Calling Thread:cancel() on the worker also causes Thread:task() to end cancelled.
-    local handle2 = thread.spawn(function (): integer
+    const handle2 = thread.spawn(function (): integer
       ready_tx:send(true)
       return hold_rx:receive()
     end)
     test.assert(ready_rx:receive())
-    local proxy_task = handle2:task()
+    const proxy_task = handle2:task()
     handle2:cancel(async.CancellationReason.simple("worker cancelled directly"))
     expect_error(function ()
       await_task(proxy_task)
@@ -794,12 +794,12 @@ function test_thread_group_limit_and_error_propagation(context: test.Context)
   context:log("BEGIN expected Group child proxy failure diagnostics")
   runtime_test.run(function ()
     -- Empty group wait returns empty array immediately.
-    local empty_group = thread.group(2, true)
-    local empty_errs = empty_group:wait()
+    const empty_group = thread.group(2, true)
+    const empty_errs = empty_group:wait()
     test.assert(#empty_errs == 0)
 
     -- Bounded concurrency without error propagation: all threads run, errors collected.
-    local g1 = thread.group(2, false)
+    const g1 = thread.group(2, false)
     local sum_tx, sum_rx = thread.channel<|integer|>(10)
     defer sum_tx:close()
     defer sum_rx:close()
@@ -814,7 +814,7 @@ function test_thread_group_limit_and_error_propagation(context: test.Context)
       end, i, sum_tx)
     end
 
-    local errs1 = g1:wait()
+    const errs1 = g1:wait()
     test.assert(#errs1 == 1)
     test.assert(
       errs1[1].error is string and
@@ -827,7 +827,7 @@ function test_thread_group_limit_and_error_propagation(context: test.Context)
     test.assert(total == 10 + 30 + 40)
 
     -- propagate_errors = true: first failure cancels running and queued siblings.
-    local g2 = thread.group(1, true)
+    const g2 = thread.group(1, true)
     local blocker_tx, blocker_rx = thread.channel<|integer|>(1)
     defer blocker_tx:close()
     defer blocker_rx:close()
@@ -839,7 +839,7 @@ function test_thread_group_limit_and_error_propagation(context: test.Context)
       blocker_rx:receive()
     end)
 
-    local errs2 = g2:wait()
+    const errs2 = g2:wait()
     test.assert(#errs2 == 1)
     test.assert(
       errs2[1].error is string and
@@ -850,7 +850,7 @@ end
 
 local function spawn_abandoned_sender(): (thread.Receiver<|integer|>, thread.Thread<|integer|>)
   local tx, rx = thread.channel<|integer|>(1)
-  local worker = thread.spawn_one(function (sender: thread.Sender<|integer|>): integer
+  const worker = thread.spawn_one(function (sender: thread.Sender<|integer|>): integer
     sender:send(777)
     -- Do not explicitly close `sender`; child state exit will collect it.
     return 1
@@ -859,13 +859,13 @@ local function spawn_abandoned_sender(): (thread.Receiver<|integer|>, thread.Thr
 end
 
 local function create_sender_with_abandoned_receiver(): thread.Sender<|integer|>
-  local tx, _rx = thread.channel<|integer|>(2)
+  local tx, _ = thread.channel<|integer|>(2)
   tx:try_send(1)
   return tx
 end
 
 local function drop_one_sender_clone(tx: thread.Sender<|integer|>)
-  local _clone = tx:clone()
+  local _ = tx:clone()
 end
 
 function test_gc_auto_closes_abandoned_sender_across_threads(_context: test.Context)
@@ -874,7 +874,7 @@ function test_gc_auto_closes_abandoned_sender_across_threads(_context: test.Cont
     defer rx:close()
 
     test.assert(rx:receive() == 777)
-    local st = worker:join()
+    const st = worker:join()
     local ok, val = st:has_succeeded()
     test.assert(ok and val == 1)
 
@@ -888,7 +888,7 @@ function test_gc_auto_closes_abandoned_sender_across_threads(_context: test.Cont
     end
 
     -- Dropping the last Receiver handle auto-closes the channel and flushes buffered messages.
-    local orphan_tx = create_sender_with_abandoned_receiver()
+    const orphan_tx = create_sender_with_abandoned_receiver()
     gc.collect()
     gc.collect()
     test.assert(orphan_tx:is_closed())
@@ -907,7 +907,7 @@ function test_gc_auto_closes_abandoned_sender_across_threads(_context: test.Cont
     test.assert(main_tx:try_send(55))
     test.assert(main_rx:receive() == 55)
 
-    local second_clone = main_tx:clone()
+    const second_clone = main_tx:clone()
     second_clone:close()
     test.assert(main_tx:is_closed() and second_clone:is_closed() and main_rx:is_closed())
   end)
@@ -927,7 +927,7 @@ function test_in_flight_endpoint_survives_sender_gc_before_receive(_context: tes
     defer outer_tx:close()
     defer outer_rx:close()
 
-    local inner_rx = enqueue_ephemeral_sender(outer_tx)
+    const inner_rx = enqueue_ephemeral_sender(outer_tx)
     defer inner_rx:close()
 
     -- Collect the ephemeral `inner_tx` before the envelope is decoded from `outer_rx`.
@@ -935,7 +935,7 @@ function test_in_flight_endpoint_survives_sender_gc_before_receive(_context: tes
     gc.collect()
     test.assert(not inner_rx:is_closed())
 
-    local env = outer_rx:receive()
+    const env = outer_rx:receive()
     case env
     when sender_end(tx, tag) then
       test.assert(tag == "in-flight-tx")
@@ -965,7 +965,7 @@ local function attempt_discarded_endpoint_sends(
   end, "record must be public with only public fields")
 
   -- 3. Mid-encode failure in a closure capture list rolls back tx3's retained ref.
-  local bad_capture: value = {1, 2}
+  const bad_capture: value = {1, 2}
   expect_error(function ()
     any_tx:try_send(function (): integer
       tx3:try_send(1)
@@ -982,7 +982,7 @@ local function start_cancelled_endpoint_send(
 ): (async.Task<|boolean, value|>, thread.Receiver<|integer|>)
   local tx, rx = thread.channel<|integer|>(1)
   local env: PipeEnvelope? = PipeEnvelope.sender_end(tx, "cancelled-send")
-  local task = spawn_task(function (): boolean
+  const task = spawn_task(function (): boolean
     defer env = nil
     full_tx:send(env as PipeEnvelope)
     return true
@@ -995,7 +995,7 @@ local function spawn_abandoned_thread_returning_sender_after_finish(): thread.Re
   local done_tx, done_rx = thread.channel<|boolean|>(1)
   defer done_tx:close()
   defer done_rx:close()
-  local _worker = thread.spawn_two(function (
+  const _worker = thread.spawn_two(function (
     inner_tx: thread.Sender<|integer|>,
     notify_tx: thread.Sender<|boolean|>
   ): PipeEnvelope
@@ -1003,7 +1003,7 @@ local function spawn_abandoned_thread_returning_sender_after_finish(): thread.Re
     return PipeEnvelope.sender_end(inner_tx, "abandoned-result-after-finish")
   end, tx, done_tx)
   test.assert(done_rx:receive())
-  local deadline = poll_deadline()
+  const deadline = poll_deadline()
   while not _worker:status():has_finished() do
     check_poll_deadline(deadline, "the abandoned worker finishing")
     async.yield()
@@ -1016,7 +1016,7 @@ local function spawn_abandoned_thread_returning_sender_while_running(
   ready_tx: thread.Sender<|boolean|>
 ): thread.Receiver<|integer|>
   local tx, rx = thread.channel<|integer|>(1)
-  local _worker = thread.spawn_three(function (
+  local _ = thread.spawn_three(function (
     inner_tx: thread.Sender<|integer|>,
     g_rx: thread.Receiver<|boolean|>,
     r_tx: thread.Sender<|boolean|>
@@ -1089,7 +1089,7 @@ function test_endpoint_transfer_gating_discard_and_rollback(_context: test.Conte
 
     -- Verify abandoned Thread returning a Sender releases its result retain
     -- both when finalized after worker completion and when finalized while running.
-    local rx5 = spawn_abandoned_thread_returning_sender_after_finish()
+    const rx5 = spawn_abandoned_thread_returning_sender_after_finish()
     defer rx5:close()
     gc.collect()
     gc.collect()
@@ -1101,7 +1101,7 @@ function test_endpoint_transfer_gating_discard_and_rollback(_context: test.Conte
     defer ab_gate_rx:close()
     defer ab_ready_tx:close()
     defer ab_ready_rx:close()
-    local rx6 = spawn_abandoned_thread_returning_sender_while_running(ab_gate_rx, ab_ready_tx)
+    const rx6 = spawn_abandoned_thread_returning_sender_while_running(ab_gate_rx, ab_ready_tx)
     defer rx6:close()
     test.assert(ab_ready_rx:receive())
     gc.collect()
@@ -1118,7 +1118,7 @@ function test_endpoint_transfer_gating_discard_and_rollback(_context: test.Conte
     local close_flush_tx, close_flush_rx = thread.channel<|PipeEnvelope|>(2)
     defer close_flush_tx:close()
     defer close_flush_rx:close()
-    local rx7 = enqueue_ephemeral_sender(close_flush_tx)
+    const rx7 = enqueue_ephemeral_sender(close_flush_tx)
     defer rx7:close()
     gc.collect()
     gc.collect()
@@ -1143,7 +1143,7 @@ function test_non_transferable_error_leaves_channel_usable(_context: test.Contex
     end, "transfer: unsupported value")
 
     expect_error(function ()
-      thread.spawn_one(function (_x: PrivateNonTransferable): integer
+      thread.spawn_one(function (_: PrivateNonTransferable): integer
         return 1
       end, PrivateNonTransferable(7))
     end, "record must be public with only public fields")
@@ -1153,11 +1153,11 @@ function test_non_transferable_error_leaves_channel_usable(_context: test.Contex
     test.assert(rx:receive() as string == "healthy")
 
     -- Non-transferable return value from a thread becomes ThreadStatus.failed and is cached.
-    local bad_ret = thread.spawn(function (): value
+    const bad_ret = thread.spawn(function (): value
       return {1, 2}
     end)
-    local st_ret1 = bad_ret:join()
-    local st_ret2 = bad_ret:status()
+    const st_ret1 = bad_ret:join()
+    const st_ret2 = bad_ret:status()
     test.assert(st_ret1:has_failed() and st_ret2:has_failed())
     local ok_ret_err, ret_err? = st_ret1:has_failed()
     test.assert(
@@ -1166,10 +1166,10 @@ function test_non_transferable_error_leaves_channel_usable(_context: test.Contex
       strings.find((ret_err as thread.Error).error as string, "transfer: unsupported value") ~= nil)
 
     -- Non-transferable raised error degrades to rendered string with preserved traceback.
-    local bad_err_th = thread.spawn(function (): integer
+    const bad_err_th = thread.spawn(function (): integer
       raise PrivateNonTransferable(99)
     end)
-    local st_bad_err = bad_err_th:join()
+    const st_bad_err = bad_err_th:join()
     local has_bad_err, bad_err_obj? = st_bad_err:has_failed()
     test.assert(has_bad_err and bad_err_obj ~= nil)
     test.assert((bad_err_obj as thread.Error).error is string)
@@ -1182,13 +1182,13 @@ function test_non_transferable_error_leaves_channel_usable(_context: test.Contex
     defer ready_rx:close()
     defer hold_tx:close()
     defer hold_rx:close()
-    local cancel_th = thread.spawn(function (): integer
+    const cancel_th = thread.spawn(function (): integer
       ready_tx:send(true)
       return hold_rx:receive()
     end)
     test.assert(ready_rx:receive())
     cancel_th:cancel(async.CancellationReason.complex(PrivateNonTransferable(5) as value))
-    local st_cancel = cancel_th:join()
+    const st_cancel = cancel_th:join()
     local ok_cancel, cancel_reason? = st_cancel:has_cancelled()
     test.assert(ok_cancel and cancel_reason ~= nil)
     test.assert(reason_text(cancel_reason as async.CancellationReason<|value|>) == "cancelled")
@@ -1197,7 +1197,7 @@ end
 
 function test_thread_task_failure_and_cancel_forwarding(_context: test.Context)
   runtime_test.run(function ()
-    local failing = thread.spawn(function (): integer
+    const failing = thread.spawn(function (): integer
       raise "task failure from worker"
     end)
     expect_error(function ()
@@ -1211,35 +1211,35 @@ function test_thread_task_failure_and_cancel_forwarding(_context: test.Context)
     defer hold_tx:close()
     defer hold_rx:close()
 
-    local worker = thread.spawn(function (): integer
+    const worker = thread.spawn(function (): integer
       ready_tx:send(true)
       return hold_rx:receive()
     end)
     test.assert(ready_rx:receive())
 
-    local t = worker:task()
+    const t = worker:task()
     wait_until_waiting(t)
     t:cancel(async.CancellationReason.simple("cancel via task"))
     expect_error(function ()
       await_task(t)
     end, "cancel via task")
 
-    local st = worker:join()
+    const st = worker:join()
     test.assert(st:has_finished() and st:as_string() == "cancelled")
 
     -- Pre-start cancellation still forwards to worker2 and retires the worker
     -- before publishing the proxy's terminal cancellation.
-    local worker2 = thread.spawn(function (): integer
+    const worker2 = thread.spawn(function (): integer
       ready_tx:send(true)
       return hold_rx:receive()
     end)
     test.assert(ready_rx:receive())
-    local t2 = worker2:task()
+    const t2 = worker2:task()
     t2:cancel(async.CancellationReason.simple("cancel before start"))
     expect_error(function ()
       await_task(t2)
     end, "cancel before start")
-    local st2 = worker2:join()
+    const st2 = worker2:join()
     test.assert(st2:has_finished() and st2:as_string() == "cancelled")
   end)
 end
@@ -1248,7 +1248,7 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
   context:log("BEGIN expected Group child proxy failure diagnostics")
   runtime_test.run(function ()
     -- Verify that a 3rd Group:spawn call suspends when limit = 2 and resumes on slot release.
-    local g = thread.group(2, false)
+    const g = thread.group(2, false)
     local gate_tx, gate_rx = thread.channel<|integer|>(2)
     local started_tx, started_rx = thread.channel<|integer|>(4)
     defer gate_tx:close()
@@ -1268,7 +1268,7 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
     test.assert(started_rx:receive() + started_rx:receive() == 3)
 
     local third_admitted = false
-    local spawner = spawn_task(function (): boolean
+    const spawner = spawn_task(function (): boolean
       g:spawn_one(function (s: thread.Sender<|integer|>)
         s:send(3)
       end, started_tx)
@@ -1283,11 +1283,11 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
     test.assert(third_admitted)
     test.assert(started_rx:receive() == 3)
     gate_tx:send(1)
-    local errs = g:wait()
+    const errs = g:wait()
     test.assert(#errs == 0)
 
     -- Verify that propagate_errors = true cancels an already-running sibling thread.
-    local g_prop = thread.group(2, true)
+    const g_prop = thread.group(2, true)
     local ready_tx, ready_rx = thread.channel<|boolean|>(1)
     local block_tx, block_rx = thread.channel<|integer|>(1)
     local cancelled_tx, cancelled_rx = thread.channel<|boolean|>(1)
@@ -1317,7 +1317,7 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
       raise "sibling boom"
     end)
 
-    local prop_errs = g_prop:wait()
+    const prop_errs = g_prop:wait()
     test.assert(cancelled_rx:receive())
     test.assert(#prop_errs == 1)
     test.assert(
@@ -1326,7 +1326,7 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
 
     -- Verify explicit Group:cancel(reason) cancels active threads, wakes queued spawn,
     -- and makes subsequent Group:spawn calls no-ops.
-    local g_cancel = thread.group(1, false)
+    const g_cancel = thread.group(1, false)
     g_cancel:spawn_three(function (
       r_tx: thread.Sender<|boolean|>,
       b_rx: thread.Receiver<|integer|>,
@@ -1345,7 +1345,7 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
     local unexpected_tx, unexpected_rx = thread.channel<|string|>(2)
     defer unexpected_tx:close()
     defer unexpected_rx:close()
-    local queued_spawner = spawn_task(function (): boolean
+    const queued_spawner = spawn_task(function (): boolean
       g_cancel:spawn_one(function (tx: thread.Sender<|string|>)
         tx:send("queued")
       end, unexpected_tx)
@@ -1358,7 +1358,7 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
     g_cancel:spawn_one(function (tx: thread.Sender<|string|>)
       tx:send("after_cancel")
     end, unexpected_tx)
-    local cancel_errs = g_cancel:wait()
+    const cancel_errs = g_cancel:wait()
     test.assert(cancelled_rx:receive())
     local has_unexpected, unexpected? = unexpected_rx:try_receive()
     test.assert(#cancel_errs == 0 and not has_unexpected and unexpected == nil)
@@ -1373,10 +1373,10 @@ end
 function test_group_cancel_in_admission_window(_: test.Context)
   runtime_test.run(function ()
     task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
-      local group = thread.group(1, false)
+      const group = thread.group(1, false)
       local block_tx, block_rx = thread.channel<|integer|>(1)
       local unexpected_tx, unexpected_rx = thread.channel<|string|>(1)
-      local retire = function ()
+      const retire = function ()
         block_tx:close()
         group:cancel()
         group:wait()
@@ -1398,7 +1398,7 @@ function test_group_cancel_in_admission_window(_: test.Context)
         test.assert(finished and result == "returned", "offset " .. offset ..
           ": a Group:cancel during admission left the spawner " .. spawner:status():as_string())
         retire()
-        local received, _message? = unexpected_rx:try_receive()
+        local received, _? = unexpected_rx:try_receive()
         test.assert(not received, "offset " .. offset .. ": the cancelled admission started its thread")
       end)
     end)
@@ -1413,7 +1413,7 @@ end
 function test_task_cancel_in_group_admission_window(_: test.Context)
   runtime_test.run(function ()
     task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
-      local group = thread.group(1, false)
+      const group = thread.group(1, false)
       local block_tx, block_rx = thread.channel<|integer|>(1)
       local unexpected_tx, unexpected_rx = thread.channel<|string|>(1)
       runtime_test.cleanup(function ()
@@ -1439,7 +1439,7 @@ function test_task_cancel_in_group_admission_window(_: test.Context)
         -- a stranded waiter.
         block_tx:close()
         drain_group(group, "offset " .. offset .. ": the Group draining after a cancelled admission")
-        local received, _message? = unexpected_rx:try_receive()
+        local received, _? = unexpected_rx:try_receive()
         test.assert(not received, "offset " .. offset .. ": the cancelled admission started its thread")
       end)
     end)
@@ -1459,7 +1459,7 @@ end
 local function group_release_window(mode: string)
   runtime_test.run(function ()
     task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
-      local group = thread.group(1, false)
+      const group = thread.group(1, false)
       local block_tx, block_rx = thread.channel<|integer|>(1)
       local hold_tx, hold_rx = thread.channel<|integer|>(1)
       runtime_test.cleanup(function ()
@@ -1473,17 +1473,17 @@ local function group_release_window(mode: string)
       end, block_rx)
       local window_cell: task_support.WakeWindow? = nil
       local queued: async.Task? = nil
-      local unencodable_spawn = function ()
-        group:spawn_one(function (_x: PrivateNonTransferable) end, PrivateNonTransferable(7))
+      const unencodable_spawn = function ()
+        group:spawn_one(function (_: PrivateNonTransferable) end, PrivateNonTransferable(7))
       end
-      local drive = function (window: task_support.WakeWindow, target: async.Task)
+      const drive = function (window: task_support.WakeWindow, target: async.Task)
         -- Count only the target's safepoints after its failed spawn.
         window.open = false
         window_cell = window
         -- The target queues its admission first, so the incumbent's release
         -- grants it.
         wait_until_waiting(target)
-        local admission = spawn_task<|value|>(function (): value
+        const admission = spawn_task<|value|>(function (): value
           group:spawn_one(function (rx: thread.Receiver<|integer|>)
             rx:receive_result()
           end, hold_rx)
@@ -1492,7 +1492,7 @@ local function group_release_window(mode: string)
         queued = admission
         wait_until_waiting(admission)
         block_tx:close()
-        local deadline = poll_deadline()
+        const deadline = poll_deadline()
         while not target:status():has_finished() do
           check_poll_deadline(deadline, "the target finishing")
           -- Parked after its window opened: only the held thread can wake
@@ -1506,7 +1506,7 @@ local function group_release_window(mode: string)
       end
       return task_support.WakeCase(function (): value
         expect_error(unencodable_spawn, "record must be public with only public fields")
-        local window? = window_cell
+        const window? = window_cell
         if window ~= nil then window.open = true end
         if mode == "wait" then
           group:wait()
@@ -1515,7 +1515,7 @@ local function group_release_window(mode: string)
         end
         return "returned"
       end, function (_: async.Task)
-        local admission? = queued
+        const admission? = queued
         if admission ~= nil then
           admission:cancel(async.CancellationReason.simple("granted admission cancelled"))
         end

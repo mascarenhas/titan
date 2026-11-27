@@ -39,7 +39,7 @@ local constructions = 0
 
 record PublicView
   number: integer
-  local secret: integer
+  local const secret: integer
 end
 
 function PublicView.new(number: integer): PublicView
@@ -53,7 +53,7 @@ end
 
 record EncodeOnly
   number: integer
-  local secret: integer
+  local const secret: integer
 end
 
 function EncodeOnly.new(source: integer): EncodeOnly
@@ -71,7 +71,7 @@ end
 local hook_calls = 0
 
 record Hooked
-  local number: integer
+  local const number: integer
 end
 
 function Hooked:to_transfer_payload(): string
@@ -112,7 +112,7 @@ local function expect_error(action: function (): (), expected: string)
     action()
   catch
     caught = true
-    local message: string = error
+    const message: string = error
     test.assert(string.find(message, expected, 1) ~= nil, message)
   end
   test.assert(caught, "expected rejection: " .. expected)
@@ -120,7 +120,7 @@ end
 
 local function publish(name: string, codec: protobuf.PortableCodec, bytes: string,
     check: function (string): boolean)
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
   target:call(Value.is_string(name), Value.is_string(codec:describe()),
       Value.is_bytes(bytes), Value.is_callable(function(...: Value): Value
@@ -129,13 +129,13 @@ local function publish(name: string, codec: protobuf.PortableCodec, bytes: strin
 end
 
 local function control(name: string, callback: Callable)
-  local target = browser.binding("control")
+  const target = browser.binding("control")
   defer target:close()
   target:call(Value.is_string(name), Value.is_callable(callback))
 end
 
 function test_scalar_golden(_: test.Context)
-  local codec = protobuf.portable({reflect.Type.is_integer(), reflect.Type.is_string(),
+  const codec = protobuf.portable({reflect.Type.is_integer(), reflect.Type.is_string(),
       reflect.Type.is_boolean(), reflect.Type.is_option(reflect.Type.is_integer())})
   publish("golden", codec, codec:encode(-7, "A\0B", false, nil), function(bytes: string): boolean
     local number: integer, raw: string, flag: boolean, absent: integer? = codec:decode(bytes)
@@ -145,18 +145,18 @@ function test_scalar_golden(_: test.Context)
 end
 
 function test_point_golden(_: test.Context)
-  local codec = protobuf.portable({descriptor(Point(3, "x"))})
+  const codec = protobuf.portable({descriptor(Point(3, "x"))})
   publish("point", codec, codec:encode(Point(3, "x")), function(bytes: string): boolean
-    local actual: Point = codec:decode(bytes)
+    const actual: Point = codec:decode(bytes)
     test.assert(actual.x == 3 and actual.label == "x")
     return bytes == codec:encode(Point(3, "x"))
   end)
 end
 
 function test_empty_variant_golden(_: test.Context)
-  local codec = protobuf.portable({descriptor(Choice.empty())})
+  const codec = protobuf.portable({descriptor(Choice.empty())})
   publish("empty", codec, codec:encode(Choice.empty()), function(bytes: string): boolean
-    local actual: Choice = codec:decode(bytes)
+    const actual: Choice = codec:decode(bytes)
     case actual
     when empty() then
     else raise "expected empty variant"
@@ -166,21 +166,21 @@ function test_empty_variant_golden(_: test.Context)
 end
 
 function test_dynamic_integer_golden(_: test.Context)
-  local codec = protobuf.portable({reflect.Type.is_value()})
+  const codec = protobuf.portable({reflect.Type.is_value()})
   publish("integer", codec, codec:encode(7), function(bytes: string): boolean
-    local actual: value = codec:decode(bytes)
+    const actual: value = codec:decode(bytes)
     test.assert(actual is integer and actual == 7)
     return bytes == codec:encode(7)
   end)
 end
 
 function test_scalar_types(_: test.Context)
-  local codec = protobuf.portable({reflect.Type.is_nil(), reflect.Type.is_boolean(),
+  const codec = protobuf.portable({reflect.Type.is_nil(), reflect.Type.is_boolean(),
       reflect.Type.is_integer(), reflect.Type.is_integer(), reflect.Type.is_float(),
       reflect.Type.is_float(), reflect.Type.is_string()})
-  local minimum = -9223372036854775807 - 1
-  local maximum = 9223372036854775807
-  local raw = "A\0\255B"
+  const minimum = -9223372036854775807 - 1
+  const maximum = 9223372036854775807
+  const raw = "A\0\255B"
   publish("scalars", codec, codec:encode(nil, false, minimum, maximum, 1.0, -0.0, raw),
       function(bytes: string): boolean
         local absent: nil, flag: boolean, low: integer, high: integer,
@@ -192,12 +192,12 @@ function test_scalar_types(_: test.Context)
 end
 
 function test_union_variants(_: test.Context)
-  local codec = protobuf.portable({descriptor(Choice.empty()), descriptor(Choice.empty()),
+  const codec = protobuf.portable({descriptor(Choice.empty()), descriptor(Choice.empty()),
       descriptor(Choice.empty()), descriptor(PublicUnion.empty()), descriptor(PublicUnion.empty())})
   expect_error(function() codec:encode(Choice.empty(), Choice.scalar(12),
       Choice.pair(Point(9, "nine"), nil), PublicUnion.hidden("private"), PublicUnion.empty()) end,
       "private union variant")
-  local encode = function(): string
+  const encode = function(): string
     return codec:encode(Choice.empty(), Choice.scalar(12), Choice.pair(Point(9, "nine"), nil),
         PublicUnion.shown(5), PublicUnion.empty())
   end
@@ -230,12 +230,12 @@ function test_union_variants(_: test.Context)
 end
 
 function test_array_constness_and_holes(_: test.Context)
-  local maybe = reflect.Type.is_array(reflect.ArrayTypeConstness.is_maybe_const(),
+  const maybe = reflect.Type.is_array(reflect.ArrayTypeConstness.is_maybe_const(),
       reflect.Type.is_integer())
-  local codec = protobuf.portable({maybe, maybe, reflect.Type.is_value(), reflect.Type.is_value()})
-  local entries: {integer} = {}
+  const codec = protobuf.portable({maybe, maybe, reflect.Type.is_value(), reflect.Type.is_value()})
+  const entries: {integer} = {}
   entries[1], entries[3] = 1, 3
-  local frozen = entries as const {integer}
+  const frozen = entries as const {integer}
   publish("arrays", codec, codec:encode(entries, frozen, entries, frozen),
       function(bytes: string): boolean
         local mutable: const? {integer}, immutable: const? {integer},
@@ -243,22 +243,22 @@ function test_array_constness_and_holes(_: test.Context)
         test.assert(mutable is {integer} and immutable is const {integer})
         test.assert(dynamic is {value} and dynamic_const is const {value})
         test.assert(#mutable == 3 and mutable[1] == 1 and mutable[2] == nil and mutable[3] == 3)
-        local dynamic_entries: {value} = dynamic
+        const dynamic_entries: {value} = dynamic
         test.assert(#dynamic_entries == 3 and dynamic_entries[2] == nil)
         return bytes == codec:encode(entries, frozen, entries, frozen)
       end)
 end
 
 function test_dynamic_value_arms(_: test.Context)
-  local fields: {reflect.Type} = {}
+  const fields: {reflect.Type} = {}
   for index = 1, 9 do
     fields[index] = reflect.Type.is_value()
   end
-  local codec = protobuf.portable(fields as const {reflect.Type},
+  const codec = protobuf.portable(fields as const {reflect.Type},
       {descriptor(Point(0, "")), descriptor(Choice.empty())})
-  local entries: {value} = {true, nil, "bytes"}
-  local frozen = entries as const {value}
-  local encode = function(): string
+  const entries: {value} = {true, nil, "bytes"}
+  const frozen = entries as const {value}
+  const encode = function(): string
     return codec:encode(nil, false, 7, 1.0, "\0\255", Point(4, "four"), Choice.scalar(6),
         entries, frozen)
   end
@@ -272,19 +272,19 @@ function test_dynamic_value_arms(_: test.Context)
     else raise "wrong dynamic variant"
     end
     test.assert(mutable is {value} and immutable is const {value})
-    local array: {value} = mutable
+    const array: {value} = mutable
     test.assert(#array == 3 and array[1] == true and array[2] == nil and array[3] == "bytes")
     return bytes == encode()
   end)
 end
 
 function test_recursive_and_repeated_graphs(_: test.Context)
-  local codec = protobuf.portable({descriptor(Node(nil, 0)), descriptor(Pair(Point(0, ""), Point(0, "")))})
-  local shared = Point(2, "two")
-  local encode = function(): string
+  const codec = protobuf.portable({descriptor(Node(nil, 0)), descriptor(Pair(Point(0, ""), Point(0, "")))})
+  const shared = Point(2, "two")
+  const encode = function(): string
     return codec:encode(Node(Node(nil, 2), 1), Pair(shared, shared))
   end
-  local cyclic = Node(nil, 1)
+  const cyclic = Node(nil, 1)
   cyclic.next = cyclic
   expect_error(function() codec:encode(cyclic, Pair(shared, shared)) end, "cyclic object graph")
   publish("graphs", codec, encode(), function(bytes: string): boolean
@@ -296,15 +296,15 @@ function test_recursive_and_repeated_graphs(_: test.Context)
 end
 
 function test_text_positions(_: test.Context)
-  local wrapped = reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+  const wrapped = reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
       reflect.Type.is_option(reflect.Type.is_string()))
-  local codec = protobuf.portable({reflect.Type.is_string(), descriptor(Caption("")),
+  const codec = protobuf.portable({reflect.Type.is_string(), descriptor(Caption("")),
       descriptor(Notice.text("")), wrapped}, nil,
       {"1", "browser.portable_tests.Caption.label", "browser.portable_tests.Notice.text.value", "4"})
-  local text = "\239\187\191caf\195\169"
-  local words: {string} = {}
+  const text = "\239\187\191caf\195\169"
+  const words: {string} = {}
   words[1], words[3] = text, "ok"
-  local encode = function(): string
+  const encode = function(): string
     return codec:encode(text, Caption(text), Notice.text(text), words)
   end
   publish("text", codec, encode(), function(bytes: string): boolean
@@ -319,19 +319,19 @@ function test_text_positions(_: test.Context)
 end
 
 function test_public_record_constructor(_: test.Context)
-  local original = PublicView(11)
-  local codec = protobuf.portable({descriptor(original)})
+  const original = PublicView(11)
+  const codec = protobuf.portable({descriptor(original)})
   publish("view", codec, codec:encode(original), function(bytes: string): boolean
-    local before = constructions
-    local actual: PublicView = codec:decode(bytes)
+    const before = constructions
+    const actual: PublicView = codec:decode(bytes)
     test.assert(constructions == before + 1 and actual.number == 11 and actual:computed() == 33)
     return bytes == codec:encode(PublicView(11))
   end)
 end
 
 function test_encode_only_record(_: test.Context)
-  local original = EncodeOnly(9)
-  local codec = protobuf.portable({descriptor(original)})
+  const original = EncodeOnly(9)
+  const codec = protobuf.portable({descriptor(original)})
   publish("encode_only", codec, codec:encode(original), function(bytes: string): boolean
     codec:decode(bytes)
     raise "unexpectedly decoded an encode-only public view"
@@ -339,11 +339,11 @@ function test_encode_only_record(_: test.Context)
 end
 
 function test_closed_nominal_set(_: test.Context)
-  local codec = protobuf.portable({reflect.Type.is_value()})
+  const codec = protobuf.portable({reflect.Type.is_value()})
   expect_error(function() codec:encode(Point(1, "unlisted")) end,
       "browser.portable_tests.Point is not in this portable codec")
   publish("closed", codec, codec:encode(7), function(bytes: string): boolean
-    local actual: value = codec:decode(bytes)
+    const actual: value = codec:decode(bytes)
     test.assert(actual == 7)
     return bytes == codec:encode(7)
   end)
@@ -356,8 +356,8 @@ function test_transfer_hooks_are_not_called(_: test.Context)
 end
 
 function test_invalid_text_error_and_recovery(_: test.Context)
-  local codec = protobuf.portable({reflect.Type.is_string()}, nil, {"1"})
-  local target = browser.binding("decode_text")
+  const codec = protobuf.portable({reflect.Type.is_string()}, nil, {"1"})
+  const target = browser.binding("decode_text")
   defer target:close()
   local caught = false
   do
@@ -365,9 +365,9 @@ function test_invalid_text_error_and_recovery(_: test.Context)
   catch
     caught = true
     test.assert(error is browser.BrowserError)
-    local failure: browser.BrowserError = error
+    const failure: browser.BrowserError = error
     defer failure:close()
-    local checker = browser.binding("check_text_error")
+    const checker = browser.binding("check_text_error")
     defer checker:close()
     test.assert(expect_boolean(checker:call(Value.is_handle(failure.thrown))))
   end
@@ -377,7 +377,7 @@ function test_invalid_text_error_and_recovery(_: test.Context)
 end
 
 function test_heap_growth_tools(_: test.Context)
-  local codec = protobuf.portable({reflect.Type.is_string()})
+  const codec = protobuf.portable({reflect.Type.is_string()})
   control("heap", function(...: Value): Value
     return Value.is_integer(ffi.titan_test_heap_size() as integer)
   end)
@@ -385,29 +385,29 @@ function test_heap_growth_tools(_: test.Context)
     return Value.is_bytes(codec:encode(string.rep("\0\255A", 11184811)))
   end)
   control("grow_in", function(...: Value): Value
-    local bytes = expect_bytes(...[1])
-    local actual: string = codec:decode(bytes)
+    const bytes = expect_bytes(...[1])
+    const actual: string = codec:decode(bytes)
     test.assert(#actual == 33554433 and string.sub(actual, 1, 3) == "\0\255A")
     return Value.is_bytes(codec:encode(actual))
   end)
 end
 
 function test_integer_cost_note(_: test.Context)
-  local codec = protobuf.portable({reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+  const codec = protobuf.portable({reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
       reflect.Type.is_integer())})
-  local entries: {integer} = {}
+  const entries: {integer} = {}
   for index = 1, 10000 do
     entries[index] = index
   end
   publish("benchmark", codec, codec:encode(entries), function(bytes: string): boolean
-    local clock = browser.binding("clock")
+    const clock = browser.binding("clock")
     defer clock:close()
-    local start = clock:call()
-    local encoded = codec:encode(entries)
-    local restored: {integer} = codec:decode(bytes)
-    local finish = clock:call()
+    const start = clock:call()
+    const encoded = codec:encode(entries)
+    const restored: {integer} = codec:decode(bytes)
+    const finish = clock:call()
     test.assert(#restored == 10000 and restored[10000] == 10000)
-    local report = browser.binding("report_cost")
+    const report = browser.binding("report_cost")
     defer report:close()
     report:call(start, finish)
     return bytes == encoded

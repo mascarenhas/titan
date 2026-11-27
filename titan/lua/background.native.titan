@@ -33,7 +33,7 @@ end
 -- @usage standard-library-lua.md#asynchronous-execution
 function Lua:run_async(chunk: string, name: string?, ...: async.TransferValue):
     (...: async.TransferValue)
-  local call = self:prepare_call(chunk, name, {...})
+  const call = self:prepare_call(chunk, name, {...})
   self:reserve()
   call.stack_top = ffi.lua_gettop(self.handle)
   defer call:finish()
@@ -46,7 +46,7 @@ end
 -- @usage standard-library-lua.md#asynchronous-execution
 function Lua:run_async_from_loader(reader: io.Reader, name: string?,
                                          ...: async.TransferValue): (...: async.TransferValue)
-  local builder = string.writer()
+  const builder = string.writer()
   for chunk in reader:read do builder:write(chunk) end
   return self:run_async(builder:drain(), name, ...)
 end

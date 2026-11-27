@@ -137,8 +137,8 @@ local const CANCELLABLE_SUCCESS_NIL: CancellableResult<|value, value|>?
 --- Opaque readable string-channel endpoint created by reader_writer_channel.
 -- @usage async-io.md
 record ChannelReader
-  local receive: function (): (string)
-  local close_channel: function (): ()
+  local const receive: function (): (string)
+  local const close_channel: function (): ()
   local excess: string?
   local closed: boolean
 end
@@ -146,8 +146,8 @@ end
 --- Opaque writable string-channel endpoint created by reader_writer_channel.
 -- @usage async-io.md
 record ChannelWriter
-  local send: function (string): ()
-  local close_channel: function (): ()
+  local const send: function (string): ()
+  local const close_channel: function (): ()
 end
 
 --- First successful result among 2 named Tasks, or none when all reject.
@@ -307,7 +307,7 @@ end
 record Completion<|C, T, E|>
   local stored_context: C
   local register: (function (Completion<|C, T, E|>, integer): (Request?))?
-  local task: Task
+  local const task: Task
   local epoch: integer
   local policy: integer
   local phase: integer
@@ -319,29 +319,29 @@ end
 local type Wait = Completion<|value, value, value|>
 
 local record Orphan
-  local task: Task
-  local wait: Wait?
-  local epoch: integer
+  local const task: Task
+  local const wait: Wait?
+  local const epoch: integer
 end
 
 local record TerminalRegistration<|A, B|>
-  local listener: function (TaskStatus<|A, B|>): ()
+  local const listener: function (TaskStatus<|A, B|>): ()
   local live: boolean
 end
 
 local record CloseRegistration
-  local listener: function (): ()
+  local const listener: function (): ()
   local live: boolean
 end
 
 local record Runtime
   -- Per-target backend state, declared by the runtime contributor.
-  local backend: Backend
+  local const backend: Backend
   local ready_head: Task?
   local ready_tail: Task?
   local ready_count: integer
   local wake_armed: boolean
-  local tasks: {Task}
+  local const tasks: {Task}
   local next_task: integer
   local current_task: Task?
   local driving: boolean
@@ -350,14 +350,15 @@ local record Runtime
   local shutdown_cancelled: boolean
   local exit_code: integer?
   local close_registrations: {CloseRegistration}
+  -- titan-lint: allow(prefer-const-local-field): the native external and runtime contributors assign it
   local retirement_error: ExternalWait?
 end
 
 --- Deferred cooperative computation with typed success and complex-cancellation payloads.
 -- @usage async-io.md
 record Task<|A, B|>
-  local root: coroutine.Coroutine
-  local runtime: Runtime
+  local const root: coroutine.Coroutine
+  local const runtime: Runtime
   local phase: integer
   local state: TaskStatus<|A, B|>?
   local epoch: integer
@@ -370,7 +371,7 @@ record Task<|A, B|>
   local wait: Wait?
   local completion: Wait?
   local root_index: integer
-  local terminal_registrations: {TerminalRegistration<|A, B|>}
+  local const terminal_registrations: {TerminalRegistration<|A, B|>}
   local suspended: boolean
   local resume_token: ResumeToken?
   local resume_pending: boolean
@@ -379,7 +380,7 @@ record Task<|A, B|>
   -- wait (the latest call wins). start_suspend consumes it; the driver
   -- discards it when it next enters the root, and at termination.
   local latched_token: ResumeToken?
-  local cleanup_start: boolean
+  local const cleanup_start: boolean
   local cleanup_active: boolean
   local cleanup_wait: ExternalWait?
   local terminal_kind: integer
@@ -463,13 +464,13 @@ end
 -- @usage async-io.md
 function Task:add_terminal_listener(listener: function (TaskStatus<|A, B|>): ()): function (): ()
   if self.phase == TASK_FINISHED then return function () end end
-  local registration = TerminalRegistration<|A, B|> {listener = listener, live = true}
+  const registration = TerminalRegistration<|A, B|> {listener = listener, live = true}
   self.terminal_registrations[#self.terminal_registrations + 1] = registration
-  local task = self
+  const task = self
   return function ()
     if not registration.live then return end
     registration.live = false
-    local registrations = task.terminal_registrations
+    const registrations = task.terminal_registrations
     for index = 1, #registrations do
       if registrations[index] == registration then
         for following = index, #registrations - 1 do
@@ -490,10 +491,10 @@ local function has_tasks(runtime: Runtime): boolean
 end
 
 local function require_main_thread()
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack" end
   ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
-  local main = ffi.lua_tothread(L, -1)
+  const main = ffi.lua_tothread(L, -1)
   ffi.lua_settop(L, top)
   if L ~= main then raise "async.loop must be driven from the Lua main thread" end
 end
@@ -515,13 +516,13 @@ end
 -- whose retirement gate is still armed (the gate finish_task refuses on) stays
 -- nonterminal.
 local function retire_tasks_at_close(runtime: Runtime)
-  local abandoned = CancellationReason.simple(ABANDONED_AT_CLOSE)
+  const abandoned = CancellationReason.simple(ABANDONED_AT_CLOSE)
   for index = 1, runtime.next_task - 1 do
-    local task? = runtime.tasks[index]
+    const task? = runtime.tasks[index]
     if task ~= nil then
       task.wait = nil
       clear_suspension(task)
-      local barrier? = task.cleanup_wait
+      const barrier? = task.cleanup_wait
       if barrier == nil or barrier:retired_natively() then
         task.phase = TASK_FINISHED
         task.state = TaskStatus.cancelled(task.cancel_value or abandoned)
@@ -541,7 +542,7 @@ local function new_runtime(): Runtime
   if ffi.titan_state_closing(L) ~= 0 then
     raise "cannot create an async Runtime during Lua state close"
   end
-  local runtime = Runtime {backend = new_backend(),
+  const runtime = Runtime {backend = new_backend(),
     ready_head = nil, ready_tail = nil, ready_count = 0, wake_armed = false,
     tasks = {}, next_task = 1,
     current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}, retirement_error = nil}
@@ -552,9 +553,9 @@ local function new_runtime(): Runtime
 end
 
 local function ensure_runtime(): Runtime
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime ~= nil then return runtime end
-  local created = new_runtime()
+  const created = new_runtime()
   active_runtime = created
   return created
 end
@@ -565,7 +566,7 @@ end
 -- @return True while the Runtime is closing; does not check Task cancellation.
 -- @usage async-io.md
 function is_closing(): boolean
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
   return runtime.closing
 end
@@ -575,17 +576,17 @@ end
 -- @return Idempotent remover; registration requires an active, nonclosing Runtime.
 -- @usage async-io.md#runtime-close-listeners
 function add_close_listener(listener: function (): ()): function (): ()
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
   if runtime.closing or runtime.exit_code ~= nil then
     raise "cannot register a close listener while async Runtime is shutting down"
   end
-  local registration = CloseRegistration(listener, true)
+  const registration = CloseRegistration(listener, true)
   runtime.close_registrations[#runtime.close_registrations + 1] = registration
   return function ()
     if not registration.live then return end
     registration.live = false
-    local registrations = runtime.close_registrations
+    const registrations = runtime.close_registrations
     for index = 1, #registrations do
       if registrations[index] == registration then
         for following = index, #registrations - 1 do
@@ -601,10 +602,10 @@ end
 local function notify_runtime_closed(runtime: Runtime)
   unbind_backend(runtime)
   runtime.closing = true
-  local registrations = runtime.close_registrations
+  const registrations = runtime.close_registrations
   runtime.close_registrations = {}
   for index = 1, #registrations do
-    local registration = registrations[index]
+    const registration = registrations[index]
     if registration.live then
       registration.live = false
       do registration.listener()
@@ -619,9 +620,9 @@ end
 -- @return The same Task userdata as the typed owner view.
 -- @usage async-io.md
 function running(): Task<|value, value|>
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
-  local task? = runtime.current_task
+  const task? = runtime.current_task
   -- A synchronous callback sees no current Task, even when it runs inside a
   -- binding that a Task called: it cannot wait or switch.
   if task == nil or ffi.titan_no_switch(L) ~= 0 then
@@ -635,8 +636,8 @@ end
 --- Check sticky cancellation and Runtime failure synchronously without yielding.
 -- @usage async-io.md
 function checkpoint()
-  local task = running()
-  local reason? = task.cancel_value
+  const task = running()
+  const reason? = task.cancel_value
   if reason ~= nil then raise reason end
   if task.runtime.closing then raise (task.runtime.failure as Error).error end
 end
@@ -655,7 +656,7 @@ end
 
 local function begin_suspension(task: Task, operation: Wait?)
   local limit = ffi.LUA_MAXINTEGER as integer
-  local final_wait? = task.cleanup_wait
+  const final_wait? = task.cleanup_wait
   if final_wait ~= nil then
     -- The reserved epoch belongs to one prepared retirement capability, not
     -- arbitrary yielding code reached while its cleanup callback is running.
@@ -675,14 +676,14 @@ local function release_completion(wait: Wait)
 end
 
 local function finish_task(task: Task, state: TaskStatus)
-  local barrier? = task.cleanup_wait
+  const barrier? = task.cleanup_wait
   if barrier ~= nil and not barrier:retired_natively() then return end
   -- An exceptional Result allocation can occur after task.wait was detached.
-  local cached? = task.completion
+  const cached? = task.completion
   if cached ~= nil then cached.phase = WAIT_RETIRED; release_completion(cached) end
   clear_suspension(task)
   task.latched_token = nil
-  local wait? = task.wait
+  const wait? = task.wait
   if wait ~= nil then wait.phase = WAIT_RETIRED; release_completion(wait) end
   task.wait = nil
   task.phase = TASK_FINISHED
@@ -691,7 +692,7 @@ local function finish_task(task: Task, state: TaskStatus)
   task.terminal_value = nil
   task.terminal_trace = nil
   task.cleanup_wait = nil
-  local listeners = task.terminal_registrations
+  const listeners = task.terminal_registrations
   for index = 1, #listeners do listeners[index].live = false end
   for index = 1, #listeners do
     do listeners[index].listener(state) catch end
@@ -707,7 +708,7 @@ end
 
 local function error_text(err: value): string
   if err is OperationError then
-    local failure = err as OperationError
+    const failure = err as OperationError
     return failure.operation .. ": " .. failure.name ..
            " (" .. failure.code .. "): " .. failure.message
   end
@@ -724,10 +725,10 @@ local function report_task_error(err: value, trace: string)
   -- stderr is a macro on the supported C libraries and therefore is not a
   -- portable FFI object. Descriptor 2 is the inherited stderr boundary. The
   -- typed call checks its count against this platform's actual write parameter.
-  local bytes = text as foreign const *char
+  const bytes = text as foreign const *char
   local offset = 0
   while offset < #text do
-    local written = ffi.write(
+    const written = ffi.write(
         2 as foreign int, bytes + offset,
         #text - offset)
     if written < 0 then
@@ -747,15 +748,15 @@ end
 local function publish_terminal(task: Task)
   if not task.root_done or task.terminal_kind == TERMINAL_NONE or
       task.phase == TASK_FINISHED then return end
-  local barrier? = task.cleanup_wait
+  const barrier? = task.cleanup_wait
   if barrier ~= nil and not barrier:complete_retirement(task) then return end
-  local kind = task.terminal_kind
-  local payload = task.terminal_value
-  local reason? = task.cancel_value
+  const kind = task.terminal_kind
+  const payload = task.terminal_value
+  const reason? = task.cancel_value
   if reason ~= nil then
     finish_task(task, TaskStatus.cancelled(reason))
   elseif kind == TERMINAL_FAILED then
-    local trace = task.terminal_trace or ""
+    const trace = task.terminal_trace or ""
     finish_task(task, TaskStatus.failed(Error(payload, trace)))
     report_task_error(payload, trace)
   else
@@ -794,7 +795,7 @@ end
 
 local function wait_result(wait: Wait): (boolean, value)
   if wait.kind == OUTCOME_FATAL then return true, wait.payload end
-  local reason? = wait.task.cancel_value
+  const reason? = wait.task.cancel_value
   if wait.policy ~= WAIT_CLEANUP and reason ~= nil then
     if wait.policy == WAIT_CANCELLABLE then
       return false, CancellableResult<|value, value|>.cancelled(reason)
@@ -817,7 +818,7 @@ end
 
 local function deliver_wait(wait: Wait)
   if wait.phase ~= WAIT_SETTLED then raise "async operation is not settled" end
-  local task = wait.task
+  const task = wait.task
   if task.wait ~= wait or task.epoch ~= wait.epoch then
     raise "stale async operation settlement"
   end
@@ -842,10 +843,10 @@ local function settle(wait: Wait, kind: integer, payload: value)
   if wait.task.wait ~= wait or wait.task.epoch ~= wait.epoch then
     raise "stale async operation settlement"
   end
-  local registering = wait.phase == WAIT_REGISTERING
+  const registering = wait.phase == WAIT_REGISTERING
   -- A finalizer cannot resume the waiting Task either, nor can a synchronous
   -- callback: queue its delivery.
-  local deferred = not registering and (wait.task.runtime.current_task ~= nil or
+  const deferred = not registering and (wait.task.runtime.current_task ~= nil or
     ffi.titan_in_finalizer(L) ~= 0 or ffi.titan_no_switch(L) ~= 0)
   -- A peer Task cannot advance this Task inline. Accept its deferred wake
   -- before committing settlement: synchronous scheduling failure leaves the
@@ -861,8 +862,8 @@ end
 -- This capability belongs to one terminal operation, not to whichever wait
 -- the Task happens to have when a late callback reports its failure.
 local function fatal(wait: Wait, error: value, trace: string)
-  local task = wait.task
-  local runtime = task.runtime
+  const task = wait.task
+  const runtime = task.runtime
   if runtime.current_task ~= nil then
     raise "async fatal callback must run outside an async Task"
   end
@@ -951,14 +952,14 @@ local function advance_task(task: Task, failed: boolean, payload: value)
       publish_terminal(task)
       return
     end
-    local yielding = yielded == YIELD_TAG
+    const yielding = yielded == YIELD_TAG
     local operation: Wait? = nil
     local policy = WAIT_ORDINARY
     if not yielding then
       operation = yielded as Wait
       policy = operation.policy
     end
-    local reason? = task.cancel_value
+    const reason? = task.cancel_value
     if policy ~= WAIT_CLEANUP and reason ~= nil then
       if operation ~= nil then operation.phase = WAIT_RETIRED; release_completion(operation) end
       if policy == WAIT_CANCELLABLE then
@@ -983,21 +984,19 @@ local function advance_task(task: Task, failed: boolean, payload: value)
       if admitted then
         set_phase(task, TASK_WAITING)
         if yielding then
-          do
-            enqueue_ready(task, READY_YIELD, nil)
-            return
-          catch
-            next_failed = true
-            next_payload = error
-          end
+          enqueue_ready(task, READY_YIELD, nil)
+          return
+        catch
+          next_failed = true
+          next_payload = error
         else
-          local wait = operation as Wait
+          const wait = operation as Wait
           wait.epoch = task.epoch
           task.wait = wait
           local request: Request? = nil
           local registration_failed = false
           do
-            local start = wait.register
+            const start = wait.register
             request = start(wait, wait.epoch)
           catch
             wait.phase = WAIT_RETIRED
@@ -1017,7 +1016,7 @@ local function advance_task(task: Task, failed: boolean, payload: value)
             -- admission check above found no parked wait (Task:cancel), so a
             -- published explicit suspension takes it here, once.
             if task.suspended and policy ~= WAIT_CLEANUP and task.cancel_value ~= nil then
-              local action? = task.suspend_cancel
+              const action? = task.suspend_cancel
               if action ~= nil then action() end
               if wait.phase == WAIT_REGISTERING then settle(wait, OUTCOME_SUCCESS, nil) end
             end
@@ -1055,7 +1054,7 @@ end
 
 local function enqueue_ready(task: Task, kind: integer, wait: Wait?)
   if task.ready_queued then raise "async Task already has a queued continuation" end
-  local runtime = task.runtime
+  const runtime = task.runtime
   -- Only nonallocating fields change after wake acceptance. Callers commit
   -- settlement or resume_pending after this returns, so failure is retryable.
   do arm_ready(runtime)
@@ -1069,7 +1068,7 @@ local function enqueue_ready(task: Task, kind: integer, wait: Wait?)
   task.ready_epoch = task.epoch
   task.ready_wait = wait
   task.ready_queued = true
-  local tail? = runtime.ready_tail
+  const tail? = runtime.ready_tail
   if tail == nil then runtime.ready_head = task
   else tail.ready_next = task end
   runtime.ready_tail = task
@@ -1082,11 +1081,11 @@ end
 local function drain_ready(runtime: Runtime, available: integer)
   local count = available
   if count > READY_BATCH_LIMIT then count = READY_BATCH_LIMIT end
-  for index = 1, count do
-    local task = runtime.ready_head as Task
-    local kind = task.ready_kind
-    local epoch = task.ready_epoch
-    local wait? = task.ready_wait
+  for _ = 1, count do
+    const task = runtime.ready_head as Task
+    const kind = task.ready_kind
+    const epoch = task.ready_epoch
+    const wait? = task.ready_wait
     runtime.ready_head = task.ready_next
     runtime.ready_count = runtime.ready_count - 1
     if runtime.ready_head == nil then runtime.ready_tail = nil end
@@ -1099,7 +1098,7 @@ local function drain_ready(runtime: Runtime, available: integer)
     task.ready_wait = nil
     if task.phase ~= TASK_FINISHED and task.epoch == epoch and task.wait == wait then
       if kind == READY_START or kind == READY_YIELD then
-        local reason? = task.cancel_value
+        const reason? = task.cancel_value
         if reason ~= nil and not (kind == READY_START and task.cleanup_start) then
           advance_task(task, true, reason)
         else advance_task(task, false, nil) end
@@ -1127,13 +1126,13 @@ function Task:cancel(reason: CancellationReason<|B|>?)
   -- Only an accepted, parked wait acts now. A running or ready Task meets the
   -- reason at its next admission check, and one still registering its wait at
   -- the acceptance boundary in advance_task.
-  local wait? = self.wait
+  const wait? = self.wait
   if wait == nil or wait.phase ~= WAIT_PENDING then return end
   if wait.policy == WAIT_CANCELLABLE and wait.request ~= nil then
     cancel_request(wait.request)
   end
   if self.suspended then
-    local action? = self.suspend_cancel
+    const action? = self.suspend_cancel
     if action ~= nil then action() end
     self:resume(self.resume_token as ResumeToken)
   end
@@ -1150,14 +1149,14 @@ function Task:resume(token: ResumeToken)
   -- have published its token yet: latch this wake, the latest call winning.
   -- Never enqueue here, so a registration keeps one settlement owner.
   -- Implementation notes: doc/implementation/libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators
-  local wait? = self.wait
+  const wait? = self.wait
   if self.phase == TASK_RUNNING or (wait ~= nil and wait.phase == WAIT_REGISTERING) then
     self.latched_token = token
     return
   end
   if token ~= self.resume_token then
     local source = "unknown source"
-    local expected? = self.resume_token
+    const expected? = self.resume_token
     if expected ~= nil then source = expected.source or source end
     raise "Task resume token mismatch (expected source: " .. source .. ")"
   end
@@ -1210,16 +1209,16 @@ function Completion:fatal(number: integer, error: value, trace: string)
 end
 
 local function completion<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (Request?), policy: integer): Completion<|C, T, E|>
-  local task = running()
-  local saved? = task.completion
+  const task = running()
+  const saved? = task.completion
   if saved == nil then
-    local created = Completion<|C, T, E|> {stored_context = context, register = start,
+    const created = Completion<|C, T, E|> {stored_context = context, register = start,
       task = task, epoch = 0, policy = policy, phase = WAIT_REGISTERING,
       kind = OUTCOME_SUCCESS, payload = nil, request = nil}
     task.completion = created as Wait
     return created
   end
-  local reused = saved as Completion<|C, T, E|>
+  const reused = saved as Completion<|C, T, E|>
   reused.epoch = 0
   reused.stored_context = context
   reused.register = start
@@ -1247,7 +1246,7 @@ local function legacy_settle(done: Wait, number: integer, kind: integer, payload
 end
 
 local function old_void_start<|T, E|>(done: Completion<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>, number: integer): Request?
-  local op = done:context(number)
+  const op = done:context(number)
   op(function (result: T) legacy_settle(done as Wait, number, OUTCOME_SUCCESS, result) end,
       function (error: E) legacy_settle(done as Wait, number, OUTCOME_ERROR, error) end,
       function (error: value, trace: string) done:fatal(number, error, trace) end)
@@ -1282,8 +1281,8 @@ end
 -- a resume during done:resolve latches again harmlessly. A cancellation in
 -- this window is taken at the acceptance boundary in advance_task.
 local function start_suspend(done: Completion<|ResumeToken, value, value|>, number: integer): Request?
-  local token = done:context(number)
-  local task = done.task
+  const token = done:context(number)
+  const task = done.task
   task.suspended = true
   task.resume_token = token
   task.resume_pending = false
@@ -1296,14 +1295,14 @@ end
 -- @param cancel_action Optional nonyielding, nonraising action detaching the exact waiter on cancellation.
 -- @usage async-io.md
 function suspend(token: ResumeToken, cancel_action: (function (): ())?)
-  local task = running()
+  const task = running()
   -- The token remains unpublished until registration accepts this suspension.
   -- A resume before that, even from a finalizer during Completion
   -- construction, is latched by Task:resume and consumed by start_suspend.
   -- Rejection and setup errors clear the staged action.
   task.suspend_cancel = cancel_action
   defer clear_suspension(task)
-  local result = await_registered<|ResumeToken, value, value|>(token, start_suspend, WAIT_ORDINARY) as Result<|value, value|>
+  const result = await_registered<|ResumeToken, value, value|>(token, start_suspend, WAIT_ORDINARY) as Result<|value, value|>
   case result
   when error(failure) then raise failure
   else
@@ -1323,10 +1322,10 @@ end
 -- @usage async-io.md
 function run<|A, B|>(func: function (): (A)): Task<|A, B|>
   if ffi.titan_state_closing(L) ~= 0 then refuse_start_at_close() end
-  local runtime = ensure_runtime()
+  const runtime = ensure_runtime()
   if runtime.closing or runtime.exit_code ~= nil then raise "cannot start a Task while async Runtime is shutting down" end
-  local root = coroutine.create(function (_: value): value return func() end, ASYNC_TAG)
-  local task = Task<|A, B|> {root = root, runtime = runtime, phase = TASK_READY, state = nil,
+  const root = coroutine.create(function (_: value): value return func() end, ASYNC_TAG)
+  const task = Task<|A, B|> {root = root, runtime = runtime, phase = TASK_READY, state = nil,
     epoch = 0, ready_next = nil, ready_queued = false, ready_kind = READY_START,
     ready_epoch = 0, ready_wait = nil,
     cancel_value = nil, wait = nil, completion = nil, root_index = runtime.next_task,
@@ -1335,7 +1334,7 @@ function run<|A, B|>(func: function (): (A)): Task<|A, B|>
     cleanup_start = false,
     cleanup_active = false, cleanup_wait = nil, terminal_kind = TERMINAL_NONE,
     terminal_value = nil, terminal_trace = nil, root_done = false}
-  local erased = task as Task<|value, value|>
+  const erased = task as Task<|value, value|>
   runtime.tasks[runtime.next_task] = erased
   runtime.next_task = runtime.next_task + 1
   do enqueue_ready(erased, READY_START, nil)
@@ -1352,13 +1351,13 @@ function run_with_cleanup<|A, B|>(
     cleanup: function (CancellationReason<|B|>?): (),
     final_wait: ExternalWait?): Task<|A, B|>
   if ffi.titan_state_closing(L) ~= 0 then refuse_start_at_close() end
-  local runtime = ensure_runtime()
+  const runtime = ensure_runtime()
   if runtime.closing or runtime.exit_code ~= nil then
     raise "cannot start a Task while async Runtime is shutting down"
   end
   if final_wait ~= nil then final_wait:check_cleanup_binding(runtime) end
-  local root = coroutine.create(function (_: value): value
-    local task = running() as Task<|A, B|>
+  const root = coroutine.create(function (_: value): value
+    const task = running() as Task<|A, B|>
     defer do
       task.cleanup_active = true
       -- At Lua-state close an abandoned Task is unwound without a reason;
@@ -1372,7 +1371,7 @@ function run_with_cleanup<|A, B|>(
     end
     do
       checkpoint()
-      local result = body()
+      const result = body()
       task.terminal_value = result
       return result
     catch
@@ -1383,7 +1382,7 @@ function run_with_cleanup<|A, B|>(
       raise
     end
   end, ASYNC_TAG)
-  local task = Task<|A, B|> {
+  const task = Task<|A, B|> {
     root = root, runtime = runtime, phase = TASK_READY, state = nil,
     epoch = 0, ready_next = nil, ready_queued = false, ready_kind = READY_START,
     ready_epoch = 0, ready_wait = nil, cancel_value = nil, wait = nil,
@@ -1394,7 +1393,7 @@ function run_with_cleanup<|A, B|>(
     cleanup_wait = final_wait, terminal_kind = TERMINAL_NONE,
     terminal_value = nil, terminal_trace = nil, root_done = false
   }
-  local erased = task as Task<|value, value|>
+  const erased = task as Task<|value, value|>
   -- Ownership-retiring cleanup must not need its first Completion allocation
   -- after the Task has already accepted cancellation.
   task.completion = Completion<|value, value, value|> {
@@ -1408,7 +1407,7 @@ function run_with_cleanup<|A, B|>(
   local admitted = false
   defer if not admitted and final_wait ~= nil then final_wait:unbind_cleanup(erased) end
   do
-    local index = runtime.next_task
+    const index = runtime.next_task
     runtime.next_task = index + 1
     task.root_index = index
     runtime.tasks[index] = erased
@@ -1443,17 +1442,17 @@ local function cancel_shutdown_tasks(runtime: Runtime, origin: Task?)
   if runtime.shutdown_cancelled then return end
   runtime.shutdown_cancelled = true
   for index = 1, runtime.next_task - 1 do
-    local task? = runtime.tasks[index]
+    const task? = runtime.tasks[index]
     if task ~= nil and task ~= origin and task.terminal_kind == TERMINAL_NONE then
-      do task:cancel(CancellationReason.simple("async Runtime stopped after callback failure")) catch end
-    end
+      task:cancel(CancellationReason.simple("async Runtime stopped after callback failure"))
+    catch end
   end
 end
 
 local function unwind_orphans(runtime: Runtime)
-  local stranded: {Orphan} = {}
+  const stranded: {Orphan} = {}
   for index = 1, runtime.next_task - 1 do
-    local task? = runtime.tasks[index]
+    const task? = runtime.tasks[index]
     if task ~= nil and not task.root_done then
       stranded[#stranded + 1] = Orphan(task, task.wait, task.epoch)
     end
@@ -1462,16 +1461,16 @@ local function unwind_orphans(runtime: Runtime)
   -- captured wait. Never reinterpret a newer wait as one from this snapshot.
   cancel_shutdown_tasks(runtime, nil)
   for index = 1, #stranded do
-    local orphan = stranded[index]
-    local task = orphan.task
-    local wait? = orphan.wait
+    const orphan = stranded[index]
+    const task = orphan.task
+    const wait? = orphan.wait
     if task.phase ~= TASK_FINISHED and task.epoch == orphan.epoch and
         task.wait == wait and not task.ready_queued and not task.resume_pending and
         (wait == nil or wait.phase == WAIT_PENDING) then
       if wait ~= nil then wait.phase = WAIT_RETIRED; release_completion(wait) end
       task.wait = nil
       clear_suspension(task)
-      local failure = runtime.failure as Error
+      const failure = runtime.failure as Error
       advance_task(task, true, failure.error)
     end
   end
@@ -1481,31 +1480,35 @@ end
 -- whether a scheduling failure needs another recovery pass before blocking.
 local function recover_task(runtime: Runtime, task: Task): boolean
   local recover = false
-  local barrier? = task.cleanup_wait
+  const barrier? = task.cleanup_wait
   if barrier ~= nil then barrier:poll_retirement(task) end
   if task.root_done and task.terminal_kind ~= TERMINAL_NONE and
       (barrier == nil or barrier:retired_natively()) then
     if not task.ready_queued then
-      do enqueue_ready(task, READY_TERMINAL, nil)
-      catch recover = true; fail_runtime(runtime, error, traceback) end
+      enqueue_ready(task, READY_TERMINAL, nil)
+    catch
+      recover = true; fail_runtime(runtime, error, traceback)
     end
   elseif barrier ~= nil then
-    do barrier:notify_if_ready()
-    catch recover = true; fail_runtime(runtime, error, traceback) end
+    barrier:notify_if_ready()
+  catch
+    recover = true; fail_runtime(runtime, error, traceback)
   end
   if runtime.failure ~= nil and not task.root_done and not task.ready_queued then
     if task.phase == TASK_READY then
       -- An entry allocation may have failed after dequeue but before
       -- the startup trampoline ran. Preserve run_with_cleanup's entry.
-      do enqueue_ready(task, READY_START, nil)
-      catch recover = true; fail_runtime(runtime, error, traceback) end
+      enqueue_ready(task, READY_START, nil)
+    catch
+      recover = true; fail_runtime(runtime, error, traceback)
     else
-      local waiting? = task.wait
+      const waiting? = task.wait
       if waiting ~= nil and waiting.phase == WAIT_SETTLED then
-        do enqueue_ready(task, READY_DELIVER, waiting)
-        catch recover = true; fail_runtime(runtime, error, traceback) end
+        enqueue_ready(task, READY_DELIVER, waiting)
+      catch
+        recover = true; fail_runtime(runtime, error, traceback)
       else
-        local unaccepted_native = waiting ~= nil and barrier ~= nil and
+        const unaccepted_native = waiting ~= nil and barrier ~= nil and
           barrier:unaccepted(waiting)
         if waiting == nil or waiting.phase == WAIT_RETIRED or unaccepted_native then
           -- These operations have no outstanding domain acceptance.
@@ -1516,7 +1519,7 @@ local function recover_task(runtime: Runtime, task: Task): boolean
           task.resume_pending = false
           task.suspend_cancel = nil
           if barrier ~= nil and task.terminal_kind == TERMINAL_NONE then
-            local failure = runtime.failure as Error
+            const failure = runtime.failure as Error
             task.terminal_kind = TERMINAL_FAILED
             task.terminal_value = failure.error
             task.terminal_trace = failure.traceback
@@ -1536,7 +1539,7 @@ end
 -- @usage async-io.md
 function channel<|T|>(size: integer?):
     (function (T): (), function (): (T), function (): ())
-  local capacity = size or 1
+  const capacity = size or 1
   if capacity < 1 then raise "channel size must be at least 1" end
 
   -- Count is authoritative because a channel may carry nil. The array slots
@@ -1548,15 +1551,15 @@ function channel<|T|>(size: integer?):
   local send_waiter: Task<|value, value|>? = nil
   local receive_waiter: Task<|value, value|>? = nil
   local closed = false
-  local resume_token = ResumeToken("channel")
+  const resume_token = ResumeToken("channel")
 
-  local send: function (T): () = function (item: T)
+  const send: function (T): () = function (item: T)
     if closed then raise "channel is closed" end
     if send_waiter ~= nil then
       raise "channel already has a blocked sender"
     end
     if count == capacity then
-      local current = running()
+      const current = running()
       send_waiter = current
       defer do
         if send_waiter == current then send_waiter = nil end
@@ -1577,13 +1580,13 @@ function channel<|T|>(size: integer?):
     if receive_waiter ~= nil then receive_waiter:resume(resume_token) end
   end
 
-  local receive: function (): (T) = function (): T
+  const receive: function (): (T) = function (): T
     if closed then raise "channel is closed" end
     if receive_waiter ~= nil then
       raise "channel already has a blocked receiver"
     end
     if count == 0 then
-      local current = running()
+      const current = running()
       receive_waiter = current
       defer do
         if receive_waiter == current then receive_waiter = nil end
@@ -1594,7 +1597,7 @@ function channel<|T|>(size: integer?):
       if closed then raise "channel is closed" end
     end
 
-    local item = transfer[first]
+    const item = transfer[first]
     transfer[first] = nil
     first = first + 1
     if first > capacity then first = 1 end
@@ -1603,7 +1606,7 @@ function channel<|T|>(size: integer?):
     return item
   end
 
-  local close: function (): () = function ()
+  const close: function (): () = function ()
     if closed then return end
     closed = true
     transfer = {}
@@ -1623,7 +1626,7 @@ end
 function ChannelReader:read(): string?
   if self.closed then return nil end
   if self.excess then
-    local excess = self.excess
+    const excess = self.excess
     self.excess = nil
     return excess
   end
@@ -1640,29 +1643,29 @@ function ChannelReader:read_until(delimiter: string,
   if self.closed then return nil end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  local builder = string.writer()
+  const builder = string.writer()
   local tail = ""
   while true do
-    local chunk? = self:read()
+    const chunk? = self:read()
     if not chunk then
       if #tail > 0 then builder:write(tail) end
-      local result = builder:drain()
+      const result = builder:drain()
       if #result == 0 then return nil end
       return result
     end
-    local bytes = chunk as string
+    const bytes = chunk as string
     local boundary = bytes
     if #tail > 0 then boundary = tail .. bytes end
-    local match: integer? = string.find(boundary, delimiter)
+    const match: integer? = string.find(boundary, delimiter)
     if match then
-      local match_first = match as integer
-      local match_end = match_first + #delimiter - 1
+      const match_first = match as integer
+      const match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
         builder:write(string.sub(boundary, 1, result_end))
       end
-      local excess = string.sub(boundary, match_end + 1)
+      const excess = string.sub(boundary, match_end + 1)
       if #excess > 0 then
         self.excess = excess
       else
@@ -1672,7 +1675,7 @@ function ChannelReader:read_until(delimiter: string,
     end
     local keep = #delimiter - 1
     if keep > #boundary then keep = #boundary end
-    local committed = #boundary - keep
+    const committed = #boundary - keep
     if committed > 0 then
       if committed == #boundary then
         builder:write(boundary)
@@ -1742,7 +1745,7 @@ end
 function any_two<|A1, B1, A2, B2|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>):
     AnyTwoResult<|A1, A2|>
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
 
@@ -1769,12 +1772,12 @@ function any_two<|A1, B1, A2, B2|>(
 
   if terminal_count == 2 then return AnyTwoResult<|A1, A2|>.none() end
 
-  local resume_token = ResumeToken("async.any_two")
-  local waiting = current
+  const resume_token = ResumeToken("async.any_two")
+  const waiting = current
   local winner = 0
   local result: value = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -1795,10 +1798,10 @@ function any_two<|A1, B1, A2, B2|>(
       end
     end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -1819,7 +1822,7 @@ function any_two<|A1, B1, A2, B2|>(
       end
     end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
   suspend(resume_token)
@@ -1838,7 +1841,7 @@ function any_three<|A1, B1, A2, B2, A3, B3|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>):
     AnyThreeResult<|A1, A2, A3|>
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -1876,12 +1879,12 @@ function any_three<|A1, B1, A2, B2, A3, B3|>(
 
   if terminal_count == 3 then return AnyThreeResult<|A1, A2, A3|>.none() end
 
-  local resume_token = ResumeToken("async.any_three")
-  local waiting = current
+  const resume_token = ResumeToken("async.any_three")
+  const waiting = current
   local winner = 0
   local result: value = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -1902,10 +1905,10 @@ function any_three<|A1, B1, A2, B2, A3, B3|>(
       end
     end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -1926,10 +1929,10 @@ function any_three<|A1, B1, A2, B2, A3, B3|>(
       end
     end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -1950,7 +1953,7 @@ function any_three<|A1, B1, A2, B2, A3, B3|>(
       end
     end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
   suspend(resume_token)
@@ -1971,7 +1974,7 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>):
     AnyFourResult<|A1, A2, A3, A4|>
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -2020,12 +2023,12 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
 
   if terminal_count == 4 then return AnyFourResult<|A1, A2, A3, A4|>.none() end
 
-  local resume_token = ResumeToken("async.any_four")
-  local waiting = current
+  const resume_token = ResumeToken("async.any_four")
+  const waiting = current
   local winner = 0
   local result: value = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2046,10 +2049,10 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
       end
     end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2070,10 +2073,10 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
       end
     end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2094,10 +2097,10 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
       end
     end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
-  local fourth_listener = function (status: TaskStatus<|A4, B4|>)
+  const fourth_listener = function (status: TaskStatus<|A4, B4|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2118,7 +2121,7 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
       end
     end
   end
-  local remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
+  const remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
   defer remove_fourth_listener()
 
   suspend(resume_token)
@@ -2142,7 +2145,7 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>,
     fifth: Task<|A5, B5|>):
     AnyFiveResult<|A1, A2, A3, A4, A5|>
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -2202,12 +2205,12 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
 
   if terminal_count == 5 then return AnyFiveResult<|A1, A2, A3, A4, A5|>.none() end
 
-  local resume_token = ResumeToken("async.any_five")
-  local waiting = current
+  const resume_token = ResumeToken("async.any_five")
+  const waiting = current
   local winner = 0
   local result: value = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2228,10 +2231,10 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       end
     end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2252,10 +2255,10 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       end
     end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2276,10 +2279,10 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       end
     end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
-  local fourth_listener = function (status: TaskStatus<|A4, B4|>)
+  const fourth_listener = function (status: TaskStatus<|A4, B4|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2300,10 +2303,10 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       end
     end
   end
-  local remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
+  const remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
   defer remove_fourth_listener()
 
-  local fifth_listener = function (status: TaskStatus<|A5, B5|>)
+  const fifth_listener = function (status: TaskStatus<|A5, B5|>)
     if winner ~= 0 then return end
     case status
     when succeeded(payload) then
@@ -2324,7 +2327,7 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       end
     end
   end
-  local remove_fifth_listener = fifth:add_terminal_listener(fifth_listener)
+  const remove_fifth_listener = fifth:add_terminal_listener(fifth_listener)
   defer remove_fifth_listener()
 
   suspend(resume_token)
@@ -2344,7 +2347,7 @@ end
 function race_two<|A1, B1, A2, B2|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>):
     RaceTwoResult<|A1, B1, A2, B2|>
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
 
@@ -2355,27 +2358,27 @@ function race_two<|A1, B1, A2, B2|>(
     return RaceTwoResult<|A1, B1, A2, B2|>.second(second:status())
   end
 
-  local resume_token = ResumeToken("async.race_two")
-  local waiting = current
+  const resume_token = ResumeToken("async.race_two")
+  const waiting = current
   local winner = 0
   local result: TaskStatus<|value, value|>? = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
     winner = 1
     result = status
     waiting:resume(resume_token)
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if winner ~= 0 then return end
     winner = 2
     result = status
     waiting:resume(resume_token)
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
   suspend(resume_token)
@@ -2395,7 +2398,7 @@ function race_three<|A1, B1, A2, B2, A3, B3|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>):
     RaceThreeResult<|A1, B1, A2, B2, A3, B3|>
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -2410,36 +2413,36 @@ function race_three<|A1, B1, A2, B2, A3, B3|>(
     return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.third(third:status())
   end
 
-  local resume_token = ResumeToken("async.race_three")
-  local waiting = current
+  const resume_token = ResumeToken("async.race_three")
+  const waiting = current
   local winner = 0
   local result: TaskStatus<|value, value|>? = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
     winner = 1
     result = status
     waiting:resume(resume_token)
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if winner ~= 0 then return end
     winner = 2
     result = status
     waiting:resume(resume_token)
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if winner ~= 0 then return end
     winner = 3
     result = status
     waiting:resume(resume_token)
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
   suspend(resume_token)
@@ -2463,7 +2466,7 @@ function race_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>):
     RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -2482,45 +2485,45 @@ function race_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(fourth:status())
   end
 
-  local resume_token = ResumeToken("async.race_four")
-  local waiting = current
+  const resume_token = ResumeToken("async.race_four")
+  const waiting = current
   local winner = 0
   local result: TaskStatus<|value, value|>? = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
     winner = 1
     result = status
     waiting:resume(resume_token)
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if winner ~= 0 then return end
     winner = 2
     result = status
     waiting:resume(resume_token)
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if winner ~= 0 then return end
     winner = 3
     result = status
     waiting:resume(resume_token)
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
-  local fourth_listener = function (status: TaskStatus<|A4, B4|>)
+  const fourth_listener = function (status: TaskStatus<|A4, B4|>)
     if winner ~= 0 then return end
     winner = 4
     result = status
     waiting:resume(resume_token)
   end
-  local remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
+  const remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
   defer remove_fourth_listener()
 
   suspend(resume_token)
@@ -2549,7 +2552,7 @@ function race_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>,
     fifth: Task<|A5, B5|>):
     RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -2572,54 +2575,54 @@ function race_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(fifth:status())
   end
 
-  local resume_token = ResumeToken("async.race_five")
-  local waiting = current
+  const resume_token = ResumeToken("async.race_five")
+  const waiting = current
   local winner = 0
   local result: TaskStatus<|value, value|>? = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
     winner = 1
     result = status
     waiting:resume(resume_token)
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if winner ~= 0 then return end
     winner = 2
     result = status
     waiting:resume(resume_token)
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if winner ~= 0 then return end
     winner = 3
     result = status
     waiting:resume(resume_token)
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
-  local fourth_listener = function (status: TaskStatus<|A4, B4|>)
+  const fourth_listener = function (status: TaskStatus<|A4, B4|>)
     if winner ~= 0 then return end
     winner = 4
     result = status
     waiting:resume(resume_token)
   end
-  local remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
+  const remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
   defer remove_fourth_listener()
 
-  local fifth_listener = function (status: TaskStatus<|A5, B5|>)
+  const fifth_listener = function (status: TaskStatus<|A5, B5|>)
     if winner ~= 0 then return end
     winner = 5
     result = status
     waiting:resume(resume_token)
   end
-  local remove_fifth_listener = fifth:add_terminal_listener(fifth_listener)
+  const remove_fifth_listener = fifth:add_terminal_listener(fifth_listener)
   defer remove_fifth_listener()
 
   suspend(resume_token)
@@ -2645,14 +2648,14 @@ end
 -- @usage async-io.md
 function all_two<|A1, B1, A2, B2|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>): (A1, A2)
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
 
   local completed = 0
   local first_result: value = nil
   if first.phase == TASK_FINISHED then
-    local first_status = first:status()
+    const first_status = first:status()
     case first_status
     when succeeded(result) then
       first_result = result
@@ -2664,7 +2667,7 @@ function all_two<|A1, B1, A2, B2|>(
 
   local second_result: value = nil
   if second.phase == TASK_FINISHED then
-    local second_status = second:status()
+    const second_status = second:status()
     case second_status
     when succeeded(result) then
       second_result = result
@@ -2678,12 +2681,12 @@ function all_two<|A1, B1, A2, B2|>(
     return first_result as A1, second_result as A2
   end
 
-  local resume_token = ResumeToken("async.all_two")
-  local waiting = current
+  const resume_token = ResumeToken("async.all_two")
+  const waiting = current
   local rejected = 0
   local rejection: TaskStatus<|value, value|>? = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -2700,10 +2703,10 @@ function all_two<|A1, B1, A2, B2|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -2720,7 +2723,7 @@ function all_two<|A1, B1, A2, B2|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
   suspend(resume_token)
@@ -2743,7 +2746,7 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>):
     (A1, A2, A3)
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -2751,7 +2754,7 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
   local completed = 0
   local first_result: value = nil
   if first.phase == TASK_FINISHED then
-    local first_status = first:status()
+    const first_status = first:status()
     case first_status
     when succeeded(result) then
       first_result = result
@@ -2763,7 +2766,7 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
 
   local second_result: value = nil
   if second.phase == TASK_FINISHED then
-    local second_status = second:status()
+    const second_status = second:status()
     case second_status
     when succeeded(result) then
       second_result = result
@@ -2775,7 +2778,7 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
 
   local third_result: value = nil
   if third.phase == TASK_FINISHED then
-    local third_status = third:status()
+    const third_status = third:status()
     case third_status
     when succeeded(result) then
       third_result = result
@@ -2790,12 +2793,12 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
            third_result as A3
   end
 
-  local resume_token = ResumeToken("async.all_three")
-  local waiting = current
+  const resume_token = ResumeToken("async.all_three")
+  const waiting = current
   local rejected = 0
   local rejection: TaskStatus<|value, value|>? = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -2812,10 +2815,10 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -2832,10 +2835,10 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -2852,7 +2855,7 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
   suspend(resume_token)
@@ -2880,7 +2883,7 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>):
     (A1, A2, A3, A4)
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -2889,7 +2892,7 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   local completed = 0
   local first_result: value = nil
   if first.phase == TASK_FINISHED then
-    local first_status = first:status()
+    const first_status = first:status()
     case first_status
     when succeeded(result) then
       first_result = result
@@ -2901,7 +2904,7 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
 
   local second_result: value = nil
   if second.phase == TASK_FINISHED then
-    local second_status = second:status()
+    const second_status = second:status()
     case second_status
     when succeeded(result) then
       second_result = result
@@ -2913,7 +2916,7 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
 
   local third_result: value = nil
   if third.phase == TASK_FINISHED then
-    local third_status = third:status()
+    const third_status = third:status()
     case third_status
     when succeeded(result) then
       third_result = result
@@ -2925,7 +2928,7 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
 
   local fourth_result: value = nil
   if fourth.phase == TASK_FINISHED then
-    local fourth_status = fourth:status()
+    const fourth_status = fourth:status()
     case fourth_status
     when succeeded(result) then
       fourth_result = result
@@ -2940,12 +2943,12 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
            third_result as A3, fourth_result as A4
   end
 
-  local resume_token = ResumeToken("async.all_four")
-  local waiting = current
+  const resume_token = ResumeToken("async.all_four")
+  const waiting = current
   local rejected = 0
   local rejection: TaskStatus<|value, value|>? = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -2962,10 +2965,10 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -2982,10 +2985,10 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -3002,10 +3005,10 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
-  local fourth_listener = function (status: TaskStatus<|A4, B4|>)
+  const fourth_listener = function (status: TaskStatus<|A4, B4|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -3022,7 +3025,7 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
+  const remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
   defer remove_fourth_listener()
 
   suspend(resume_token)
@@ -3055,7 +3058,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>,
     fifth: Task<|A5, B5|>):
     (A1, A2, A3, A4, A5)
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -3065,7 +3068,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   local completed = 0
   local first_result: value = nil
   if first.phase == TASK_FINISHED then
-    local first_status = first:status()
+    const first_status = first:status()
     case first_status
     when succeeded(result) then
       first_result = result
@@ -3077,7 +3080,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
 
   local second_result: value = nil
   if second.phase == TASK_FINISHED then
-    local second_status = second:status()
+    const second_status = second:status()
     case second_status
     when succeeded(result) then
       second_result = result
@@ -3089,7 +3092,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
 
   local third_result: value = nil
   if third.phase == TASK_FINISHED then
-    local third_status = third:status()
+    const third_status = third:status()
     case third_status
     when succeeded(result) then
       third_result = result
@@ -3101,7 +3104,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
 
   local fourth_result: value = nil
   if fourth.phase == TASK_FINISHED then
-    local fourth_status = fourth:status()
+    const fourth_status = fourth:status()
     case fourth_status
     when succeeded(result) then
       fourth_result = result
@@ -3113,7 +3116,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
 
   local fifth_result: value = nil
   if fifth.phase == TASK_FINISHED then
-    local fifth_status = fifth:status()
+    const fifth_status = fifth:status()
     case fifth_status
     when succeeded(result) then
       fifth_result = result
@@ -3129,12 +3132,12 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
            fifth_result as A5
   end
 
-  local resume_token = ResumeToken("async.all_five")
-  local waiting = current
+  const resume_token = ResumeToken("async.all_five")
+  const waiting = current
   local rejected = 0
   local rejection: TaskStatus<|value, value|>? = nil
 
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -3151,10 +3154,10 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -3171,10 +3174,10 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -3191,10 +3194,10 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
-  local fourth_listener = function (status: TaskStatus<|A4, B4|>)
+  const fourth_listener = function (status: TaskStatus<|A4, B4|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -3211,10 +3214,10 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
+  const remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
   defer remove_fourth_listener()
 
-  local fifth_listener = function (status: TaskStatus<|A5, B5|>)
+  const fifth_listener = function (status: TaskStatus<|A5, B5|>)
     if rejected ~= 0 then return end
     case status
     when succeeded(result) then
@@ -3231,7 +3234,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
       waiting:resume(resume_token)
     end
   end
-  local remove_fifth_listener = fifth:add_terminal_listener(fifth_listener)
+  const remove_fifth_listener = fifth:add_terminal_listener(fifth_listener)
   defer remove_fifth_listener()
 
   suspend(resume_token)
@@ -3260,18 +3263,18 @@ end
 -- @return Exact terminal TaskStatus.
 -- @usage async-io.md
 function join<|A, B|>(task: Task<|A, B|>): TaskStatus<|A, B|>
-  local current = running()
+  const current = running()
   reject_running(current, task)
   if task.phase == TASK_FINISHED then return task:status() end
 
-  local resume_token = ResumeToken("async.join")
-  local waiting = current
+  const resume_token = ResumeToken("async.join")
+  const waiting = current
   local result: TaskStatus<|value, value|>? = nil
-  local listener = function (terminal_status: TaskStatus<|A, B|>)
+  const listener = function (terminal_status: TaskStatus<|A, B|>)
     result = terminal_status
     waiting:resume(resume_token)
   end
-  local remove_listener = task:add_terminal_listener(listener)
+  const remove_listener = task:add_terminal_listener(listener)
   defer remove_listener()
 
   suspend(resume_token)
@@ -3286,7 +3289,7 @@ end
 function join_two<|A1, B1, A2, B2|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>):
     (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>)
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
 
@@ -3305,24 +3308,24 @@ function join_two<|A1, B1, A2, B2|>(
     return first_result as TaskStatus<|A1, B1|>, second_result as TaskStatus<|A2, B2|>
   end
 
-  local resume_token = ResumeToken("async.join_two")
-  local waiting = current
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const resume_token = ResumeToken("async.join_two")
+  const waiting = current
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if first_result ~= nil then return end
     first_result = status
     completed = completed + 1
     if completed == 2 then waiting:resume(resume_token) end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if second_result ~= nil then return end
     second_result = status
     completed = completed + 1
     if completed == 2 then waiting:resume(resume_token) end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
   suspend(resume_token)
@@ -3339,7 +3342,7 @@ function join_three<|A1, B1, A2, B2, A3, B3|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>):
     (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>, TaskStatus<|A3, B3|>)
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -3365,33 +3368,33 @@ function join_three<|A1, B1, A2, B2, A3, B3|>(
            third_result as TaskStatus<|A3, B3|>
   end
 
-  local resume_token = ResumeToken("async.join_three")
-  local waiting = current
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const resume_token = ResumeToken("async.join_three")
+  const waiting = current
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if first_result ~= nil then return end
     first_result = status
     completed = completed + 1
     if completed == 3 then waiting:resume(resume_token) end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if second_result ~= nil then return end
     second_result = status
     completed = completed + 1
     if completed == 3 then waiting:resume(resume_token) end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if third_result ~= nil then return end
     third_result = status
     completed = completed + 1
     if completed == 3 then waiting:resume(resume_token) end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
   suspend(resume_token)
@@ -3411,7 +3414,7 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>):
     (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>,
      TaskStatus<|A3, B3|>, TaskStatus<|A4, B4|>)
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -3443,42 +3446,42 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
            third_result as TaskStatus<|A3, B3|>, fourth_result as TaskStatus<|A4, B4|>
   end
 
-  local resume_token = ResumeToken("async.join_four")
-  local waiting = current
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const resume_token = ResumeToken("async.join_four")
+  const waiting = current
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if first_result ~= nil then return end
     first_result = status
     completed = completed + 1
     if completed == 4 then waiting:resume(resume_token) end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if second_result ~= nil then return end
     second_result = status
     completed = completed + 1
     if completed == 4 then waiting:resume(resume_token) end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if third_result ~= nil then return end
     third_result = status
     completed = completed + 1
     if completed == 4 then waiting:resume(resume_token) end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
-  local fourth_listener = function (status: TaskStatus<|A4, B4|>)
+  const fourth_listener = function (status: TaskStatus<|A4, B4|>)
     if fourth_result ~= nil then return end
     fourth_result = status
     completed = completed + 1
     if completed == 4 then waiting:resume(resume_token) end
   end
-  local remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
+  const remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
   defer remove_fourth_listener()
 
   suspend(resume_token)
@@ -3500,7 +3503,7 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     fifth: Task<|A5, B5|>):
     (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>,
      TaskStatus<|A3, B3|>, TaskStatus<|A4, B4|>, TaskStatus<|A5, B5|>)
-  local current = running()
+  const current = running()
   reject_running(current, first)
   reject_running(current, second)
   reject_running(current, third)
@@ -3539,51 +3542,51 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
            fifth_result as TaskStatus<|A5, B5|>
   end
 
-  local resume_token = ResumeToken("async.join_five")
-  local waiting = current
-  local first_listener = function (status: TaskStatus<|A1, B1|>)
+  const resume_token = ResumeToken("async.join_five")
+  const waiting = current
+  const first_listener = function (status: TaskStatus<|A1, B1|>)
     if first_result ~= nil then return end
     first_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
   end
-  local remove_first_listener = first:add_terminal_listener(first_listener)
+  const remove_first_listener = first:add_terminal_listener(first_listener)
   defer remove_first_listener()
 
-  local second_listener = function (status: TaskStatus<|A2, B2|>)
+  const second_listener = function (status: TaskStatus<|A2, B2|>)
     if second_result ~= nil then return end
     second_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
   end
-  local remove_second_listener = second:add_terminal_listener(second_listener)
+  const remove_second_listener = second:add_terminal_listener(second_listener)
   defer remove_second_listener()
 
-  local third_listener = function (status: TaskStatus<|A3, B3|>)
+  const third_listener = function (status: TaskStatus<|A3, B3|>)
     if third_result ~= nil then return end
     third_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
   end
-  local remove_third_listener = third:add_terminal_listener(third_listener)
+  const remove_third_listener = third:add_terminal_listener(third_listener)
   defer remove_third_listener()
 
-  local fourth_listener = function (status: TaskStatus<|A4, B4|>)
+  const fourth_listener = function (status: TaskStatus<|A4, B4|>)
     if fourth_result ~= nil then return end
     fourth_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
   end
-  local remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
+  const remove_fourth_listener = fourth:add_terminal_listener(fourth_listener)
   defer remove_fourth_listener()
 
-  local fifth_listener = function (status: TaskStatus<|A5, B5|>)
+  const fifth_listener = function (status: TaskStatus<|A5, B5|>)
     if fifth_result ~= nil then return end
     fifth_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
   end
-  local remove_fifth_listener = fifth:add_terminal_listener(fifth_listener)
+  const remove_fifth_listener = fifth:add_terminal_listener(fifth_listener)
   defer remove_fifth_listener()
 
   suspend(resume_token)
@@ -3598,13 +3601,13 @@ end
 -- @param code Final process exit code.
 -- @usage async-io.md
 function request_exit(code: integer)
-  local task = running()
-  local runtime = task.runtime
+  const task = running()
+  const runtime = task.runtime
   if runtime.exit_code == nil then runtime.exit_code = code end
   unbind_backend(runtime)
   local index = 1
   while index < runtime.next_task do
-    local other? = runtime.tasks[index]
+    const other? = runtime.tasks[index]
     if other ~= nil then
       other:cancel(CancellationReason.simple("program exit"))
     end
@@ -3616,14 +3619,14 @@ end
 local function bootstrap(main_callable: function ({string}): (integer),
                          args: {string}): integer
   local result = 1
-  local task = run<|value, value|>(function (): value
+  const task = run<|value, value|>(function (): value
     result = main_callable(args)
     return nil
   end)
   loop()
-  local exit_code? = task.runtime.exit_code
+  const exit_code? = task.runtime.exit_code
   if exit_code ~= nil then return exit_code end
-  local succeeded = task:status():has_succeeded()
+  const succeeded = task:status():has_succeeded()
   if succeeded then return result end
   report_bootstrap_failure(task)
   return 1
@@ -3633,7 +3636,7 @@ local const COMPACT_MIN_PREFIX = 32
 
 -- Payload presence is carried by this record, never by Array length or truthiness.
 local record Item<|T|>
-  value: T
+  const value: T
 end
 
 --- Transferred subscription items with explicit count, preserving nil and false payloads.
@@ -3697,17 +3700,17 @@ local union Terminal<|E|>
 end
 
 local record Waiter
-  task: Task<|value, value|>
-  token: ResumeToken
+  const task: Task<|value, value|>
+  const token: ResumeToken
   notified: boolean
-  batch: boolean
+  const batch: boolean
 end
 
 local record Core<|T, E|>
   items: {Item<|T|>}
   first: integer
   count: integer
-  coalescing: boolean
+  const coalescing: boolean
   terminal: Terminal<|E|>
   stopped: boolean
   waiter: Waiter?
@@ -3718,13 +3721,13 @@ end
 --- Persistent source retaining only the latest safely discardable unread item.
 -- @usage async-io.md
 record CoalescingSubscription<|T, E|>
-  local core: Core<|T, E|>
+  local const core: Core<|T, E|>
 end
 
 --- Persistent source retaining every unread item in publication order.
 -- @usage async-io.md
 record BufferedSubscription<|T, E|>
-  local core: Core<|T, E|>
+  local const core: Core<|T, E|>
 end
 
 local function Core:is_live(): boolean
@@ -3735,7 +3738,7 @@ local function Core:is_live(): boolean
 end
 
 local function Core:wake()
-  local waiter? = self.waiter
+  const waiter? = self.waiter
   if waiter == nil or waiter.notified then return end
   waiter.notified = true
   do waiter.task:resume(waiter.token)
@@ -3744,11 +3747,11 @@ end
 
 local function Core:publish(value: T): boolean
   if not self:is_live() then return false end
-  local item = Item<|T|>(value)
+  const item = Item<|T|>(value)
   local index = self.first
-  local old_count = self.count
+  const old_count = self.count
   if not self.coalescing or self.count == 0 then index = self.first + self.count end
-  local previous? = self.items[index]
+  const previous? = self.items[index]
   self.items[index] = item
   if not self.coalescing or self.count == 0 then self.count = self.count + 1 end
   do self:wake()
@@ -3764,7 +3767,7 @@ end
 
 local function Core:fail(error: E): boolean
   if not self:is_live() then return false end
-  local previous = self.terminal
+  const previous = self.terminal
   self.terminal = Terminal<|E|>.error(error)
   do self:wake()
   catch self.terminal = previous; raise end
@@ -3773,7 +3776,7 @@ end
 
 local function Core:finish(): boolean
   if not self:is_live() then return false end
-  local previous = self.terminal
+  const previous = self.terminal
   self.terminal = Terminal<|E|>.ended()
   do self:wake()
   catch self.terminal = previous; raise end
@@ -3781,8 +3784,8 @@ local function Core:finish(): boolean
 end
 
 local function Core:detach(): SubscriptionBatch<|T|>
-  local replacement: {Item<|T|>} = {}
-  local batch: SubscriptionBatch<|T|> = {
+  const replacement: {Item<|T|>} = {}
+  const batch: SubscriptionBatch<|T|> = {
     count = self.count, first = self.first, items = self.items}
   self.items = replacement
   self.first = 1
@@ -3791,7 +3794,7 @@ local function Core:detach(): SubscriptionBatch<|T|>
 end
 
 local function Core.new(coalescing: boolean): Core<|T, E|>
-  local core: Core<|T, E|> = {items = {}, first = 1, count = 0,
+  const core: Core<|T, E|> = {items = {}, first = 1, count = 0,
     coalescing = coalescing, terminal = Terminal<|E|>.live(), stopped = false,
     waiter = nil, actions = nil, drain = nil}
   core.drain = function (): SubscriptionBatch<|T|> return core:detach() end
@@ -3799,13 +3802,13 @@ local function Core.new(coalescing: boolean): Core<|T, E|>
 end
 
 local function Core:register(producer: function (function (T): (boolean), function (E): (boolean), function (): (boolean)): (SubscriptionActions<|T|>))
-  local core = self
-  local publish = function (item: T): boolean return core:publish(item) end
-  local fail = function (error: E): boolean return core:fail(error) end
-  local finish = function (): boolean return core:finish() end
+  const core = self
+  const publish = function (item: T): boolean return core:publish(item) end
+  const fail = function (error: E): boolean return core:fail(error) end
+  const finish = function (): boolean return core:finish() end
   -- The producer must prebuild its actions before accepting resources. Until
   -- it returns, partial-registration rollback remains the producer's job.
-  local actions = producer(publish, fail, finish)
+  const actions = producer(publish, fail, finish)
   core.actions = actions
 end
 
@@ -3814,8 +3817,8 @@ end
 -- @return Registered subscription; rejected publication leaves event ownership with the producer.
 -- @usage async-io.md
 function CoalescingSubscription.new(producer: function (function (T): (boolean), function (E): (boolean), function (): (boolean)): (SubscriptionActions<|T|>)): CoalescingSubscription<|T, E|>
-  local core = Core<|T, E|>(true)
-  local subscription: CoalescingSubscription<|T, E|> = {core = core}
+  const core = Core<|T, E|>(true)
+  const subscription: CoalescingSubscription<|T, E|> = {core = core}
   core:register(producer)
   return subscription
 end
@@ -3825,18 +3828,18 @@ end
 -- @return Registered subscription; rejected publication leaves event ownership with the producer.
 -- @usage async-io.md
 function BufferedSubscription.new(producer: function (function (T): (boolean), function (E): (boolean), function (): (boolean)): (SubscriptionActions<|T|>)): BufferedSubscription<|T, E|>
-  local core = Core<|T, E|>(false)
-  local subscription: BufferedSubscription<|T, E|> = {core = core}
+  const core = Core<|T, E|>(false)
+  const subscription: BufferedSubscription<|T, E|> = {core = core}
   core:register(producer)
   return subscription
 end
 
 local function Core:wait(batch: boolean)
-  local task = running()
-  local token = ResumeToken("subscription")
-  local waiter = Waiter(task, token, false, batch)
-  local core = self
-  local detach = function ()
+  const task = running()
+  const token = ResumeToken("subscription")
+  const waiter = Waiter(task, token, false, batch)
+  const core = self
+  const detach = function ()
     if core.waiter == waiter then core.waiter = nil end
   end
   self.waiter = waiter
@@ -3848,10 +3851,10 @@ local function Core:wait(batch: boolean)
 end
 
 local function Core:prepare_read(batch: boolean)
-  local task = running()
+  const task = running()
   if self.waiter ~= nil then raise "subscription already has a waiter" end
   -- Check before transferring any queued resource, without yielding.
-  local reason? = task.cancel_value
+  const reason? = task.cancel_value
   if reason ~= nil then raise reason end
   if task.runtime.closing then raise (task.runtime.failure as Error).error end
   if self.count == 0 and self:is_live() then self:wait(batch) end
@@ -3861,7 +3864,7 @@ local function Core:compact()
   -- Copy only after the consumed prefix can pay for all remaining elements.
   -- Keep the entire old FIFO owned until replacement allocation/copy succeeds.
   if self.first <= COMPACT_MIN_PREFIX or self.first <= self.count then return end
-  local replacement: {Item<|T|>} = {}
+  const replacement: {Item<|T|>} = {}
   for index = 1, self.count do
     replacement[index] = self.items[self.first + index - 1]
   end
@@ -3877,8 +3880,8 @@ local function Core:next(): SubscriptionResult<|T, E|>
   end
   if self.count > 0 then
     self:compact()
-    local item = self.items[self.first]
-    local result = SubscriptionResult<|T, E|>.item(item.value)
+    const item = self.items[self.first]
+    const result = SubscriptionResult<|T, E|>.item(item.value)
     self.items[self.first] = nil
     self.first = self.first + 1
     self.count = self.count - 1
@@ -3900,10 +3903,10 @@ local function Core:next_batch(): SubscriptionBatchResult<|T, E|>
   else
   end
   if self.count > 0 then
-    local replacement: {Item<|T|>} = {}
-    local batch: SubscriptionBatch<|T|> = {
+    const replacement: {Item<|T|>} = {}
+    const batch: SubscriptionBatch<|T|> = {
       count = self.count, first = self.first, items = self.items}
-    local result = SubscriptionBatchResult<|T, E|>.batch(batch)
+    const result = SubscriptionBatchResult<|T, E|>.batch(batch)
     self.items = replacement
     self.first = 1
     self.count = 0
@@ -3941,9 +3944,9 @@ local function Core:close()
   else
   end
   running()
-  local closing = Terminal<|E|>.closed()
-  local actions = self.actions
-  local drain = self.drain
+  const closing = Terminal<|E|>.closed()
+  const actions = self.actions
+  const drain = self.drain
   -- Close blocks ordinary delivery immediately. The producer's cleanup may
   -- suspend via await_cleanup and can drain unread resource-bearing events.
   -- Repeated close calls initiate nothing, including while cleanup is pending.
@@ -4027,12 +4030,12 @@ end
 -- @return Independent batch plus nil while live, or the ended/error/closed outcome.
 -- @usage async-io.md
 function BufferedSubscription:snapshot_pending(): (SubscriptionBatch<|T|>, SubscriptionResult<|T, E|>?)
-  local core = self.core
-  local copied: {Item<|T|>} = {}
+  const core = self.core
+  const copied: {Item<|T|>} = {}
   for index = 1, core.count do
     copied[index] = Item<|T|>(core.items[core.first + index - 1].value)
   end
-  local batch = SubscriptionBatch<|T|>(core.count, 1, copied)
+  const batch = SubscriptionBatch<|T|>(core.count, 1, copied)
   case core.terminal
   when live() then return batch, nil
   when ended() then return batch, SubscriptionResult<|T, E|>.ended()
@@ -4053,7 +4056,7 @@ end
 -- @return Complete batch when any item matches, otherwise nil.
 -- @usage async-io.md
 function BufferedSubscription:drain_if(predicate: function (T): (boolean)): SubscriptionBatch<|T|>?
-  local core = self.core
+  const core = self.core
   for index = core.first, core.first + core.count - 1 do
     if predicate(core.items[index].value) then return core:detach() end
   end
@@ -4063,7 +4066,7 @@ end
 --- Wake only a blocked batch reader, permitting an empty domain-control batch.
 -- @usage async-io.md
 function BufferedSubscription:wake_batch()
-  local waiter? = self.core.waiter
+  const waiter? = self.core.waiter
   if waiter ~= nil and waiter.batch then self.core:wake() end
 end
 
@@ -4071,7 +4074,7 @@ do
   SUCCESS_NIL = Result<|value, value|>.success(nil)
   CANCELLABLE_SUCCESS_NIL = CancellableResult<|value, value|>.success(nil)
   initialize_backend()
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for async bootstrap registration"

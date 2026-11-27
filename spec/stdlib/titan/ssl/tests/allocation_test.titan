@@ -3,14 +3,14 @@ local system = import "os"
 
 local function allocator_fixture_case(context: test.Context, workspace: string,
                                       scenario: string)
-  context:run(scenario, function (_context: test.Context)
+  context:run(scenario, function (_: test.Context)
     local output, why, code = command.capture({
       command.program(workspace, "ssl_allocator_app"), scenario,
     }, workspace)
     if why == "exit" and code == 77 then
       test.assert(string.find(output, "capability: ", 1) == 1,
                   "allocator fixture returned an undocumented capability status")
-      local reason = string.gsub(output, "[\r\n]+$", function (_: string): string
+      const reason = string.gsub(output, "[\r\n]+$", function (_: string): string
         return ""
       end)
       test.skip(reason)
@@ -42,7 +42,7 @@ function test_ssl_allocator_failure_retires_transferred_native_ownership(
     fs.write_file(workspace .. "/server-key.pem", fs.read_file(support.PRIVATE_KEY))
     -- The hook object belongs only to this child. Linking it into the aggregate
     -- would replace allocators for unrelated tests and miss startup ordering.
-    local object = command.fixture_object("ssl_allocator_fixture")
+    const object = command.fixture_object("ssl_allocator_fixture")
     -- System providers retain final-link dependencies. Preserve the caller's
     -- selected SDK flags and append its available pkg-config OpenSSL flags;
     -- self-contained bundled archives also work when pkg-config is absent.

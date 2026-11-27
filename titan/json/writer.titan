@@ -23,12 +23,12 @@ local function utf8_width(subject: string, position: integer, path: Path): integ
   if width == 0 or position + width - 1 > #subject then
     json_fail("invalid_utf8", "string contains invalid UTF-8", path, nil, nil)
   end
-  local second = json_byte(subject, position + 1)
+  const second = json_byte(subject, position + 1)
   if second < lower or second > upper then
     json_fail("invalid_utf8", "string contains invalid UTF-8", path, nil, nil)
   end
   for offset = 2, width - 1 do
-    local byte = json_byte(subject, position + offset)
+    const byte = json_byte(subject, position + offset)
     if byte < 128 or byte > 191 then
       json_fail("invalid_utf8", "string contains invalid UTF-8", path, nil, nil)
     end
@@ -41,7 +41,7 @@ local function emit_quoted(subject: string, path: Path, emit: function (string):
   local first = 1
   local position = 1
   while position <= #subject do
-    local byte = json_byte(subject, position)
+    const byte = json_byte(subject, position)
     if byte == 34 or byte == 92 or byte < 32 then
       if position > first then emit(string.sub(subject, first, position - 1)) end
       if byte == 34 then emit('\\"')
@@ -65,7 +65,7 @@ local function emit_quoted(subject: string, path: Path, emit: function (string):
 end
 
 local function quoted_string(subject: string, path: Path): string
-  local output = string.writer()
+  const output = string.writer()
   defer output:close()
   emit_quoted(subject, path, function(chunk: string) output:write(chunk) end)
   return output:drain()
@@ -102,15 +102,15 @@ local function byte_less(left: string, right: string): boolean
   local length = #left
   if #right < length then length = #right end
   for index = 1, length do
-    local a = json_byte(left, index)
-    local b = json_byte(right, index)
+    const a = json_byte(left, index)
+    const b = json_byte(right, index)
     if a ~= b then return a < b end
   end
   return #left < #right
 end
 
 local function sort_keys(keys: {string})
-  local work: {string} = {}
+  const work: {string} = {}
   local width = 1
   while width < #keys do
     local first = 1
@@ -160,8 +160,8 @@ local function Encoder:map(subject: value, entries: {value: value},
                             path: Path, depth: integer)
   self:enter(subject, path)
   defer self.active[subject] = nil
-  local keys: {string} = {}
-  local values: {string: value} = {}
+  const keys: {string} = {}
+  const values: {string: value} = {}
   local minimum_bytes = 2
   for key, entry in iteration.pairs(entries) do
     case reflect.inspect(key)
@@ -171,7 +171,7 @@ local function Encoder:map(subject: value, entries: {value: value},
       end
       local overhead = 4
       if #keys > 0 then overhead = 5 end
-      local remaining = self.settings.max_bytes - self.bytes
+      const remaining = self.settings.max_bytes - self.bytes
       if minimum_bytes > remaining or overhead > remaining - minimum_bytes or
           #name > remaining - minimum_bytes - overhead then
         json_fail("limit_exceeded", "encoded text exceeds max_bytes", path, nil, nil)
@@ -185,8 +185,8 @@ local function Encoder:map(subject: value, entries: {value: value},
   sort_keys(keys)
   self:append("{", path)
   for index = 1, #keys do
-    local key = keys[index]
-    local child_path = field_path(path, key)
+    const key = keys[index]
+    const child_path = field_path(path, key)
     if index > 1 then self:append(",", path) end
     self:quoted(key, path)
     self:append(":", child_path)
@@ -202,8 +202,8 @@ local function Encoder:record_fields(subject: value, fields: const {reflect.Fiel
   defer self.active[subject] = nil
   self:append("{", path)
   for index = 1, #fields do
-    local field = fields[index]
-    local child_path = field_path(path, field.name)
+    const field = fields[index]
+    const child_path = field_path(path, field.name)
     if index > 1 then self:append(",", path) end
     self:quoted(field.name, child_path)
     self:append(":", child_path)
@@ -216,10 +216,10 @@ local function Encoder:union_value(subject: value, inspected: reflect.UnionValue
                                     path: Path, depth: integer)
   self:enter(subject, path)
   defer self.active[subject] = nil
-  local found: reflect.VariantType? = (function (
+  const found: reflect.VariantType? = (function (
       inspected: reflect.UnionValue): reflect.VariantType?
     for index = 1, #inspected.type.variants do
-      local variant = inspected.type.variants[index]
+      const variant = inspected.type.variants[index]
       if variant.tag == inspected.tag then return variant end
     end
     return nil
@@ -227,8 +227,8 @@ local function Encoder:union_value(subject: value, inspected: reflect.UnionValue
   if found == nil then
     json_fail("private_variant", "active union variant is private", path, nil, nil)
   end
-  local tag_field = self.settings.tag_field
-  local tag_path = field_path(path, tag_field)
+  const tag_field = self.settings.tag_field
+  const tag_path = field_path(path, tag_field)
   for index = 1, #found.parts do
     if found.parts[index].name == tag_field then
       json_fail("invalid_union", "union part conflicts with tag field: " .. tag_field,
@@ -241,8 +241,8 @@ local function Encoder:union_value(subject: value, inspected: reflect.UnionValue
   self:count_node(tag_path)
   self:quoted(found.name, tag_path)
   for index = 1, #found.parts do
-    local name = found.parts[index].name
-    local part_path = field_path(path, name)
+    const name = found.parts[index].name
+    const part_path = field_path(path, name)
     self:append(",", path)
     self:quoted(name, part_path)
     self:append(":", part_path)
@@ -264,7 +264,7 @@ local function Encoder:visit(subject: value, path: Path, depth: integer)
     self:append("null", path)
     return
   end
-  local inspected = reflect.inspect(subject)
+  const inspected = reflect.inspect(subject)
   local container = false
   case inspected
   when is_array() then container = true
@@ -302,9 +302,9 @@ local function Encoder:visit(subject: value, path: Path, depth: integer)
 end
 
 local function encode_value(subject: value, settings: Settings): string
-  local output = string.writer()
+  const output = string.writer()
   defer output:close()
-  local encoder = Encoder {
+  const encoder = Encoder {
     settings = settings,
     output = output,
     active = {},

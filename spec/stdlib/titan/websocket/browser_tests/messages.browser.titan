@@ -1,10 +1,10 @@
 function test_live_subprotocol_negotiation(_context: test.Context)
   runtime_test.run(function ()
-    local connection = websocket.connect(live("echo"), websocket.DialOptions { subprotocols = {"chat", "other"} })
+    const connection = websocket.connect(live("echo"), websocket.DialOptions { subprotocols = {"chat", "other"} })
     defer connection:close()
     test.assert(connection:subprotocol() == "chat", "native peer did not select the offered subprotocol")
     echo(connection, websocket.TEXT, "negotiated")
-    local plain = websocket.connect(live("echo"))
+    const plain = websocket.connect(live("echo"))
     defer plain:close()
     test.assert(plain:subprotocol() == nil, "unoffered protocol appeared on the connection")
   end)
@@ -12,7 +12,7 @@ end
 
 function test_live_text_round_trips(_context: test.Context)
   runtime_test.run(function ()
-    local connection = websocket.connect(live("echo"))
+    const connection = websocket.connect(live("echo"))
     defer connection:close()
     for _, data in iteration.ipairs({"", "plain ASCII", "aé€𠀀z"}) do echo(connection, websocket.TEXT, data) end
     echo(connection, websocket.MessageType.text(), "fresh-text")
@@ -21,7 +21,7 @@ end
 
 function test_live_binary_round_trips(_context: test.Context)
   runtime_test.run(function ()
-    local connection = websocket.connect(live("echo"))
+    const connection = websocket.connect(live("echo"))
     defer connection:close()
     for _, data in iteration.ipairs({"", "\0\xff", string.rep("\0\xff", 32768)}) do echo(connection, websocket.BINARY, data) end
     echo(connection, websocket.MessageType.binary(), "\0fresh")
@@ -30,10 +30,10 @@ end
 
 function test_live_invalid_text_is_rejected_without_sending_or_retiring(_context: test.Context)
   runtime_test.run(function ()
-    local source = live("echo")
-    local connection = websocket.connect(source)
+    const source = live("echo")
+    const connection = websocket.connect(source)
     defer connection:close()
-    local before = metric("send", source)
+    const before = metric("send", source)
     websocket_error(function () connection:write(websocket.TEXT, "\255\254") end, "utf8", "websocket.write", nil)
     test.assert(metric("send", source) == before, "invalid TEXT reached WebSocket.send")
     echo(connection, websocket.TEXT, "healthy after validation")
@@ -44,7 +44,7 @@ end
 function test_live_verified_tls_and_both_certificate_rejections(_context: test.Context)
   runtime_test.run(function ()
     if environment("TITAN_TEST_VERIFIED_TLS") == "1" then
-      local connection = websocket.connect(live("echo", environment("TITAN_TEST_WSS_VALID_URL")))
+      const connection = websocket.connect(live("echo", environment("TITAN_TEST_WSS_VALID_URL")))
       defer connection:close()
       echo(connection, websocket.TEXT, "verified certificate and hostname")
       connection:shutdown(1000, "verified")
@@ -58,7 +58,7 @@ end
 
 function test_live_browser_origin_acceptance_and_denial(_context: test.Context)
   runtime_test.run(function ()
-    local connection = websocket.connect(live("origin"))
+    const connection = websocket.connect(live("origin"))
     defer connection:close()
     local kind?, origin? = connection:read()
     if not same_message_kind(kind, websocket.TEXT) or origin == nil then raise "native Origin fixture did not publish the header" end
@@ -72,7 +72,7 @@ end
 -- Asks the burst peer for `count` numbered messages, and waits until the
 -- client holds all of them unread.
 local function queue_burst(connection: websocket.Connection, source: string, count: integer)
-  local before = metric("holders", source)
+  const before = metric("holders", source)
   connection:write(websocket.TEXT, "" .. count)
   wait_for(function (): boolean return metric("holders", source) >= before + count end,
     "the burst peer's messages did not arrive")
@@ -93,11 +93,11 @@ end
 -- message.
 function test_live_unread_suffix_survives_queue_compaction(_context: test.Context)
   runtime_test.run(function ()
-    local source = live("burst")
-    local connection = websocket.connect(source)
+    const source = live("burst")
+    const connection = websocket.connect(source)
     defer connection:close()
-    local holders = metric("holders", source)
-    local takes = metric("takes", source)
+    const holders = metric("holders", source)
+    const takes = metric("takes", source)
     queue_burst(connection, source, 100)
     read_numbered(connection, 1, 60)
     test.assert(metric("holders", source) == holders + 40, "consumed holders were not released")
@@ -111,11 +111,11 @@ end
 -- copying its bytes.
 function test_live_close_releases_unread_holders(_context: test.Context)
   runtime_test.run(function ()
-    local source = live("burst")
-    local connection = websocket.connect(source)
+    const source = live("burst")
+    const connection = websocket.connect(source)
     defer connection:close()
-    local holders = metric("holders", source)
-    local takes = metric("takes", source)
+    const holders = metric("holders", source)
+    const takes = metric("takes", source)
     queue_burst(connection, source, 100)
     read_numbered(connection, 1, 60)
     connection:close()
@@ -129,14 +129,14 @@ end
 -- bounded instead of growing with every message ever read.
 function test_live_queue_storage_stays_bounded_while_never_empty(_context: test.Context)
   runtime_test.run(function ()
-    local source = live("burst")
-    local connection = websocket.connect(source)
+    const source = live("burst")
+    const connection = websocket.connect(source)
     defer connection:close()
     queue_burst(connection, source, 150)
     read_numbered(connection, 1, 149)
     gc.collect()
     gc.collect()
-    local baseline = gc.count()
+    const baseline = gc.count()
     for _ = 1, 40 do
       queue_burst(connection, source, 150)
       read_numbered(connection, 150, 150)
@@ -144,7 +144,7 @@ function test_live_queue_storage_stays_bounded_while_never_empty(_context: test.
     end
     gc.collect()
     gc.collect()
-    local growth = gc.count() - baseline
+    const growth = gc.count() - baseline
     test.assert(growth < 16384, "40 bursts read past an unread message grew memory by " .. growth .. " bytes")
     read_numbered(connection, 150, 150)
   end)

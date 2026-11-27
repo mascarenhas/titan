@@ -1,14 +1,14 @@
 local gc = import "gc"
 
 local function fresh_value_map(name: string?): value
-  local map: {value: value} = {}
+  const map: {value: value} = {}
   if name ~= nil then map["name"] = name as string end
   return map
 end
 
 local function fresh_marker(): value
-  local marker: function (value): (value) = function(candidate: value): value
-    local map = candidate as {value: value}
+  const marker: function (value): (value) = function(candidate: value): value
+    const map = candidate as {value: value}
     return map["name"]
   end
   return marker
@@ -16,12 +16,12 @@ end
 
 function test_roots_nested_stacked_payloads_and_tags_across_gc(
     _context: test.Context)
-  local was_generational = gc.generational()
+  const was_generational = gc.generational()
   defer do
     if was_generational then gc.generational() else gc.incremental() end
   end
 
-  local weak: {value: value} = {}
+  const weak: {value: value} = {}
   gc.weak(weak)
   local tag_main: value = fresh_value_map(nil)
   local tag_a: value = fresh_value_map(nil)
@@ -32,12 +32,12 @@ function test_roots_nested_stacked_payloads_and_tags_across_gc(
   weak["payload"] = payload
   weak["marker"] = marker
 
-  local b = coroutine.create(function(arg: value): value
+  const b = coroutine.create(function(arg: value): value
     test.assert(arg == weak["payload"], "stacked payload identity changed")
-    local got = coroutine.yield(weak["marker"], weak["tag_main"])
+    const got = coroutine.yield(weak["marker"], weak["tag_main"])
     return got
   end, tag_a)
-  local a = coroutine.create(function(arg: value): value
+  const a = coroutine.create(function(arg: value): value
     return b:resume(arg, weak["tag_a"])
   end, tag_main)
 
@@ -56,7 +56,7 @@ function test_roots_nested_stacked_payloads_and_tags_across_gc(
   test.assert(a:status() == "suspended")
   test.assert(b:status() == "stacked")
 
-  local response: value = fresh_value_map("response")
+  const response: value = fresh_value_map("response")
   test.assert(a:resume(response, weak["tag_main"]) == response,
               "nested resume changed the response identity")
   test.assert(a:status() == "dead")
@@ -67,7 +67,7 @@ local function make_abandoned_stacked(tag_main: value,
                                       tag_b: value): coroutine.Coroutine
   local stacked: coroutine.Coroutine? = nil
   local a: coroutine.Coroutine? = coroutine.create(function(_: value): value
-    local b = coroutine.create(function(_: value): value
+    const b = coroutine.create(function(_: value): value
       return coroutine.yield("from-b", tag_main)
     end, tag_b)
     stacked = b
@@ -83,14 +83,14 @@ end
 
 function test_abandons_stacked_coroutine_when_handler_is_collected(
     _context: test.Context)
-  local was_generational = gc.generational()
+  const was_generational = gc.generational()
   defer do
     if was_generational then gc.generational() else gc.incremental() end
   end
 
-  local tag_main: value = fresh_value_map(nil)
-  local tag_b: value = fresh_value_map(nil)
-  local stacked = make_abandoned_stacked(tag_main, tag_b)
+  const tag_main: value = fresh_value_map(nil)
+  const tag_b: value = fresh_value_map(nil)
+  const stacked = make_abandoned_stacked(tag_main, tag_b)
 
   for _ = 1, 4 do gc.collect() end
   test.assert(stacked:status() == "dead", stacked:status())
@@ -99,7 +99,7 @@ function test_abandons_stacked_coroutine_when_handler_is_collected(
     stacked:resume(nil, tag_b)
   catch
     caught = true
-    local message = support.caught_string(error)
+    const message = support.caught_string(error)
     test.assert(support.contains(message, "Coroutine not suspended"), message)
   end
   test.assert(caught, "abandoned stacked coroutine resumed")

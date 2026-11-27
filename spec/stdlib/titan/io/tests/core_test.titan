@@ -1,10 +1,10 @@
 local record TrackingReader
-  local input: {string}
+  local const input: {string}
   local position: integer
   local reads: integer
   local closes: integer
-  local fail_read_at: integer
-  local fail_close: boolean
+  local const fail_read_at: integer
+  local const fail_close: boolean
   local closed: boolean
 end
 
@@ -34,7 +34,7 @@ end
 
 local function tracking(input: {string}, fail_read_at: integer,
                         fail_close: boolean): TrackingReader
-  return TrackingReader.new(
+  return TrackingReader(
       input, 0, 0, 0, fail_read_at, fail_close, false)
 end
 
@@ -48,7 +48,7 @@ end
 function test_io_lines_closes_on_every_loop_exit(_context: test.Context)
   runtime_test.run(function ()
     local reader = tracking({"alpha", "", "omega"}, -1, false)
-    local output: {string} = {}
+    const output: {string} = {}
     for line in stream.lines(reader) do
       output[#output + 1] = line
     end
@@ -109,10 +109,10 @@ function test_io_lines_tuple_and_close_retry(_context: test.Context)
 
     reader = tracking({"manual", "must-not-be-read"}, -1, false)
     local next_line, state, initial, close = stream.lines(reader)
-    local line: string? = next_line(state)
+    const line: string? = next_line(state)
     close(state)
     close(state)
-    local after_close: string? = next_line(state)
+    const after_close: string? = next_line(state)
     test.assert(initial == nil and line == "manual" and not after_close,
                 "io.lines returned the wrong iterator tuple behavior")
     test.assert(reader.closes == 1,
@@ -121,13 +121,13 @@ function test_io_lines_tuple_and_close_retry(_context: test.Context)
 end
 
 local record Loopback
-  local chunks: {string}
+  local const chunks: {string}
   local next: integer
   local closed: boolean
 end
 
 local function Loopback:read(): string?
-  local chunk? = self.chunks[self.next]
+  const chunk? = self.chunks[self.next]
   if chunk == nil then return nil end
   self.next = self.next + 1
   return chunk
@@ -148,18 +148,18 @@ local function Loopback:close()
 end
 
 function test_io_interfaces_accept_a_satisfying_record(_context: test.Context)
-  local loopback = Loopback { chunks = {}, next = 1, closed = false }
-  local writer: stream.Writer = loopback
+  const loopback = Loopback { chunks = {}, next = 1, closed = false }
+  const writer: stream.Writer = loopback
   writer:write("a")
-  local both: stream.ReaderWriter = loopback
+  const both: stream.ReaderWriter = loopback
   both:write("b")
   test.assert(both:read() == "a", "ReaderWriter did not read through the record")
-  local reader: stream.Reader = loopback
+  const reader: stream.Reader = loopback
   test.assert(reader:read_until("\n", true) == "b", "Reader did not read through the record")
-  local all: stream.ReaderWriterCloser = loopback
+  const all: stream.ReaderWriterCloser = loopback
   all:write("c")
   test.assert(all:read() == "c", "ReaderWriterCloser did not read through the record")
-  local closer: stream.Closer = loopback
+  const closer: stream.Closer = loopback
   closer:close()
   test.assert(loopback.closed, "Closer did not close the record")
 end

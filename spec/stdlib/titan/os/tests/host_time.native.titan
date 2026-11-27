@@ -1,13 +1,13 @@
 -- CPU clocks and a process-controlled timezone are native host capabilities.
 
 function test_clocks_and_calendar_results(_context: test.Context)
-  local original_timezone: string? = support.install_test_timezone()
+  const original_timezone: string? = support.install_test_timezone()
   defer support.restore_test_timezone(original_timezone)
 
-  local before: float = system.clock()
+  const before: float = system.clock()
   local total = 0
   for index = 1, 200000 do total = total + index end
-  local after: float = system.clock()
+  const after: float = system.clock()
   test.assert(total > 0 and before >= 0.0 and after >= before,
               "CPU clock did not remain monotonic")
   test.assert(system.difftime(27, 9) == 18.0)
@@ -27,7 +27,7 @@ function test_clocks_and_calendar_results(_context: test.Context)
   test.assert(system.date(nil, 0) is string,
               "default date format did not return a string")
 
-  local date = support.as_date(system.date("!*t", 0), "UTC decomposition")
+  const date = support.as_date(system.date("!*t", 0), "UTC decomposition")
   test.assert(date.year == 1970 and date.month == 1 and date.day == 1)
   test.assert(date.hour == 0 and date.min == 0 and date.sec == 0)
   test.assert(date.wday == 5 and date.yday == 1)
@@ -36,16 +36,16 @@ end
 
 function test_time_defaults_normalization_and_dst(
     _context: test.Context)
-  local original_timezone: string? = support.install_test_timezone()
+  const original_timezone: string? = support.install_test_timezone()
   defer support.restore_test_timezone(original_timezone)
 
-  local expected_now = support.host_time()
-  local now = system.time()
+  const expected_now = support.host_time()
+  const now = system.time()
   local delta = now - expected_now
   if delta < 0 then delta = -delta end
   test.assert(delta <= 2, "os.time differed from the host current time")
 
-  local direct_now = system.time(nil, nil, nil, nil, nil, nil, nil)
+  const direct_now = system.time(nil, nil, nil, nil, nil, nil, nil)
   delta = direct_now - now
   if delta < 0 then delta = -delta end
   test.assert(delta <= 2, "positional nil did not select current time")
@@ -65,9 +65,9 @@ function test_time_defaults_normalization_and_dst(
     system.time { isdst = false }
   end, "time requires year, month, and day together")
 
-  local inferred = system.time(2020, 7, 1, 12, 0, 0, nil)
-  local standard = system.time(2020, 7, 1, 12, 0, 0, false)
-  local daylight = system.time(2020, 7, 1, 12, 0, 0, true)
+  const inferred = system.time(2020, 7, 1, 12, 0, 0, nil)
+  const standard = system.time(2020, 7, 1, 12, 0, 0, false)
+  const daylight = system.time(2020, 7, 1, 12, 0, 0, true)
   -- The host calendar owns DST normalization, including a hint that does
   -- not match the timezone's rules. The three hints need not differ by an hour.
   test.assert(inferred == support.host_july_noon(-1 as foreign int),
@@ -77,13 +77,13 @@ function test_time_defaults_normalization_and_dst(
   test.assert(daylight == support.host_july_noon(1 as foreign int),
               "true isdst did not use the host's daylight-time hint")
 
-  local noon = system.time { year = 2001, month = 2, day = 3 }
-  local explicit_noon = system.time(2001, 2, 3, 12, 0, 0, nil)
+  const noon = system.time { year = 2001, month = 2, day = 3 }
+  const explicit_noon = system.time(2001, 2, 3, 12, 0, 0, nil)
   test.assert(noon == explicit_noon,
               "named date fields did not use the noon default")
 
-  local normalized = system.time(2020, 2, 30, 4, 5, 6, nil)
-  local fields = support.as_date(system.date("*t", normalized),
+  const normalized = system.time(2020, 2, 30, 4, 5, 6, nil)
+  const fields = support.as_date(system.date("*t", normalized),
                          "normalized local date")
   test.assert(fields.year == 2020 and fields.month == 3 and fields.day == 1)
   test.assert(fields.hour == 4 and fields.min == 5 and fields.sec == 6)
@@ -92,7 +92,7 @@ function test_time_defaults_normalization_and_dst(
 end
 
 function test_locale_rejects_an_uninstalled_native_locale(_context: test.Context)
-  local previous: string = system.setlocale(nil, "time")
+  const previous: string = system.setlocale(nil, "time")
   defer do
     test.assert(system.setlocale(previous, "time") ~= nil, "could not restore LC_TIME")
   end
