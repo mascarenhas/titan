@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -14,6 +15,7 @@ REPO_ROOT = SCRIPT_PATH.parents[1]
 SPEC = importlib.util.spec_from_file_location("check_bundled_deps", SCRIPT_PATH)
 MOD = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
+sys.modules[SPEC.name] = MOD
 SPEC.loader.exec_module(MOD)
 
 
