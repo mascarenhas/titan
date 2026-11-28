@@ -240,6 +240,11 @@ function websocketSource(op, ...args) {
   throw new TypeError(`unknown titan:websocket op ${op}`);
 }
 
+// titan:vfs of an image that links no filesystem runtime.
+function vfsUnlinked() {
+  throw new Error('ENOSYS: this browser image links no filesystem');
+}
+
 const sdkBindings = Object.freeze(Object.assign(Object.create(null), {
   'titan:timeout': () => timeoutSource,
   'titan:interval': () => intervalSource,
@@ -253,6 +258,9 @@ const sdkBindings = Object.freeze(Object.assign(Object.create(null), {
     kind: 'detachable', promise: new Promise(resolve => resolve(owner.options.stdin())),
   })),
   'titan:stdio': owner => name => owner.options[name + 'Kind'], // The embedder's declared backings; Titan validates them.
+  // The image's filesystem and SQLite runtime (titan-browser-vfs.mjs, titan-browser-sql.mjs).
+  'titan:vfs': owner => owner.storage?.vfs ?? vfsUnlinked,
+  'titan:sqlite3': (owner, state) => owner.storage?.sql?.binding(state),
 }));
 
 function observe(promise) {
@@ -558,6 +566,7 @@ class BrowserOwner {
     this.callsScheduled = false;
     this.out = new OutputChannel(options.stdout, 'stdout', this, options.stdoutEnd);
     this.err = new OutputChannel(options.stderr, 'stderr', this, options.stderrEnd);
+    this.storage = image.storage?.(this, options.vfs, image);
   }
 
   // Every application method rejects after exit; a host invocation in flight
@@ -711,6 +720,8 @@ class BrowserOwner {
         typeof WebAssembly.Suspending !== 'function') {
       throw failure('CAPABILITY', 'Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)');
     }
+    // A filesystem that cannot start fails initialization without poisoning.
+    await this.storage?.start();
     try {
       this.module = await Promise.race([this.factory(this), this.active.fatal.promise]);
       this.factory = undefined;
@@ -1203,6 +1214,7 @@ class BrowserOwner {
         this.releaseSlot(slot, entry.generation);
       }
     }
+    this.storage?.closeState(state);
   }
 
   newSlot(state, value, kind = 'value', temporary = false) {
@@ -1977,7 +1989,14 @@ class BrowserOwner {
     return Object.freeze({state: trace?.state ?? 'created', reason: trace?.reason ?? null});
   }
 
-  dispose() {
+  dispose(options = {}) {
+    if (options === null || typeof options !== 'object' ||
+        options.force !== undefined && typeof options.force !== 'boolean') {
+      return Promise.reject(new TypeError('browser dispose options must be an object with a boolean force'));
+    }
+    // A forced disposal stops the storage worker now, even under a running
+    // statement or an earlier disposal waiting for one.
+    if (options.force) this.storage?.terminate();
     if (this.disposed) return this.disposed;
     // Cancellation may synchronously call dispose again; publish its stable
     // promise before signalling any host owner.
@@ -2071,6 +2090,19 @@ async function retireOwner(owner) {
   }
   if (owner.backend) owner.backend.blocked = true;
   for (const state of owner.states.keys()) owner.closeState(state);
+  // The storage worker applies and persists every change, the connection
+  // closes of the closed states included, then stops; the instance keeps
+  // nothing of it.
+  try {
+    if (await owner.storage?.dispose()) {
+      throw failure('DISPOSED_DIRTY', 'browser storage worker stopped before it persisted every change');
+    }
+  } catch (cause) {
+    if (error && !owner.terminal) owner.reportNotification('cleanup', 'dispose', error);
+    error = cause;
+  } finally {
+    owner.storage = undefined;
+  }
   const drains = [owner.out.takeDrain(), owner.err.takeDrain()];
   const disposal = {drains, failure: error ? {error} : interruptedFailure,
     observer: owner.options?.onNotificationError};
@@ -2135,6 +2167,7 @@ export function create(factory, options = {}, image) {
       typeof image.wasm !== 'string' || !image.wasm.endsWith('.wasm')) {
     throw new TypeError('browser image binding must name a 64-digit identity and its .wasm');
   }
+  if (options.vfs !== undefined && !image.storage) throw new TypeError('browser vfs needs an image that links the filesystem');
   for (const name of ['stdin', 'stdout', 'stderr', 'stdoutEnd', 'stderrEnd', 'locateFile',
       'onNotificationError', 'requestDrain', 'onEngineFailure']) {
     if (options[name] !== undefined && typeof options[name] !== 'function') {
@@ -2165,7 +2198,7 @@ export function create(factory, options = {}, image) {
     callTask: (callable, args = [], options = {}) => owner.callTask(callable, args, options),
     notify: (callable, ...args) => owner.notify(callable, args),
     drain: () => owner.drain(),
-    dispose: () => owner.dispose(),
+    dispose: options => owner.dispose(options),
     get trace() { return owner.trace(); },
   });
 }

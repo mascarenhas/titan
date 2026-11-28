@@ -9,6 +9,13 @@ string algorithms, and the ta-regex-derived parser. Their full attributions
 and license texts are listed below. The semantic pack contains no Lua runtime
 archive or native standard provider.
 
+A browser image that links the filesystem embeds the storage runtime
+(`titan-browser-vfs.mjs`) and is published with its storage worker
+(`<stem>.worker.mjs`); both contain JavaScript generated from uwasi. An image
+that links `titan.sqlite3` is also published with its SQLite service
+(`<stem>.sqlite3.wasm`), which incorporates SQLite. Their attributions and
+license texts are listed below.
+
 ## Experimental Windows builds
 
 `Makefile.win` packages the pinned Lua, libuv, llhttp, and SQLite providers
@@ -103,6 +110,20 @@ The source's author disclaimer and blessing are reproduced in
 The private archive is built with `SQLITE_THREADSAFE=1` and is incorporated
 into both standard-provider configurations; it is not installed as a separate
 SQLite library or header.
+
+The browser SQLite service `titan-sqlite3-service.wasm` incorporates the same
+amalgamation, built with `SQLITE_THREADSAFE=0`, `SQLITE_OMIT_LOAD_EXTENSION`
+and `SQLITE_TEMP_STORE=3`, together with Titan's service reactor.
+
+## uwasi
+
+Titan's browser storage runtime and storage worker incorporate JavaScript
+generated from uwasi 1.6.0, commit
+`11b4ebf5fef47d49eb7da8a9d21483cf921e1a6c`, obtained from
+<https://github.com/swiftwasm/uwasi>. uwasi is distributed under the Apache
+License 2.0, reproduced in `LICENSES/uwasi-LICENSE`. Titan changed four of its
+files; `vendor/uwasi/UPSTREAM.md` lists each change, and every changed place is
+marked in the vendored source.
 
 ## lpeg_patterns URI grammar
 

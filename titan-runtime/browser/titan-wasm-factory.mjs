@@ -470,9 +470,11 @@ function calendarImports(context) {
  * The image's wasi_snapshot_preview1 imports. `bridge.output(stream, pointer,
  * length)` copies standard output (1) and error (2), `bridge.options.env`
  * lists `NAME=value` entries, `views` supplies HEAPU8 and HEAPU32, and
- * `onAbort(message)` reports a fatal exit and throws. A browser image has no
- * preopened directories, so wasi-libc fails every path call before it gets
- * here; descriptors 0 to 2 are character streams that are not terminals.
+ * `onAbort(message)` reports a fatal exit and throws. Without the filesystem
+ * runtime a browser image has no preopened directories, so wasi-libc fails
+ * every path call before it gets here; with it, titan-browser-vfs.mjs serves
+ * every other descriptor and path. Descriptors 0 to 2 are character streams
+ * that are not terminals.
  */
 export function createWasiImports(bridge, views, onAbort) {
   const standard = fd => fd >>> 0 <= 2;
@@ -528,6 +530,7 @@ export function createWasiImports(bridge, views, onAbort) {
       views.HEAPU32[written >>> 2] = total;
       return 0;
     },
+    path_filestat_get: nosys,
     path_open: nosys,
     path_remove_directory: nosys,
     path_rename: nosys,
@@ -851,8 +854,11 @@ async function instantiate(bridge) {
   };
   imports.wasi_snapshot_preview1 = createWasiImports({output, get options() { return bridge.options; }},
     context, message => context.abort(message));
+  // An image that links the filesystem gets its WASI filesystem and storage imports.
+  const storage = bridge.storage?.imports(context, imports.wasi_snapshot_preview1);
+  if (storage) imports.wasi_snapshot_preview1 = storage.wasi;
   imports.env = Object.assign(Object.create(null), imports.env, backend.imports(), bridgeImports(bridge),
-    calendarImports(context), {
+    calendarImports(context), storage?.env, {
       titan_browser_trace_capture: (out, capacity) => trace.capture(out, capacity),
       titan_browser_trace_symbolize: (record, base, baseBytes, symbol, symbolBytes, line) =>
         trace.symbolize(record, base, baseBytes, symbol, symbolBytes, line),
