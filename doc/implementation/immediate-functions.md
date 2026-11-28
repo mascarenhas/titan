@@ -168,7 +168,7 @@ annotations where absence is meaningful. Stored callbacks and returned
 iterators remain ordinary closures.
 
 An immediate call keeps the cleanup boundaries of the code around it. Lua source
-loading (`titan/lua/loading.native.titan`) keeps the file's close in the enclosing scope,
+loading (`titan/lua/loading.titan`) keeps the file's close in the enclosing scope,
 and TLS context cleanup (`titan/ssl.native.titan`) stays outside the expression that
 selects the context. The inline function boundary must preserve these
 relationships even though the generated code shares one C activation.

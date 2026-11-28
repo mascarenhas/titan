@@ -60,10 +60,25 @@ assert.equal(emitted.entry, '.titan-links/main/synthetic/main__entrypoint.c');
 assert.ok(emitted.files[emitted.entry].includes('0123456789abcdef'));
 assert.ok(!emitted.files['main.c'].includes('titan_source'));
 
+// A unit importing titan.lua retains the filesystem runtime's marker; a pure
+// program does not. The bundle carries the storage runtime build_trace embeds.
+assert.ok(!emitted.files['main.c'].includes('titan_browser_vfs_linked'));
+const storage = compiler.emit_c({'main.titan': 'local lua = import "lua"\n\nfunction main(args: {string}): integer\n' +
+  '  local state = lua.new()\n  state:close()\n  return 0\nend\n'}, 'fedcba9876543210'.repeat(4));
+assert.deepEqual(storage.diagnostics, []);
+assert.ok(storage.files['main.c'].includes('(void)titan_browser_vfs_linked();'));
+for (const name of ['titan-browser-vfs.mjs', 'titan-browser-sql.mjs', 'titan-storage-worker.mjs',
+  'titan-sqlite3-service.wasm']) {
+  assert.ok((await asset(name)).length > 0, name);
+}
+
 // Refused requests leave the compiler usable.
 assert.throws(() => compiler.check({'../main.titan': ''}), /invalid project path/);
 assert.throws(() => compiler.hover(files, {path: 'absent.titan', offset: 0}), TypeError);
 assert.throws(() => compiler.check({'main.titan': 7}), TypeError);
+// A partial storage tuple is refused before it reaches the compiler, even without vfs.
+assert.throws(() => compiler.build_trace({linked: new Uint8Array(), identity: '0'.repeat(64), factory: '',
+  loader: '', sql: '', worker: '', sqlite: new Uint8Array()}), TypeError);
 assert.deepEqual(compiler.check(files), []);
 
 // A second compiler is independent; disposal is idempotent and final.

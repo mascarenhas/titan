@@ -1,0 +1,6 @@
+local test = import "test"
+local subject = import "sqlite3"
+
+function test_initializer_completed(_context: test.Context)
+  test.assert(test.testing(), "sqlite3 initializer did not reach its test")
+end

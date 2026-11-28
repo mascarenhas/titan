@@ -1,0 +1,37 @@
+-- Native lock contention: POSIX advisory locks let a writer take RESERVED
+-- beside a reader's SHARED lock, so the conflict surfaces at COMMIT. The
+-- browser service's dot-file locks surface it at the first write instead
+-- (transaction_lock_test.browser.titan).
+
+function test_failed_commit_preserves_active_transaction_and_native_busy_code(
+    context: test.Context)
+  runtime_test.run(function ()
+    const path = fs.tmpname()
+    defer fs.unlink(path)
+    const writer = sqlite3.connect(path)
+    defer writer:close()
+    execute_sql(writer, "CREATE TABLE item (value INTEGER)")
+    execute_sql(writer, "INSERT INTO item VALUES (1)")
+    const reader = sqlite3.connect(path)
+    defer reader:close()
+    const statement = reader:prepare("SELECT value FROM item")
+    defer statement:close()
+    const cursor = statement:query()
+    defer cursor:close()
+    assert_integer_cell(required_row(cursor), 1, 1)
+    -- The reader keeps a real SHARED lock after its first step. A writer can
+    -- acquire RESERVED and modify, but COMMIT cannot become EXCLUSIVE yet.
+    writer:set_autocommit(false)
+    execute_sql(writer, "INSERT INTO item VALUES (2)")
+    const failure = expect_native_error(function () writer:commit() end, 5)
+    test.assert(failure.operation == "commit",
+                "contended COMMIT reported the wrong operation")
+    test.assert(not writer:get_autocommit(),
+                "failed COMMIT pretended the transaction had ended")
+    cursor:close()
+    writer:commit()
+    test.assert(writer:get_autocommit() and
+                scalar_integer(writer, "SELECT count(*) FROM item") == 2,
+                "explicit retry after releasing the reader did not commit")
+  end)
+end

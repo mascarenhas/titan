@@ -508,7 +508,8 @@ end
         toolchain.stage_runner(info, root)
         local assets = browserlink.sdk_assets(driver.installed_paths(root, "browser"))
         local installed = browserlink.sdk_assets(driver.installed_paths(info.prefix, "browser"))
-        local keys = { "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page" }
+        local keys = { "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page",
+            "vfs", "sql", "storage_worker", "sqlite_service" }
         for _, key in ipairs(keys) do fixtures.copy(installed[key], assets[key]) end
         -- The profile record is not a shared input: links check it, not certify it.
         fixtures.copy(installed.build_profile, assets.build_profile)

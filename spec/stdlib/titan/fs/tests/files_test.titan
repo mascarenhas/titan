@@ -1,0 +1,510 @@
+function test_fs_binary_delimiters_and_close(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const binary_path = root .. "/binary.dat"
+    support.cleanup_path(context, binary_path)
+    const boundary = support.make_boundary_payload()
+
+    fs.write_file(binary_path, boundary)
+    test.assert(fs.read_file(binary_path) == boundary,
+                "whole-file helpers changed binary data")
+
+    const file = fs.open(binary_path, "rb")
+    defer file:close()
+    expect_failure(function ()
+      file:read_until("")
+    end, "File accepted an empty delimiter")
+    const selected: string? = file:read_until("\0Y", true)
+    test.assert(selected == strings.rep("x", 65535),
+                "delimiter spanning native reads returned the wrong prefix")
+    test.assert(file:read() == "tail\r\n\255",
+                "delimiter read lost retained excess")
+    test.assert(not file:read(1) and not file:read_until("missing"),
+                "repeated File reads did not return EOF")
+
+    file:close()
+    file:close()
+    test.assert(file:is_closed(), "File close was not idempotent")
+    test.assert(not file:read() and not file:read_until("missing"),
+                "closed File did not behave as Reader EOF")
+    expect_failure(function ()
+      file:write("late")
+    end, "closed File accepted a write")
+    expect_failure(function ()
+      file:write("")
+    end, "closed File accepted an empty write")
+    expect_failure(function ()
+      file:flush()
+    end, "closed File accepted a flush")
+
+    const append = fs.open(binary_path, "ab")
+    defer append:close()
+    test.assert(append:write("\0end\r\n") == 6,
+                "binary append returned the wrong byte count")
+    append:flush()
+    append:close()
+    test.assert(fs.read_file(binary_path) == boundary .. "\0end\r\n",
+                "binary append or flush changed bytes or line endings")
+
+    fs.unlink(binary_path)
+  end)
+end
+
+function test_fs_modes_interfaces_and_validation(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const modes_path = root .. "/modes.dat"
+    support.cleanup_path(context, modes_path)
+
+    do
+      const file = fs.open(modes_path, "w")
+      defer file:close()
+      test.assert(file:write("abc") == 3,
+                  "write returned the wrong length")
+      file:flush()
+    end
+    do
+      const file = fs.open(modes_path, "a")
+      defer file:close()
+      test.assert(file:write("d") == 1,
+                  "append returned the wrong length")
+    end
+    test.assert(fs.read_file(modes_path) == "abcd",
+                "append changed file data")
+
+    do
+      const file = fs.open(modes_path, "r+")
+      defer file:close()
+      test.assert(file:read(2) == "ab",
+                  "read/update mode returned wrong bytes")
+      test.assert(file:write("XY") == 2,
+                  "read/update write failed")
+      file:flush()
+    end
+    test.assert(fs.read_file(modes_path) == "abXY",
+                "read/update mode used the wrong file position")
+
+    const valid_modes = {
+      "r", "rb", "r+", "r+b", "rb+", "a", "ab", "a+", "a+b", "ab+"
+    }
+    for index = 1, #valid_modes do
+      const opened = fs.open(modes_path, valid_modes[index])
+      opened:close()
+    end
+    const truncating_modes = {"w", "wb", "w+", "w+b", "wb+"}
+    for index = 1, #truncating_modes do
+      const opened = fs.open(modes_path, truncating_modes[index])
+      opened:close()
+    end
+
+    const invalid_modes = {"", "x", "rr", "br", "r++"}
+    for index = 1, #invalid_modes do
+      const mode = invalid_modes[index]
+      expect_failure(function ()
+        fs.open(modes_path, mode)
+      end, "invalid mode was accepted: " .. mode)
+    end
+    expect_failure(function ()
+      fs.open(root .. "/bad\0path", "r")
+    end, "embedded-NUL path was accepted")
+
+    do
+      const file = fs.open(modes_path, "r")
+      defer file:close()
+      expect_failure(function ()
+        file:read(0)
+      end, "zero-sized read was accepted")
+    end
+
+    const interface_path = root .. "/interface.dat"
+    support.cleanup_path(context, interface_path)
+    fs.write_file(interface_path, "line\nrest")
+    do
+      const file = fs.open(interface_path, "r+")
+      defer file:close()
+      const concrete: stream.ReaderWriterCloser = file
+      test.assert(concrete:read_until("\n", true) == "line",
+                  "ReaderWriterCloser delimiter dispatch failed")
+      concrete:write("X")
+      test.assert(concrete:read() == "rest",
+                  "ReaderWriterCloser retained read failed")
+      concrete:close()
+    end
+    test.assert(fs.read_file(interface_path) == "line\nrestX",
+                "ReaderWriterCloser write changed position")
+
+    fs.unlink(modes_path)
+    fs.unlink(interface_path)
+  end)
+end
+
+function test_fs_paths_metadata_locations_and_errors(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    if common.is_windows() then
+      support.set_fixture_environment(context, "USERPROFILE", root)
+      support.set_fixture_environment(context, "TMP", root)
+      support.set_fixture_environment(context, "TEMP", root)
+    else
+      support.set_fixture_environment(context, "HOME", root)
+      support.set_fixture_environment(context, "TMPDIR", root)
+    end
+
+    const canonical_root = fs.realpath(root)
+    test.assert(fs.realpath(root .. "/.") == canonical_root,
+                "realpath did not resolve a dot component")
+    local realpath_missing = false
+    do
+      fs.realpath(root .. "/missing-realpath")
+    catch
+      const failure = error as async.OperationError
+      test.assert(failure.operation == "fs.realpath",
+                  "missing realpath reported the wrong operation")
+      realpath_missing = true
+    end
+    test.assert(realpath_missing, "realpath accepted a missing path")
+    expect_failure(function ()
+      fs.realpath(root .. "/bad\0path")
+    end, "realpath accepted an embedded-NUL path")
+
+    const target = root .. "/target.dat"
+    support.cleanup_path(context, target)
+    fs.write_file(target, "target")
+
+    const tree = root .. "/tree"
+    const sub = tree .. "/sub"
+    const first = tree .. "/first héllo 世界.dat"
+    const renamed = tree .. "/renamed héllo 世界.dat"
+    const cwd = root .. "/cwd"
+    const marker = cwd .. "/marker"
+    support.cleanup_path(context, tree)
+    support.cleanup_path(context, sub)
+    support.cleanup_path(context, first)
+    support.cleanup_path(context, renamed)
+    support.cleanup_path(context, cwd)
+    support.cleanup_path(context, marker)
+
+    fs.mkdir(tree)
+    fs.mkdir(sub)
+    fs.mkdir(cwd)
+    fs.write_file(marker, "cwd")
+    fs.write_file(first, "abc\0def")
+
+    const info = fs.stat(first)
+    test.assert(info.kind == "file" and info.size == 7,
+                "stat returned wrong regular-file metadata")
+    test.assert(info.mode >= 0 and info.modified_nanoseconds >= 0 and
+                info.modified_nanoseconds < 1000000000,
+                "stat returned invalid portable metadata")
+    test.assert(fs.stat(sub).kind == "directory",
+                "stat did not classify a directory")
+
+    const entries = fs.list(tree)
+    test.assert(#entries == 2 and contains_entry(entries, "first héllo 世界.dat") and
+                contains_entry(entries, "sub"),
+                "list returned wrong entries")
+    test.assert(not contains_entry(entries, ".") and
+                not contains_entry(entries, ".."),
+                "list exposed dot entries")
+
+    fs.rename(first, renamed)
+    test.assert(fs.stat(first) == nil and fs.lstat(first) == nil,
+                "rename left the old path present")
+    const renamed_info = fs.stat(renamed)
+    const renamed_link_info = fs.lstat(renamed)
+    test.assert(renamed_info.device == info.device and
+                renamed_info.inode == info.inode and renamed_info.size == info.size,
+                "rename changed file identity or metadata")
+    test.assert(renamed_link_info.device == renamed_info.device and
+                renamed_link_info.inode == renamed_info.inode and
+                renamed_link_info.size == renamed_info.size and
+                renamed_link_info.kind == "file",
+                "stat and lstat disagreed on the same ordinary file")
+    test.assert(fs.read_file(renamed) == "abc\0def",
+                "rename lost file data")
+    expect_failure(function ()
+      fs.rmdir(tree)
+    end, "rmdir removed a nonempty directory")
+    expect_failure(function ()
+      fs.unlink(sub)
+    end, "unlink removed a directory")
+
+    const missing = root .. "/missing"
+    test.assert(fs.stat(missing) == nil and fs.lstat(missing) == nil,
+                "missing metadata did not return nil")
+    test.assert(fs.stat(missing .. "/child") == nil and
+                fs.lstat(missing .. "/child") == nil,
+                "missing metadata parent did not return nil")
+
+    local metadata_error_path = target .. "/child"
+    if common.is_windows() then
+      -- Windows reports UV_ENOENT for a child below an ordinary file. Use a
+      -- path beyond its UTF-16 limit to retain the native non-ENOENT oracle.
+      test.assert(fs.stat(metadata_error_path) == nil and
+                  fs.lstat(metadata_error_path) == nil,
+                  "Windows missing metadata component did not return nil")
+      metadata_error_path = root .. "/" .. strings.rep("x", 40000)
+    end
+    const expect_metadata_error: function (function (): (), string): () =
+      function (action: function (): (), operation: string)
+        local failed = false
+        do
+          action()
+        catch
+          const failure = error as async.OperationError
+          test.assert(failure.operation == operation,
+                      "metadata failure reported the wrong operation")
+          if common.is_windows() then
+            test.assert(failure.name == "ENAMETOOLONG",
+                        "overlong Windows metadata path lost its native error")
+          end
+          failed = true
+        end
+        test.assert(failed, "metadata swallowed a non-ENOENT failure")
+      end
+    expect_metadata_error(function ()
+      fs.stat(metadata_error_path)
+    end, "fs.stat")
+    expect_metadata_error(function ()
+      fs.lstat(metadata_error_path)
+    end, "fs.lstat")
+    expect_failure(function ()
+      fs.list(missing)
+    end, "list accepted a missing path")
+
+    test.assert(fs.realpath(fs.tmpdir()) == canonical_root and
+                fs.realpath(fs.homedir()) == canonical_root,
+                "portable directory helpers returned wrong paths")
+    const temporary = fs.tmpname()
+    support.cleanup_path(context, temporary)
+    test.assert(fs.lstat(temporary).kind == "file",
+                "tmpname did not leave a closed regular file")
+    fs.unlink(temporary)
+
+    const original = fs.pwd()
+    do
+      defer fs.chdir(original)
+      fs.chdir(cwd)
+      const changed = fs.pwd()
+      test.assert(changed ~= original and fs.read_file("marker") == "cwd",
+                  "chdir did not select the requested directory")
+      test.assert(fs.read_file(changed .. "/marker") == "cwd",
+                  "pwd did not identify the current directory")
+    end
+    test.assert(fs.pwd() == original, "chdir did not restore pwd")
+
+    fs.unlink(target)
+    fs.unlink(renamed)
+    fs.unlink(marker)
+    fs.rmdir(sub)
+    fs.rmdir(tree)
+    fs.rmdir(cwd)
+  end)
+end
+
+function test_fs_independent_continuations(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const first_path = root .. "/parallel-first.dat"
+    const second_path = root .. "/parallel-second.dat"
+    support.cleanup_path(context, first_path)
+    support.cleanup_path(context, second_path)
+
+    local first_realpath: string? = nil
+    local second_realpath: string? = nil
+    const first = async.run<|value, value|>(function (): value
+      fs.write_file(first_path, "first")
+      first_realpath = fs.realpath(first_path)
+      return nil
+    end)
+    task_support.cleanup_task(first, "first filesystem Task cleanup")
+    const second = async.run<|value, value|>(function (): value
+      fs.write_file(second_path, "second")
+      second_realpath = fs.realpath(second_path)
+      return nil
+    end)
+    task_support.cleanup_task(second, "second filesystem Task cleanup")
+
+    while not first:status():has_finished() or
+          not second:status():has_finished() do
+      timer.yield()
+    end
+    test.assert(first:status():as_string() == "succeeded" and
+                second:status():as_string() == "succeeded",
+                "independent filesystem Tasks did not succeed")
+    test.assert(fs.read_file(first_path) == "first" and
+                fs.read_file(second_path) == "second" and
+                first_realpath == fs.realpath(first_path) and
+                second_realpath == fs.realpath(second_path),
+                "independent filesystem results changed")
+
+    fs.unlink(first_path)
+    fs.unlink(second_path)
+  end)
+end
+
+function test_fs_close_before_acceptance_restores_ownership(context: test.Context)
+  const root = support.new_workspace(context)
+  const path = root .. "/close-restore.dat"
+  support.cleanup_path(context, path)
+  support.write_file_synchronously(path, "retained")
+  local held: fs.File? = nil
+  context:cleanup(function ()
+    if held and not held:is_closed() then
+      runtime_test.run(function () held:close() end)
+    end
+  end)
+  runtime_test.run(function () held = fs.open(path, "r") end)
+
+  expect_failure(function () held:close() end,
+                 "File close outside a Task unexpectedly succeeded")
+  test.assert(not held:is_closed(),
+              "rejected File close abandoned its descriptor before acceptance")
+  runtime_test.run(function ()
+    test.assert(held:read() == "retained",
+                "File close did not restore a usable descriptor")
+    held:close()
+    test.assert(held:is_closed(), "restored File did not close")
+  end)
+end
+
+function test_fs_close_completes_with_pending_cancellation(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/cancel-close.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "owned")
+    const file = fs.open(path, "r")
+    defer file:close()
+    const reason = async.CancellationReason<|value|>.simple("cleanup File close")
+    local close_completed = false
+    const closer = async.run<|value, value|>(function (): value
+      async.running():cancel(reason)
+      file:close()
+      close_completed = true
+      return nil
+    end)
+    task_support.cleanup_task(closer, "cancelled filesystem close cleanup")
+    async.join(closer)
+    local cancelled, actual? = closer:status():has_cancelled()
+    test.assert(cancelled and actual == reason and close_completed and file:is_closed(),
+                "pending cancellation prevented File ownership cleanup")
+  end)
+end
+
+function test_fs_file_transfer_preserves_buffer_position_and_source_invalidation(
+    context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/transfer.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "head\0tail\255")
+    const source = fs.open(path, "r+")
+    defer source:close()
+    test.assert(source:read_until("\0", true) == "head")
+    const packet = async.TransferValue.from_value(source)
+    test.assert(source:is_closed() and source:read() == nil)
+    expect_failure(function () source:write("invalid") end,
+                   "transferred File remained writable")
+    source:close()
+    const target: fs.File = packet:to_value()
+    defer target:close()
+    test.assert(target:read(2) == "ta" and target:read() == "il\255",
+                "File transfer lost retained delimiter bytes")
+    test.assert(target:read() == nil)
+    test.assert(target:write("\0end") == 4)
+    target:flush()
+    target:close()
+    test.assert(fs.read_file(path) == "head\0tail\255\0end",
+                "File transfer changed the descriptor position")
+  end)
+end
+
+function test_fs_file_transfer_rejects_closed_and_malformed_payloads(
+    context: test.Context)
+  expect_failure(function () fs.File.from_transfer_payload("") end,
+                 "File accepted a missing transfer payload")
+  expect_failure(function ()
+    fs.File.from_transfer_payload(strings.char(10, 0, 18, 0))
+  end, "File accepted an invalid descriptor wire kind")
+  expect_failure(function ()
+    fs.File.from_transfer_payload(strings.char(8, 1, 18, 0))
+  end, "File accepted a closed descriptor")
+  expect_failure(function ()
+    fs.File.from_transfer_payload(strings.char(8, 128, 128, 128, 128, 16, 18, 0))
+  end, "File accepted an out-of-range descriptor")
+  expect_failure(function ()
+    fs.File.from_transfer_payload(strings.char(8, 0))
+  end, "File accepted a missing retained buffer")
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/closed-transfer.dat"
+    support.cleanup_path(context, path)
+    const file = fs.open(path, "w")
+    file:close()
+    expect_failure(function () file:to_transfer_payload() end,
+                   "closed File transferred a descriptor")
+  end)
+end
+
+function test_fs_file_transfer_hooks_are_synchronous(context: test.Context)
+  local source: fs.File?
+  local target: fs.File?
+  defer runtime_test.run(function ()
+    if target then target:close() end
+    if source then source:close() end
+  end)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/synchronous-transfer.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "data")
+    source = fs.open(path, "r")
+  end)
+  target = fs.File.from_transfer_payload(source:to_transfer_payload())
+  runtime_test.run(function () test.assert(target:read() == "data") end)
+end
+
+-- A File crosses into an independent state and back without a Task, and the
+-- state's close leaves the returned descriptor open.
+function test_fs_file_transfer_crosses_independent_states(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/independent-transfer.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "head|state|host\0\255")
+    const source = fs.open(path, "r")
+    defer source:close()
+    test.assert(source:read_until("|", true) == "head")
+    const state = transfer_lua.new()
+    defer state:close()
+    const returned: async.TransferValue = state:run([[
+      local file = ...
+      assert(not file:is_closed())
+      return file
+    ]], "=file-transfer", async.TransferValue.from_value(source))
+    test.assert(source:is_closed(), "File transfer left its source open")
+    state:close()
+    const target: fs.File = returned:to_value()
+    defer target:close()
+    test.assert(target:read() == "state|host\0\255" and target:read() == nil,
+                "independent-state File transfer lost its descriptor or bytes")
+  end)
+end
+
+-- Stat is a public value record that constructs from its fields without a
+-- Task, through the record call and through its new function as a value.
+function test_fs_stat_constructs_from_its_fields(_: test.Context)
+  const new_stat: function (integer, string, integer, integer, integer, integer,
+                            integer): (fs.Stat) = fs.Stat.new
+  const built = new_stat(7, "file", 420, 1, 2, 1700000000, 999999999)
+  test.assert(built.size == 7 and built.kind == "file" and built.mode == 420 and
+              built.device == 1 and built.inode == 2 and
+              built.modified_seconds == 1700000000 and
+              built.modified_nanoseconds == 999999999,
+              "Stat.new lost a field")
+  const named = fs.Stat { size = 0, kind = "directory", mode = 493, device = 3,
+                          inode = 4, modified_seconds = 0, modified_nanoseconds = 0 }
+  test.assert(named.kind == "directory" and named.inode == 4,
+              "the Stat record call lost a field")
+end

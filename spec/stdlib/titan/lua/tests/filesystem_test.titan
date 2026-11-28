@@ -1,0 +1,127 @@
+-- titan.lua's file loading, which reads through titan.fs on both targets.
+
+local function filesystem_directory(): string
+  const root = fs.tmpname()
+  fs.unlink(root)
+  fs.mkdir(root)
+  runtime_test.cleanup(function () fs.rmdir(root) end)
+  return root
+end
+
+local function filesystem_file(path: string, contents: string)
+  runtime_test.cleanup(function ()
+    if fs.stat(path) ~= nil then fs.unlink(path) end
+  end)
+  fs.write_file(path, contents)
+end
+
+local function filesystem_error(action: function (): ()): value
+  do
+    action()
+  catch
+    return error
+  end
+  raise "expected an error"
+end
+
+function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(
+    _context: test.Context)
+  runtime_test.run(function ()
+    const root = filesystem_directory()
+    const success = root .. "/dofile-success.lua"
+    const runtime_error = root .. "/dofile-runtime-error.lua"
+    const syntax_error = root .. "/dofile-syntax-error.lua"
+    filesystem_file(success, "return ...")
+    filesystem_file(runtime_error, "error('runtime marker')")
+    filesystem_file(syntax_error, "this is not Lua")
+
+    const values: {value} = { tlua.dofile(success, 4, nil, 6) }
+    test.assert(#values == 3, "dofile changed the flexible result count")
+    test.assert(values[1] == 4 and values[2] == nil and values[3] == 6,
+                "dofile changed flexible arguments or results")
+
+    const runtime_message = filesystem_error(function () tlua.dofile(runtime_error) end)
+    test.assert(runtime_message is string and
+                common.contains(runtime_message as string, "runtime marker"),
+                "dofile lost its runtime error: " .. common.error_text(runtime_message))
+    const syntax_message = filesystem_error(function () tlua.dofile(syntax_error) end)
+    -- Lua abbreviates long source paths but keeps the filename suffix.
+    test.assert(syntax_message is string and
+                common.contains(syntax_message as string, "dofile-syntax-error.lua"),
+                "dofile lost its syntax error: " .. common.error_text(syntax_message))
+    const missing = filesystem_error(function () tlua.dofile(root .. "/missing.lua") end)
+    test.assert(missing is async.OperationError and
+                (missing as async.OperationError).name == "ENOENT",
+                "dofile of a missing file did not raise ENOENT: " .. common.error_text(missing))
+
+    -- Both exceptional paths leave dofile usable.
+    fs.write_file(runtime_error, "return 'runtime-recovered'")
+    fs.write_file(syntax_error, "return 'syntax-recovered'")
+    const runtime_recovered: value = tlua.dofile(runtime_error)
+    const syntax_recovered: value = tlua.dofile(syntax_error)
+    test.assert(runtime_recovered == "runtime-recovered" and
+                syntax_recovered == "syntax-recovered",
+                "dofile did not recover after a caught file error")
+  end)
+end
+
+-- lua.require searches package.path through titan.fs, and an independent
+-- state's stock require reads the same files.
+function test_lua_require_loads_lua_sources_from_package_path(_context: test.Context)
+  runtime_test.run(function ()
+    const root = filesystem_directory()
+    const package_table = tlua.load("return package")() as {string: value}
+    const loaded = package_table["loaded"] as {string: value}
+    const saved_path = package_table["path"] as string
+    package_table["path"] = root .. "/?.lua;" .. root .. "/?/init.lua"
+    defer package_table["path"] = saved_path
+
+    const source = root .. "/lua_tests_vfs_source.lua"
+    filesystem_file(source, "return { name = ..., filename = select(2, ...) }")
+    const package_directory = root .. "/lua_tests_vfs_package"
+    fs.mkdir(package_directory)
+    runtime_test.cleanup(function () fs.rmdir(package_directory) end)
+    filesystem_file(package_directory .. "/init.lua", "return 'package init'")
+    const broken = root .. "/lua_tests_vfs_broken.lua"
+    filesystem_file(broken, "this is not Lua")
+    runtime_test.cleanup(function ()
+      loaded["lua_tests_vfs_source"] = nil
+      loaded["lua_tests_vfs_package"] = nil
+    end)
+
+    const result = tlua.require("lua_tests_vfs_source") as {string: value}
+    test.assert(result["name"] == "lua_tests_vfs_source" and result["filename"] == source,
+                "source require changed its loader arguments")
+    test.assert(tlua.require("lua_tests_vfs_source") == result,
+                "source require did not cache its result")
+    test.assert(tlua.require("lua_tests_vfs_package") == "package init",
+                "source require missed a package init file")
+
+    const failure = common.error_text(filesystem_error(function ()
+      tlua.require("lua_tests_vfs_broken")
+    end))
+    test.assert(common.contains(failure, "error loading module 'lua_tests_vfs_broken' from file '" ..
+                broken .. "'"), failure)
+    const miss = common.error_text(filesystem_error(function ()
+      tlua.require("lua_tests_vfs_missing")
+    end))
+    test.assert(common.contains(miss, "no file '" .. root .. "/lua_tests_vfs_missing.lua'") and
+                common.contains(miss, "no file '" .. root .. "/lua_tests_vfs_missing/init.lua'"),
+                miss)
+
+    const state = tlua.new()
+    defer state:close()
+    const child = state:run([[
+      package.path = ...
+      local module = require('lua_tests_vfs_source')
+      assert(require('lua_tests_vfs_package') == 'package init')
+      return module.filename
+    ]], "=lua-require-sources", async.TransferValue.is_string(package_table["path"] as string))
+    case child
+    when is_string(filename) then
+      test.assert(filename == source, "independent-state require read another file")
+    else
+      raise "independent-state require returned no filename"
+    end
+  end)
+end

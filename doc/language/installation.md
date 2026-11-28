@@ -332,8 +332,9 @@ All paths live under `ROCKS_TREE` (`PREFIX` in the default layout):
 | `share/titan/LICENSE`, `THIRD_PARTY_NOTICES.md`, `LICENSES/` | Titan and third-party license notices. |
 
 Optional browser installs add `lib/browser/` (`liblua.a`, headers, build
-record) and `lib/titan-browser/0.6/` (browser runtime, loader, runner, and
-21-module browser standard library), kept separate from `lib/titan/0.6/`.
+record) and `lib/titan-browser/0.6/` (browser runtime, loader, storage
+worker, SQLite service, runner, and 23-module browser standard library), kept
+separate from `lib/titan/0.6/`.
 
 ## How Titan finds its installation
 

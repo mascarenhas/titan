@@ -285,7 +285,7 @@ RUNTIME_LDFLAGS ?= $(TITAN_WINDOWS_NATIVE_LDFLAGS)
 LPEGLABEL_BUILD_CFLAGS ?= $(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_PROFILE_HOST_FLAGS)
 TITAN_LICENSE_FILES := libuv-LICENSE libuv-LICENSE-extra libuv-tree-LICENSE libuv-inet-LICENSE \
 	lpeglabel-LICENSE lpeg-LICENSE lpeg-patterns-LICENSE ta-regex-LICENSE lua-LICENSE \
-	llhttp-LICENSE sqlite3-LICENSE openssl-LICENSE go-LICENSE libbacktrace-LICENSE llvm-LICENSE
+	llhttp-LICENSE sqlite3-LICENSE openssl-LICENSE go-LICENSE libbacktrace-LICENSE llvm-LICENSE uwasi-LICENSE
 
 .PHONY: runtime-build runtime install-titan-sdk runtime-check
 runtime-build: lua libbacktrace
@@ -375,6 +375,10 @@ BROWSER_RUNNER_SHELL := sh
 BROWSER_COMPILER_REMEDY := run 'mingw32-make -f Makefile.win compiler' first
 BROWSER_NATIVE_PARITY = $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua inventory-fixture \
 	$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/members.md"
+# The browser SDK's SQLite service compiles the SQLite amalgamation that
+# native-source extracts and verifies from the pinned dependency manifest.
+BROWSER_SQLITE3_SRC_DIR := $(WINDOWS_BUILD_ROOT)/native-src/$(shell awk -F '\t' '$$1 == "sqlite3" { print $$2 }' vendor/windows-native/dependencies.tsv)
+BROWSER_SQLITE3_PREREQS := native-source
 include $(call make_path,$(TITAN_MAKEFILE_DIR)scripts/browser.mk)
 TITAN_TEST_BUILD_DIR ?= $(WINDOWS_BUILD_ROOT)/stdlib-tests
 TITAN_TEST_MAKE := $(MAKE)

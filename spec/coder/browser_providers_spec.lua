@@ -790,7 +790,7 @@ describe("browser providers real toolchain", function()
         local assets = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(prefix))
         local source = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(info.prefix))
         for _, key in ipairs({ "runtime", "factory", "loader", "runner", "runner_module", "node_worker",
-                "page", "build_profile" }) do
+                "page", "vfs", "sql", "storage_worker", "sqlite_service", "build_profile" }) do
             if platform.windows then
                 files.copy(source[key], assets[key])
             else

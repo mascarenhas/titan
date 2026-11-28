@@ -1,0 +1,384 @@
+-- Native-only titan.fs cases: libuv request ownership across cancellation and
+-- GC, symbolic links, descriptor inventories and Lua states that drive Tasks.
+local gc = import "gc"
+
+function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
+    context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/concurrent-reads.dat"
+    support.cleanup_path(context, path)
+    const expected = support.make_boundary_payload()
+    fs.write_file(path, expected)
+    const first = fs.open(path, "rb")
+    runtime_test.cleanup(function () first:close() end)
+    const second = fs.open(path, "rb")
+    runtime_test.cleanup(function () second:close() end)
+    local start_first: (function (nil): ())? = nil
+    local start_second: (function (nil): ())? = nil
+    local first_submitted, second_submitted = false, false
+    local cancelled_delivered = false
+    local received: string? = nil
+    const cancelled = async.run<|value, value|>(function (): value
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        start_first = resolve
+      end)
+      first_submitted = true
+      first:read(65536)
+      cancelled_delivered = true
+      return nil
+    end)
+    task_support.cleanup_task(cancelled, "cancelled filesystem read cleanup")
+    const survivor = async.run<|value, value|>(function (): value
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        start_second = resolve
+      end)
+      second_submitted = true
+      local contents = ""
+      while true do
+        const chunk? = second:read()
+        if not chunk then break end
+        contents = contents .. chunk
+        gc.collect()
+      end
+      received = contents
+      return nil
+    end)
+    task_support.cleanup_task(survivor, "surviving filesystem read cleanup")
+    -- Release unused gates before Task joins, then close files only after both
+    -- readers finish. Cancellation prevents cleanup from starting a new read.
+    runtime_test.cleanup(function ()
+      if start_first ~= nil then
+        const release = start_first
+        start_first = nil
+        cancelled:cancel(async.CancellationReason.simple("unused filesystem read gate"))
+        release(nil)
+      end
+    end)
+    runtime_test.cleanup(function ()
+      if start_second ~= nil then
+        const release = start_second
+        start_second = nil
+        survivor:cancel(async.CancellationReason.simple("unused filesystem read gate"))
+        release(nil)
+      end
+    end)
+    while start_first == nil or start_second == nil do timer.yield() end
+
+    test.assert(not first_submitted and not second_submitted,
+                "filesystem readers passed their start gates")
+    -- Registration runs outside a Task, so each gate settles synchronously
+    -- through the real File:read submission. No UV completion can interleave
+    -- before this registration returns, even if a worker has finished reading.
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local release_first, release_second = start_first, start_second
+      start_first = nil
+      release_first(nil)
+      start_second = nil
+      release_second(nil)
+      test.assert(first_submitted and second_submitted and
+                  cancelled:status():as_string() == "waiting" and
+                  survivor:status():as_string() == "waiting",
+                  "filesystem reads did not suspend after submission")
+      expect_failure(function () first:to_transfer_payload() end,
+                     "File transfer accepted an in-flight read")
+      expect_failure(function () second:to_transfer_payload() end,
+                     "File transfer detached an active survivor")
+      test.assert(not first:is_closed() and not second:is_closed(),
+                  "rejected File transfer detached a descriptor")
+      cancelled:cancel(async.CancellationReason.simple("cancel pending read"))
+      gc.collect()
+      gc.collect()
+      test.assert(cancelled:status():as_string() == "waiting" and
+                  survivor:status():as_string() == "waiting" and
+                  not cancelled_delivered and received == nil,
+                  "filesystem reads advanced before their completion callbacks")
+      resolve(nil)
+    end)
+    async.join(cancelled)
+    async.join(survivor)
+    test.assert(cancelled:status():has_cancelled() and not cancelled_delivered,
+                "cancelled filesystem read delivered a result")
+    test.assert(survivor:status():has_succeeded() and received == expected,
+                "concurrent filesystem read lost its owner buffer")
+  end)
+end
+
+function test_fs_symbolic_links_preserve_metadata_and_identity(context: test.Context)
+  runtime_test.run(function ()
+    const actual_root = support.new_workspace(context)
+    const root = actual_root .. "-alias"
+    support.make_symlink(context, actual_root, root)
+    test.assert(fs.realpath(root .. "/.") == fs.realpath(actual_root),
+                "realpath did not resolve a symlink and dot component")
+    const target = root .. "/target.dat"
+    const link = root .. "/target-link"
+    support.cleanup_path(context, target)
+    fs.write_file(target, "target")
+    support.make_symlink(context, target, link)
+    test.assert(fs.stat(link).kind == "file",
+                "stat did not follow a symbolic link")
+    const target_info = fs.stat(target)
+    const link_info = fs.stat(link)
+    test.assert(link_info.device == target_info.device and
+                link_info.inode == target_info.inode,
+                "stat did not preserve physical identity through a symlink")
+    test.assert(fs.lstat(link).kind == "symlink",
+                "lstat did not classify the symbolic link")
+    const dangling = root .. "/dangling-link"
+    support.make_symlink(context, root .. "/missing", dangling)
+    test.assert(fs.stat(dangling) == nil,
+                "stat did not treat a dangling symlink as missing")
+    const dangling_info? = fs.lstat(dangling)
+    test.assert(dangling_info ~= nil and dangling_info.kind == "symlink",
+                "lstat did not preserve a dangling symlink")
+  end)
+end
+
+function test_fs_cancelled_realpath_keeps_its_accepted_request(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/cancelled-realpath.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "first")
+    const expected = fs.realpath(path)
+
+    local cancellation_started = false
+    local cancelled_realpath: string? = nil
+    const cancelled = async.run<|value, value|>(function (): value
+      const held = fs.open(path, "r")
+      defer held:close()
+      cancellation_started = true
+      cancelled_realpath = fs.realpath(path)
+      return nil
+    end)
+    task_support.cleanup_task(cancelled,
+                              "cancelled realpath Task cleanup")
+    while not cancellation_started do timer.yield() end
+
+    local realpath_resume_error = ""
+    do
+      cancelled:resume(async.ResumeToken("realpath outsider"))
+    catch
+      realpath_resume_error = error as string
+    end
+    test.assert(realpath_resume_error ==
+                "Task resume token mismatch (expected source: unknown source)" and
+                cancelled:status():as_string() == "waiting" and
+                cancelled_realpath == nil,
+                "an unrelated token changed the one-shot realpath wait")
+
+    gc.collect()
+    cancelled:cancel(async.CancellationReason.simple(
+        "cancel pending realpath"))
+    -- Accepted native work keeps its request alive after the waiter detaches.
+    gc.collect()
+    async.join(cancelled)
+    test.assert(cancelled:status():has_cancelled() and
+                cancelled_realpath == nil,
+                "realpath delivered a result after Task cancellation")
+    timer.yield()
+    test.assert(fs.realpath(path) == expected,
+                "realpath cancellation damaged later requests")
+    fs.unlink(path)
+  end)
+end
+
+function test_fs_accepted_close_error_keeps_file_closed(context: test.Context)
+  runtime_test.run(function ()
+    support.require_descriptor_inventory()
+    const root = support.new_workspace(context)
+    const path = root .. "/accepted-close.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "terminal")
+    const file = fs.open(path, "r")
+    defer file:close()
+    const descriptor = support.file_descriptor(path)
+    test.assert(descriptor >= 0, "could not observe the fixture descriptor")
+    -- Only the uniquely owned fixture descriptor is invalidated. No Task or
+    -- asynchronous operation can open a replacement before File submits close.
+    support.close_descriptor(descriptor)
+    local rejected = false
+    do
+      file:close()
+    catch
+      if error is async.OperationError then
+        const failure: async.OperationError = error
+        rejected = failure.name == "EBADF" and failure.operation == "fs.close"
+      end
+    end
+    test.assert(rejected and file:is_closed(),
+                "accepted close failure restored invalid descriptor ownership")
+    file:close()
+    test.assert(support.file_descriptor(path) == -1,
+                "failed close left a fixture descriptor open")
+  end)
+end
+
+function test_fs_cancelled_open_retires_unpublished_descriptor(context: test.Context)
+  runtime_test.run(function ()
+    support.require_descriptor_inventory()
+    const root = support.new_workspace(context)
+    const path = root .. "/cancel-open.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "owned")
+    test.assert(support.file_descriptor(path) == -1,
+                "open cancellation fixture already has an open descriptor")
+    local submitted, published = false, false
+    const opener = async.run<|value, value|>(function (): value
+      submitted = true
+      const file = fs.open(path, "r")
+      defer file:close()
+      published = true
+      return nil
+    end)
+    task_support.cleanup_task(opener, "cancelled filesystem open cleanup")
+    while not submitted do timer.yield() end
+    test.assert(opener:status():as_string() == "waiting" and not published,
+                "open did not wait for its accepted request")
+    const reason = async.CancellationReason<|value|>.simple("cancel accepted open")
+    opener:cancel(reason)
+    gc.collect()
+    async.join(opener)
+    local cancelled, actual? = opener:status():has_cancelled()
+    test.assert(cancelled and actual == reason and not published,
+                "cancelled open published its File or lost its cancellation reason")
+    test.assert(support.file_descriptor(path) == -1,
+                "cancelled open leaked its unpublished descriptor")
+  end)
+end
+
+function test_fs_file_transfer_crosses_states_and_survives_source_shutdown(
+    context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/cross-state-transfer.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "head|worker|host\0\255")
+    const source = fs.open(path, "r")
+    defer source:close()
+    test.assert(source:read_until("|", true) == "head")
+    const state = transfer_lua.new()
+    defer state:close()
+    const operation = function (): async.TransferValue
+      defer source:close()
+      test.assert(source:read_until("|", true) == "worker")
+      return async.TransferValue.from_value(source)
+    end
+    const packet: async.TransferValue = state:run_async([[
+      local operation = ...
+      local async = require('titan.async')
+      local task = async.run(operation)
+      async.loop()
+      local success, result = task:status():has_succeeded()
+      if not success then
+        local failed, failure = task:status():has_failed()
+        if failed then failure:raise() end
+        error('File transfer worker did not succeed')
+      end
+      return result
+    ]], "=file-transfer", async.TransferValue.from_value(operation))
+    test.assert(source:is_closed())
+    state:close()
+    gc.collect()
+    gc.collect()
+    const target: fs.File = packet:to_value()
+    defer target:close()
+    test.assert(target:read() == "host\0\255" and target:read() == nil,
+                "cross-state File transfer lost its native owner or bytes")
+  end)
+end
+
+local foreign function fs_close_record(cells: *void, slot: int, code: int)
+  local codes = cells as *int
+  codes[slot] = code
+end
+
+local fs_close_parked = false
+local fs_close_unclosed: fs.File? = nil
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- Parks a Task whose lexical File close is still pending. Cell codes: 0 the
+-- close never ran, 1 it returned, 2 it raised.
+function fs_close_park_with_open_file(path: string, cells_raw: value)
+  const cells = cells_raw as foreign *void
+  const task = async.run<|nil, value|>(function (): nil
+    const file = fs.open(path, "w")
+    defer do
+      do
+        file:close()
+        fs_close_record(cells, 0, 1)
+      catch
+        fs_close_record(cells, 0, 2)
+      end
+    end
+    file:write("abandoned")
+    fs_close_parked = true
+    async.suspend(async.ResumeToken("File parked at Lua state close"))
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return fs_close_parked end)
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- Leaves a File that no code closes.
+function fs_close_leave_open_file(path: string)
+  const task = async.run<|nil, value|>(function (): nil
+    fs_close_unclosed = fs.open(path, "w")
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return fs_close_unclosed ~= nil end)
+end
+
+-- Linux and macOS list the process's open descriptors in /dev/fd.
+local function fs_close_open_descriptors(): integer?
+  if common.is_windows() then return nil end
+  return #fs.list("/dev/fd")
+end
+
+local function fs_close_child(entry: string, ...: async.TransferValue)
+  const state = transfer_lua.new()
+  defer state:close()
+  state:run([[
+    package.path, package.cpath = '', ''
+    local entry = ...
+    require('fs.tests')[entry](select(2, ...))
+  ]], "=fs-state-close", async.TransferValue.is_string(entry), ...)
+  state:close()
+end
+
+-- A File closes through a libuv request, which a Lua state close cannot await.
+-- Closing the state must still close its descriptor.
+function test_lua_close_closes_open_files(context: test.Context)
+  context:run("parked_task", function (_: test.Context)
+    runtime_test.run(function ()
+      const path = fs.tmpname()
+      support.cleanup_path(context, path)
+      const before? = fs_close_open_descriptors()
+      const cells: owned int[] = foreign int.new_array(1)
+      cells[0] = 0
+      fs_close_child("fs_close_park_with_open_file", async.TransferValue.is_string(path),
+                     async.TransferValue.is_pointer(cells as foreign *void))
+      test.assert((cells[0] as integer) == 1,
+                  "File close during Lua state close gave code " .. (cells[0] as integer))
+      if before ~= nil then
+        test.assert(fs_close_open_descriptors() == before,
+                    "Lua state close leaked the parked Task's File descriptor")
+      end
+      test.assert(fs.read_file(path) == "abandoned", "the abandoned File lost its write")
+    end)
+  end)
+  context:run("unclosed_file", function (_: test.Context)
+    if common.is_windows() then
+      test.skip("platform: open descriptor accounting uses /dev/fd")
+    end
+    runtime_test.run(function ()
+      const path = fs.tmpname()
+      support.cleanup_path(context, path)
+      const before? = fs_close_open_descriptors()
+      fs_close_child("fs_close_leave_open_file", async.TransferValue.is_string(path))
+      test.assert(fs_close_open_descriptors() == before,
+                  "Lua state close leaked an unclosed File descriptor")
+    end)
+  end)
+end

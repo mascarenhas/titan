@@ -82,8 +82,8 @@ print(m.sum_list(m.sample())) --> 10
 ### Part III — Standard Library Reference
 
 Titan ships **27** standard modules (**26** native modules plus browser-only
-`browser`; **21** modules are available on `--target browser`: 14 complete
-shared modules, 6 browser-adapted subsets, and `browser`). Titan source imports
+`browser`; **23** modules are available on `--target browser`: 14 complete
+shared modules, 8 browser-adapted modules, and `browser`). Titan source imports
 each module by its short name; Lua loads the same module via `titan.<name>`.
 
 #### Strings, Parsing, Math, and Iteration
@@ -101,8 +101,8 @@ each module by its short name; Lua loads the same module via `titan.<name>`.
 | --- | --- | --- | --- | --- |
 | [io](standard-library-io.md) | `"io"` | `"titan.io"` | Native & Browser | Shared `Reader`/`Writer`/`Closer` Interfaces, `print`, and ownership-safe `lines` iteration. |
 | [path](standard-library-path.md) | `"path"` | `"titan.path"` | Native & Browser | Lexical path joining, splitting, normalization, extensions, and Windows volumes. |
-| [fs](standard-library-fs.md) | `"fs"` | `"titan.fs"` | Native only | Asynchronous binary files, metadata, directory operations, and filesystem watchers. |
-| [os](standard-library-os.md) | `"os"` | `"titan.os"` | Native & Browser (subset) | Time/dates, environment, stdio streams, exit; native adds clocks, host queries, signals, and processes. |
+| [fs](standard-library-fs.md) | `"fs"` | `"titan.fs"` | Native & Browser (subset) | Asynchronous binary files, metadata, directory operations, and `File` transfer; native adds filesystem watchers. |
+| [os](standard-library-os.md) | `"os"` | `"titan.os"` | Native & Browser (subset) | Time/dates, environment, directories, stdio streams, exit; native adds clocks, host identity, signals, and processes. |
 
 #### Concurrency, Runtime, and Transfer
 
@@ -130,7 +130,7 @@ each module by its short name; Lua loads the same module via `titan.<name>`.
 | --- | --- | --- | --- | --- |
 | [json](standard-library-json.md) | `"json"` | `"titan.json"` | Native & Browser | JSON encoding, reflection-directed typed decoding, null policies, and structured diagnostics. |
 | [protobuf](standard-library-protobuf.md) | `"protobuf"` | `"titan.protobuf"` | Native & Browser | Proto3 encoding/decoding for records and unions, portable codecs, and anonymous messages. |
-| [sqlite3](standard-library-sqlite3.md) | `"sqlite3"` | `"titan.sqlite3"` | Native only | Asynchronous embedded SQLite connections, prepared statements, transactions, and record mapping. |
+| [sqlite3](standard-library-sqlite3.md) | `"sqlite3"` | `"titan.sqlite3"` | Native & Browser | Asynchronous embedded SQLite connections, prepared statements, transactions, and record mapping. |
 | [reflect](standard-library-reflect.md) | `"reflect"` | `"titan.reflect"` | Native & Browser | Runtime value inspection, nominal type descriptors, field access, and dynamic construction. |
 
 #### Testing, Garbage Collection, and Host Bridges
@@ -139,7 +139,7 @@ each module by its short name; Lua loads the same module via `titan.<name>`.
 | --- | --- | --- | --- | --- |
 | [test](standard-library-test.md) | `"test"` | `"titan.test"` | Native & Browser | Native `test_*` discovery, assertions, subtests, scoped cleanup, skips, and filtering. |
 | [gc](standard-library-gc.md) | `"gc"` | `"titan.gc"` | Native & Browser | Weak Maps, ephemerons, reachability finalizers, `gc.keep_alive`, collector modes, and Lua 5.5 tuning. |
-| [lua](standard-library-lua.md) | `"lua"` | `"titan.lua"` | Native & Browser (subset) | Loading Lua chunks, `require`, and isolated `lua.Lua` states; native adds `dofile` and `run_async`. |
+| [lua](standard-library-lua.md) | `"lua"` | `"titan.lua"` | Native & Browser (subset) | Loading Lua chunks, `dofile`, `require`, and isolated `lua.Lua` states; native adds `run_async`. |
 | [browser](standard-library-browser.md) | `"browser"` | `"titan.browser"` | Browser only | Typed JavaScript handles, `BrowserValue` marshalling, async requests, and pinned callbacks. |
 | [uv](standard-library-uv.md) | `"uv"` | `"titan.uv"` | Native only | Low-level public libuv binding for event loops, handles, requests, threads, and locks. |
 

@@ -1,0 +1,435 @@
+-- Native-only titan.fs.Watcher cases: the browser has no change notifications.
+
+local function watcher_event_matches(event: fs.WatcherEvent,
+                                      kind: string,
+                                      path: string,
+                                      forbidden: string?,
+                                      alternative_kind: string?): boolean
+  local actual = ""
+  local matches = false
+  case event
+  when created(found) then
+    actual = found
+    matches = (kind == "created" or alternative_kind == "created") and
+              found == path
+  when deleted(found) then
+    actual = found
+    matches = (kind == "deleted" or alternative_kind == "deleted") and
+              found == path
+  when modified(found) then
+    actual = found
+    matches = (kind == "modified" or alternative_kind == "modified") and
+              found == path
+  when error(failure) then raise failure
+  end
+  test.assert(forbidden == nil or actual ~= forbidden,
+              "watcher reported an out-of-scope path")
+  return matches
+end
+
+local function wait_for_watcher_event(watcher: fs.Watcher,
+                                      kind: string,
+                                      path: string,
+                                      forbidden: string?,
+                                      alternative_kind: string?)
+  while true do
+    const events = watcher:poll()
+    for index = 1, #events do
+      if watcher_event_matches(
+          events[index], kind, path, forbidden, alternative_kind) then
+        return
+      end
+    end
+  end
+end
+
+local function cleanup_watcher(watcher: fs.Watcher)
+  runtime_test.cleanup(function ()
+    watcher:clear()
+    watcher:poll()
+  end)
+end
+
+local function wait_for_watcher_subscription()
+  -- Darwin creates its FSEvents stream on a separate CF thread after
+  -- uv_fs_event_start returns. Match libuv's own portable test boundary before
+  -- performing the mutation whose notification a case is meant to observe.
+  timer.sleep(100)
+end
+
+function test_fs_condition_waiter_tokens_and_callback_progress(
+    context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const watcher_path = root .. "/watcher.dat"
+    support.cleanup_path(context, watcher_path)
+    -- Use a direct-file watch for this suspension protocol oracle. Darwin
+    -- routes it through kqueue, avoiding FSEvents startup notifications that
+    -- can otherwise wake the poll before the stale-token assertion.
+    support.write_file_synchronously(watcher_path, "")
+    const canonical = fs.realpath(watcher_path)
+    const watcher = fs.watcher()
+    cleanup_watcher(watcher)
+    watcher:watch(watcher_path)
+    wait_for_watcher_subscription()
+
+    local watcher_phase = 0
+    local watcher_events: {fs.WatcherEvent}? = nil
+    const gate_token = async.ResumeToken("filesystem test gate")
+    const watcher_task = async.run<|value, value|>(function (): value
+      watcher_phase = 1
+      async.suspend(gate_token)
+      watcher_phase = 2
+      watcher_events = watcher:poll()
+      gc.collect()
+      return nil
+    end)
+    task_support.cleanup_task(
+        watcher_task, "token-guarded watcher Task cleanup")
+    while watcher_phase == 0 do timer.yield() end
+    watcher_task:resume(gate_token)
+    while watcher_phase < 2 do timer.yield() end
+    test.assert(watcher_events == nil,
+                "watcher poll did not remain pending for the race")
+
+    local stale_error = ""
+    do
+      watcher_task:resume(gate_token)
+    catch
+      stale_error = error as string
+    end
+    test.assert(stale_error ==
+                "Task resume token mismatch (expected source: subscription)" and
+                watcher_task:status():as_string() == "waiting",
+                "stale gate token changed the watcher poll")
+
+    gc.collect()
+    support.write_file_synchronously(watcher_path, "watcher")
+    async.join(watcher_task)
+    test.assert(watcher_task:status():has_succeeded() and
+                watcher_events ~= nil,
+                "watcher callback did not complete token-guarded poll")
+
+    local found = false
+    const events = watcher_events as {fs.WatcherEvent}
+    for index = 1, #events do
+      if watcher_event_matches(events[index], "modified", canonical, nil) then
+        found = true
+      end
+    end
+    test.assert(found, "watcher callback lost its event")
+    fs.unlink(watcher_path)
+  end)
+end
+
+function test_fs_watcher_directory_events_and_canonical_paths(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const modify_path = root .. "/modify héllo 世界.dat"
+    const delete_path = root .. "/delete.dat"
+    const create_path = root .. "/create.dat"
+    const nested_dir = root .. "/nested"
+    const nested_path = nested_dir .. "/nested.dat"
+    const sentinel_path = root .. "/sentinel.dat"
+    support.cleanup_path(context, modify_path)
+    support.cleanup_path(context, delete_path)
+    support.cleanup_path(context, create_path)
+    support.cleanup_path(context, nested_dir)
+    support.cleanup_path(context, nested_path)
+    support.cleanup_path(context, sentinel_path)
+    fs.write_file(modify_path, "before")
+    fs.write_file(delete_path, "delete")
+    fs.mkdir(nested_dir)
+    fs.write_file(nested_path, "nested-before")
+
+    const canonical_root = fs.realpath(root)
+    const canonical_modify = fs.realpath(modify_path)
+    const canonical_delete = fs.realpath(delete_path)
+    const canonical_nested = fs.realpath(nested_path)
+    const watcher = fs.watcher()
+    cleanup_watcher(watcher)
+    test.assert(#watcher:poll() == 0,
+                "empty watcher poll did not return immediately")
+
+    watcher:watch(root)
+    watcher:watch(root .. "/.")
+    wait_for_watcher_subscription()
+    test.assert(watcher:is_watching(root) and
+                watcher:is_watching(root .. "/."),
+                "watcher did not recognize an equivalent canonical path")
+
+    -- Darwin may report or coalesce events collected immediately before
+    -- uv_fs_event_start. Observe a child created after registration to drain
+    -- those hints before checking fixtures that existed before the watch.
+    fs.write_file(create_path, "created")
+    const canonical_create = fs.realpath(create_path)
+    wait_for_watcher_event(
+        watcher, "created", canonical_create, canonical_nested, "modified")
+
+    fs.write_file(modify_path, "after")
+    -- Libuv permits UV_CHANGE or UV_RENAME hints for directory entries. A
+    -- truncate/write can therefore map to created when the path still exists.
+    wait_for_watcher_event(
+        watcher, "modified", canonical_modify, canonical_nested, "created")
+
+    fs.unlink(delete_path)
+    wait_for_watcher_event(
+        watcher, "deleted", canonical_delete, canonical_nested, "modified")
+
+    fs.write_file(nested_path, "nested-after")
+    -- Darwin's FSEvents can coalesce back-to-back mutations. Match libuv's
+    -- portable test boundary so the out-of-scope nested event and the
+    -- in-scope sentinel event are delivered in separate batches.
+    timer.sleep(100)
+    fs.write_file(sentinel_path, "sentinel")
+    const canonical_sentinel = fs.realpath(sentinel_path)
+    wait_for_watcher_event(
+        watcher, "created", canonical_sentinel, canonical_nested, "modified")
+
+    watcher:stop(root .. "/.")
+    test.assert(not watcher:is_watching(root),
+                "stopping an equivalent path left its canonical watch active")
+    watcher:stop(root)
+    watcher:clear()
+    watcher:clear()
+    watcher:poll()
+    test.assert(#watcher:poll() == 0,
+                "stopped watcher did not become empty")
+
+    watcher:watch(root)
+    test.assert(watcher:is_watching(canonical_root),
+                "watcher could not rewatch a stopped path")
+    watcher:clear()
+
+    const removed_directory = root .. "/removed-directory"
+    support.cleanup_path(context, removed_directory)
+    fs.mkdir(removed_directory)
+    const canonical_removed = fs.realpath(removed_directory)
+    watcher:watch(removed_directory)
+    wait_for_watcher_subscription()
+    fs.rmdir(removed_directory)
+    wait_for_watcher_event(
+        watcher, "deleted", canonical_removed, canonical_nested)
+    test.assert(not watcher:is_watching(removed_directory) and
+                #watcher:poll() == 0,
+                "deleted directory watch did not retire its registration")
+
+    fs.unlink(modify_path)
+    fs.unlink(create_path)
+    fs.unlink(nested_path)
+    fs.unlink(sentinel_path)
+    fs.rmdir(nested_dir)
+  end)
+end
+
+function test_fs_watcher_file_scope(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const watched_path = root .. "/watched héllo 世界.dat"
+    const sibling_path = root .. "/watched.dat.other"
+    support.cleanup_path(context, watched_path)
+    support.cleanup_path(context, sibling_path)
+    fs.write_file(watched_path, "before")
+    fs.write_file(sibling_path, "sibling-before")
+
+    const canonical_watched = fs.realpath(watched_path)
+    const canonical_sibling = fs.realpath(sibling_path)
+    const watcher = fs.watcher()
+    cleanup_watcher(watcher)
+    watcher:watch(watched_path)
+    watcher:watch(root .. "/./watched héllo 世界.dat")
+    test.assert(watcher:is_watching(canonical_watched),
+                "file watcher did not retain its canonical registration")
+    wait_for_watcher_subscription()
+
+    fs.write_file(sibling_path, "sibling-after")
+    fs.write_file(watched_path, "after")
+    wait_for_watcher_event(
+        watcher, "modified", canonical_watched, canonical_sibling)
+
+    fs.unlink(watched_path)
+    wait_for_watcher_event(
+        watcher, "deleted", canonical_watched, canonical_sibling)
+    test.assert(not watcher:is_watching(watched_path),
+                "deleted file watch remained active")
+    watcher:stop(watched_path)
+    test.assert(#watcher:poll() == 0,
+                "deleted file watch did not retire its registration")
+
+    -- Linux may publish several inotify hints for one direct-file deletion.
+    -- Repeat the public boundary enough times to exercise callbacks queued
+    -- while poll is classifying and retiring the registration.
+    for attempt = 2, 32 do
+      fs.write_file(watched_path, "retirement " .. attempt)
+      watcher:watch(watched_path)
+      wait_for_watcher_subscription()
+      fs.unlink(watched_path)
+      wait_for_watcher_event(
+          watcher, "deleted", canonical_watched, canonical_sibling)
+      test.assert(not watcher:is_watching(watched_path),
+                  "repeated deleted file watch remained active")
+      test.assert(#watcher:poll() == 0,
+                  "retired file watch leaked a later notification batch")
+    end
+
+    fs.write_file(watched_path, "rewatched")
+    watcher:watch(watched_path)
+    watcher:watch(sibling_path)
+    wait_for_watcher_subscription()
+    watcher:stop(watched_path)
+    test.assert(not watcher:is_watching(watched_path) and
+                watcher:is_watching(sibling_path),
+                "stopping one file watch changed another registration")
+    fs.write_file(sibling_path, "sibling-final")
+    wait_for_watcher_event(
+        watcher, "modified", canonical_sibling, canonical_watched)
+    watcher:clear()
+
+    fs.unlink(watched_path)
+    fs.unlink(sibling_path)
+  end)
+end
+
+function test_fs_watcher_poll_waiter_protocol(context: test.Context)
+  runtime_test.run(function ()
+    const root = support.new_workspace(context)
+    const path = root .. "/wake.dat"
+    const clear_path = root .. "/clear.dat"
+    support.cleanup_path(context, path)
+    support.cleanup_path(context, clear_path)
+    support.write_file_synchronously(path, "")
+    support.write_file_synchronously(clear_path, "")
+    const canonical = fs.realpath(path)
+    const watcher = fs.watcher()
+    cleanup_watcher(watcher)
+    watcher:watch(path)
+    wait_for_watcher_subscription()
+
+    local entered = false
+    local first_result: {fs.WatcherEvent}? = nil
+    const first = async.run<|value, value|>(function (): value
+      entered = true
+      first_result = watcher:poll()
+      return nil
+    end)
+    task_support.cleanup_task(first, "filesystem watcher first poll cleanup")
+    while not entered do timer.yield() end
+    timer.yield()
+
+    local resume_error = ""
+    do
+      first:resume(async.ResumeToken("filesystem poll outsider"))
+    catch
+      resume_error = error as string
+    end
+    test.assert(resume_error ==
+                "Task resume token mismatch (expected source: subscription)" and
+                first:status():as_string() == "waiting" and
+                first_result == nil and watcher:is_watching(path),
+                "an unrelated token changed a blocked poll")
+
+    expect_failure(function ()
+      watcher:poll()
+    end, "watcher accepted a second concurrent poll")
+
+    first:cancel(async.CancellationReason.simple("cancel blocked poll"))
+    fs.write_file(path, "wake")
+    async.join(first)
+    test.assert(first:status():as_string() == "cancelled" and
+                first_result == nil and watcher:is_watching(path),
+                "poll cancellation changed watcher ownership")
+
+    wait_for_watcher_event(watcher, "modified", canonical, nil)
+
+    local stop_poll_entered = false
+    local stopped_result: {fs.WatcherEvent}? = nil
+    const stopped = async.run<|value, value|>(function (): value
+      stop_poll_entered = true
+      stopped_result = watcher:poll()
+      return nil
+    end)
+    task_support.cleanup_task(stopped,
+                              "filesystem watcher stop poll cleanup")
+    while not stop_poll_entered do timer.yield() end
+    timer.yield()
+    watcher:stop(path)
+    async.join(stopped)
+    test.assert(stopped:status():has_succeeded() and
+                stopped_result ~= nil and #stopped_result == 0 and
+                not watcher:is_watching(path),
+                "stop did not wake an empty blocked poll")
+    test.assert(#watcher:poll() == 0,
+                "poll after stopping the final registration was not empty")
+
+    watcher:watch(path)
+    local clear_poll_entered = false
+    local cleared_result: {fs.WatcherEvent}? = nil
+    const cleared = async.run<|value, value|>(function (): value
+      clear_poll_entered = true
+      cleared_result = watcher:poll()
+      return nil
+    end)
+    task_support.cleanup_task(cleared,
+                              "filesystem watcher clear poll cleanup")
+    while not clear_poll_entered do timer.yield() end
+
+    local repeated_resume_error = ""
+    do
+      cleared:resume(async.ResumeToken("repeated poll outsider"))
+    catch
+      repeated_resume_error = error as string
+    end
+    test.assert(repeated_resume_error ==
+                "Task resume token mismatch (expected source: subscription)" and
+                cleared:status():as_string() == "waiting" and
+                cleared_result == nil,
+                "a repeated blocked poll did not establish its token guard")
+
+    watcher:clear()
+    async.join(cleared)
+    test.assert(cleared:status():has_succeeded() and
+                cleared_result ~= nil and
+                #cleared_result == 0,
+                "clear did not wake an empty blocked poll")
+
+    watcher:watch(path)
+    watcher:watch(clear_path)
+    local clear_entered = false
+    const concurrent_clear = async.run<|value, value|>(function (): value
+      clear_entered = true
+      watcher:clear()
+      return nil
+    end)
+    task_support.cleanup_task(concurrent_clear,
+                              "filesystem watcher concurrent clear cleanup")
+    while not clear_entered do timer.yield() end
+    expect_failure(function ()
+      watcher:poll()
+    end, "watcher accepted a poll during clear")
+    expect_failure(function ()
+      watcher:clear()
+    end, "watcher accepted a second concurrent clear")
+    async.join(concurrent_clear)
+    test.assert(concurrent_clear:status():has_succeeded() and
+                #watcher:poll() == 0,
+                "watcher did not leave clear state after completion")
+
+    fs.unlink(path)
+    fs.unlink(clear_path)
+  end)
+end
+
+function test_fs_watcher_runtime_ownership(context: test.Context)
+  const root = support.new_workspace(context)
+  local stale: fs.Watcher? = nil
+  runtime_test.run(function ()
+    stale = fs.watcher()
+    stale:watch(root)
+  end)
+
+  runtime_test.run(function ()
+    expect_failure(function ()
+      stale:poll()
+    end, "watcher remained usable after its Runtime stopped")
+  end)
+end

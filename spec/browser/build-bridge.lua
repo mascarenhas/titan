@@ -8,6 +8,7 @@ assert(not arg[2], "build-bridge.lua accepts exactly one output directory")
 if not path.is_absolute(output) then output = path.join(repository, output) end
 local prefix = assert(os.getenv("TITAN_ROOT") or os.getenv("PREFIX"), "TITAN_ROOT or PREFIX is required")
 local fixture = path.join(repository, "spec/fixtures/browser_bridge")
+local durable = path.join(repository, "spec/fixtures/browser_durable")
 local profile = os.getenv("TITAN_BUILD_PROFILE") or "production"
 assert(profile == "production" or profile == "validation",
   "TITAN_BUILD_PROFILE must be production or validation")
@@ -46,22 +47,28 @@ for _, target in ipairs({
     source=path.join(fixture, "independent_states.c"), wrap=true, imports={"entry", "fixture:controls"}},
   {name="initializer-failure", owner="initializer_failure", tree=fixture, imports={"entry"}},
   -- integration.mjs's third image: public lua.new lifetimes, kept apart so the
-  -- legacy bridge image stays without Lua's async owner driver.
+  -- legacy bridge image stays without Lua's async owner driver. Importing
+  -- titan.lua links the filesystem runtime (D14).
   {name="public-states", owner="browser.public_state_tests", testing=true,
     tree=path.join(repository, "spec/stdlib/titan"),
-    source=path.join(fixture, "independent_states.c"), wrap=true, imports={"entry", "fixture:controls"}},
+    source=path.join(fixture, "independent_states.c"), wrap=true, imports={"entry", "fixture:controls", "vfs"}},
   -- Page tests of their own images, which need a DOM: the click counter of
   -- synchronous callbacks and the async driver's responsiveness.
   {name="counter", owner="counter", tree=fixture, imports={"entry", "fixture:click"}},
   {name="responsive", owner="responsive", tree=fixture, imports={"entry"}},
+  -- The real-browser durable storage gate (vfs-durable.test.mjs): its
+  -- scenario program links the filesystem and SQLite runtime, and the
+  -- stock-novfs control links none of it. Both run main in a Task.
+  {name="durable", owner="durable", tree=durable, bootstrap=true, imports={"entry", "vfs", "sqlite3"}},
+  {name="stock-novfs", owner="stock_novfs", tree=durable, bootstrap=true, imports={"entry"}},
 }) do
   -- The installed compiler links each image with this installation's
   -- profile, exactly as the portable trace builder does. No mock runtime is
   -- linked.
   local image = path.join(root, target.name .. ".mjs")
   local argv = {prefix .. "/bin/titanc", "-q", "--incremental", "--target", "browser",
-    "--no-uv-bootstrap", "--tree", target.tree,
-    "--output", path.join(root, "objects", target.name), "--exe", image}
+    "--tree", target.tree, "--output", path.join(root, "objects", target.name), "--exe", image}
+  if not target.bootstrap then argv[#argv + 1] = "--no-uv-bootstrap" end
   if target.source then
     argv[#argv + 1] = "--c-source"
     argv[#argv + 1] = target.source
@@ -87,8 +94,8 @@ for _, target in ipairs({
     assert(lfs.attributes(artifact, "mode") == "file", "missing built image asset " .. artifact)
   end
   assert(checks.check_file_imports(strategy, image, target.imports))
-  io.stdout:write(string.format("BRIDGE-IMAGE profile=%s owner=%s image=%s\n",
-    profile, target.owner, image))
+  io.stdout:write(string.format("BRIDGE-IMAGE profile=%s owner=%s image=%s imports=%s\n",
+    profile, target.owner, image, table.concat(target.imports, ",")))
   built = built + 1
 end
 

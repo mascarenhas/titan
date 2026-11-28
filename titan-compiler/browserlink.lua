@@ -14,6 +14,12 @@ function M.sdk_assets(paths)
         runner_module = path.join(root, "titan-browser-run.mjs"),
         node_worker = path.join(root, "titan-browser-node-worker.mjs"),
         page = path.join(root, "titan-browser-page.mjs"),
+        -- The storage runtime: embedded or published only for an image that
+        -- links it (see `M.storage`).
+        vfs = path.join(root, "titan-browser-vfs.mjs"),
+        sql = path.join(root, "titan-browser-sql.mjs"),
+        storage_worker = path.join(root, "titan-storage-worker.mjs"),
+        sqlite_service = path.join(root, "titan-sqlite3-service.wasm"),
         build_profile = path.join(root, "build-profile"),
         lpeglabel = path.join(root, "libtitan-lpeglabel.a"),
         provider = path.join(root, "titan.a"),
@@ -57,7 +63,7 @@ function M.require_sdk(context, descriptor, install)
         return M.install_command("sdk", install.prefix, install.rocks_tree)
     end
     for _, key in ipairs({ "runtime", "factory", "loader", "runner", "runner_module", "node_worker",
-            "page", "build_profile" }) do
+            "page", "vfs", "sql", "storage_worker", "sqlite_service", "build_profile" }) do
         local filename = assets[key]
         local stat = context.io:stat(filename)
         local readable = stat and stat.kind == "file" and context.io:read_file(filename, 0)
@@ -273,17 +279,76 @@ local function js_string(value)
     end) .. '"'
 end
 
--- One image module: the SDK's static factory, the loader, then the image's
--- `create`. The factory's named seams become plain declarations, so an image
--- exports only `create`, and its trailing default export is the instantiate
--- function the loader receives. The image binding names the `.wasm`, the
--- identity the linked Wasm exports, so the loader refuses a `.wasm` from
--- another link before any entry, and the module's own directory. The default
--- `locateFile` keeps both `new URL` literals visible to bundlers. A module
--- evaluated from an opaque URL (`blob:` or `data:`) has no directory: with a
--- caller `locateFile` the binding names an empty one instead of throwing.
-function M.embed(factory, loader, wasm_name, identity)
-    if type(identity) ~= "string" or not identity:match("^" .. string.rep("[0-9a-f]", 64) .. "$") then
+local HEX64 = "^" .. string.rep("[0-9a-f]", 64) .. "$"
+
+-- The storage runtime an image links, read from its import section: units
+-- that use titan.fs, os.cwd, os.chdir or titan.lua call
+-- `env.titan_browser_vfs_*` from their module initialization, and
+-- titan.sqlite3 `env.titan_browser_sql_retire_sync`. Returns nil, "vfs" or
+-- "sql" (the filesystem and SQLite). An image that links neither embeds no
+-- storage JavaScript and publishes no worker or SQLite service.
+local STORAGE_IMPORTS = { titan_browser_vfs_linked = "vfs", titan_browser_vfs_retire_sync = "vfs",
+    titan_browser_sql_retire_sync = "sql" }
+function M.storage(imports)
+    local linked
+    for _, import in ipairs(imports) do
+        local kind = import.kind == 0 and import.module == "env" and STORAGE_IMPORTS[import.name]
+        if kind == "sql" then return "sql" end
+        linked = linked or kind or nil
+    end
+    return linked
+end
+
+-- The image-scoped companions beside `<stem>.wasm`: the storage worker and
+-- the SQLite service.
+function M.companion_names(wasm_name)
+    local stem = wasm_name:gsub("%.wasm$", "")
+    return stem .. ".worker.mjs", stem .. ".sqlite3.wasm"
+end
+
+-- A published worker starts with this line naming its image's identity, so
+-- a later link removes a worker only when Titan wrote it.
+local WORKER_SENTINEL = "// Titan-Generated-Browser-Worker: "
+function M.worker_module(worker, identity)
+    return WORKER_SENTINEL .. identity .. "\n" .. worker
+end
+
+function M.generated_worker(bytes)
+    local line = bytes:match("^([^\n]*)\n")
+    return line ~= nil and line:sub(1, #WORKER_SENTINEL) == WORKER_SENTINEL and
+        line:sub(#WORKER_SENTINEL + 1):match(HEX64) ~= nil
+end
+
+-- The SHA-256 of the SQLite service a published image module names, or nil.
+function M.embedded_sqlite_digest(module_bytes)
+    return module_bytes:match("\nexport default function create%(.-sqlite: {wasm: \"[^\"\n]*\", sha256: \"(" ..
+        string.rep("[0-9a-f]", 64) .. ")\"}")
+end
+
+-- A storage source has the factory's surface: its one exported function
+-- becomes a module-level declaration.
+local function companion_source(text, name)
+    local count
+    text, count = ("\n" .. text):gsub("\nexport function " .. name .. "%(", "\nfunction " .. name .. "(")
+    if count ~= 1 or text:match("\n%s*export%s") or text:match("\n%s*import%s") then return nil end
+    return text:sub(2)
+end
+
+-- One image module: the SDK's static factory, the storage runtime the image
+-- links, the loader, then the image's `create`. The factory's named seams
+-- become plain declarations, so an image exports only `create`, and its
+-- trailing default export is the instantiate function the loader receives.
+-- The image binding names the `.wasm`, the identity the linked Wasm exports,
+-- so the loader refuses a `.wasm` from another link before any entry, and
+-- the module's own directory. `storage`, when the image links it, holds the
+-- `vfs` source and, for SQLite, the `sql` source and the published service's
+-- `sqlite_sha256`; the binding then names the storage, the worker and the
+-- service. The default `locateFile` keeps every `new URL` literal visible to
+-- bundlers. A module evaluated from an opaque URL (`blob:` or `data:`) has no
+-- directory: with a caller `locateFile` the binding names an empty one
+-- instead of throwing.
+function M.embed(factory, loader, wasm_name, identity, storage)
+    if type(identity) ~= "string" or not identity:match(HEX64) then
         return nil, "browser image identity must be 64 lowercase hexadecimal digits"
     end
     local instantiate, count
@@ -301,15 +366,37 @@ function M.embed(factory, loader, wasm_name, identity)
         return nil, "browser loader has an unsupported module surface"
     end
     local wasm, trace = js_string(wasm_name), js_string(wasm_name .. ".trace")
-    return factory:sub(2) .. "\nconst titanCreate = (() => {\n" .. loader ..
+    local runtime, binding, located = { factory:sub(2) }, "", ""
+    if storage then
+        local vfs = companion_source(storage.vfs, "titanBrowserStorage")
+        if not vfs then return nil, "browser filesystem runtime has an unsupported module surface" end
+        runtime[#runtime + 1] = vfs
+        local worker_name, sqlite_name = M.companion_names(wasm_name)
+        local worker, sqlite = js_string(worker_name), js_string(sqlite_name)
+        binding = ",\n    storage: titanBrowserStorage, worker: " .. worker
+        located = "name === " .. worker .. " ? new URL(" .. worker .. ", import.meta.url).href :\n    "
+        if storage.sql then
+            local sql = companion_source(storage.sql, "titanBrowserSql")
+            if not sql then return nil, "browser SQLite runtime has an unsupported module surface" end
+            if type(storage.sqlite_sha256) ~= "string" or not storage.sqlite_sha256:match(HEX64) then
+                return nil, "browser SQLite service digest must be 64 lowercase hexadecimal digits"
+            end
+            runtime[#runtime + 1] = sql
+            binding = binding .. ",\n    sql: titanBrowserSql, sqlite: {wasm: " .. sqlite .. ", sha256: \"" ..
+                storage.sqlite_sha256 .. "\"}"
+            located = located .. "name === " .. sqlite .. " ? new URL(" .. sqlite .. ", import.meta.url).href :\n    "
+        end
+    end
+    return table.concat(runtime, "\n") .. "\nconst titanCreate = (() => {\n" .. loader ..
         "\nreturn create;\n})();\n" ..
         "export default function create(options = {}) {\n" ..
         "  const locateFile = options.locateFile ?? (name => name.endsWith('.wasm.trace') ?\n" ..
-        "    new URL(" .. trace .. ", import.meta.url).href : new URL(" .. wasm .. ", import.meta.url).href);\n" ..
+        "    new URL(" .. trace .. ", import.meta.url).href : " .. located ..
+        "new URL(" .. wasm .. ", import.meta.url).href);\n" ..
         "  const directory = options.locateFile != null && !URL.canParse('.', import.meta.url) ? '' :\n" ..
         "    new URL('.', import.meta.url).href;\n" ..
         "  return titanCreate(" .. instantiate .. ", {...options, locateFile}, {identity: \"" .. identity ..
-        "\", wasm: " .. wasm .. ", directory});\n}\n"
+        "\", wasm: " .. wasm .. ", directory" .. binding .. "});\n}\n"
 end
 
 -- The protocol probe image links the program's own C, so it may import host

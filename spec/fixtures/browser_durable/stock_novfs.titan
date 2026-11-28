@@ -1,0 +1,67 @@
+-- The stock-novfs control program of spec/browser/vfs-durable.test.mjs. It
+-- uses none of titan.fs, titan.sqlite3, os.cwd, os.chdir or titan.lua, so its
+-- image links no filesystem runtime (D14). Its Lua state still opens the
+-- stock io and os libraries, whose file operations then fail with ordinary
+-- Lua errors instead of reaching any file.
+local io = import "io"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+
+local type StockChunk = function (): (string)
+
+-- Every stock file operation, each of which must refuse: the ones that
+-- report failures return (nil, message, errno), loadfile (nil, message),
+-- and the ones that raise raise a message.
+local const CHECKS = [[
+  local accepted = {}
+  local function triple(name, result, message, code, ...)
+    if result ~= nil or type(message) ~= 'string' or type(code) ~= 'number' or select('#', ...) ~= 0 then
+      accepted[#accepted + 1] = name
+    end
+  end
+  local function raises(name, ok, message)
+    if ok or type(message) ~= 'string' then accepted[#accepted + 1] = name end
+  end
+  triple('io.open', io.open('/tmp/stock-novfs.txt', 'w'))
+  triple('io.open read', io.open('/tmp/stock-novfs.txt', 'r'))
+  triple('io.tmpfile', io.tmpfile())
+  triple('os.remove', os.remove('/tmp/stock-novfs.txt'))
+  triple('os.rename', os.rename('/tmp/a', '/tmp/b'))
+  raises('os.tmpname', pcall(os.tmpname))
+  raises('io.lines', pcall(io.lines, '/tmp/stock-novfs.txt'))
+  raises('io.input', pcall(io.input, '/tmp/stock-novfs.txt'))
+  raises('io.output', pcall(io.output, '/tmp/stock-novfs.txt'))
+  raises('dofile', pcall(dofile, '/tmp/stock-novfs.lua'))
+  if select('#', loadfile('/tmp/stock-novfs.lua')) ~= 2 then accepted[#accepted + 1] = 'loadfile' end
+  local chunk, message = loadfile('/tmp/stock-novfs.lua')
+  if chunk ~= nil or type(message) ~= 'string' then accepted[#accepted + 1] = 'loadfile result' end
+  local found, searched = package.searchpath('stock_novfs_module', package.path)
+  if found ~= nil or type(searched) ~= 'string' then accepted[#accepted + 1] = 'package.searchpath' end
+  local loaded = pcall(require, 'stock_novfs_module')
+  if loaded then accepted[#accepted + 1] = 'require' end
+  return table.concat(accepted, ',')
+]]
+
+local function stock_chunk(chunk: string): StockChunk
+  const top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for the stock chunk"
+  end
+  if ffi.luaL_loadbufferx(L, chunk, #chunk as foreign size_t, "=stock-novfs", nil) ~= ffi.LUA_OK then
+    const failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  const callable: value = ffi.lua_totvalue(L, -1)
+  return callable as StockChunk
+end
+
+function main(_: {string}): integer
+  const accepted = stock_chunk(CHECKS)()
+  if accepted ~= "" then
+    raise "stock Lua file operations succeeded without a filesystem: " .. accepted
+  end
+  io.print("STOCK-NOVFS PASS")
+  return 0
+end

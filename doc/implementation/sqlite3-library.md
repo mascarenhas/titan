@@ -1,11 +1,18 @@
 # SQLite standard-library implementation
 
 The [public contract](../language/standard-library-sqlite3.md) belongs to the
-folder module `titan.sqlite3`. `sqlite3.native.titan` owns Connection/Statement/Cursor
-state and submission, `bindings.titan` owns reflection input validation and
-owned output decoding, `row.titan` owns synchronous row mapping, and
-`worker.titan` contains restricted source foreign functions. `native.h`
-declares native carriers only.
+folder module `titan.sqlite3`. Shared `validation.titan` owns the public
+`Error` record, zero-allocation in-place UTF-8 validation (`valid_text`), and
+binding-value classification (`argument_cell`); shared `row.titan` owns
+synchronous row mapping. On native targets, `sqlite3.native.titan` owns
+Connection/Statement/Cursor state and submission, `bindings.native.titan` owns
+native packet encoding and decoding, `worker.native.titan` contains restricted
+source foreign functions, and `native.h` declares native carriers. On the
+browser target, `sqlite3.browser.titan`, `bindings.browser.titan`, and
+declaration-only `sqlite3.browser.h` drive the worker-hosted SQLite service
+without linking any SQLite C header or archive into the browser guest
+([Browser connections](#browser-connections),
+[Browser service frames](#browser-service-frames)).
 
 ## Provider and dependency
 
@@ -48,7 +55,7 @@ Each operation uses its own exact `foreign function (*void): void` entry. There 
 second operation dispatcher or actor. Every submission calls that entry through
 the `sqlite_run_worker` trampoline, which adds only the Windows
 [x87 precision reset](libuv-runtime.md#worker-floating-point-state) before the
-entry and the [state-close handoff](#lua-state-close) after it. `sqlite_copy_bytes` (`worker.titan`) always allocates
+entry and the [state-close handoff](#lua-state-close) after it. `sqlite_copy_bytes` (`worker.native.titan`) always allocates
 one extra terminator byte, including for an empty BLOB; binding lengths remain
 explicit and use `SQLITE_TRANSIENT`.
 
@@ -89,7 +96,7 @@ Column/Row/Cursor values while the packet still owns execution; failed
 publication resets it before releasing its buffers and Connection reservation.
 Fetch failure similarly retires the active execution and closes the Cursor.
 
-`sqlite_retire_worker` (`worker.titan`) finalizes an unpublished Statement or resets an
+`sqlite_retire_worker` (`worker.native.titan`) finalizes an unpublished Statement or resets an
 unpublished execution, then closes an unpublished Connection. Flags clear only
 at their corresponding native retirement/transfer point. Finalize clears its
 handle even when it reports a prior execution error; a failed sqlite3_close
@@ -176,7 +183,7 @@ Every Connection registers `finalize_connection` with `gc.finalizable` before
 it holds a handle, in `connect` and `from_transfer_payload`. The finalizer
 returns at once unless `titan_state_closing` is set, so ordinary collection
 still performs no database I/O. During close it releases an open, non-busy
-Connection with `sqlite_release_connection` (`worker.titan`): it
+Connection with `sqlite_release_connection` (`worker.native.titan`): it
 finalizes every statement that `sqlite3_next_stmt` still reports, including an
 active execution, then calls `sqlite3_close`. Statement and Cursor shells keep
 their dangling handles. `Statement:close` and `Cursor:close` return without a
@@ -271,6 +278,115 @@ expanding arbitrary type schemas. Generic value fields keep their erased
 semantics. Shape checks precede writes, but later conversion failures can
 leave earlier fields changed.
 
+## Browser connections
+
+On `--target browser`, `titan/sqlite3/` compiles only `validation.titan`,
+`row.titan`, `sqlite3.browser.titan`, `bindings.browser.titan`, and
+declaration-only `sqlite3.browser.h` (which declares
+`TITAN_WASM_IMPORT("titan_browser_sql_retire_sync")`). Neither `titan.a` nor
+any browser user image includes `sqlite3.h` or links SQLite objects; the
+SQLite engine lives solely in the SDK's standalone `titan-sqlite3-service.wasm`
+reactor hosted by the storage worker.
+
+* **State token and lease authority:** `sql_transport()` discovers the calling
+  Lua state's 32-bit `state_token` once through a short-lived `browser.pin`
+  probe and caches `browser.binding("titan:sqlite3")`. Connections and
+  statements are opaque generation-tagged 64-bit integer handles (`connId`,
+  `stmtId`) tracked by the single per-instance lease ledger
+  (`titanBrowserSql(storage)` in `titan-browser-sql.mjs`), whose `leases` map
+  maps each `connId` to its owning state. `Connection:to_transfer_payload()` and
+  `Connection.from_transfer_payload()` call synchronous `detach` and `adopt` on
+  `titan:sqlite3` carrying `(nonce, connId)` through protobuf; detachment
+  refuses closed connections, busy connections, active cursors, open
+  statements, or connections with pending deferred cleanup (`has_deferred()`).
+* **Working directory coherence:** `database_path()` resolves relative database
+  names against `os.cwd()` before `OP_OPEN` (checking `MAX_TEXT_BYTES` before
+  concatenation). Every `request(frame)` also sends `working_directory()`
+  (`os.cwd()` or `nil`) alongside the frame so the storage worker issues
+  worker-internal `OP_CHDIR = 14` before dispatching the SQLite operation.
+  Inside `sqlite3_service.c`, a thin default `sqlite3_vfs` wrapper named
+  `titan` (copying `unix-dotfile`) overrides `xFullPathname` to refuse every
+  relative path (including `..`, `ATTACH`, and `VACUUM INTO`) with
+  `SQLITE_CANTOPEN` whenever no guest working directory is active, while
+  passing absolute paths through unchanged.
+* **Completion before cancellation:** `request(frame)` uses
+  `async.await_cleanup` so a cancelled Task waits for an already-accepted
+  worker frame to reply and retires any unpublished handle (`OP_FINALIZE`,
+  `OP_CLOSE`, or `OP_RESET`) before delivering cancellation.
+* **Deferred finalizer cleanup (`Connection:drain()`):** Finalizers cannot
+  suspend, so `Connection:cleanup` appends `OP_RESET`/`OP_FINALIZE` frames to
+  `self.deferred` (`{string}`) indexed by a head cursor `self.deferred_head`
+  (`has_deferred()` holds if and only if `deferred_head <= #deferred`). Before sending any
+  new frame, `Connection:drain()` enforces a strict queued → admitted →
+  consumed order: if `has_deferred()` holds, it calls `async.running()` **first**
+  before touching queue state, loops dynamically while
+  `self.deferred_head <= #self.deferred` (draining any further frames queued by
+  a finalizer during suspension), and overwrites `self.deferred[index] = ""`
+  (never `nil`, avoiding Array holes) and advances `deferred_head` strictly
+  **after** `request(frame)` returns cleanly, resetting to `{}` and `1` once
+  empty. If transport fails, the unconsumed frame remains at `deferred_head`,
+  preserving `has_deferred()` and keeping transfer refused. During Lua-state
+  close (`titan_state_closing(L) ~= 0`), and when `Connection:close()` runs
+  where `can_wait()` is false (such as inside a finalizer),
+  `Connection:retire()` drops `deferred` and calls non-suspending
+  `titan_browser_sql_retire_sync(state_token, id)`. In `titan-browser-sql.mjs`,
+  `ledger.retire(state, id)` checks `leases.get(id) === state` before queuing
+  `CLOSE_CONN` (and transferred source shells already clear `handle = 0`), so
+  transferred connections are never touched.
+
+## Browser service frames
+
+The browser wire codec lives in Titan (`titan/sqlite3/bindings.browser.titan`,
+using `string.pack`, `string.unpack`, and `string.writer()`), keeping
+`titan-browser-sql.mjs` to pure byte forwarding and lease checks and keeping
+SQLite inside the standalone plain-C Wasm reactor
+`titan-runtime/browser/sqlite3_service.c` + pinned `sqlite3.c`
+(`titan-sqlite3-service.wasm`, compiled with `-DSQLITE_THREADSAFE=0
+-DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_TEMP_STORE=3` and zero Lua or Titan
+runtime).
+
+Version-1 frames are little-endian with a fixed 16-byte header followed by an
+opcode-specific body:
+
+* **Request header (16 bytes):** `u8 op`, `u8 version` (`1`), `u16 reserved`
+  (`0`), `u32 count` (argument cells for `EXECUTE`/`QUERY`, `<= 32766`; else
+  `0`), and `u64 handle` (`connId`, `stmtId`, or `0` for `OPEN` and `CHDIR`).
+* **Reply header (16 bytes):** `u8 op` (echoed, or `0` if header malformed),
+  `u8 status` (`0` OK, `1` ERROR, `2` PROTOCOL), `u8 writing` (`1` when any
+  connection holds an explicit transaction via `sqlite3_get_autocommit() == 0`
+  or an implicit write via `sqlite3_txn_state() == SQLITE_TXN_WRITE`), 5
+  reserved bytes, and `u64 handle`. Status `1` or `2` carries a failure body:
+  `i32 code`, `i32 extended`, `u32 len + UTF-8 message`, `i32 cleanup_code`,
+  and `u32 len + cleanup_message` (`len == 0xFFFFFFFF` when absent).
+
+| `op` | Name | Handle | Request body | OK reply body |
+| --- | --- | --- | --- | --- |
+| 1 | `OPEN` | `0` | `u32 len, path` | — (`handle = connId`) |
+| 2 | `PREPARE` | `connId` | `u32 len, sql` | `u32 parameter_count, u32 column_count` (`handle = stmtId`) |
+| 3 | `EXECUTE` | `stmtId` | `count` cells | `i64 changes` |
+| 4 | `QUERY` | `stmtId` | `count` cells | column descriptors, then row-or-done |
+| 5 | `FETCH` | `stmtId` | — | row-or-done |
+| 6 | `RESET` | `stmtId` | — | — |
+| 7 | `FINALIZE` | `stmtId` | — | — |
+| 8 | `CLOSE` | `connId` | — | — |
+| 9 | `CLOSE_CONN` | `connId` | — | — (ledger-only retirement; rejected from guest `call`) |
+| 10 | `AUTOCOMMIT` | `connId` | — | `u8 autocommit` |
+| 11 | `BEGIN` | `connId` | — | `u8 autocommit` |
+| 12 | `COMMIT` | `connId` | — | `u8 autocommit` |
+| 13 | `ROLLBACK` | `connId` | — | `u8 autocommit` |
+| 14 | `CHDIR` | `0` | `u32 len, cwd` (`0` clears) | — (worker-internal; rejected from guest `call`) |
+
+Argument and result cells share the five type tags defined in
+`validation.titan`: `1` `INTEGER` (`i64`), `2` `FLOAT` (`f64`), `3` `TEXT`
+(`u32 len + UTF-8`, no embedded NUL), `4` `BLOB` (`u32 len + bytes`), and `5`
+`NULL` (no payload). Request and reply frames are capped at **64 MiB**, SQL
+text and database paths at **16 MiB**, single `TEXT`/`BLOB` cells at **32
+MiB**, bound parameters at **32,766**, open connections at **1,024**, and open
+statements per connection at **4,096**. `bindings.browser.titan` validates
+request bounds before scanning or sending so oversized inputs raise
+`SQLITE_TOOBIG` (`18`) directly, while oversized replies return status `1`
+with `SQLITE_TOOBIG`.
+
 ## Verification ownership
 
 Public behavior lives under `spec/stdlib/titan/sqlite3/` in the native aggregate,
@@ -288,4 +404,7 @@ Deterministic worker gates use SQLite's supported native extension hooks in a
 normal installed static-consumer child, with no rewritten provider or callback
 interposition. Focused ASan/UBSan runs use the instrumented bundled SQLite.
 Existing packaging specs verify private native archive linkage, thread mode,
-source/archive inventories, and installed dynamic/static consumption.
+source/archive inventories, and installed dynamic/static consumption. On the
+browser target, `spec/stdlib/titan/sqlite3/` runs in the browser
+standard-library test suite alongside storage-worker reactor unit tests
+(`spec/browser/vfs-unit.test.mjs`) and durable OPFS tests.

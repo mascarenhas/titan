@@ -15,7 +15,8 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 TITAN_STDLIB_BROWSER_TEST_ROOTS := \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test url.tests path.tests \
-	test.tests reflect.tests json.tests protobuf.tests protobuf.portable_tests transfer.tests async.tests timer.tests os.tests io.tests http.tests websocket.tests
+	test.tests reflect.tests json.tests protobuf.tests protobuf.portable_tests transfer.tests async.tests timer.tests \
+	os.tests io.tests fs.tests sqlite3.tests http.tests websocket.tests
 
 # Lint-only owners: the browser-only test harness owners and helper programs
 # beyond the portable subset, and native helper modules that test-root
@@ -25,7 +26,7 @@ TITAN_STDLIB_BROWSER_TEST_ROOTS := \
 TITAN_STDLIB_BROWSER_ONLY_TEST_ROOTS := async.browser_tests browser.portable_tests \
 	browser.public_state_tests browser.tests http.browser_tests os.browser_tests websocket.browser_tests
 TITAN_STDLIB_BROWSER_HELPER_ROOTS := async.browser_child browser.early_close browser.independent \
-	browser.public_state
+	browser.public_state fs.test_support
 TITAN_STDLIB_NATIVE_HELPER_ROOTS := async.test_support coroutine.test_support \
 	coroutine.unwind_init_fixture fs.test_support http.test_support io.print_values io.test_support \
 	lua.handle_transfer_fixture lua.preload_fixture lua.receiver_fixture lua.test_support \
@@ -74,7 +75,7 @@ TITAN_STDLIB_TEST_SECONDS_os.tests := 0.1
 TITAN_STDLIB_TEST_SECONDS_os.process_tests := 45.8
 TITAN_STDLIB_TEST_SECONDS_uv.runtime_tests := 58.8
 TITAN_STDLIB_TEST_SECONDS_reflect.tests := 0.1
-TITAN_STDLIB_TEST_SECONDS_sqlite3.tests := 5.3
+TITAN_STDLIB_TEST_SECONDS_sqlite3.tests := 6.3
 TITAN_STDLIB_TEST_SECONDS_json.tests := 0.6
 TITAN_STDLIB_TEST_SECONDS_protobuf.tests := 0.4
 TITAN_STDLIB_TEST_SECONDS_thread.tests := 39.0

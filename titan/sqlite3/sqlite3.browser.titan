@@ -1,0 +1,729 @@
+--- Task-aware SQLite connections, prepared statements, streamed results, and transactions.
+-- @module titan.sqlite3
+-- @usage standard-library-sqlite3.md
+
+local async = import "async"
+local browser = import "browser"
+local reflect = import "reflect"
+local protobuf = import "protobuf"
+local string = import "string"
+local math = import "math"
+local gc = import "gc"
+local os = import "os"
+foreign import "errno.h"
+foreign import "titan/ffi.h"
+foreign import "sqlite3.browser.h"
+
+local type Value = browser.BrowserValue
+
+-- Browser connections and statements are ids in the storage worker's SQLite
+-- service, reached through this Lua state's titan:sqlite3 binding, whose
+-- ledger leases each connection to one state. A connection transfer payload
+-- carries the instance nonce and the connection id.
+-- Implementation notes: doc/implementation/sqlite3-library.md#browser-connections
+local const connection_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_integer(),
+}
+
+--- An owned SQLite database connection with serialized work in the browser's SQLite service.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
+record Connection
+  local handle: integer
+  local statements: integer
+  local busy: boolean
+  local active_statement: Statement?
+  -- RESET and FINALIZE frames a finalizer could not wait for, sent before
+  -- this connection's next frame. Entries before deferred_head are spent.
+  local deferred: {string}
+  local deferred_head: integer
+end
+
+--- A reusable prepared SQL statement owned by one connection.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
+record Statement
+  local const connection: Connection
+  local handle: integer
+  local parameter_count: integer
+end
+
+--- One streamed statement execution with immutable column metadata.
+-- @field columns Ordered immutable column metadata; its length includes SQL NULL cells.
+-- @usage standard-library-sqlite3.md#executing-and-querying
+record Cursor
+  const columns: const {Column}
+  local const statement: Statement
+  local pending: Row?
+  local exhausted: boolean
+  local closed: boolean
+end
+
+-- This Lua state's titan:sqlite3 binding, and the loader's token for the
+-- state, the bit pattern titan_browser_sql_retire_sync names it by.
+local transport: browser.BrowserHandle? = nil
+local state_token = 0
+
+local function identify_state(...: Value): Value
+  return Value.is_nil()
+end
+
+local function sql_transport(): browser.BrowserHandle
+  local opened? = transport
+  if opened == nil then
+    -- A pin's identity is the one public carrier of the state token; this
+    -- pin closes at once. The binding is cached only with its token.
+    const probe = browser.pin(identify_state)
+    defer probe:close()
+    const token = probe:identity()
+    opened = browser.binding("titan:sqlite3")
+    if token > 2147483647 then state_token = token - 4294967296
+    else state_token = token end
+    transport = opened
+  end
+  return opened
+end
+
+-- The working directory this Lua state shares with titan.fs, for the
+-- relative names SQLite resolves itself (ATTACH, VACUUM INTO), or nil when
+-- it cannot be read.
+local function working_directory(): Value
+  return Value.is_string(os.cwd())
+catch
+  if not (error is async.OperationError) then raise end
+  return Value.is_nil()
+end
+
+-- Send one frame and return its reply. The wait outlives cancellation: the
+-- service finishes every frame it accepts, and the reply says what that
+-- published, so callers clean it up before a cancellation is delivered.
+local function request(frame: string): string
+  const source = sql_transport()
+  const directory = working_directory()
+  local pending: browser.BrowserRequest? = nil
+  defer if pending ~= nil then pending:close() end
+  const outcome = async.await_cleanup<|string, string|>(function (resolve, reject, fatal)
+    const delivered = function (...: Value): Value
+      case ...[1]
+      when is_bytes(reply) then resolve(reply)
+      when is_handle(handle) then
+        handle:close()
+        reject("titan:sqlite3 reply is not a frame")
+      else reject("titan:sqlite3 reply is not a frame")
+      end
+      return Value.is_nil()
+    catch
+      fatal(error, traceback)
+      raise
+    end
+    const failed = function (...: Value): Value
+      reject(browser.failure_text(...[1], ...[2]) or "titan:sqlite3 request failed")
+      return Value.is_nil()
+    catch
+      fatal(error, traceback)
+      raise
+    end
+    pending = source:start(delivered, failed, Value.is_string("call"), Value.is_bytes(frame), directory)
+  catch
+    if not (error is browser.BrowserError) then raise end
+    const failure: browser.BrowserError = error
+    const message = failure.message
+    failure:close()
+    reject(message)
+  end)
+  case outcome
+  when success(reply) then return reply
+  when error(message) then
+    -- A stopped or failed storage worker is a submission failure, as a
+    -- refused native worker submission is.
+    raise async.OperationError(-ffi.EIO, "EIO", message, "titan:sqlite3")
+  end
+end
+
+-- Whether this code may wait for the worker: neither Lua state close nor a
+-- finalizer (an abandoned Task's unwind) can.
+local function can_wait(): boolean
+  return ffi.titan_state_closing(L) == 0 and ffi.titan_in_finalizer(L) == 0
+end
+
+local function Connection:has_deferred(): boolean
+  return self.deferred_head <= #self.deferred
+end
+
+-- Send the cleanup frames that could not be sent when they were due. A
+-- frame stays queued until its request returns: admission comes before
+-- anything changes, a failed transport leaves the frame at the head, and
+-- one a finalizer queues meanwhile still goes before the caller's frame.
+local function Connection:drain()
+  if not self:has_deferred() then return end
+  async.running()
+  while self:has_deferred() do
+    const index = self.deferred_head
+    request(self.deferred[index])
+    self.deferred[index] = ""
+    self.deferred_head = index + 1
+  end
+  self.deferred = {}
+  self.deferred_head = 1
+end
+
+-- One frame on this connection, after any cleanup it still owes. The wait
+-- outlives cancellation, as request's does.
+local function Connection:request(frame: string): string
+  self:drain()
+  return request(frame)
+end
+
+-- Ordinary work: a cancelled Task submits nothing.
+local function Connection:send(frame: string): string
+  async.checkpoint()
+  self:drain()
+  async.checkpoint()
+  return request(frame)
+end
+
+-- Ordinary work whose failed transport yields to a cancellation that
+-- arrived meanwhile, as on a native ordinary wait.
+local function Connection:submit(frame: string): string
+  return self:send(frame)
+catch
+  if error is async.OperationError then async.checkpoint() end
+  raise
+end
+
+-- One synchronous titan:sqlite3 ledger call of a transfer hook.
+local function transfer_call(operation: string, ...: Value): Value
+  return sql_transport():call(...)
+catch
+  if not (error is browser.BrowserError) then raise end
+  const failure: browser.BrowserError = error
+  const message = failure.message
+  failure:close()
+  raise Error { message = message, code = nil, extended_code = nil, operation = operation }
+end
+
+-- The ledger marks the connection in transit and returns the instance nonce.
+local function detach(id: integer): integer
+  case transfer_call("to_transfer_payload", Value.is_string("detach"), Value.is_integer(id))
+  when is_integer(nonce) then return nonce
+  when is_handle(handle) then handle:close()
+  else
+  end
+  raise Error {
+    message = "titan:sqlite3 detach returned no instance nonce",
+    code = nil, extended_code = nil, operation = "to_transfer_payload"
+  }
+end
+
+-- The ledger leases an in-transit connection of this instance to this state.
+local function adopt(nonce: integer, id: integer, operation: string)
+  case transfer_call(operation, Value.is_string("adopt"),
+                     Value.is_integer(nonce), Value.is_integer(id))
+  when is_handle(handle) then handle:close()
+  else
+  end
+end
+
+local function Connection:reserve(operation: string, allow_cursor: boolean)
+  if self.handle == 0 then
+    raise Error {
+      message = "connection is closed",
+      code = nil,
+      extended_code = nil,
+      operation = operation
+    }
+  end
+  if self.busy then
+    raise Error {
+      message = "connection has an outstanding operation",
+      code = nil,
+      extended_code = nil,
+      operation = operation
+    }
+  end
+  if not allow_cursor and self.active_statement ~= nil then
+    raise Error {
+      message = "connection has an active cursor",
+      code = nil,
+      extended_code = nil,
+      operation = operation
+    }
+  end
+  self.busy = true
+end
+
+local function Statement:require_open(operation: string)
+  if self.handle == 0 then
+    raise Error {
+      message = "statement is closed",
+      code = nil,
+      extended_code = nil,
+      operation = operation
+    }
+  end
+end
+
+-- Lua state close cannot wait for the worker. The ledger's retirement
+-- finalizes every statement of the connection, including an active
+-- execution, and closes it, which rolls back an open transaction: no
+-- deferred cleanup remains.
+local function Connection:retire()
+  const id = self.handle
+  if id == 0 then return end
+  self.handle = 0
+  self.deferred = {}
+  self.deferred_head = 1
+  ffi.titan_browser_sql_retire_sync(state_token, id)
+end
+
+-- Ordinary collection performs no database I/O; Lua state close retires the
+-- connection, busy or not: the ledger orders retirement after any frame
+-- still in flight.
+local function finalize_connection(candidate: value)
+  if ffi.titan_state_closing(L) == 0 then return end
+  const connection: Connection = candidate
+  connection:retire()
+end
+
+-- Cleanup of a statement or execution that no owner holds any more. It
+-- waits when it can and returns the reply. A finalizer cannot wait, so the
+-- frame goes before the connection's next one; at Lua state close the
+-- connection's retirement finalizes the statement. Both return nil.
+local function Connection:cleanup(op: integer, id: integer): string?
+  if ffi.titan_state_closing(L) ~= 0 then return nil end
+  const frame = handle_frame(op, id)
+  if ffi.titan_in_finalizer(L) ~= 0 then
+    self.deferred[#self.deferred + 1] = frame
+    return nil
+  end
+  return self:request(frame)
+end
+
+-- Retirement of what an accepted frame published but no owner received.
+-- As natively, its own SQLite result is not reported, and it never replaces
+-- the error or cancellation unwinding its caller: a failed transport
+-- accepts nothing more, and disposal retires what it still holds.
+local function Connection:retire_unpublished(op: integer, id: integer)
+  self:cleanup(op, id)
+catch
+  if not (error is async.OperationError) then raise end
+end
+
+-- An OPEN its caller could not publish. CLOSE succeeds, as a new connection
+-- owns no statements; where nothing may wait, the ledger retires it.
+local function retire_opened(id: integer)
+  if not can_wait() then
+    ffi.titan_browser_sql_retire_sync(state_token, id)
+    return
+  end
+  request(handle_frame(OP_CLOSE, id))
+catch
+  if not (error is async.OperationError) then raise end
+end
+
+local function database_path(name: string): string
+  -- The service opens "", ":memory:" or an absolute path. A relative name,
+  -- like a native one, names a file under the working directory; the whole
+  -- path's length is checked before it is built.
+  if name == "" or name == ":memory:" then return name end
+  const first: integer = (name as foreign const *unsigned char)[0]
+  if first == 47 then return name end
+  const directory = os.cwd()
+  local length = #directory + 1 + #name
+  if directory == "/" then length = length - 1 end
+  if length > MAX_TEXT_BYTES then raise too_big("database path", "connect") end
+  if directory == "/" then return "/" .. name end
+  return directory .. "/" .. name
+end
+
+--- Open a SQLite database, including the special :memory: database.
+-- @param name Database path, :memory:, or empty for a private temporary database; a relative path names a file under the working directory.
+-- @return Owned database connection.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
+function connect(name: string): Connection
+  check_text_size(name, "database path", "connect")
+  check_no_nul(name, "connect")
+  -- Allocate the public shell and register its state-close finalizer before
+  -- the service opens the connection.
+  const connection = Connection {
+    handle = 0,
+    statements = 0,
+    busy = false,
+    active_statement = nil,
+    deferred = {},
+    deferred_head = 1
+  }
+  gc.finalizable<|value|>(connection, finalize_connection)
+  const reply = connection:submit(text_frame(OP_OPEN, 0, database_path(name), "database path", "connect"))
+  const failure? = reply_failure(reply, OP_OPEN, 0, "connect")
+  if failure ~= nil then
+    async.checkpoint()
+    raise failure
+  end
+  local opened = open_reply(reply, "connect")
+  defer if opened ~= 0 then retire_opened(opened) end
+  async.checkpoint()
+  connection.handle = opened
+  opened = 0
+  return connection
+end
+
+--- Compile one SQL statement for repeated binding and execution.
+-- @param sql One SQL statement to prepare.
+-- @return Reusable prepared statement; close it before closing the connection.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
+function Connection:prepare(sql: string): Statement
+  self:reserve("prepare", true)
+  defer self.busy = false
+  check_text_size(sql, "SQL", "prepare")
+  check_no_nul(sql, "prepare")
+  const statement = Statement { connection = self, handle = 0, parameter_count = 0 }
+  const reply = self:submit(text_frame(OP_PREPARE, self.handle, sql, "SQL", "prepare"))
+  const failure? = reply_failure(reply, OP_PREPARE, self.handle, "prepare")
+  if failure ~= nil then
+    async.checkpoint()
+    raise failure
+  end
+  local prepared, parameter_count = prepare_reply(reply, "prepare")
+  defer if prepared ~= 0 then self:retire_unpublished(OP_FINALIZE, prepared) end
+  async.checkpoint()
+  statement.parameter_count = parameter_count
+  statement.handle = prepared
+  self.statements = self.statements + 1
+  prepared = 0
+  return statement
+end
+
+--- Close a database connection after its statements are released.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
+function Connection:close()
+  if self.handle == 0 then return end
+  self:reserve("close", false)
+  defer self.busy = false
+  if self.statements ~= 0 then
+    raise Error {
+      message = "connection owns open statements",
+      code = nil,
+      extended_code = nil,
+      operation = "close"
+    }
+  end
+  -- Where nothing may wait, the ledger retires the connection.
+  if not can_wait() then
+    self:retire()
+    return
+  end
+  -- A failed close, SQLITE_BUSY included, leaves the owner open for retry.
+  const reply = self:request(handle_frame(OP_CLOSE, self.handle))
+  const failure? = reply_failure(reply, OP_CLOSE, self.handle, "close")
+  if failure ~= nil then raise failure end
+  self.handle = 0
+  empty_reply(reply, "close")
+end
+
+--- Detach an idle connection into a manually owned transfer payload.
+-- @return Opaque payload naming the connection in this browser instance; adopt exactly once or recover ownership.
+-- @usage standard-library-sqlite3.md#transferring-connections
+function Connection:to_transfer_payload(): string
+  self:reserve("to_transfer_payload", false)
+  defer self.busy = false
+  if self.statements ~= 0 then
+    raise Error {
+      message = "connection owns open statements",
+      code = nil,
+      extended_code = nil,
+      operation = "to_transfer_payload"
+    }
+  end
+  -- Cleanup still owed would be lost with the connection's new owner.
+  if self:has_deferred() then
+    raise Error {
+      message = "connection has pending statement cleanup",
+      code = nil,
+      extended_code = nil,
+      operation = "to_transfer_payload"
+    }
+  end
+  const id = self.handle
+  const nonce = detach(id)
+  -- A connection in transit belongs to no state. If its payload cannot be
+  -- built, adopt it back, so the source keeps its close authority.
+  const payload = (function (): string
+    return protobuf.serialize_fields(connection_transfer_fields, nonce, id)
+  catch
+    adopt(nonce, id, "to_transfer_payload")
+    raise
+  end)()
+  self.handle = 0
+  return payload
+end
+
+--- Adopt one detached SQLite connection without changing its transaction state.
+-- @param payload Exact opaque byte payload returned by to_transfer_payload.
+-- @return Fresh connection owner; the payload cannot be adopted again.
+-- @usage standard-library-sqlite3.md#transferring-connections
+function Connection.from_transfer_payload(payload: string): Connection
+  local nonce: integer, id: integer = (function (): (integer, integer)
+    return protobuf.deserialize_fields(payload, connection_transfer_fields)
+  catch
+    raise Error {
+      message = "invalid connection transfer payload",
+      code = nil, extended_code = nil, operation = "from_transfer_payload"
+    }
+  end)()
+  if id == 0 then
+    raise Error {
+      message = "invalid connection transfer payload",
+      code = nil, extended_code = nil, operation = "from_transfer_payload"
+    }
+  end
+  const connection = Connection {
+    handle = 0,
+    statements = 0,
+    busy = false,
+    active_statement = nil,
+    deferred = {},
+    deferred_head = 1
+  }
+  gc.finalizable<|value|>(connection, finalize_connection)
+  -- The ledger admits only an in-transit connection of this instance.
+  adopt(nonce, id, "from_transfer_payload")
+  connection.handle = id
+  return connection
+end
+
+--- Finalize this statement after its active cursor is released.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
+function Statement:close()
+  -- A Lua state close may already have retired the Connection, and with it
+  -- every Statement.
+  if self.handle == 0 or self.connection.handle == 0 then return end
+  self.connection:reserve("statement.close", true)
+  defer self.connection.busy = false
+  if self.connection.active_statement == self then
+    raise Error {
+      message = "statement has an active cursor",
+      code = nil,
+      extended_code = nil,
+      operation = "statement.close"
+    }
+  end
+  const reply? = self.connection:cleanup(OP_FINALIZE, self.handle)
+  if reply ~= nil then
+    const failure? = reply_failure(reply, OP_FINALIZE, self.handle, "statement.close")
+    -- FINALIZE destroys the statement even when SQLite reports an error; only
+    -- a refused frame leaves it.
+    if failure ~= nil and reply_status(reply) == STATUS_PROTOCOL then raise failure end
+    self.handle = 0
+    self.connection.statements = self.connection.statements - 1
+    if failure ~= nil then raise failure end
+    empty_reply(reply, "statement.close")
+    return
+  end
+  -- Nothing waited: the connection's retirement or its next frame
+  -- finalizes the statement.
+  self.handle = 0
+  self.connection.statements = self.connection.statements - 1
+end
+
+local function Connection:transaction(op: integer, operation: string)
+  self:reserve(operation, false)
+  defer self.busy = false
+  const reply = self:submit(handle_frame(op, self.handle))
+  const failure? = reply_failure(reply, op, self.handle, operation)
+  if failure ~= nil then
+    async.checkpoint()
+    raise failure
+  end
+  autocommit_reply(reply, operation)
+  async.checkpoint()
+end
+
+--- Commit an active transaction, or do nothing in autocommit mode.
+-- @usage standard-library-sqlite3.md#transactions
+function Connection:commit()
+  self:transaction(OP_COMMIT, "commit")
+end
+
+--- Roll back an active transaction, or do nothing in autocommit mode.
+-- @usage standard-library-sqlite3.md#transactions
+function Connection:rollback()
+  self:transaction(OP_ROLLBACK, "rollback")
+end
+
+--- Read SQLite's actual transaction state.
+-- @return True when SQLite is outside an explicit transaction.
+-- @usage standard-library-sqlite3.md#transactions
+function Connection:get_autocommit(): boolean
+  self:reserve("get_autocommit", true)
+  defer self.busy = false
+  const reply = self:submit(handle_frame(OP_AUTOCOMMIT, self.handle))
+  const failure? = reply_failure(reply, OP_AUTOCOMMIT, self.handle, "get_autocommit")
+  if failure ~= nil then
+    async.checkpoint()
+    raise failure
+  end
+  const autocommit = autocommit_reply(reply, "get_autocommit")
+  async.checkpoint()
+  return autocommit
+end
+
+--- Begin a deferred transaction when false, or commit when true.
+-- @param autocommit True commits the active transaction; false begins one when needed.
+-- @usage standard-library-sqlite3.md#transactions
+function Connection:set_autocommit(autocommit: boolean)
+  if autocommit then
+    self:transaction(OP_COMMIT, "set_autocommit")
+  else
+    self:transaction(OP_BEGIN, "set_autocommit")
+  end
+end
+
+--- Bind values and execute a statement without returning rows.
+-- @param ... SQL binding values in placeholder order, including nil for SQL NULL.
+-- @return Number of rows changed by this execution.
+-- @usage standard-library-sqlite3.md#executing-and-querying
+function Statement:execute(...: value): integer
+  self:require_open("execute")
+  self.connection:reserve("execute", false)
+  defer self.connection.busy = false
+  check_argument_count(self.parameter_count, #..., "execute")
+  const reply = self.connection:submit(argument_frame(OP_EXECUTE, self.handle, "execute", ...))
+  const failure? = reply_failure(reply, OP_EXECUTE, self.handle, "execute")
+  if failure ~= nil then
+    async.checkpoint()
+    raise failure
+  end
+  -- The service resets the statement after every execution.
+  const changes = changes_reply(reply, "execute")
+  async.checkpoint()
+  return changes
+end
+
+--- Bind values and start a streamed query execution.
+-- @param ... SQL binding values in placeholder order, including nil for SQL NULL.
+-- @return Cursor owning this execution until exhaustion or close.
+-- @usage standard-library-sqlite3.md#executing-and-querying
+function Statement:query(...: value): Cursor
+  self:require_open("query")
+  self.connection:reserve("query", false)
+  defer self.connection.busy = false
+  check_argument_count(self.parameter_count, #..., "query")
+  const reply = self.connection:submit(argument_frame(OP_QUERY, self.handle, "query", ...))
+  const failure? = reply_failure(reply, OP_QUERY, self.handle, "query")
+  if failure ~= nil then
+    async.checkpoint()
+    raise failure
+  end
+  -- A reply with a row leaves the execution active until a Cursor owns it.
+  local needs_reset = true
+  defer if needs_reset then self.connection:retire_unpublished(OP_RESET, self.handle) end
+  const columns, row? = query_reply(reply, "query")
+  needs_reset = row ~= nil
+  async.checkpoint()
+  const cursor = Cursor {
+    columns = columns,
+    statement = self,
+    pending = row,
+    exhausted = row == nil,
+    closed = false
+  }
+  if not cursor.exhausted then self.connection.active_statement = self end
+  needs_reset = false
+  return cursor
+end
+
+--- Return the next copied row, or nil after exhaustion.
+-- @return Copied row, or nil after the query is exhausted.
+-- @usage standard-library-sqlite3.md#executing-and-querying
+function Cursor:fetch(): Row?
+  if self.closed then
+    raise Error {
+      message = "cursor is closed",
+      code = nil,
+      extended_code = nil,
+      operation = "fetch"
+    }
+  end
+  if self.pending ~= nil then
+    const row: Row? = self.pending
+    self.pending = nil
+    return row
+  end
+  if self.exhausted then return nil end
+  const connection = self.statement.connection
+  -- Outside a Task the Cursor stays as it was; a cancelled Task still enters
+  -- and retires the execution, as natively.
+  async.running()
+  connection:reserve("fetch", true)
+  defer connection.busy = false
+  -- Until it publishes a row or the end, a fetch owns the active execution.
+  -- One that fails or is cancelled first closes this Cursor, then retires
+  -- the execution; a failed transport leaves nothing to retire.
+  local needs_reset = true
+  local published = false
+  defer do
+    if not published then
+      self.closed = true
+      connection.active_statement = nil
+      if needs_reset then connection:retire_unpublished(OP_RESET, self.statement.handle) end
+    end
+  end
+  local reply = ""
+  do
+    reply = connection:send(handle_frame(OP_FETCH, self.statement.handle))
+  catch
+    if error is async.OperationError then
+      needs_reset = false
+      async.checkpoint()
+    end
+    raise
+  end
+  const failure? = reply_failure(reply, OP_FETCH, self.statement.handle, "fetch")
+  if failure ~= nil then
+    -- The service resets an execution whose step failed.
+    needs_reset = false
+    async.checkpoint()
+    raise failure
+  end
+  const row? = fetch_reply(reply, self.columns, "fetch")
+  needs_reset = row ~= nil
+  async.checkpoint()
+  if row == nil then
+    self.exhausted = true
+    connection.active_statement = nil
+  end
+  published = true
+  return row
+end
+
+--- Retire this execution and make its prepared statement reusable.
+-- @usage standard-library-sqlite3.md#executing-and-querying
+function Cursor:close()
+  if self.closed then return end
+  if self.exhausted then
+    self.closed = true
+    return
+  end
+  const connection = self.statement.connection
+  -- A Lua state close may already have retired the Connection, and with it
+  -- this execution.
+  if connection.handle == 0 then
+    self.closed = true
+    self.pending = nil
+    return
+  end
+  -- Outside a Task, where it could wait, the Cursor stays as it was.
+  if can_wait() then async.running() end
+  connection:reserve("cursor.close", true)
+  defer connection.busy = false
+  -- The Cursor lets go of the execution first; the RESET then waits when it
+  -- can (Connection:cleanup).
+  self.closed = true
+  self.pending = nil
+  connection.active_statement = nil
+  const reply? = connection:cleanup(OP_RESET, self.statement.handle)
+  if reply ~= nil then
+    const failure? = reply_failure(reply, OP_RESET, self.statement.handle, "cursor.close")
+    if failure ~= nil then raise failure end
+    empty_reply(reply, "cursor.close")
+  end
+end

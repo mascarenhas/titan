@@ -4,6 +4,7 @@ foreign import "environment.browser.h"
 
 -- These messages match native uv.strerror; libc setenv can also fail with
 -- ENOMEM, which must retain its own name rather than becoming an I/O error.
+-- An errno without a native name stays typed, as uv's UNKNOWN.
 local function make_error(code: integer, operation: string,
                           detail: string?): async.OperationError
   if code == ffi.EINVAL then
@@ -19,7 +20,7 @@ local function make_error(code: integer, operation: string,
   elseif code == ffi.ENOMEM then
     return async.OperationError(-code, "ENOMEM", detail or "not enough memory", operation)
   end
-  raise "unrecognized browser OS errno " .. code
+  return async.OperationError(-code, "UNKNOWN", detail or "unknown error", operation)
 end
 
 local function checked_text(text: string, operation: string)

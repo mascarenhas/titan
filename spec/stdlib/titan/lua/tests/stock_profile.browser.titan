@@ -20,20 +20,207 @@ local function stock_profile_case(context: test.Context, name: string, source: s
   end)
 end
 
-function test_lua_browser_stock_filesystem_failures(context: test.Context)
-  stock_profile_case(context, "io_open", "failure(function() return io.open('x', 'r') end)")
-  stock_profile_case(context, "io_lines", "failure(function() return io.lines('x') end)")
-  stock_profile_case(context, "io_input", "failure(function() return io.input('x') end)")
-  stock_profile_case(context, "io_output", "failure(function() return io.output('x') end)")
-  stock_profile_case(context, "io_tmpfile", "failure(io.tmpfile)")
-  stock_profile_case(context, "os_remove", "failure(function() return os.remove('x') end)")
-  stock_profile_case(context, "os_rename", "failure(function() return os.rename('x', 'y') end)")
-  stock_profile_case(context, "os_tmpname", "failure(os.tmpname)")
-  stock_profile_case(context, "dofile", "failure(function() return dofile('x') end)")
-  stock_profile_case(context, "loadfile", [[
-    local result, message, extra = loadfile('x')
-    assert(result == nil and type(message) == 'string' and extra == nil)
+local function stock_remove_tree(path: string)
+  const info? = fs.lstat(path)
+  if not info then return end
+  if info.kind == "directory" then
+    const entries = fs.list(path)
+    for index = 1, #entries do stock_remove_tree(path .. "/" .. entries[index]) end
+    fs.rmdir(path)
+  else
+    fs.unlink(path)
+  end
+end
+
+local function stock_directory(): string
+  const root = fs.tmpname()
+  fs.unlink(root)
+  fs.mkdir(root)
+  runtime_test.cleanup(function () stock_remove_tree(root) end)
+  return root
+end
+
+-- Each operation runs in the owner state and then in an independent state, on
+-- a fresh directory of the filesystem the image links.
+local function stock_filesystem_case(context: test.Context, name: string, source: string)
+  context:run(name, function (_: test.Context)
+    runtime_test.run(function ()
+      const root = stock_directory()
+      const chunk = "local root = ...\n" .. source .. "\nreturn true"
+      test.assert(tlua.load(chunk, "=browser-stock-" .. name)(root) == true)
+      const state = tlua.new()
+      defer state:close()
+      assert_transfer_boolean(state:run(chunk, "=browser-state-stock-" .. name,
+                                        async.TransferValue.is_string(root)), true)
+    end)
+  end)
+end
+
+function test_lua_browser_stock_filesystem_operations(context: test.Context)
+  stock_filesystem_case(context, "io_open", [[
+    local path = root .. '/open.txt'
+    local file = assert(io.open(path, 'w'))
+    assert(file:write('alpha\n', 'beta\n') == file)
+    assert(file:close())
+    file = assert(io.open(path, 'a+'))
+    assert(file:write('gamma\n'))
+    assert(file:seek('set', 0) == 0)
+    assert(file:read('a') == 'alpha\nbeta\ngamma\n')
+    assert(file:close())
+    local missing, message, code = io.open(root .. '/missing.txt', 'r')
+    assert(missing == nil and message:find('missing.txt', 1, true) and type(code) == 'number')
+    assert(os.remove(path))
   ]])
+  stock_filesystem_case(context, "io_lines", [[
+    local path = root .. '/lines.txt'
+    local file = assert(io.open(path, 'w'))
+    assert(file:write('one\n\nthree'))
+    assert(file:close())
+    local lines = {}
+    for line in io.lines(path) do lines[#lines + 1] = line end
+    assert(#lines == 3 and lines[1] == 'one' and lines[2] == '' and lines[3] == 'three')
+    local ok = pcall(io.lines, root .. '/missing.txt')
+    assert(not ok)
+    assert(os.remove(path))
+  ]])
+  stock_filesystem_case(context, "io_input_output", [[
+    local path = root .. '/redirect.txt'
+    local saved_output, saved_input = io.output(), io.input()
+    io.output(path)
+    assert(io.write('redirected'))
+    assert(io.close())
+    io.output(saved_output)
+    io.input(path)
+    assert(io.read('a') == 'redirected')
+    assert(io.close(io.input()))
+    io.input(saved_input)
+    assert(os.remove(path))
+  ]])
+  stock_filesystem_case(context, "io_tmpfile", [[
+    local file = assert(io.tmpfile())
+    assert(file:write('scratch'))
+    assert(file:seek('set', 0) == 0)
+    assert(file:read('a') == 'scratch')
+    assert(file:close())
+  ]])
+  stock_filesystem_case(context, "os_tmpname", [[
+    local name = os.tmpname()
+    assert(name:match('^/tmp/lua_'), name)
+    local file = assert(io.open(name, 'r'))
+    assert(file:read('a') == '')
+    assert(file:close())
+    assert(os.remove(name))
+    assert(io.open(name, 'r') == nil)
+  ]])
+  stock_filesystem_case(context, "os_remove_rename", [[
+    local from, to = root .. '/from.txt', root .. '/to.txt'
+    local file = assert(io.open(from, 'w'))
+    assert(file:write('moved'))
+    assert(file:close())
+    assert(os.rename(from, to))
+    assert(io.open(from, 'r') == nil)
+    file = assert(io.open(to, 'r'))
+    assert(file:read('a') == 'moved')
+    assert(file:close())
+    assert(os.remove(to))
+    local ok, message, code = os.remove(to)
+    assert(ok == nil and type(message) == 'string' and type(code) == 'number')
+    ok, message, code = os.rename(from, to)
+    assert(ok == nil and type(message) == 'string' and type(code) == 'number')
+  ]])
+  stock_filesystem_case(context, "dofile_loadfile", [[
+    local script = root .. '/script.lua'
+    local file = assert(io.open(script, 'w'))
+    assert(file:write('return 40 + (... or 2)'))
+    assert(file:close())
+    assert(dofile(script) == 42)
+    assert(loadfile(script)(1) == 41)
+    local chunk, message = loadfile(root .. '/missing.lua')
+    assert(chunk == nil and type(message) == 'string')
+    assert(not pcall(dofile, root .. '/missing.lua'))
+    assert(os.remove(script))
+  ]])
+  stock_filesystem_case(context, "package_paths", [[
+    local module = root .. '/stock_vfs_module.lua'
+    local file = assert(io.open(module, 'w'))
+    assert(file:write('return { name = ..., file = select(2, ...) }'))
+    assert(file:close())
+    assert(type(package.path) == 'string' and type(package.cpath) == 'string')
+    local saved = package.path
+    package.path = root .. '/?.lua'
+    local found, message = package.searchpath('stock_vfs_module', package.path)
+    local missing, missed = package.searchpath('stock_vfs_missing', package.path)
+    package.loaded.stock_vfs_module = nil
+    local ok, loaded = pcall(require, 'stock_vfs_module')
+    package.loaded.stock_vfs_module = nil
+    package.path = saved
+    assert(found == module, message)
+    assert(missing == nil and missed:find(root .. '/stock_vfs_missing.lua', 1, true))
+    assert(ok and loaded.name == 'stock_vfs_module' and loaded.file == module, tostring(loaded))
+    assert(os.remove(module))
+  ]])
+  -- The unmodified default package.path finds `./?.lua` and `./?/init.lua`
+  -- in the working directory, for stock require and for lua.require alike.
+  context:run("default_package_path", function (_: test.Context)
+    runtime_test.run(function ()
+      const root = stock_directory()
+      fs.write_file(root .. "/stock_default_module.lua", "return { name = ..., file = select(2, ...) }")
+      fs.mkdir(root .. "/stock_default_package")
+      fs.write_file(root .. "/stock_default_package/init.lua", "return 'package init'")
+      const original = browser_os.cwd()
+      browser_os.chdir(root)
+      defer browser_os.chdir(original)
+      const chunk = [[
+        assert(package.path:find('./?.lua', 1, true) and package.path:find('./?/init.lua', 1, true),
+          package.path)
+        assert(package.searchpath('stock_default_module', package.path) == './stock_default_module.lua')
+        assert(package.searchpath('stock_default_package', package.path) == './stock_default_package/init.lua')
+        local missing, message = package.searchpath('stock_default_missing', package.path)
+        assert(missing == nil and message:find('./stock_default_missing.lua', 1, true), message)
+        package.loaded.stock_default_module, package.loaded.stock_default_package = nil, nil
+        local ok, module = pcall(require, 'stock_default_module')
+        local package_ok, init = pcall(require, 'stock_default_package')
+        package.loaded.stock_default_module, package.loaded.stock_default_package = nil, nil
+        assert(ok and module.name == 'stock_default_module' and module.file == './stock_default_module.lua',
+          tostring(module))
+        assert(package_ok and init == 'package init', tostring(init))
+        return true
+      ]]
+      test.assert(tlua.load(chunk, "=browser-stock-default-path")() == true)
+      const state = tlua.new()
+      defer state:close()
+      assert_transfer_boolean(state:run(chunk, "=browser-state-stock-default-path"), true)
+      const loaded = tlua.load("return package.loaded")() as {string: value}
+      defer loaded["stock_default_module"] = nil
+      const module = tlua.require("stock_default_module") as {string: value}
+      test.assert(module["file"] == "./stock_default_module.lua",
+                  "lua.require did not search the default package.path")
+    end)
+  end)
+  -- titan.fs and stock Lua share one tree and its bytes.
+  context:run("titan_fs_coherence", function (_: test.Context)
+    runtime_test.run(function ()
+      const root = stock_directory()
+      fs.write_file(root .. "/titan.txt", "from titan\0bytes")
+      const read = tlua.load([[
+        local file = assert(io.open(..., 'rb'))
+        local data = file:read('a')
+        assert(file:close())
+        return data
+      ]])(root .. "/titan.txt")
+      test.assert(read == "from titan\0bytes", "stock Lua read other bytes than titan.fs wrote")
+      tlua.load([[
+        local file = assert(io.open(..., 'wb'))
+        assert(file:write('from lua\255'))
+        assert(file:close())
+      ]])(root .. "/lua.txt")
+      test.assert(fs.read_file(root .. "/lua.txt") == "from lua\255",
+                  "titan.fs read other bytes than stock Lua wrote")
+    end)
+  end)
+end
+
+function test_lua_browser_stock_profile_failures(context: test.Context)
   stock_profile_case(context, "io_popen", "failure(function() return io.popen('x') end)")
   stock_profile_case(context, "os_execute", [[
     failure(function() return os.execute('x') end)
@@ -51,11 +238,9 @@ function test_lua_browser_stock_filesystem_failures(context: test.Context)
     local result, message, where = package.loadlib('x', 'y')
     assert(result == nil and type(message) == 'string' and where == 'absent')
   ]])
-  stock_profile_case(context, "package_paths", [[
-    assert(type(package.path) == 'string' and type(package.cpath) == 'string')
-    local result, message = package.searchpath('definitely_missing', package.path)
-    assert(result == nil and type(message) == 'string')
-    result, message = package.searchpath('definitely_missing', package.cpath)
+  stock_profile_case(context, "package_cpath", [[
+    assert(type(package.cpath) == 'string')
+    local result, message = package.searchpath('definitely_missing', package.cpath)
     assert(result == nil and type(message) == 'string')
   ]])
   stock_profile_case(context, "environment", "assert(os.getenv('HOME') == nil)")
@@ -99,44 +284,47 @@ function test_lua_browser_stock_filesystem_failures(context: test.Context)
   ]])
 end
 
+-- lua.require searches package.path over the linked filesystem, then the C
+-- path, and never looks for dynamic providers, whatever the environment says.
 function test_lua_browser_require_misses_ignore_provider_environment(_: test.Context)
-  const name = "lua.tests.browser_missing"
-  const source = "no source search: the browser target has no filesystem"
-  const provider = "no Titan provider search: the browser target has no dynamic providers"
-  const miss = function (): string
-    tlua.require(name)
-    raise "missing module unexpectedly loaded"
-  catch
-    return error as string
-  end
-  const before = miss()
-  const previous? = browser_os.getenv("TITAN_PATH")
-  const versioned? = browser_os.getenv("TITAN_PATH_0_6")
-  defer do
-    if previous ~= nil then browser_os.setenv("TITAN_PATH", previous)
-    else browser_os.unsetenv("TITAN_PATH") end
-    if versioned ~= nil then browser_os.setenv("TITAN_PATH_0_6", versioned)
-    else browser_os.unsetenv("TITAN_PATH_0_6") end
-  end
-  browser_os.setenv("TITAN_PATH", "/browser/provider/one")
-  browser_os.setenv("TITAN_PATH_0_6", "/browser/provider/two")
-  test.assert(miss() == before, "browser provider search read the environment")
-  const check = tlua.load([[
-    return function(message, source, provider)
-      local preload = assert(message:find("no field package.preload['lua.tests.browser_missing']", 1, true))
-      local source_at = assert(message:find(source, 1, true))
-      local c_at = assert(message:find('no file', source_at, true))
-      local provider_at = assert(message:find(provider, 1, true))
-      assert(preload < source_at and source_at < c_at and c_at < provider_at)
+  runtime_test.run(function ()
+    const name = "lua.tests.browser_missing"
+    const provider = "no Titan provider search: the browser target has no dynamic providers"
+    const miss = function (): string
+      tlua.require(name)
+      raise "missing module unexpectedly loaded"
+    catch
+      return error as string
     end
-  ]])() as function (string, string, string): ()
-  check(before, source, provider)
-  const state = tlua.new()
-  defer state:close()
-  const result = state:run([[
-    local ok, message = pcall(require, 'lua.tests.browser_missing')
-    assert(not ok and message:find('no Titan provider search: the browser target has no dynamic providers', 1, true))
-    return true
-  ]])
-  assert_transfer_boolean(result, true)
+    const before = miss()
+    const previous? = browser_os.getenv("TITAN_PATH")
+    const versioned? = browser_os.getenv("TITAN_PATH_0_6")
+    defer do
+      if previous ~= nil then browser_os.setenv("TITAN_PATH", previous)
+      else browser_os.unsetenv("TITAN_PATH") end
+      if versioned ~= nil then browser_os.setenv("TITAN_PATH_0_6", versioned)
+      else browser_os.unsetenv("TITAN_PATH_0_6") end
+    end
+    browser_os.setenv("TITAN_PATH", "/browser/provider/one")
+    browser_os.setenv("TITAN_PATH_0_6", "/browser/provider/two")
+    test.assert(miss() == before, "browser provider search read the environment")
+    const check = tlua.load([[
+      return function(message, provider)
+        local preload = assert(message:find("no field package.preload['lua.tests.browser_missing']", 1, true))
+        local source_at = assert(message:find("\n\tno file '", preload, true))
+        local provider_at = assert(message:find(provider, 1, true))
+        assert(preload < source_at and source_at < provider_at, message)
+      end
+    ]])() as function (string, string): ()
+    check(before, provider)
+    const state = tlua.new()
+    defer state:close()
+    const result = state:run([[
+      local ok, message = pcall(require, 'lua.tests.browser_missing')
+      assert(not ok and message:find("\n\tno file '", 1, true) and
+        message:find('no Titan provider search: the browser target has no dynamic providers', 1, true))
+      return true
+    ]])
+    assert_transfer_boolean(result, true)
+  end)
 end

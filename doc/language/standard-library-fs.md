@@ -6,7 +6,9 @@ synchronous-looking Titan API. Titan imports it with `local fs = import "fs"`
 (parser sugar for `import "titan.fs"`); Lua loads the same module with
 `require "titan.fs"`.
 
-**Target availability:** Native only (absent on the browser target).
+**Target availability:** Native (complete) & Browser (subset: 27 of 35 members;
+omits `Watcher`, `WatcherEvent`, and `watcher`; see
+[On the browser](#on-the-browser)).
 
 ## Example
 
@@ -43,11 +45,12 @@ end
 ## Tasks, concurrency, and errors
 
 - **Async Task requirement:** File, metadata, directory, `realpath`, `tmpname`,
-  and `Watcher` operations perform asynchronous libuv work and must run inside
-  an [async Task](async-io.md). Importing `fs` installs the standalone async
-  bootstrap for `main`; Lua hosts schedule work with `async.run` and drive
-  `async.loop`. Only `tmpdir`, `homedir`, `pwd`, `chdir`, and `File` transfer
-  hooks are synchronous and require no active Task.
+  and `Watcher` operations require an active [async Task](async-io.md) (running
+  libuv work natively or coordinating browser storage durability). Importing
+  `fs` installs the standalone async bootstrap for `main`; Lua hosts schedule
+  work with `async.run` and drive `async.loop`. Only `tmpdir`, `homedir`,
+  `pwd`, `chdir`, and `File` transfer hooks are synchronous and require no
+  active Task.
 - **`io` Interfaces:** `File` structurally satisfies all seven
   [`io` Interfaces](standard-library-io.md#standard-implementations) (adjusted
   dispatch for `read` and `write`, exact for `read_until` and `close`).
@@ -304,3 +307,36 @@ adopted `File` explicitly. `File` has no `discard_transfer_payload`; recover an
 undelivered payload by calling `File.from_transfer_payload` and closing the
 resulting `File`. Copying or dropping a payload does not duplicate or close the
 descriptor.
+
+## On the browser
+
+On `--target browser`, `titan.fs` provides **27 of 35** members—everything
+except filesystem watching (`Watcher`, `WatcherEvent`, and `watcher` are absent
+at compile time). Importing `fs` automatically links the
+[browser filesystem runtime](browser-target.md#filesystem-and-durable-storage).
+
+- **Resident VFS and `io` Interfaces:** File reads, writes, metadata queries,
+  directory scans, `realpath`, `pwd`, and `chdir` run against the instance's
+  resident filesystem, so changes are immediately visible to C code, stock Lua
+  `io.*`, and `titan.sqlite3`. `File` structurally satisfies all seven
+  [`io` Interfaces](standard-library-io.md#standard-implementations) and works
+  with `io.lines`.
+- **Task admission and durability:** `open`, `read`, `read_until`, `write`,
+  `flush`, `close`, `read_file`, `write_file`, metadata queries, directory
+  operations, `realpath`, and `tmpname` require an active async Task as
+  natively (`tmpdir`, `homedir`, `pwd`, `chdir`, and `File` transfer hooks are
+  synchronous). `File:flush()`, writable `File:close()`, `fs.write_file()`, and
+  `fs.tmpname()` wait for the storage worker to flush that descriptor's durable
+  file on OPFS mounts; `fs.mkdir()`, `fs.unlink()`, `fs.rmdir()`, and
+  `fs.rename()` wait for the storage worker's replay barrier so durable
+  namespace updates settle without flushing unrelated open files. Capacity or
+  storage failures raise `async.OperationError` (such as `ENOSPC`, `EBADF`, or
+  `EIO`).
+- **Temporary paths:** `fs.tmpname()` creates an empty file exclusively under
+  `tmpdir()` (default `/tmp`) using platform entropy and returns its path.
+- **Transfer and Lua-state close:** `File:to_transfer_payload()` and
+  `File.from_transfer_payload()` move an open, idle descriptor and any retained
+  delimiter remainder across `lua.new()` states within the same browser
+  instance. During Lua-state close, open descriptors are retired synchronously
+  without suspending, and any pending durable flush finishes before instance
+  disposal completes.

@@ -92,7 +92,8 @@ else
     } })
   assert(server.ok, server.output or server.diagnostic)
 end
-assert(checks.check_file_imports(strategy, path.join(output, "browser-app/out/app.mjs"), { "entry" }))
+-- The application imports titan.lua, so it links the filesystem runtime (D14).
+assert(checks.check_file_imports(strategy, path.join(output, "browser-app/out/app.mjs"), { "entry", "vfs" }))
 
 -- The Node run's module and the expectations it shares with the hosted test
 -- sit at the root that titan-browser-run serves.

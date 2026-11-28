@@ -1,0 +1,156 @@
+-- Target-independent input validation and the public Error record. The
+-- native worker binder and the browser frame encoder both classify binding
+-- values here, so every target rejects the same arguments the same way.
+
+--- A SQLite validation or native-operation failure with optional SQLite result codes.
+-- @field message Human-readable failure description.
+-- @field code Primary native result code, or nil when no native code is available.
+-- @field extended_code Extended SQLite result code, or nil for a nonnative validation failure.
+-- @field operation Operation that reported the failure.
+-- @usage standard-library-sqlite3.md#errors-and-cancellation
+record Error
+  const message: string
+  const code: integer?
+  const extended_code: integer?
+  const operation: string
+end
+
+-- SQLite's fundamental datatype codes: the native binder stores them in its
+-- C cells, and the browser frames use them as cell tags.
+local const CELL_INTEGER = 1
+local const CELL_FLOAT = 2
+local const CELL_TEXT = 3
+local const CELL_BLOB = 4
+local const CELL_NULL = 5
+
+local function check_no_nul(subject: string, operation: string)
+  const position? = string.find(subject, "\0")
+  if position ~= nil then
+    raise Error {
+      message = "embedded NUL is not permitted",
+      code = nil,
+      extended_code = nil,
+      operation = operation
+    }
+  end
+end
+
+-- Titan strings are bytes. Accept canonical UTF-8 scalar encodings only;
+-- SQL TEXT excludes embedded NUL, while Blob preserves arbitrary bytes. The
+-- walk reads the bytes in place, allocating nothing per byte.
+local function valid_text(subject: string): boolean
+  const bytes = subject as foreign const *unsigned char
+  const size = #subject
+  local index = 0
+  while index < size do
+    const first: integer = bytes[index]
+    if first == 0 then return false end
+    if first < 128 then
+      index = index + 1
+    else
+      local length = 0
+      local lower = 128
+      local upper = 191
+      if first >= 194 and first <= 223 then
+        length = 2
+      elseif first >= 224 and first <= 239 then
+        length = 3
+        if first == 224 then lower = 160 end
+        if first == 237 then upper = 159 end
+      elseif first >= 240 and first <= 244 then
+        length = 4
+        if first == 240 then lower = 144 end
+        if first == 244 then upper = 143 end
+      else
+        return false
+      end
+      if length > size - index then return false end
+      const second: integer = bytes[index + 1]
+      if second < lower or second > upper then return false end
+      for offset = 2, length - 1 do
+        const byte: integer = bytes[index + offset]
+        if byte < 128 or byte > 191 then return false end
+      end
+      index = index + length
+    end
+  end
+  return true
+end
+
+local function check_argument_count(expected: integer, actual: integer,
+                                    operation: string)
+  if actual ~= expected then
+    raise Error {
+      message = "expected " .. expected .. " arguments, got " .. actual,
+      code = nil,
+      extended_code = nil,
+      operation = operation
+    }
+  end
+end
+
+local function unsupported_argument(index: integer, kind: string,
+                                    operation: string): Error
+  return Error {
+    message = "argument " .. index .. " has unsupported kind " .. kind,
+    code = nil,
+    extended_code = nil,
+    operation = operation
+  }
+end
+
+-- Classify one binding value as its cell type and the payload that type
+-- uses; the other payload results are placeholders. TEXT and BLOB payloads
+-- are the caller's own strings, never copies.
+local function argument_cell(candidate: value, index: integer,
+                             operation: string): (integer, integer, float, string)
+  case reflect.inspect(candidate)
+  when is_nil() then
+    return CELL_NULL, 0, 0.0, ""
+  when is_boolean(flag) then
+    if flag then return CELL_INTEGER, 1, 0.0, "" end
+    return CELL_INTEGER, 0, 0.0, ""
+  when is_integer(number) then
+    return CELL_INTEGER, number, 0.0, ""
+  when is_float(number) then
+    if number ~= number or number == math.huge or number == -math.huge then
+      raise Error {
+        message = "argument " .. index .. " must be finite",
+        code = nil,
+        extended_code = nil,
+        operation = operation
+      }
+    end
+    return CELL_FLOAT, 0, number, ""
+  when is_string(bytes) then
+    if not valid_text(bytes) then
+      raise Error {
+        message = "argument " .. index ..
+          " must be UTF-8 TEXT without NUL; use Blob for bytes",
+        code = nil,
+        extended_code = nil,
+        operation = operation
+      }
+    end
+    return CELL_TEXT, 0, 0.0, bytes
+  when is_record(inspected) then
+    if inspected.value is Blob then
+      const blob: Blob = inspected.value
+      return CELL_BLOB, 0, 0.0, blob.bytes
+    end
+    raise unsupported_argument(index, "record", operation)
+  when is_array() then raise unsupported_argument(index, "Array", operation)
+  when is_const_array() then raise unsupported_argument(index, "const Array", operation)
+  when is_map() then raise unsupported_argument(index, "Map", operation)
+  when is_union() then raise unsupported_argument(index, "union", operation)
+  when is_interface() then raise unsupported_argument(index, "Interface", operation)
+  when is_titan_function() then raise unsupported_argument(index, "Titan function", operation)
+  when is_lua_function() then raise unsupported_argument(index, "Lua function", operation)
+  when is_lua_c_function() then raise unsupported_argument(index, "Lua C function", operation)
+  when is_owned_foreign_pointer() then raise unsupported_argument(index, "owned pointer", operation)
+  when is_owned_foreign_array() then raise unsupported_argument(index, "owned Array", operation)
+  when is_lua_userdata() then raise unsupported_argument(index, "userdata", operation)
+  when is_lua_thread() then raise unsupported_argument(index, "thread", operation)
+  when is_raw_pointer() then raise unsupported_argument(index, "raw pointer", operation)
+  end
+end

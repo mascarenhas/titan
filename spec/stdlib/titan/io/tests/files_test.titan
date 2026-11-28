@@ -1,0 +1,78 @@
+local io_fs = import "fs"
+
+local function file_with(contents: string): string
+  const path = io_fs.tmpname()
+  runtime_test.cleanup(function ()
+    if io_fs.stat(path) ~= nil then io_fs.unlink(path) end
+  end)
+  io_fs.write_file(path, contents)
+  return path
+end
+
+-- An fs.File is every titan.io Interface, on both targets.
+function test_io_interfaces_accept_fs_files(_context: test.Context)
+  runtime_test.run(function ()
+    const path = file_with("one\ntwo\n")
+    do
+      const file = io_fs.open(path, "r+")
+      defer file:close()
+      const reader: stream.Reader = file
+      test.assert(reader:read_until("\n", true) == "one", "Reader File lost its line")
+      const writer: stream.Writer = file
+      const both: stream.ReaderWriter = file
+      test.assert(both:read_until("\n") == "two\n", "ReaderWriter File lost its line")
+      writer:write("three")
+      both:write("\n")
+      const closer: stream.Closer = file
+      closer:close()
+      test.assert(file:is_closed(), "Closer did not close the File")
+      closer:close()
+    end
+    test.assert(io_fs.read_file(path) == "one\ntwo\nthree\n",
+                "Writer views changed the File's bytes")
+
+    do
+      const read_only: stream.ReaderCloser = io_fs.open(path, "r")
+      defer read_only:close()
+      test.assert(read_only:read() == "one\ntwo\nthree\n" and read_only:read() == nil,
+                  "ReaderCloser File did not read to EOF")
+    end
+    do
+      const append: stream.WriterCloser = io_fs.open(path, "a")
+      defer append:close()
+      append:write("four\n")
+    end
+    do
+      const update: stream.ReaderWriterCloser = io_fs.open(path, "r+")
+      defer update:close()
+      test.assert(update:read_until("\n", true) == "one",
+                  "ReaderWriterCloser File lost its line")
+      update:write("five\n")
+      test.assert(update:read() == "two\nthree\nfour\n",
+                  "ReaderWriterCloser File lost its retained bytes")
+    end
+    test.assert(io_fs.read_file(path) == "one\ntwo\nthree\nfour\nfive\n",
+                "WriterCloser or ReaderWriterCloser views changed the File's bytes")
+  end)
+end
+
+function test_io_lines_reads_and_closes_fs_files(_context: test.Context)
+  runtime_test.run(function ()
+    const path = file_with("first\n\r\nlast")
+    const file = io_fs.open(path, "r")
+    defer file:close()
+    const lines: {string} = {}
+    for line in stream.lines(file) do lines[#lines + 1] = line end
+    test.assert(#lines == 3 and lines[1] == "first" and lines[2] == "\r" and lines[3] == "last",
+                "io.lines changed an fs.File's lines")
+    test.assert(file:is_closed(), "io.lines did not close the fs.File at EOF")
+
+    const early = io_fs.open(path, "r")
+    defer early:close()
+    for line in stream.lines(early) do
+      test.assert(line == "first", "io.lines started past the first line")
+      break
+    end
+    test.assert(early:is_closed(), "io.lines did not close the fs.File on break")
+  end)
+end

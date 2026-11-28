@@ -1,13 +1,16 @@
 # Filesystem-library implementation
 
-`titan/fs.native.titan` owns high-level File and Watcher policy through ordinary
-compiled imports of public `titan.async`, `titan.uv`, and `titan.string`. Its
-only native include is `fs_platform.h`, which defines the path separator
-`TITAN_FS_DIRSEP` and has no libuv storage, callback, or scheduler dependency;
-fs defines no foreign callback, so its one generated object uses the public
-UV/async protocols exactly as an independently compiled library would. Native
-filesystem requests, callbacks and borrowed-storage roots belong to UV, and
-Task waits and subscription queues belong to async. See the
+`titan/fs.native.titan` owns native File and Watcher policy through ordinary
+compiled imports of public `titan.async`, `titan.uv`, and `titan.string`;
+`titan/fs.browser.titan` provides the 27-member browser subset over the
+instance's resident `uwasi` VFS and the `titan:vfs` host binding
+([Browser files](#browser-files)). The native variant's only native include is
+`fs_platform.h`, which defines the path separator `TITAN_FS_DIRSEP` and has no
+libuv storage, callback, or scheduler dependency; fs defines no foreign
+callback, so its one generated object uses the public UV/async protocols
+exactly as an independently compiled library would. Native filesystem requests,
+callbacks and borrowed-storage roots belong to UV, and Task waits and
+subscription queues belong to async. See the
 [filesystem API](../language/standard-library-fs.md),
 [public UV filesystem operations](../language/uv/functions/fs.md), and the
 [generic runtime](libuv-runtime.md).
@@ -207,6 +210,60 @@ subscription reusable; that producer has no native handle of its own. Runtime
 shutdown walks any remaining handles only after Tasks and their cleanup have
 retired.
 
+## Browser files
+
+`titan/fs.browser.titan` implements the 27-member browser subset (all `File`,
+metadata, directory, `realpath`, and `tmpname` operations, omitting `Watcher`,
+`WatcherEvent`, and `watcher`) without `uv` or native worker pools. Its sole
+private header, declaration-only `titan/fs.browser.h`, declares:
+
+* `TITAN_WASM_IMPORT("titan_browser_vfs_retire_sync") int
+  titan_browser_vfs_retire_sync(int32_t state, int32_t fd);` — synchronous
+  descriptor retirement during Lua-state close (calling it also anchors the
+  browser storage runtime in every image that links `titan.fs`); and
+* `realpath` and `getentropy`, which `wasi-libc` hides without X/Open or BSD
+  feature macros (which would arrive too late in generated C).
+
+All file reads, writes, metadata queries, directory scans (`scandir`),
+`realpath`, `pwd`, and `chdir` run directly via `wasi-libc` POSIX calls over
+the guest's resident `uwasi` filesystem, so changes are immediately visible to
+C code, stock Lua `io.*`, and `titan.sqlite3`. `operation_error` translates
+WASI `ENOTCAPABLE` to `EBADF` (`-8`, matching native bad-descriptor errors)
+and maps `errno` values to negated codes and libuv-compatible names and
+messages. Operations that await native work still enforce `async.running()` or
+`async.checkpoint()` (`tmpdir`, `homedir`, `pwd`, `chdir`, and `File` transfer
+hooks remain synchronous).
+
+Only durability waits for the storage worker, via `sync_storage` over
+`browser.binding("titan:vfs")`:
+
+* `File:flush()` awaits `titan:vfs("sync", descriptor)`.
+* `File:close_with` checks `fcntl(descriptor, F_GETFL)` after `async.running()`
+  and awaits `sync_storage(descriptor, operation, true)` (`async.await_cleanup`)
+  whenever the descriptor is writable (`flags < 0 or (flags & O_WRONLY) ~= 0`,
+  which covers both `O_WRONLY` and `O_RDWR` under `wasi-libc`), then closes
+  `descriptor`. A `defer` guard guarantees descriptor closure even if the wait
+  unwinds during Lua-state close.
+* `fs.write_file` writes, awaits `sync_storage`, and closes the descriptor.
+* `mkdir`, `unlink`, `rmdir`, and `rename` run the POSIX call and then await
+  `titan:vfs("sync", nil)` so durable namespace updates settle before
+  returning.
+
+`fs.tmpname()` generates six-character random suffixes under `tmpdir() ..
+"/titan-fs-"` using `getentropy(name, 6)` (WASI `random_get`, keeping
+`math.random` untouched) and retries `open(..., O_RDWR | O_CREAT | O_EXCL,
+0600)` up to 100 times on `EEXIST`.
+
+During Lua-state close (`titan_state_closing(L) ~= 0`), `finalize_file` and
+`File:close_with` cannot suspend for the storage worker, so they call
+`titan_browser_vfs_retire_sync(0, descriptor)` directly; the host closes `fd`
+immediately and queues any required durable flush to complete before instance
+disposal finishes. Because `wasi-libc` and `uwasi` share one per-instance
+descriptor table, `File:to_transfer_payload()` and
+`File.from_transfer_payload()` transfer `(handle, excess)` across `lua.new()`
+states within the same browser instance using the same protobuf schema and
+`pending_operations == 0` guard as native targets.
+
 ## Tests
 
 Native behavior belongs in `spec/stdlib/titan/fs/tests.titan`: binary and
@@ -218,5 +275,7 @@ position, source invalidation, malformed and closed payloads, hooks outside a
 Task, use after source-state shutdown, and rejection while concurrent reads
 are pending). `test_lua_close_closes_open_files` closes independent states
 holding a parked Task's File and an unclosed File and counts the process's
-open descriptors. Schema fixtures keep the File, Stat and Watcher declarations and
-the canonical `async.OperationError` owner.
+open descriptors. Schema fixtures keep the File, Stat and Watcher declarations
+and the canonical `async.OperationError` owner. The portable 27-member subset
+also runs in the browser standard-library test suite alongside browser storage
+and durable OPFS tests.

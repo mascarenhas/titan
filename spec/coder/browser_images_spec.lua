@@ -341,7 +341,7 @@ assert.throws(() => opaque(), TypeError);
         for key in pairs(assets) do keys[#keys + 1] = key end
         table.sort(keys)
         assert.same({ "build_profile", "factory", "loader", "lpeglabel", "node_worker", "page", "provider",
-            "runner", "runner_module", "runtime", "sdk_digests" }, keys)
+            "runner", "runner_module", "runtime", "sdk_digests", "sql", "sqlite_service", "storage_worker", "vfs" }, keys)
     end)
 
     it("requires only readable runtime and JS assets, in bootstrap order", function()
@@ -356,7 +356,7 @@ assert.throws(() => opaque(), TypeError);
             end,
         } }
         for _, key in ipairs({ "runtime", "factory", "loader", "runner", "runner_module", "node_worker",
-                "page", "build_profile" }) do
+                "page", "vfs", "sql", "storage_worker", "sqlite_service", "build_profile" }) do
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..

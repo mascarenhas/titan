@@ -6,7 +6,7 @@ isolated `lua.Lua` states with independent globals, registries, and garbage
 collectors.
 
 - **Import:** `local lua = import "lua"` (Titan) · `require "titan.lua"` (Lua)
-- **Targets:** Native & Browser (subset: `dofile`, `Lua:run_async`, and `Lua:run_async_from_loader` are native-only; see [On the browser](#on-the-browser))
+- **Targets:** Native & Browser (subset: `Lua:run_async` and `Lua:run_async_from_loader` are native-only; `dofile` and `package.path` source search work over the browser VFS; see [On the browser](#on-the-browser))
 
 ## Quick example
 
@@ -37,7 +37,7 @@ function load(chunk: string, name: string?,
               env: value): function(...: value): (...: value)
 function load_from_reader(reader: io.Reader, name: string?,
                           env: value): function(...: value): (...: value)
-function dofile(filename: string, ...: value): (...: value) -- native only
+function dofile(filename: string, ...: value): (...: value)
 ```
 
 ### `load`
@@ -74,12 +74,12 @@ end
 
 ### `dofile`
 
-*(Native only.)* `dofile` opens `filename` via
-[`fs.open`](standard-library-fs.md), compiles its contents with chunk name
-`@filename`, executes it with all trailing arguments, and returns all results
-(preserving interior `nil`s). The file closes on success, read/compile error,
-or runtime error. Because opening and reading use asynchronous filesystem I/O,
-`dofile` must run inside an [async Task](async-io.md).
+`dofile` opens `filename` via [`fs.open`](standard-library-fs.md), compiles its
+contents with chunk name `@filename`, executes it with all trailing arguments,
+and returns all results (preserving interior `nil`s). The file closes on
+success, read/compile error, or runtime error. Because opening and reading use
+asynchronous filesystem I/O, `dofile` must run inside an
+[async Task](async-io.md).
 
 ## Requiring modules
 
@@ -96,10 +96,9 @@ is returned.
 Searcher order mirrors Lua while using non-blocking source loading:
 
 1. `package.searchers[1]` (the preload searcher).
-2. On native targets, every template in `package.path` using asynchronous `fs`
-   operations (dots become directory separators; `?` expands to the path). On
-   the browser, this step reports
-   `no source search: the browser target has no filesystem`.
+2. Every template in `package.path` using asynchronous `fs` operations (dots
+   become directory separators; `?` expands to the path), on both native and
+   browser targets.
 3. `package.searchers[3]` onward (Lua's C searchers, Titan's package searcher,
    and any custom searchers) up to the first `nil` slot.
 
@@ -340,14 +339,17 @@ configure `UV_THREADPOOL_SIZE` before first pool use (see
 
 | Members | Native | Browser |
 | --- | --- | --- |
-| `load`, `load_from_reader`, `require`, `new` | Available | Available |
+| `load`, `load_from_reader`, `dofile`, `require`, `new` | Available | Available |
 | `Lua:run`, `Lua:run_from_loader`, `Lua:close`, `Lua:detach` | Available | Available |
-| `dofile`, `Lua:run_async`, `Lua:run_async_from_loader` | Available | Absent |
+| `Lua:run_async`, `Lua:run_async_from_loader` | Available | Absent |
 
-On `--target browser`, `lua.new()` creates another Lua state inside the same
-WebAssembly instance and executes calls synchronously on the owner thread.
-Browser async Tasks belong exclusively to the instance's owner state; child
-states cannot run or drive browser Tasks.
+On `--target browser`, importing `titan.lua` automatically links the
+[browser filesystem runtime](browser-target.md#filesystem-and-durable-storage),
+so `dofile` and `require`'s `package.path` search read from the instance's VFS.
+`lua.new()` creates another Lua state inside the same WebAssembly instance and
+executes calls synchronously on the owner thread. Browser async Tasks belong
+exclusively to the instance's owner state; child states cannot run or drive
+browser Tasks.
 
 ### Stock Lua libraries on the browser
 
@@ -357,11 +359,11 @@ APIs, distinct from `titan.io` and `titan.os`):
 
 | Stock Lua API | Browser behavior |
 | --- | --- |
-| `io.open`, `io.lines(file)`, `io.input(file)`, `io.output(file)`, `io.tmpfile`, `os.remove`, `os.rename`, `os.tmpname`, `dofile`, `loadfile` | Fail with Lua's standard error (no filesystem) |
+| `io.open`, `io.lines(file)`, `io.input(file)`, `io.output(file)`, `io.tmpfile`, `os.remove`, `os.rename`, `os.tmpname`, `dofile`, `loadfile` | Operate on the browser VFS when linked (`io.tmpfile` creates an unlinked file in `/tmp`; `os.tmpname` creates a unique path in `/tmp`); without a linked filesystem runtime (or `/tmp`), path calls fail with `ENOENT` (`"No such file or directory"`), `io.tmpfile()` returns `nil, "No such file or directory", 44`, and `os.tmpname()` raises `"unable to generate a unique filename"` |
 | `io.popen`, `os.execute(cmd)` | Fail without starting a process (`os.execute()` reports no shell) |
 | `io.read`, `io.stdin:read` | Fail with a read error (use `titan.os.stdin` for embedding input) |
 | `package.loadlib` | Returns `nil, message, "absent"` |
-| `package.path`, `package.cpath` searches | Miss (only copied preload entries resolve) |
+| `package.path`, `package.cpath` searches | `package.path` searches the browser VFS when linked (misses without VFS); `package.cpath` misses (only copied preload entries resolve) |
 | `os.getenv` | Reads the instance environment (initially empty) |
 | `print`, `io.write`, `io.stdout`, `io.stderr` | Send bytes to the instance's output queues |
 | `os.clock()` | Raises `os.clock is unavailable on the browser target (no process CPU-time clock)` |

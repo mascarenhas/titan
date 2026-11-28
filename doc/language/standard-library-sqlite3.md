@@ -2,11 +2,12 @@
 
 `titan.sqlite3` embeds SQLite with prepared statements, streamed query cursors,
 explicit transactions, and row-to-record mapping. Database operations suspend
-the current [async Task](async-io.md) while a native worker executes SQLite;
-rows and their values are owned snapshots.
+the current [async Task](async-io.md) while a native worker thread or the
+browser storage worker executes SQLite; rows and their values are owned
+snapshots.
 
 - **Import:** `local sqlite3 = import "sqlite3"` (Titan) · `require "titan.sqlite3"` (Lua)
-- **Targets:** Native only (requires a running async Task for database operations and `close`; `Row:get` and `Row:fill` are synchronous)
+- **Targets:** Native & Browser (complete — all 26 members; requires a running async Task for database operations and `close`; `Row:get` and `Row:fill` are synchronous; see [On the browser](#on-the-browser))
 
 ## Quick example
 
@@ -70,12 +71,12 @@ function Statement:close()
 `":memory:"` creates a private in-memory database, and `""` creates a temporary
 database. Filenames reject embedded NUL bytes.
 
-The bundled SQLite build enables `SQLITE_THREADSAFE=1` and opens each connection
-with `SQLITE_OPEN_FULLMUTEX`. A single `Connection` allows one outstanding
-native operation at a time; overlapping calls raise `sqlite3.Error` before
-submission. Independent connections run concurrently in libuv's shared worker
-pool (on Windows, worker threads restore x87 precision before SQLite runs; see
-[Windows build](windows-build.md)).
+On native targets, the bundled SQLite build enables `SQLITE_THREADSAFE=1` and
+opens each connection with `SQLITE_OPEN_FULLMUTEX`; independent connections run
+concurrently in libuv's shared worker pool (on Windows, worker threads restore
+x87 precision before SQLite runs; see [Windows build](windows-build.md)). On
+both native and browser targets, a single `Connection` allows one outstanding
+operation at a time; overlapping calls raise `sqlite3.Error` before submission.
 
 `prepare` compiles exactly one SQL statement. Trailing whitespace, comments, and
 empty semicolons are allowed; empty SQL, embedded NUL bytes, and multiple
@@ -336,3 +337,46 @@ retain it while delivery is pending, and adopt-and-close it locally if delivery
 fails (for example, if `async.send` rejects the carrier). Replaying a payload
 causes double-close or use-after-free, and abandoning one leaks the database.
 The same rules apply when a transferred closure captures a `Connection`.
+
+## On the browser
+
+`titan.sqlite3` exposes all **26** public members on `--target browser`.
+Importing `sqlite3` automatically links the
+[browser storage runtime](browser-target.md#filesystem-and-durable-storage) and
+publishes `<stem>.worker.mjs` and `<stem>.sqlite3.wasm` beside `<stem>.mjs`.
+
+- **Worker-hosted execution:** SQLite runs inside the instance's dedicated
+  storage worker, keeping `async` Tasks cooperative and non-blocking. Databases
+  may use `":memory:"`, `""`, the ephemeral in-memory filesystem, or durable
+  OPFS mounts configured through `create({ vfs })`.
+- **Working directory and paths:** `connect` resolves relative database names
+  against `os.cwd()`, and every operation carries the calling state's current
+  working directory so relative paths resolved by SQLite itself (such as
+  `ATTACH` and `VACUUM INTO`) stay coherent with `os.chdir` and `fs.chdir`.
+  When the working directory cannot be entered, relative SQLite paths fail with
+  `SQLITE_CANTOPEN` while absolute paths work normally. As on native targets,
+  `file:` URI filenames are not enabled; database paths must be `":memory:"`,
+  `""`, or a filesystem path.
+- **Cancellation, Lua-state close, and disposal:** Task cancellation follows the
+  native completion-before-cancellation rule: an already-accepted request
+  completes in the worker and cleans up unpublished handles before cancellation
+  is delivered. Unlike native teardown, closing a Lua state cannot wait
+  synchronously for the storage worker: every open connection is retired
+  immediately without waiting, and the storage worker finalizes open statements,
+  rolls back open transactions, and closes the connection after any
+  already-in-flight operation finishes. Graceful `instance.dispose()` waits for
+  in-flight SQLite work and queued retirements and flushes durable mounts;
+  `instance.dispose({ force: true })` terminates the worker immediately and
+  rejects with `TITAN_BROWSER_DISPOSED_DIRTY` if uncommitted writes or open
+  write transactions were lost.
+- **Transferring connections:** `Connection:to_transfer_payload()` and
+  `Connection.from_transfer_payload()` transfer an idle connection across
+  `lua.new()` states within the same browser instance. In addition to open
+  statements, active cursors, and in-flight operations, detachment rejects a
+  connection with pending deferred statement cleanup from a prior finalizer
+  (`"connection has pending statement cleanup"`).
+- **Browser frame limits:** Single requests and replies are bounded to **64
+  MiB**, SQL strings and database paths to **16 MiB**, individual `TEXT` or
+  `BLOB` cells to **32 MiB**, bound parameters to **32,766**, open connections
+  to **1,024**, and open statements per connection to **4,096**. Exceeding a
+  frame, text, or cell bound raises `sqlite3.Error` with `SQLITE_TOOBIG`.

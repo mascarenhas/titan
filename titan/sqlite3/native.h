@@ -6,7 +6,7 @@
 
 /* This header declares native carriers, plus the one atomic exchange Titan's
  * FFI cannot spell. All operations are restricted source foreign functions in
- * worker.titan; no Lua/Titan value reaches them. */
+ * worker.native.titan; no Lua/Titan value reaches them. */
 typedef struct TitanSqliteCell {
     int kind;
     sqlite3_int64 integer_value;

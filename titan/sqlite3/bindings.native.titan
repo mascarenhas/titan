@@ -1,0 +1,90 @@
+local function native_allocation_error(operation: string)
+  raise Error {
+    message = "out of memory allocating SQLite operation",
+    code = ffi.SQLITE_NOMEM,
+    extended_code = ffi.SQLITE_NOMEM,
+    operation = operation
+  }
+end
+
+local function copy_input(packet: foreign *TitanSqlitePacket,
+                          input: string, operation: string)
+  packet.input_length = #input
+  packet.input = sqlite_copy_bytes(input, packet.input_length)
+  if not packet.input then native_allocation_error(operation) end
+end
+
+local function copy_argument_bytes(cell: foreign *TitanSqliteCell,
+                                   bytes: string, operation: string)
+  cell.length = #bytes
+  cell.bytes = sqlite_copy_bytes(bytes, cell.length)
+  if not cell.bytes then native_allocation_error(operation) end
+end
+
+local function bind_argument(cell: foreign *TitanSqliteCell,
+                             candidate: value, index: integer,
+                             operation: string)
+  const kind, number, real, bytes = argument_cell(candidate, index, operation)
+  -- The shared cell codes are SQLite's own fundamental datatype codes.
+  cell.kind = kind
+  if kind == CELL_INTEGER then
+    cell.integer_value = number
+  elseif kind == CELL_FLOAT then
+    cell.float_value = real
+  elseif kind ~= CELL_NULL then
+    copy_argument_bytes(cell, bytes, operation)
+  end
+end
+
+local function Statement:bind(packet: foreign *TitanSqlitePacket,
+                              operation: string, ...: value)
+  check_argument_count(self.parameter_count, #..., operation)
+  packet.argument_count = #...
+  if #... <= 0 then return end
+  packet.arguments = ffi.calloc(#..., foreign TitanSqliteCell.sizeof)
+  if not packet.arguments then native_allocation_error(operation) end
+  -- Preserve the vararg run itself: an Array loses its trailing nil positions.
+  for index = 1, #... do
+    bind_argument(packet.arguments + (index - 1), ...[index], index, operation)
+  end
+end
+
+local function copy_result_bytes(cell: foreign *TitanSqliteCell): string
+  const bytes: owned char[] = foreign char.new_array(cell.length)
+  if cell.length > 0 then ffi.memcpy(bytes, cell.bytes, cell.length) end
+  return bytes as string
+end
+
+local function decode_columns(packet: foreign *TitanSqlitePacket): const {Column}
+  const columns: {Column} = {}
+  const count: integer = packet.column_count
+  for index = 1, count do
+    const native_column = packet.columns + (index - 1)
+    local declared_type: string?
+    if native_column.declared_type ~= nil then
+      declared_type = native_column.declared_type as string
+    end
+    columns[index] = Column(native_column.name as string, declared_type)
+  end
+  return columns as const {Column}
+end
+
+local function decode_row(packet: foreign *TitanSqlitePacket,
+                           columns: const {Column}): Row
+  const cells: {value} = {}
+  for index = 1, #columns do
+    const cell = packet.cells + (index - 1)
+    if cell.kind == ffi.SQLITE_INTEGER then
+      const number: integer = cell.integer_value
+      cells[index] = number
+    elseif cell.kind == ffi.SQLITE_FLOAT then
+      const number: float = cell.float_value
+      cells[index] = number
+    elseif cell.kind == ffi.SQLITE_TEXT then
+      cells[index] = copy_result_bytes(cell)
+    elseif cell.kind == ffi.SQLITE_BLOB then
+      cells[index] = Blob(copy_result_bytes(cell))
+    end
+  end
+  return Row(columns, cells as const {value})
+end

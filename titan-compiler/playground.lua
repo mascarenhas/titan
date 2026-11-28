@@ -15,6 +15,7 @@ local types = require "titan-compiler.types"
 local browsertrace = require "titan-compiler.browsertrace"
 local browserlink = require "titan-compiler.browserlink"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local sha256 = require "titan-compiler.sha256"
 local util = require "titan-compiler.util"
 
 local playground = {}
@@ -368,8 +369,13 @@ function Service:emit_c(files, identity)
 end
 
 -- The published image of an optimized link: the stripped Wasm, its source
--- map and trace table, and the loader module embedding factory and loader.
-function playground.build_trace(linked, identity, factory, loader)
+-- map and trace table, the loader module embedding factory and loader, and,
+-- for an image that links the storage runtime, that runtime's JavaScript
+-- and its companions. `storage` holds the bundle's `vfs`, `sql` and
+-- `worker` sources and its `sqlite` service bytes; `companions` lists each
+-- `{ name, bytes }` to publish beside `app.wasm` (`app.worker.mjs`, then
+-- `app.sqlite3.wasm`).
+function playground.build_trace(linked, identity, factory, loader, storage)
     local image, map = browsertrace.dwarf_map(linked, IMAGE .. ".map", IMAGE)
     if not image then return nil, map end
     local inventory, err, oversized = browserlink.image_inventory(image)
@@ -384,10 +390,29 @@ function playground.build_trace(linked, identity, factory, loader)
     local trace
     map, trace = browsertrace.rewrite(image, map, identity, IMAGE .. ".map")
     if not map then return nil, trace end
+    local linked_storage, embedded, companions = browserlink.storage(inventory.imports), nil, {}
+    if linked_storage then
+        if type(storage) ~= "table" then
+            return nil, "this image links the browser storage runtime; pass the bundle's storage sources"
+        end
+        for _, key in ipairs(linked_storage == "sql" and { "vfs", "worker", "sql", "sqlite" } or { "vfs", "worker" }) do
+            if type(storage[key]) ~= "string" then
+                return nil, "the bundle's storage source '" .. key .. "' must be a string"
+            end
+        end
+        local worker, sqlite = browserlink.companion_names(IMAGE)
+        embedded = { vfs = storage.vfs }
+        companions[1] = { name = worker, bytes = browserlink.worker_module(storage.worker, identity) }
+        if linked_storage == "sql" then
+            embedded.sql = storage.sql
+            embedded.sqlite_sha256 = sha256.hex_via(require("titan")._sha256_binary, storage.sqlite)
+            companions[2] = { name = sqlite, bytes = storage.sqlite }
+        end
+    end
     local module
-    module, err = browserlink.embed(factory, loader, IMAGE, identity)
+    module, err = browserlink.embed(factory, loader, IMAGE, identity, embedded)
     if not module then return nil, err end
-    return { mjs = module, wasm = image, trace = trace, map = map }
+    return { mjs = module, wasm = image, trace = trace, map = map, companions = companions }
 end
 
 -- The titanc.wasm protocol, private to that host and its titanc.mjs adapter.
@@ -494,10 +519,18 @@ function operations.emit_c(service, strings)
     return ok(result)
 end
 
+-- The bundle's storage sources follow the loader, all four or none.
 function operations.build_trace(_, strings)
-    local image, err = playground.build_trace(strings[2], strings[3], strings[4], strings[5])
+    if strings[6] ~= nil and strings[9] == nil then error("incomplete browser storage sources", 0) end
+    local image, err = playground.build_trace(strings[2], strings[3], strings[4], strings[5], strings[6] and
+        { vfs = strings[6], sql = strings[7], worker = strings[8], sqlite = strings[9] })
     if not image then error(err, 0) end
-    return encode_message("ok", "null", image.mjs, image.wasm, image.trace, image.map)
+    local names, files = array(), {}
+    for index, companion in ipairs(image.companions) do
+        names[index], files[index] = companion.name, companion.bytes
+    end
+    return encode_message("ok", table.concat(encode_json(names, {})), image.mjs, image.wasm, image.trace, image.map,
+        table.unpack(files))
 end
 
 -- The request handler titanc.wasm keeps: `open` first, with the catalog,

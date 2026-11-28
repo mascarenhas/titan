@@ -12360,6 +12360,7 @@ function driver.browser_entrypoint_contents(modname, program_name, options)
     local initializer = [[
 static int titan_browser_initialize_worker(lua_State *L) {
     luaL_openlibs(L);
+    titan_browser_install_tmp_io(L);
     titan_install_searcher(L);
     if (luaL_loadstring(L, TITAN_LUA_BROWSER_PROFILE) != LUA_OK) return lua_error(L);
     lua_call(L, 0, 0);
@@ -15505,6 +15506,9 @@ function driver.preflight_build_outputs(context, plan, options)
             output(wasm, "browser Wasm")
             output(wasm .. ".map", "browser source map")
             output(wasm .. ".trace", "browser trace table")
+            local worker, sqlite = driver.browserlink.companion_names(wasm)
+            output(worker, "browser storage worker")
+            output(sqlite, "browser SQLite service")
         elseif platform.windows then
             local paths, err = driver.windows_program_paths(
                 options.test and require("titan-compiler.test_runner").MODULE_NAME or main,
@@ -15956,16 +15960,17 @@ function driver.run_standalone_archive_probe(
         for _, flag in ipairs(extra_flags) do
             if not trace_option(flag) then protocol_flags[#protocol_flags + 1] = flag end
         end
-        local base
-        base, err = create_compile_log()
-        if not base then return nil, err end
-        os.remove(base)
+        -- Every probe artifact, the companions a storage-linking image
+        -- publishes included, lives in one private directory the probe owns.
+        local directory
+        directory, err = create_compile_log()
+        if not directory then return nil, err end
+        os.remove(directory)
+        local made, mkdir_error = lfs.mkdir(directory)
+        if not made then return nil, "cannot create browser protocol probe directory: " .. tostring(mkdir_error) end
+        local cleanup <close> = setmetatable({}, { __close = function() remove_path(directory) end })
+        local base = path.join(directory, "probe")
         local source, image, stand_ins = base .. ".c", base .. ".mjs", base .. ".imports.mjs"
-        local cleanup <close> = setmetatable({}, { __close = function()
-            os.remove(source); os.remove(base .. ".o")
-            os.remove(image); os.remove(base .. ".wasm"); os.remove(base .. ".wasm.map")
-            os.remove(base .. ".wasm.trace"); os.remove(stand_ins)
-        end })
         local linked, term, code = driver.compile_browser_image(
             standalone_archive_probe_source(entries, module_names, true),
             source, image, libnames, static_archives, extra_objects, verbose,
@@ -16202,8 +16207,10 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     return true
 end
 
--- Publish the extended map and Wasm before the mjs commit rename. Every
--- predecessor survives a rename or certificate failure.
+-- Publish the extended map, the Wasm and the storage companions the image
+-- links before the mjs commit rename; a companion the image no longer links
+-- retires with the commit. Every predecessor survives a rename or
+-- certificate failure.
 function driver.compile_browser_image(contents, entrypoint, executable,
         objects, archives, extra_objects, verbose, options)
     options = options or {}
@@ -16252,14 +16259,18 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     executable, wasm = driver.browser_program_path(executable, executable)
     if not executable then return nil, wasm end
     local sdk_inputs = { assets.runtime, context.target_descriptor.paths.liblua,
-        context.target_descriptor.paths.lua_record, assets.factory, assets.loader }
+        context.target_descriptor.paths.lua_record, assets.factory, assets.loader,
+        assets.vfs, assets.sql, assets.storage_worker, assets.sqlite_service }
     local inputs = { table.unpack(sdk_inputs) }
     append_argv(inputs, objects)
     append_argv(inputs, archives)
     append_argv(inputs, extra_objects)
     append_argv(inputs, libraries)
+    -- The image's companions exist only when it links the storage runtime,
+    -- but their names are always the image's.
+    local worker, sqlite = driver.browserlink.companion_names(wasm)
     valid, err = driver.validate_program_output_paths({}, executable, entrypoint,
-        inputs, { wasm, wasm .. ".map", wasm .. ".trace" }, {}, context)
+        inputs, { wasm, wasm .. ".map", wasm .. ".trace", worker, sqlite }, {}, context)
     if not valid then return nil, err end
     valid, err = ensure_output_parent(executable)
     if not valid then return nil, err end
@@ -16369,7 +16380,65 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     if not factory_bytes then return nil, err end
     loader_bytes, err = context.io:read_file(assets.loader)
     if not loader_bytes then return nil, err end
-    module_bytes, err = driver.browserlink.embed(factory_bytes, loader_bytes, wasm:match("([^/\\]+)$"), identity)
+    -- The storage runtime the linked image imports: its JavaScript joins the
+    -- module, its worker (and SQLite service) are published beside it.
+    local linked_storage, storage = driver.browserlink.storage(inventory.imports), nil
+    -- Titan owns a companion an earlier link evidently wrote: a worker with
+    -- Titan's sentinel line, or a service the predecessor module names by
+    -- digest. A link replaces or retires only those; any other file of that
+    -- name is the user's, and a link that would replace it fails before
+    -- touching any predecessor.
+    local predecessor_digest
+    local function owned(filename, is_worker)
+        local bytes = context.io:read_file(filename)
+        if not bytes then return false end
+        if is_worker then return driver.browserlink.generated_worker(bytes) end
+        if predecessor_digest == nil then
+            local predecessor = lfs.symlinkattributes(executable, "mode") == "file" and context.io:read_file(executable)
+            predecessor_digest = predecessor and driver.browserlink.embedded_sqlite_digest(predecessor) or false
+        end
+        return predecessor_digest ~= false and
+            predecessor_digest == sha256.hex_via(context.cache_adapter and context.cache_adapter.sha256_binary, bytes)
+    end
+    local staged_worker, staged_sqlite = driver.browserlink.companion_names(staged_wasm)
+    local companions = {}
+    for _, companion in ipairs({ { worker, staged_worker, linked_storage ~= nil, true },
+            { sqlite, staged_sqlite, linked_storage == "sql", false } }) do
+        local destination, source, published, is_worker = table.unpack(companion, 1, 4)
+        local present = lfs.symlinkattributes(destination, "mode") == "file"
+        if present and not owned(destination, is_worker) then
+            if published then
+                return nil, "browser output '" .. destination .. "' exists but Titan did not write it; " ..
+                    "move it away or link the image under another name"
+            end
+        elseif published then
+            companions[#companions + 1] = { source = source, destination = destination }
+        elseif present then
+            companions[#companions + 1] = { destination = destination, retired = true }
+        end
+    end
+    if linked_storage then
+        local vfs_bytes, worker_bytes
+        vfs_bytes, err = context.io:read_file(assets.vfs)
+        if not vfs_bytes then return nil, err end
+        worker_bytes, err = context.io:read_file(assets.storage_worker)
+        if not worker_bytes then return nil, err end
+        valid, err = context.io:write_file(staged_worker, driver.browserlink.worker_module(worker_bytes, identity))
+        if not valid then return nil, err end
+        storage = { vfs = vfs_bytes }
+        if linked_storage == "sql" then
+            local service_bytes
+            storage.sql, err = context.io:read_file(assets.sql)
+            if not storage.sql then return nil, err end
+            service_bytes, err = context.io:read_file(assets.sqlite_service)
+            if not service_bytes then return nil, err end
+            storage.sqlite_sha256 = incremental.file_digest(context, assets.sqlite_service, service_bytes)
+            valid, err = context.io:write_file(staged_sqlite, service_bytes)
+            if not valid then return nil, err end
+        end
+    end
+    module_bytes, err = driver.browserlink.embed(factory_bytes, loader_bytes, wasm:match("([^/\\]+)$"), identity,
+        storage)
     if not module_bytes then return nil, err end
     valid, err = context.io:write_file(staged, module_bytes)
     if not valid then return nil, err end
@@ -16381,8 +16450,9 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         { source = staged_trace, destination = trace },
         { source = staged_map, destination = map },
         { source = staged_wasm, destination = wasm },
-        { source = staged, destination = executable },
     }
+    for _, companion in ipairs(companions) do outputs[#outputs + 1] = companion end
+    outputs[#outputs + 1] = { source = staged, destination = executable }
     local function rollback(reason)
         for index = #outputs, 1, -1 do
             local output = outputs[index]
@@ -16414,9 +16484,11 @@ function driver.compile_browser_image(contents, entrypoint, executable,
             if not valid then return rollback(err) end
             output.backed = true
         end
-        valid, err = rename_output(output.source, output.destination)
-        if not valid then return rollback(err) end
-        output.published = true
+        if not output.retired then
+            valid, err = rename_output(output.source, output.destination)
+            if not valid then return rollback(err) end
+            output.published = true
+        end
     end
     if options.after_publish then
         local called, committed, commit_error = pcall(options.after_publish)

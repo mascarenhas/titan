@@ -302,22 +302,22 @@ invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):
 `titan.transfer`, and `titan.thread`. `titan.uv`, `titan.async`, `titan.http`,
 `titan.websocket`, `titan.os`, `titan.peg`, `titan.string`, `titan.sqlite3`,
 `titan.json`, `titan.lua`, `titan.protobuf`, and `titan.thread` are folder
-ensembles; the others are flat sources. The mains of `titan.fs`,
-`titan.net`, `titan.ssl`, `titan.uv`, `titan.http`, `titan.websocket`,
-`titan.sqlite3` and `titan.thread` are `native` variants
-(`titan/fs.native.titan`, `titan/uv/uv.native.titan`), so the browser target
-has none of them. `titan.os` and `titan.lua` have shared mains with native and
-browser contributors: browser `os` omits native host/process capabilities,
-and browser `lua` omits file loading and background execution.
-The complete shared `titan.io` facade imports the selected `os` composition.
-`titan.timer` has a `native` and a `browser` variant
-(`titan/timer.native.titan`, `titan/timer.browser.titan`) with one public
-interface. Fourteen shared roots including `io`, the target-specific
-compositions of `async`, `timer`, `os`, `lua`, `http`, and `websocket`, and the
-browser-only `titan.browser` form the twenty-one-module [browser standard
-provider](browser-target.md#the-browser-standard-library). The root order is
-not topological (`titan.async` precedes `titan.string`, which it imports);
-recursive import loading resolves dependencies while the roots are processed.
+ensembles; the others are flat sources. The mains of `titan.net`, `titan.ssl`,
+`titan.uv`, and `titan.thread` are native-only variants
+(`titan/net.native.titan`, `titan/uv/uv.native.titan`), so the browser target
+omits them. `titan.fs` and `titan.timer` pair flat `.native.titan` and
+`.browser.titan` variants; `titan.sqlite3`, `titan.os`, `titan.lua`,
+`titan.http`, and `titan.websocket` compose shared and target-specific
+contributors (browser `lua` shares `loading.titan` and omits only
+`background.native.titan`; browser `os` omits host identity, clocks, signals,
+and processes). The complete shared `titan.io` facade imports the selected `os`
+composition. Fourteen shared roots including `io`, the target-specific
+compositions of `async`, `timer`, `fs`, `sqlite3`, `os`, `lua`, `http`, and
+`websocket`, and the browser-only `titan.browser` form the twenty-three-module
+[browser standard provider](browser-target.md#the-browser-standard-library).
+The root order is not topological (`titan.async` precedes `titan.string`, which
+it imports); recursive import loading resolves dependencies while the roots are
+processed.
 The invocation publishes root `titan.so` and `titan.a`:
 
 ```sh

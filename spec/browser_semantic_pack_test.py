@@ -218,7 +218,7 @@ local context = driver.new_resolver_context({
     io = io, target = "browser", analysis_only = true, browser_analysis_target = target,
 })
 local json, provider, _, inventory = driver.find_static_interface("", "titan.json", context)
-assert(json and provider == target.provider_file and #inventory.key_order == 21)
+assert(json and provider == target.provider_file and #inventory.key_order == 23)
 assert(driver.language_server_cache_identity({ context = context }))
 assert(driver.close_resolver_context(context))
 """, relocated)

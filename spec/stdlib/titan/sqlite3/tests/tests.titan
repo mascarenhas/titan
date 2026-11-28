@@ -1,4 +1,6 @@
--- Public behavior of the canonical embedded SQLite provider.
+-- Public behavior of the canonical embedded SQLite provider. Every default
+-- contributor runs on native and browser targets; .native.titan and
+-- .browser.titan contributors hold the cases one target alone can express.
 local test = import "test"
 local sqlite3 = import "sqlite3"
 local runtime_test = import "support.runtime.titan"

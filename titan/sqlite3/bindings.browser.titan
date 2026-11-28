@@ -1,0 +1,296 @@
+-- The titan:sqlite3 frame codec. The storage worker's SQLite service answers
+-- each request frame with one reply frame; the transport forwards both as
+-- opaque bytes. Version 1 frames are little-endian: a 16-byte header (op,
+-- version or status, then a u64 connection or statement id), then the body.
+-- Wire format: doc/implementation/sqlite3-library.md#browser-service-frames
+
+local const FRAME_VERSION = 1
+local const HEADER_BYTES = 16
+
+local const OP_OPEN = 1
+local const OP_PREPARE = 2
+local const OP_EXECUTE = 3
+local const OP_QUERY = 4
+local const OP_FETCH = 5
+local const OP_RESET = 6
+local const OP_FINALIZE = 7
+local const OP_CLOSE = 8
+local const OP_AUTOCOMMIT = 10
+local const OP_BEGIN = 11
+local const OP_COMMIT = 12
+local const OP_ROLLBACK = 13
+
+local const STATUS_OK = 0
+local const STATUS_ERROR = 1
+local const STATUS_PROTOCOL = 2
+
+-- A u32 text length that marks an absent text.
+local const ABSENT_TEXT = 0xFFFFFFFF
+
+-- The service's frame limits. Requests are checked here, before anything is
+-- sent; an oversized reply arrives as the service's SQLITE_TOOBIG failure.
+local const MAX_TEXT_BYTES = 16 * 1024 * 1024
+local const MAX_CELL_BYTES = 32 * 1024 * 1024
+local const MAX_FRAME_BYTES = 64 * 1024 * 1024
+local const SQLITE_TOOBIG = 18
+
+local function too_big(subject: string, operation: string): Error
+  return Error {
+    message = subject .. " exceeds the browser frame limit",
+    code = SQLITE_TOOBIG,
+    extended_code = SQLITE_TOOBIG,
+    operation = operation
+  }
+end
+
+local function malformed_reply(operation: string): Error
+  return Error {
+    message = "malformed SQLite reply frame",
+    code = nil,
+    extended_code = nil,
+    operation = operation
+  }
+end
+
+-- A request with no body: every statement and connection op but these below.
+local function handle_frame(op: integer, handle: integer): string
+  return string.pack("<BBI2I4I8", op, FRAME_VERSION, 0, 0, handle)
+end
+
+-- A text the frame limits refuse is refused before anything scans, copies
+-- or extends it.
+local function check_text_size(text: string, subject: string, operation: string)
+  if #text > MAX_TEXT_BYTES then raise too_big(subject, operation) end
+end
+
+-- OPEN with its path, or PREPARE with its SQL.
+local function text_frame(op: integer, handle: integer, text: string,
+                          subject: string, operation: string): string
+  check_text_size(text, subject, operation)
+  return string.pack("<BBI2I4I8s4", op, FRAME_VERSION, 0, 0, handle, text)
+end
+
+-- The cell bytes of a TEXT or BLOB argument, known before argument_cell
+-- scans its UTF-8; nil for any other argument, whose fixed-size cell
+-- argument_cell checks first.
+local function argument_bytes(candidate: value): integer?
+  if candidate is string then return #(candidate as string) end
+  if candidate is Blob then return #(candidate as Blob).bytes end
+  return nil
+end
+
+-- EXECUTE or QUERY with one cell per argument. The vararg run itself is
+-- encoded, so trailing nil arguments stay NULL cells.
+local function argument_frame(op: integer, handle: integer, operation: string,
+                              ...: value): string
+  const builder = string.writer()
+  builder:write(string.pack("<BBI2I4I8", op, FRAME_VERSION, 0, #..., handle))
+  local size = HEADER_BYTES
+  for index = 1, #... do
+    -- A TEXT or BLOB cell's exact cost (kind, length, bytes) is checked
+    -- before its scan; a NULL (1 byte) or number (9 bytes) after it is
+    -- validated, so an unsupported argument reports its own error.
+    const length? = argument_bytes(...[index])
+    if length ~= nil then
+      if length > MAX_CELL_BYTES then raise too_big("argument " .. index, operation) end
+      if size + 5 + length > MAX_FRAME_BYTES then raise too_big("SQLite request", operation) end
+    end
+    const kind, number, real, bytes = argument_cell(...[index], index, operation)
+    if kind == CELL_INTEGER then
+      builder:write(string.pack("<Bi8", kind, number))
+      size = size + 9
+    elseif kind == CELL_FLOAT then
+      builder:write(string.pack("<Bd", kind, real))
+      size = size + 9
+    elseif kind == CELL_NULL then
+      builder:write(string.char(kind))
+      size = size + 1
+    else
+      builder:write(string.pack("<BI4", kind, #bytes))
+      builder:write(bytes)
+      size = size + 5 + #bytes
+    end
+    if size > MAX_FRAME_BYTES then raise too_big("SQLite request", operation) end
+  end
+  return builder:drain()
+end
+
+-- The failure a reply reports, or nil when it reports success, after its
+-- header is checked against the request (op and handle). The message
+-- matches native: cleanup details follow the original failure. A protocol
+-- failure may echo op 0, when the service could not read the request header.
+local function reply_failure(reply: string, op: integer, handle: integer,
+                             operation: string): Error?
+  if #reply < HEADER_BYTES then raise malformed_reply(operation) end
+  local echoed: integer, status: integer, writing: integer, reserved: integer,
+        reserved_tail: integer, replied: integer, start: integer =
+    string.unpack("<BBBBI4I8", reply)
+  if writing > 1 or reserved ~= 0 or reserved_tail ~= 0 then raise malformed_reply(operation) end
+  if status == STATUS_OK then
+    if echoed ~= op then raise malformed_reply(operation) end
+    -- OPEN and PREPARE name the connection or statement they made; every
+    -- other reply names the request's own.
+    if op == OP_OPEN or op == OP_PREPARE then
+      if replied == 0 then raise malformed_reply(operation) end
+    elseif replied ~= handle then
+      raise malformed_reply(operation)
+    end
+    return nil
+  end
+  if status == STATUS_ERROR then
+    if echoed ~= op then raise malformed_reply(operation) end
+  elseif status == STATUS_PROTOCOL then
+    if echoed ~= op and echoed ~= 0 then raise malformed_reply(operation) end
+  else
+    raise malformed_reply(operation)
+  end
+  local code: integer, extended: integer, message: string,
+        cleanup_code: integer, position: integer =
+    string.unpack("<i4i4s4i4", reply, start)
+  local cleanup: string? = nil
+  const length: integer = string.unpack("<I4", reply, position)
+  if length == ABSENT_TEXT then
+    position = position + 4
+  else
+    local text: string, after: integer = string.unpack("<s4", reply, position)
+    cleanup = text
+    position = after
+  end
+  if position ~= #reply + 1 then raise malformed_reply(operation) end
+  if cleanup_code ~= 0 then
+    message = message .. "; cleanup: " ..
+      (cleanup or ("SQLite code " .. cleanup_code))
+  end
+  if code == 0 then
+    return Error {
+      message = message, code = nil, extended_code = nil, operation = operation
+    }
+  end
+  return Error {
+    message = message, code = code, extended_code = extended, operation = operation
+  }
+catch
+  if error is Error then raise end
+  raise malformed_reply(operation)
+end
+
+-- The status of a reply that reply_failure has read.
+local function reply_status(reply: string): integer
+  const status: integer = (reply as foreign const *unsigned char)[1]
+  return status
+end
+
+local function empty_reply(reply: string, operation: string)
+  if #reply ~= HEADER_BYTES then raise malformed_reply(operation) end
+end
+
+-- OPEN's new connection id.
+local function open_reply(reply: string, operation: string): integer
+  empty_reply(reply, operation)
+  const connection: integer = string.unpack("<I8", reply, 9)
+  return connection
+end
+
+-- PREPARE's new statement id and its parameter count.
+local function prepare_reply(reply: string, operation: string): (integer, integer)
+  if #reply ~= HEADER_BYTES + 8 then raise malformed_reply(operation) end
+  local statement: integer, parameters: integer = string.unpack("<I8I4", reply, 9)
+  return statement, parameters
+end
+
+-- EXECUTE's changed-row count.
+local function changes_reply(reply: string, operation: string): integer
+  if #reply ~= HEADER_BYTES + 8 then raise malformed_reply(operation) end
+  const changes: integer = string.unpack("<i8", reply, HEADER_BYTES + 1)
+  return changes
+end
+
+-- The autocommit flag of AUTOCOMMIT, BEGIN, COMMIT and ROLLBACK.
+local function autocommit_reply(reply: string, operation: string): boolean
+  if #reply ~= HEADER_BYTES + 1 then raise malformed_reply(operation) end
+  const autocommit: integer = (reply as foreign const *unsigned char)[HEADER_BYTES]
+  if autocommit > 1 then raise malformed_reply(operation) end
+  return autocommit == 1
+end
+
+local function decode_columns(reply: string, start: integer): (const {Column}, integer)
+  local count: integer, position: integer = string.unpack("<I4", reply, start)
+  const columns: {Column} = {}
+  for index = 1, count do
+    local name: string, after: integer = string.unpack("<s4", reply, position)
+    position = after
+    local declared_type: string? = nil
+    const length: integer = string.unpack("<I4", reply, position)
+    if length == ABSENT_TEXT then
+      position = position + 4
+    else
+      local declared: string, next: integer = string.unpack("<s4", reply, position)
+      declared_type = declared
+      position = next
+    end
+    columns[index] = Column(name, declared_type)
+  end
+  return columns as const {Column}, position
+end
+
+-- A row-or-done body that ends the reply: nil when the execution is done.
+local function decode_row(reply: string, start: integer, columns: const {Column},
+                          operation: string): Row?
+  -- Tags are read in place; each cell's payload through one unpack.
+  const bytes = reply as foreign const *unsigned char
+  if start > #reply then raise malformed_reply(operation) end
+  const has_row: integer = bytes[start - 1]
+  local position = start + 1
+  if has_row == 0 then
+    if position ~= #reply + 1 then raise malformed_reply(operation) end
+    return nil
+  end
+  if has_row ~= 1 then raise malformed_reply(operation) end
+  const cells: {value} = {}
+  for index = 1, #columns do
+    if position > #reply then raise malformed_reply(operation) end
+    const tag: integer = bytes[position - 1]
+    if tag == CELL_INTEGER then
+      local number: integer, after: integer = string.unpack("<i8", reply, position + 1)
+      cells[index] = number
+      position = after
+    elseif tag == CELL_FLOAT then
+      local number: float, after: integer = string.unpack("<d", reply, position + 1)
+      cells[index] = number
+      position = after
+    elseif tag == CELL_TEXT then
+      local text: string, after: integer = string.unpack("<s4", reply, position + 1)
+      cells[index] = text
+      position = after
+    elseif tag == CELL_BLOB then
+      local bytes: string, after: integer = string.unpack("<s4", reply, position + 1)
+      cells[index] = Blob(bytes)
+      position = after
+    elseif tag == CELL_NULL then
+      position = position + 1
+    else
+      raise malformed_reply(operation)
+    end
+  end
+  if position ~= #reply + 1 then raise malformed_reply(operation) end
+  return Row(columns, cells as const {value})
+end
+
+-- QUERY's columns, then its first row or nil when the query is done.
+local function query_reply(reply: string, operation: string): (const {Column}, Row?)
+  local columns: const {Column}, position: integer =
+    decode_columns(reply, HEADER_BYTES + 1)
+  return columns, decode_row(reply, position, columns, operation)
+catch
+  if error is Error then raise end
+  raise malformed_reply(operation)
+end
+
+-- FETCH's next row, or nil when the query is done.
+local function fetch_reply(reply: string, columns: const {Column},
+                           operation: string): Row?
+  return decode_row(reply, HEADER_BYTES + 1, columns, operation)
+catch
+  if error is Error then raise end
+  raise malformed_reply(operation)
+end

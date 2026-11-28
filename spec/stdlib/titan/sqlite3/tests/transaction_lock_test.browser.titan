@@ -1,0 +1,38 @@
+-- Browser lock contention: the SQLite service's titan VFS keeps SQLite's
+-- dot-file locks, where any lock excludes every other connection, so a
+-- reader's active Cursor refuses the writer's first write. Natively the write
+-- succeeds and COMMIT fails instead (transaction_lock_test.native.titan).
+
+function test_contended_write_preserves_active_transaction_and_native_busy_code(
+    context: test.Context)
+  runtime_test.run(function ()
+    const path = fs.tmpname()
+    defer fs.unlink(path)
+    const writer = sqlite3.connect(path)
+    defer writer:close()
+    execute_sql(writer, "CREATE TABLE item (value INTEGER)")
+    execute_sql(writer, "INSERT INTO item VALUES (1)")
+    const reader = sqlite3.connect(path)
+    defer reader:close()
+    const statement = reader:prepare("SELECT value FROM item")
+    defer statement:close()
+    const cursor = statement:query()
+    defer cursor:close()
+    assert_integer_cell(required_row(cursor), 1, 1)
+    writer:set_autocommit(false)
+    const insert = writer:prepare("INSERT INTO item VALUES (2)")
+    defer insert:close()
+    const failure = expect_native_error(function () insert:execute() end, 5)
+    test.assert(failure.operation == "execute",
+                "contended write reported the wrong operation")
+    test.assert(not writer:get_autocommit(),
+                "failed write pretended the transaction had ended")
+    cursor:close()
+    test.assert(insert:execute() == 1,
+                "write retry after releasing the reader changed no row")
+    writer:commit()
+    test.assert(writer:get_autocommit() and
+                scalar_integer(writer, "SELECT count(*) FROM item") == 2,
+                "explicit retry after releasing the reader did not commit")
+  end)
+end

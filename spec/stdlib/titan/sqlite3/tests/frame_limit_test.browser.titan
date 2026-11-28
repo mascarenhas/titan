@@ -1,0 +1,55 @@
+-- Browser-only frame limits of the SQLite service: 16 MiB of SQL text or
+-- database path, 32 MiB per TEXT or BLOB cell, 64 MiB per frame. A request
+-- past them is refused before it is sent, and a result past them fails in the
+-- service; each reports SQLITE_TOOBIG and leaves its owners reusable.
+local const BROWSER_FRAME_MIB = 1024 * 1024
+
+local function expect_frame_limit(action: function (): (), subject: string,
+                                  operation: string)
+  const failure = expect_native_error(action, 18)
+  test.assert(failure.extended_code == 18 and failure.operation == operation and
+              failure.message == subject .. " exceeds the browser frame limit",
+              "frame limit of " .. subject .. " reported: " .. failure.message)
+end
+
+function test_browser_frame_limits_report_sqlite_toobig(_: test.Context)
+  runtime_test.run(function ()
+    const connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    expect_frame_limit(function ()
+      const opened = sqlite3.connect("/" .. string.rep("p", 16 * BROWSER_FRAME_MIB))
+      opened:close()
+    end, "database path", "connect")
+    expect_frame_limit(function ()
+      const prepared = connection:prepare("SELECT 1" .. string.rep(" ", 16 * BROWSER_FRAME_MIB))
+      prepared:close()
+    end, "SQL", "prepare")
+    const arguments = connection:prepare("SELECT ?, ?, ?")
+    defer arguments:close()
+    expect_frame_limit(function ()
+      const cursor = arguments:query(sqlite3.Blob(string.rep("\0", 32 * BROWSER_FRAME_MIB + 1)),
+                                     nil, nil)
+      cursor:close()
+    end, "argument 1", "query")
+    const cell = sqlite3.Blob(string.rep("\0", 22 * BROWSER_FRAME_MIB))
+    expect_frame_limit(function ()
+      const cursor = arguments:query(cell, cell, cell)
+      cursor:close()
+    end, "SQLite request", "query")
+    const generated = connection:prepare("SELECT zeroblob(?)")
+    defer generated:close()
+    expect_frame_limit(function ()
+      const cursor = generated:query(32 * BROWSER_FRAME_MIB + 1)
+      cursor:close()
+    end, "SQLite result", "query")
+    const reused = generated:query(16)
+    defer reused:close()
+    const blob: sqlite3.Blob = required_row(reused):get(1)
+    test.assert(blob.bytes == string.rep("\0", 16),
+                "an oversized result left its Statement unusable")
+    reused:close()
+    const small = arguments:query(sqlite3.Blob("\0"), "text", 3)
+    defer small:close()
+    assert_integer_cell(required_row(small), 3, 3)
+  end)
+end

@@ -52,7 +52,8 @@ changed.
 | `headers.tar` | Two include roots, `lua` (the verified browser Lua headers) and `sdk` (`browsertarget.SDK_HEADERS`), as a deterministic ustar archive with relative names of at most 100 bytes and directory entries without a trailing slash. |
 | `link-plan.json` | `compile_flags`, `include_roots` and the program profile's `link_flags` and `optimizer_flags`, all from the real validated [descriptor](browser-target.md#the-descriptor). |
 | `titan-browser.mjs`, `titan-wasm-factory.mjs` | The SDK loader and factory `build_trace` embeds. |
-| `LICENSE`, `THIRD_PARTY_NOTICES.md`, `LICENSES/` | Notices for every redistributed file. |
+| `titan-browser-vfs.mjs`, `titan-browser-sql.mjs`, `titan-storage-worker.mjs`, `titan-sqlite3-service.wasm` | The SDK storage runtime assets `build_trace` embeds or publishes as `app.worker.mjs` and `app.sqlite3.wasm` when a playground program links the filesystem or SQLite. |
+| `LICENSE`, `THIRD_PARTY_NOTICES.md`, `LICENSES/` | Notices for every redistributed file (including `LICENSES/uwasi-LICENSE`). |
 
 `scripts/playground_sdk.lua` builds them in order:
 
@@ -60,11 +61,10 @@ changed.
    --c-source` from the same sources and descriptor flags as the SDK's, with
    members named after their sources.
 2. The browser standard library roots, rebuilt with `--no-source-records`
-   against that LPegLabel archive into `titan.a`, which must stay under the
-   site's 25 MiB per-file limit. The build claims its output directory for the
-   browser target (`driver.validate_output_target`, as titanc claims an empty
-   one), copies the checkout's `titan/` tree inside it, and runs there with
-   `TITAN_PATH_0_6=.`.
+   against that LPegLabel archive into `titan.a`. The build claims its output
+   directory for the browser target (`driver.validate_output_target`, as titanc
+   claims an empty one), copies the checkout's `titan/` tree inside it, and
+   runs there with `TITAN_PATH_0_6=.`.
 3. `analysis-target` with `provider_sha256` set to the new archive's digest
    (`browsertarget.encode_analysis_data`), and the catalog from
    `driver.browser_analysis_target` over that semantic pack.
@@ -75,7 +75,9 @@ changed.
    script's own build flags cleared first.
 6. `headers.tar`.
 7. `titanc.wasm`.
-8. The remaining archives, JavaScript and notices.
+8. The remaining archives, JavaScript, storage assets, and notices, followed by
+   a size check requiring every published file—including every notice under
+   `LICENSES/`—to stay below `MAX_ASSET_BYTES` (25 MiB).
 9. `scripts/playground_smoke.mjs`, which opens the new compiler over its own
    catalog and checks, describes, completes and emits a two-module program.
 
@@ -83,12 +85,13 @@ changed.
 
 The bundle is byte-identical for the same sources and tools wherever the
 checkout, prefix and `wasi-sdk` live. Every C object it ships is compiled with
-`-ffile-prefix-map` entries that rename the checkout and the provider's
-source copy to `.`, the installation to `titan-sdk` and `wasi-sdk` to
-`wasi-sdk` (sorted so the most specific prefix wins), so neither line tables
-nor `__FILE__` strings name a host path, and provider line tables name
-`./titan/...`. A provider module's interface names the C types it uses by
-the identity of their declaring header, which is a path; the source copy puts
+`-ffile-prefix-map` entries that rename the checkout, the provider's build
+output root (`lean_dir`), and the provider's source copy (`provider_sources`)
+to `.`, the installation to `titan-sdk`, and `wasi-sdk` to `wasi-sdk` (sorted
+by ascending prefix length so the most specific prefix wins), so neither line
+tables nor `__FILE__` strings name a host path, and generated C and provider
+line tables name `./titan/...`. A provider module's interface names the C types
+it uses by the identity of their declaring header, which is a path; the source copy puts
 the headers beside the library's sources under the build's output root, which
 the compiler [relocates](incremental-compilation.md) to `<titan:output>`, so
 those identities do not name the checkout either. The browser Lua archive
@@ -228,13 +231,17 @@ misspelled target label is a diagnostic on its file.
 | `hover(files, cursor)` | In the module owning the cursor's file, the innermost checked node whose written name covers the byte offset: `{ at, signature, summary?, declaration? }`. |
 | `complete(files, cursor)` | `completion.prepare`, then, in the module owning the cursor's file, a private analysis context over the transformed snapshot: `{ replace, items }`. Inside an import string the host answers instead, as the [completion contract](completion.md) asks: every import spelling the parser maps to a loadable module, namely the other project modules as `name` and `name.titan`, and each SDK module by its canonical name and its standard shorthand (`driver.browser_analysis_modules`). A spelling `parser.normalize_import` maps to a different module is not offered, and modules absent from the target are not in the catalog. |
 | `emit_c(files, identity)` | An emit-only context rooted at `main`: `{ files, units, entry, diagnostics }`; language errors return diagnostics and no units. |
-| `build_trace(linked, identity, factory, loader)` | `browsertrace.dwarf_map`, `browserlink.image_inventory`, `browsertrace.rewrite` and `browserlink.embed` on the optimized image, named `app.wasm`. |
+| `build_trace(linked, identity, factory, loader, storage?)` | `browsertrace.dwarf_map`, `browserlink.image_inventory`, `browsertrace.rewrite`, `browserlink.storage`, and `browserlink.embed` on the optimized image (`app.wasm`), returning `{ mjs, wasm, trace, map, companions }` where `companions` holds `app.worker.mjs` (and `app.sqlite3.wasm` for SQLite) when linked. |
 
 The private wire format is a little-endian `u32` count of `u32`-length-prefixed
 byte strings in both directions: the operation and its arguments (file maps as
 path and contents pairs, offsets in decimal), then `ok` and a JSON result or
-`error` and a message; `build_trace` returns its four outputs as further
-strings rather than JSON.
+`error` and a message. For `build_trace`, the four optional storage sources
+(`vfs`, `sql`, `worker`, `sqlite`) follow `loader` as all four or none (a
+partial tuple throws `TypeError` in `titanc.mjs` and errors in
+`operations.build_trace`); the reply's JSON result lists companion filenames
+and its trailing binary strings carry `mjs`, `wasm`, `trace`, `map`, and each
+companion's bytes in order.
 
 `titan-runtime/playground/titanc.mjs` instantiates the module with exactly the
 WASI functions it imports (standard output and error and the clocks work;

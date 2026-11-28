@@ -66,7 +66,7 @@ plan:
         return relative
     end
 
-    it("keeps all twenty-three portable owners in the single-image root inventory", function()
+    it("keeps all twenty-five portable owners in the single-image root inventory", function()
         local result = root_plan()
         assert.is_true(result.ok, result.output)
         local roots, count = {}, 0
@@ -74,7 +74,7 @@ plan:
             assert.is_nil(roots[root], root)
             roots[root], count = true, count + 1
         end
-        assert.equal(23, count, "the audited browser inventory has 23 owners; change this deliberately")
+        assert.equal(25, count, "the audited browser inventory has 25 owners; change this deliberately")
         assert.is_true(roots["transfer.tests"])
         assert.is_true(roots["protobuf.tests"])
         assert.is_true(roots["protobuf.portable_tests"])
@@ -82,7 +82,9 @@ plan:
         assert.is_true(roots["timer.tests"])
         assert.is_true(roots["os.tests"])
         assert.is_true(roots["io.tests"])
+        assert.is_true(roots["fs.tests"])
         assert.is_true(roots["lua.tests"])
+        assert.is_true(roots["sqlite3.tests"])
         assert.is_true(roots["http.tests"])
         assert.is_true(roots["websocket.tests"])
     end)
@@ -165,7 +167,12 @@ plan:
                 if assignment then sources[#sources + 1] = assignment end
             end
         end
-        local sdk = table.concat(sources, "\n")
+        -- Only the SDK's standalone SQLite service, which the storage worker
+        -- runs, compiles SQLite's amalgamation, named by this one directory.
+        -- SQLITE3_ARCHIVE, SQLITE3_CPPFLAGS and every SQLite object stay out
+        -- of the provider build (check_output, check_archive and check_path).
+        local sdk = table.concat(sources, "\n"):gsub("TITAN_BROWSER_SQLITE3_SRC_DIR", "")
+            :gsub("BROWSER_SQLITE3_SRC_DIR", "")
         for _, forbidden in ipairs({ "STDLIB_EXTRA_OBJECTS", "LIBUV_", "OPENSSL_", "LLHTTP_", "SQLITE3_" }) do
             assert.is_nil(sdk:find(forbidden, 1, true), forbidden)
         end
@@ -258,6 +265,45 @@ plan:
         end
     end)
 
+    -- titan/sqlite3/sqlite3.browser.h puts titan/sqlite3/ on the C search
+    -- path, so its includes record missing probes there.
+    it("ignores only missing titan/sqlite3 search probes for ordinary header names", function()
+        local missing = "c-header-search-v2;exists=no;kind=missing;open=unreadable"
+        local found = "c-header-search-v2;exists=yes;kind=file;open=readable"
+        local function headers(dependency)
+            return checks.check_headers({ c_header_dependencies = { dependency } })
+        end
+        for _, path in ipairs({ "/repo/titan/sqlite3/errno.h", "/repo/titan/sqlite3/stdint.h",
+            "/repo/titan/sqlite3/titan/ffi.h", "C:\\Repo\\Titan\\SQLite3\\errno.h" }) do
+            assert(headers({ kind = "search", path = path, identity = missing }), path)
+        end
+        assert(headers({ kind = "file", path = "/repo/titan/sqlite3/sqlite3.browser.h", identity = "fixture" }))
+        local rejected = {
+            { kind = "file", path = "/repo/titan/sqlite3/errno.h", identity = "fixture" },
+            { kind = "search", path = "/repo/titan/sqlite3/errno.h", identity = found },
+            { kind = "search", path = "/repo/titan/sqlite3/native.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/sqlite3.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/sqlite3ext.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/uv.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/openssl/ssl.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/titan/sqlite3/native.h", identity = missing },
+            { kind = "search", path = "/repo/vendor/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/libuv/include/errno.h", identity = missing },
+            { kind = "search", path = "/repo/libuv/include/uv.h", identity = missing },
+            -- A forbidden directory above titan/sqlite3/ still rejects the probe.
+            { kind = "search", path = "/repo/libuv/titan/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/vendor/sqlite3/titan/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/openssl/titan/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/uv/titan/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/llhttp/titan/sqlite3/errno.h", identity = missing },
+        }
+        for _, dependency in ipairs(rejected) do
+            local ok, err = headers(dependency)
+            assert.is_nil(ok, dependency.path)
+            assert.truthy(err:find("forbidden browser stdlib dependency: " .. dependency.path, 1, true), err)
+        end
+    end)
+
     it("rejects defined and undefined symbols from every excluded C library", function()
         for _, name in ipairs({ "uv_run", "SSL_new", "OPENSSL_init_crypto", "llhttp_init", "sqlite3_open" }) do
             for _, defined in ipairs({ true, false }) do
@@ -270,6 +316,63 @@ plan:
                 assert.truthy(err:find(name, 1, true), err)
             end
         end
+    end)
+
+    -- Titan names a module's symbols after the module, so the browser test
+    -- owner sqlite3.tests defines sqlite3_tests_* names and its test runner
+    -- references them. Only names an audited Titan object defines are exempt.
+    it("exempts exactly the library-prefixed names a Titan module's own objects define", function()
+        local defined = { ["sqlite3_tests_init"] = true }
+        assert(checks.check_symbol("sqlite3_tests_init", "owner.o", defined))
+        for _, name in ipairs({ "sqlite3_tests_other", "sqlite3_open", "sqlite3_test_control", "uv_run" }) do
+            local ok, err = checks.check_symbol(name, "owner.o", defined)
+            assert.is_nil(ok, name)
+            assert.truthy(err:find(name, 1, true), err)
+        end
+        assert.is_nil((checks.check_symbol("sqlite3_tests_init", "owner.o")))
+        local function member(module, symbols)
+            return { display_name = (module or "c") .. ".o", bytes = "", object = {
+                metadata = module and { module = module } or nil, symbols = symbols } }
+        end
+        local test_case = "sqlite3_tests_\226\132\179_test_case_titan"
+        local lambda = "sqlite3_tests_\226\132\153_lambda_7"
+        -- The owner and its metadata-free part objects define its names, and
+        -- the runner references them.
+        assert(checks.check_archive("tests.a", { members = {
+            member("sqlite3.tests", { { name = "sqlite3_tests_init", defined = true } }),
+            member(nil, { { name = test_case, defined = true }, { name = lambda, defined = true } }),
+            member("tests__test_runner", { { name = test_case, defined = false } }),
+        } }))
+        local function rejected(members, name)
+            local ok, err = checks.check_archive("tests.a", { members = members })
+            assert.is_nil(ok, name)
+            assert.truthy(err:find("forbidden browser stdlib symbol " .. name, 1, true), err)
+        end
+        -- A separator-mangled name of a module the audit does not hold, and a
+        -- part object's name without a separator.
+        rejected({ member(nil, { { name = test_case, defined = true } }) }, test_case)
+        rejected({ member("sqlite3.tests", { { name = "sqlite3_tests_init", defined = true } }),
+            member(nil, { { name = "sqlite3_tests_open", defined = true } }) }, "sqlite3_tests_open")
+        -- A module whose prefix extends a library prefix references a real
+        -- library call: nothing Titan defines exempts it.
+        rejected({ member("sqlite3.bind", { { name = "sqlite3_bind_init", defined = true },
+            { name = "sqlite3_bind_text64", defined = false } }) }, "sqlite3_bind_text64")
+        -- A non-Titan object defines a name under such a module's prefix.
+        rejected({ member("sqlite3.bind", { { name = "sqlite3_bind_init", defined = true } }),
+            member(nil, { { name = "sqlite3_bind_text64", defined = true } }) }, "sqlite3_bind_text64")
+        rejected({ member("uv.tcp", { { name = "uv_tcp_init", defined = true } }),
+            member(nil, { { name = "uv_tcp_init_ex", defined = true } }) }, "uv_tcp_init_ex")
+        -- uv.tcp's own initializer is libuv's uv_tcp_init: only that module's
+        -- object may define it, so a C object's same-name definition fails.
+        rejected({ member("uv.tcp", { { name = "uv_tcp_init", defined = true } }),
+            member(nil, { { name = "uv_tcp_init", defined = true } }) }, "uv_tcp_init")
+        -- A module named after the library itself exempts nothing.
+        rejected({ member("sqlite3", { { name = "sqlite3_open", defined = true } }) }, "sqlite3_open")
+        -- An absent module exempts nothing either.
+        local ok, err = checks.check_archive("tests.a", { members = {
+            member("titan.uv", { { name = "titan_uv_init", defined = true } }) } })
+        assert.is_nil(ok)
+        assert.truthy(err:find("forbidden browser stdlib module titan.uv", 1, true), err)
     end)
 
     it("audits internal image names independently of optimizer retention", function()
@@ -335,6 +438,15 @@ plan:
     local clock = { "wasi_snapshot_preview1", "clock_time_get", { "i32", "i64", "i32" }, { "i32" } }
     local fixture_sleep = { "env", "fixture_sleep", { "i32" }, {} }
     local fixture_click = { "env", "titan_test_set_click_callback", { "i32", "i32", "i32" }, { "i32" } }
+
+    -- A final image's import is never a Titan definition, so the names the
+    -- build's Titan objects define never excuse one.
+    it("never exempts a final image import from the forbidden-symbol audit", function()
+        local ok, err = checks.check_image(import_image({ { "env", "uv_tcp_init", { "i32" }, {} } }),
+            "import.wasm", { ["uv_tcp_init"] = true })
+        assert.is_nil(ok)
+        assert.equal("import.wasm: forbidden browser stdlib symbol uv_tcp_init", err)
+    end)
 
     it("accepts an image whose imports the reviewed allowlist lists for its classes", function()
         assert.is_true(checks.check_imports(import_image({ completion, clock }), "entry.wasm", { "entry" }))
@@ -434,13 +546,13 @@ plan:
 
     it("uses folder-before-flat and inactive-main fallback in the source audit", function()
         local root = source_fixture()
-        files.write(root .. "/titan/owner.titan", 'local missing = import "fs"\n')
+        files.write(root .. "/titan/owner.titan", 'local missing = import "net"\n')
         files.write(root .. "/titan/owner/owner.titan", "function value(): integer return 1 end\n")
         assert.same({ "titan/owner/owner.titan" }, selected_sources(root))
         assert(os.rename(root .. "/titan/owner/owner.titan", root .. "/titan/owner/owner.native.titan"))
         local ok, err = source_check(root)
         assert.is_nil(ok)
-        assert.truthy(err:find("titan.fs", 1, true), err)
+        assert.truthy(err:find("titan.net", 1, true), err)
     end)
 
     it("rejects absent-module artifacts and metadata even under neutral archive member names", function()
@@ -602,8 +714,8 @@ plan:
         end
     end)
 
-    it("drops the omitted Lua methods but compares the owner and every retained method", function()
-        assert.same({ omitted = { "Lua:run_async", "Lua:run_async_from_loader", "dofile" } },
+    it("drops the omitted Lua methods but compares the owner, dofile and every retained method", function()
+        assert.same({ omitted = { "Lua:run_async", "Lua:run_async_from_loader" } },
             checks.omissions(checks.status_inventory)["titan.lua"])
         local retained = { "close", "detach", "run", "run_from_loader" }
         local function provider(browser, changed)
@@ -619,19 +731,16 @@ plan:
             end
             local members = {
                 types.ModuleMember("titan.lua", "Lua", types.Record(owner, {}, {}, methods, 2), nil),
+                types.ModuleMember("titan.lua", "dofile", types.Function({}, {}, false, nil, nil), {}),
             }
-            if not browser then
-                members[#members + 1] = types.ModuleMember("titan.lua", "dofile",
-                    types.Function({}, {}, false, nil, nil), {})
-            end
             return { key_order = { "titan.lua" }, entries = {
                 ["titan.lua"] = { types = types.serialize(types.Module("titan.lua", members, {})) },
             } }
         end
         local rows, modules, differences = checks.inventory(provider(false), provider(true))
         assert.equal(1, modules)
-        assert.equal(#retained + 1, #rows)
-        assert.equal(3, #differences)
+        assert.equal(#retained + 2, #rows)
+        assert.equal(2, #differences)
         for _, name in ipairs(retained) do
             local ok, err = checks.inventory(provider(false), provider(true, name))
             assert.is_nil(ok)

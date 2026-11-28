@@ -1,7 +1,7 @@
 # Browser Lua, SDK and stdlib recipes shared by the two host Makefiles.
 BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
 	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser \
-	titan.async titan.timer titan.os titan.io titan.lua titan.http titan.websocket
+	titan.async titan.timer titan.os titan.io titan.fs titan.lua titan.sqlite3 titan.http titan.websocket
 BROWSER_LPEGLABEL_SOURCES ?= $(LPEGLABEL_SOURCES)
 BROWSER_INSTALL_TREE ?= $(TITAN_INSTALL_TREE)
 BROWSER_EXE_SUFFIX ?=
@@ -12,6 +12,10 @@ BROWSER_LPEGLABEL_CPPFLAGS ?= $(LPEGLABEL_CPPFLAGS)
 BROWSER_REMEDY_PREFIX ?= $(PREFIX)
 BROWSER_REMEDY_ROCKS_TREE ?= $(ROCKS_TREE)
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
+# The SDK's SQLite service compiles Makefile's pinned, checksum-verified
+# SQLite amalgamation; the prerequisites fetch it there.
+BROWSER_SQLITE3_SRC_DIR ?= $(SQLITE3_SRC_DIR)
+BROWSER_SQLITE3_PREREQS ?= $(SQLITE3_SOURCES) $(SQLITE3_HEADER)
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
 LUA_BROWSER_RANLIB ?=
@@ -49,10 +53,11 @@ BROWSER_SDK_ENV = PREFIX=$(call make_shell_quote,$(call BROWSER_NATIVE_PATH,$(PR
 	$(if $(strip $(ROCKS_TREE)),LUA_PATH=$(call make_shell_quote,$(BROWSER_INSTALL_TREE)/share/lua/5.5/?.lua;$(BROWSER_INSTALL_TREE)/share/lua/5.5/?/init.lua;;)) \
 	$(if $(strip $(ROCKS_TREE)),LUA_CPATH=$(call make_shell_quote,$(BROWSER_INSTALL_TREE)/lib/lua/5.5/?$(BROWSER_LUA_MODULE_SUFFIX);;))
 
-browser-sdk: ## Build and install the browser target runtime, tools and core stdlib provider
+browser-sdk: $(BROWSER_SQLITE3_PREREQS) ## Build and install the browser target runtime, tools, SQLite service and core stdlib provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	$(BROWSER_SDK_ENV) TITAN_JOBS=$(call make_shell_quote,$(TITAN_JOBS)) \
+	TITAN_BROWSER_SQLITE3_SRC_DIR=$(call make_shell_quote,$(if $(strip $(BROWSER_SQLITE3_SRC_DIR)),$(call BROWSER_NATIVE_PATH,$(BROWSER_SQLITE3_SRC_DIR)))) \
 	TITAN_BROWSER_REMEDY_PREFIX=$(call make_shell_quote,$(BROWSER_REMEDY_PREFIX)) \
 	TITAN_BROWSER_REMEDY_ROCKS_TREE=$(call make_shell_quote,$(BROWSER_REMEDY_ROCKS_TREE)) \
 	BROWSER_STDLIB_ROOTS=$(call make_shell_quote,$(BROWSER_STDLIB_ROOTS)) \
@@ -142,7 +147,7 @@ titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua closure \
 	  "$$compiler_dir" $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/images/stdlib.wasm"; \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua imports \
-	  entry "$$build_dir/images/stdlib.wasm"; \
+	  entry,vfs,sqlite3 "$$build_dir/images/stdlib.wasm"; \
 	$(BROWSER_NATIVE_PARITY); \
 	filter=$(call make_shell_quote_value,TITAN_FILTER); \
 	overall=0; \

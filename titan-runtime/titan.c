@@ -57,6 +57,100 @@ lua_Integer titan_test_monotonic_ns(void) {
 #endif
 }
 
+#if defined(TITAN_TARGET_BROWSER)
+#include <fcntl.h>
+#include <unistd.h>
+
+/*
+** io.tmpfile and os.tmpname for browser Lua states. wasi-libc has no mkstemp
+** or tmpfile, so the stock library's versions always fail. These create
+** '/tmp/lua_XXXXXXXXXXXX' with O_EXCL: always under /tmp, never TMPDIR, so a
+** durable mount never receives them. Random bytes would cost an entropy
+** import, so each candidate name scrambles a per-image counter (SplitMix64)
+** with the clock, when there is one. Only a name collision retries.
+*/
+#define TITAN_TMPNAME_SIZE 32
+#define TITAN_TMPNAME_TRIES 64
+
+/* Create a new file, write its name into 'name' and return its descriptor,
+** or -1 with errno set (EEXIST after TITAN_TMPNAME_TRIES collisions). */
+static int titan_browser_tmpfd(char name[TITAN_TMPNAME_SIZE]) {
+    static uint64_t seq = 0;
+    uint64_t clk = 0;
+    struct timespec now;
+    int tries;
+    if (clock_gettime(CLOCK_REALTIME, &now) == 0)
+        clk = ((uint64_t)now.tv_sec << 32) ^ (uint64_t)now.tv_nsec;
+    for (tries = 0; tries < TITAN_TMPNAME_TRIES; tries++) {
+        uint64_t x = (++seq * 0x9e3779b97f4a7c15ULL) ^ clk;
+        int fd;
+        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+        x ^= x >> 31;
+        snprintf(name, TITAN_TMPNAME_SIZE, "/tmp/lua_%012llx",
+                 (unsigned long long)(x >> 16));
+        fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd != -1 || errno != EEXIST) return fd;
+    }
+    errno = EEXIST;
+    return -1;
+}
+
+/* The closef of an io.tmpfile stream, as liolib's io_fclose. */
+static int titan_browser_fclose(lua_State *L) {
+    luaL_Stream *p = (luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
+    errno = 0;
+    return luaL_fileresult(L, fclose(p->f) == 0, NULL);
+}
+
+/* The handle exists before the file, so a memory error cannot leak the
+** descriptor, and the file loses its name before Lua sees it. */
+static int titan_browser_io_tmpfile(lua_State *L) {
+    char name[TITAN_TMPNAME_SIZE];
+    luaL_Stream *p = (luaL_Stream *)lua_newuserdatauv(L, sizeof(luaL_Stream), 0);
+    int fd;
+    p->f = NULL;  /* an incomplete stream, as liolib's newfile makes */
+    p->closef = &titan_browser_fclose;
+    luaL_setmetatable(L, LUA_FILEHANDLE);
+    fd = titan_browser_tmpfd(name);
+    if (fd != -1 && (unlink(name) != 0 || (p->f = fdopen(fd, "w+")) == NULL)) {
+        int en = errno;  /* 'close' may change it */
+        (void)close(fd);
+        errno = en;
+    }
+    return p->f == NULL ? luaL_fileresult(L, 0, NULL) : 1;
+}
+
+static int titan_browser_os_tmpname(lua_State *L) {
+    char name[TITAN_TMPNAME_SIZE];
+    int fd = titan_browser_tmpfd(name);
+    if (fd != -1 && close(fd) != 0) {
+        (void)unlink(name);  /* best effort: never report a name that failed */
+        fd = -1;
+    }
+    if (fd == -1)
+        return luaL_error(L, "unable to generate a unique filename");
+    lua_pushstring(L, name);
+    return 1;
+}
+
+void titan_browser_install_tmp_io(lua_State *L) {
+    int top = lua_gettop(L);
+    luaL_checkstack(L, 3, "installing browser temporary files");
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+    if (lua_getfield(L, -1, "io") == LUA_TTABLE) {
+        lua_pushcfunction(L, titan_browser_io_tmpfile);
+        lua_setfield(L, -2, "tmpfile");
+    }
+    lua_pop(L, 1);
+    if (lua_getfield(L, -1, "os") == LUA_TTABLE) {
+        lua_pushcfunction(L, titan_browser_os_tmpname);
+        lua_setfield(L, -2, "tmpname");
+    }
+    lua_settop(L, top);
+}
+#endif
+
 /*
 ** These assertions make the assumptions inherited from Lua's MAXASIZE
 ** definition explicit. They intentionally use C99-compatible negative-array

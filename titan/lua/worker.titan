@@ -3,17 +3,17 @@
 -- it loads. The worker never enters or inspects the caller's Lua/Titan heap.
 foreign import "lua.h"
 foreign import "lauxlib.h"
-foreign import "lualib.h"
 foreign import "stdint.h"
 foreign import "stdlib.h"
 foreign import "string.h"
 foreign import "native.h"
 
--- Every independent state gets the Titan searcher and the target's stock-Lua
--- profile inside its existing protected opener. Native profile text is empty.
+-- Every independent state gets the target's standard libraries, the Titan
+-- searcher and the target's stock-Lua profile inside its existing protected
+-- opener. Native profile text is empty.
 local foreign function lua_state_open_libraries(state: *lua_State): int
   local initialization = ffi.lua_touserdata(state, 1) as *titan_lua_open
-  ffi.luaL_openselectedlibs(state, ~0, 0)
+  ffi.titan_lua_openlibs(state)
   for index = 0, initialization.count - 1 do
     local entry = initialization.preloads[index]
     ffi.titan_module_preload(
@@ -30,9 +30,9 @@ local foreign function lua_state_open_libraries(state: *lua_State): int
   return 0
 end
 
--- luaL_openlibs can allocate or raise, so even initialization must have a
--- protected entry in the new state rather than relying on the caller's jump
--- target. A failed initialization leaves its error on the remote stack.
+-- Opening the libraries can allocate or raise, so even initialization must
+-- have a protected entry in the new state rather than relying on the caller's
+-- jump target. A failed initialization leaves its error on the remote stack.
 local foreign function lua_state_open(initialization: *titan_lua_open): int
   local state = initialization.state
   if ffi.lua_checkstack(state, 2) == 0 then return ffi.LUA_ERRMEM end

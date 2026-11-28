@@ -126,7 +126,11 @@ end
 
 local function valid_snapshot(snapshot)
     if not closed(snapshot, { path = true, kind = true, mode = true, identity = true, entries = true }) or
-        type(snapshot.path) ~= "string" or math.type(snapshot.mode) ~= "integer" then return false end
+        type(snapshot.path) ~= "string" then return false end
+    if snapshot.kind == "absent" then
+        return snapshot.mode == nil and snapshot.identity == nil and snapshot.entries == nil
+    end
+    if math.type(snapshot.mode) ~= "integer" then return false end
     if snapshot.kind == "file" then
         return digest_string(snapshot.identity) and snapshot.entries == nil
     elseif snapshot.kind == "directory" and snapshot.identity == nil and dense(snapshot.entries) then
@@ -516,9 +520,15 @@ function certificate.files(context, files)
     return result
 end
 
+-- An optional output (a browser image's storage companion) exists only when
+-- the link produces it; its absence is recorded, so a later hit requires the
+-- same absence.
 local function output_snapshot(context, output)
     local filename = output.path
     local stat, err = context.io:lstat(filename)
+    if not stat and not err and output.optional then
+        return { path = output_path(context, filename), kind = "absent" }
+    end
     need(stat, err or ("missing output: " .. filename))
     need(stat.kind == "file" or stat.kind == "directory", "output is not a nonlink file/directory: " .. filename)
     if output.kind then need(stat.kind == output.kind, "output kind changed: " .. filename) end
@@ -913,7 +923,7 @@ function certificate.prepare(context, spec)
         need(not seen[key], "duplicate final output: " .. filename)
         seen[key] = true
         outputs[#outputs + 1] = { path = filename, executable = output.executable or false,
-            kind = output.kind or "file" }
+            kind = output.kind or "file", optional = output.optional or nil }
         keys[#keys + 1] = relocation.path(context, key)
     end
     table.sort(keys, util.bytewise_less)

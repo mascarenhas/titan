@@ -513,6 +513,7 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs titan-wasm-factory.mjs \
               titan-browser-run titan-browser-run.mjs \
               titan-browser-node-worker.mjs titan-browser-page.mjs \
+              titan-browser-vfs.mjs titan-browser-sql.mjs titan-storage-worker.mjs titan-sqlite3-service.wasm \
               titan-protobuf.mjs build-profile absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
@@ -719,6 +720,36 @@ jobs:
             "$TITAN_NODE" --test spec/browser/trace-adapter.test.mjs \
             spec/browser/playwright-runner.test.mjs \
             2>&1 | tee "$RUNNER_TEMP/browser-trace-units.log"
+
+      # The storage runtime's units: the uwasi bundle check, the guest
+      # filesystem, the storage worker and its journal, the SQLite service
+      # reactor (built from Makefile's amalgamation, which browser-sdk fetched)
+      # and the connection ledger.
+      - name: Run the browser storage runtime units
+        env:
+          TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
+        run: |
+          set -euo pipefail
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT"
+          unset CCC_OVERRIDE_OPTIONS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH
+          "$TITAN_NODE" --test spec/browser/vfs-unit.test.mjs \
+            2>&1 | tee "$RUNNER_TEMP/browser-storage-units.log"
+
+      # The real-browser durable storage gate over the bridge builder's
+      # durable scenario program and stock-novfs control: under Node, and in
+      # Chromium's real Origin Private File System over DevTools.
+      - name: Build and run the durable storage gate under Node and Chromium
+        env:
+          TITAN_ROOT: ${{ github.workspace }}/.lua
+          TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
+        run: |
+          set -euo pipefail
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
+          output="$GITHUB_WORKSPACE/out/browser/durable"
+          lua -E spec/browser/build-bridge.lua "$output" \
+            2>&1 | tee "$RUNNER_TEMP/browser-durable-build.log"
+          TITAN_BRIDGE_OUTPUT="$output" "$TITAN_NODE" --test spec/browser/vfs-durable.test.mjs \
+            2>&1 | tee "$RUNNER_TEMP/browser-durable.log"
 
       - name: Build and run the browser trace gate under Node
         env:
@@ -991,6 +1022,7 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs titan-wasm-factory.mjs \
               titan-browser-run titan-browser-run.mjs \
               titan-browser-node-worker.mjs titan-browser-page.mjs \
+              titan-browser-vfs.mjs titan-browser-sql.mjs titan-storage-worker.mjs titan-sqlite3-service.wasm \
               titan-protobuf.mjs build-profile analysis-target absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
@@ -1364,6 +1396,17 @@ jobs:
             }
           }
           JS
+
+      # The durable storage gate on each of this cell's managed engines, over
+      # the bridge build's durable and stock-novfs images.
+      - name: Run the durable OPFS storage gate on each managed engine
+        env:
+          TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
+        run: |
+          set -euo pipefail
+          TITAN_PLAYWRIGHT_TEST_ENGINES="${TITAN_TRACE_ENGINES// /,}" \
+            "$TITAN_NODE" --test spec/browser/vfs-durable.test.mjs \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-durable.log"
 
       # The browser chapter's complete application, built by the commands its
       # section documents in this cell's profile, then served by the documented

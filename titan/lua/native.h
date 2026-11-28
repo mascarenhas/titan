@@ -3,7 +3,17 @@
 
 #include <stddef.h>
 #include "lua.h"
+#include "lualib.h"
 #include "titan/ffi.h"
+
+/* Open an independent state's standard libraries. The browser's stock Lua
+ * cannot provide io.tmpfile or os.tmpname, so the runtime replaces them. */
+static inline void titan_lua_openlibs(lua_State *L) {
+  luaL_openselectedlibs(L, ~0, 0);
+#if defined(TITAN_TARGET_BROWSER)
+  titan_browser_install_tmp_io(L);
+#endif
+}
 
 /* Titan's FFI imports aggregate declarations but does not declare C layouts.
  * These carriers contain only native data. String bytes are borrowed from a

@@ -378,11 +378,12 @@ STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.native.titan \
 	titan/http/headers.titan titan/http/options.titan titan/http/parser.native.titan \
 	titan/http/pool.native.titan titan/http/server.native.titan \
 	titan/http/transfer.native.titan titan/http/upgrade.native.titan
-SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.native.titan titan/sqlite3/bindings.titan \
-	titan/sqlite3/row.titan titan/sqlite3/worker.titan
-SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
+SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.native.titan titan/sqlite3/sqlite3.browser.titan \
+	titan/sqlite3/bindings.native.titan titan/sqlite3/bindings.browser.titan \
+	titan/sqlite3/row.titan titan/sqlite3/validation.titan titan/sqlite3/worker.native.titan
+SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h titan/sqlite3/sqlite3.browser.h
 LUA_TITAN_SOURCES := titan/lua/lua.titan titan/lua/background.native.titan \
-	titan/lua/loading.browser.titan titan/lua/loading.native.titan titan/lua/worker.titan
+	titan/lua/loading.titan titan/lua/worker.titan
 LUA_TITAN_HEADERS := titan/lua/native.h
 STRING_TITAN_HEADERS := titan/string/format_native.h
 WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.native.titan titan/websocket/handshake.native.titan \
@@ -406,7 +407,8 @@ STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer titan.thread
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
-	$(ASYNC_TITAN_SOURCES) titan/timer.native.titan titan/timer.browser.titan titan/io.titan titan/fs.native.titan \
+	$(ASYNC_TITAN_SOURCES) titan/timer.native.titan titan/timer.browser.titan titan/io.titan \
+	titan/fs.native.titan titan/fs.browser.titan \
 	titan/net.native.titan titan/ssl.native.titan titan/url.titan \
 	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) $(OS_TITAN_SOURCES) titan/path.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
@@ -443,7 +445,8 @@ STDLIB_LICENSES := LICENSES/libuv-LICENSE LICENSES/libuv-LICENSE-extra \
 	LICENSES/lpeglabel-LICENSE LICENSES/lpeg-LICENSE \
 	LICENSES/lpeg-patterns-LICENSE \
 	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE \
-	LICENSES/llhttp-LICENSE LICENSES/sqlite3-LICENSE LICENSES/openssl-LICENSE LICENSES/go-LICENSE LICENSES/libbacktrace-LICENSE
+	LICENSES/llhttp-LICENSE LICENSES/sqlite3-LICENSE LICENSES/openssl-LICENSE LICENSES/go-LICENSE LICENSES/libbacktrace-LICENSE \
+	LICENSES/uwasi-LICENSE
 # The `titan` Lua support module: ltitanlib plus the shared path code. The
 # checkout compiler loads it from here; installs deploy it to lib/lua/5.5.
 TITAN_SUPPORT_MODULE := titan-runtime/bootstrap/titan.so

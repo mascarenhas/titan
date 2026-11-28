@@ -1,0 +1,22 @@
+-- The public value records construct from their fields without a Task, both
+-- through the record call and through their new functions taken as values.
+function test_public_value_records_construct_from_their_fields(_: test.Context)
+  const new_blob: function (string): (sqlite3.Blob) = sqlite3.Blob.new
+  const blob = new_blob("\0bytes\255")
+  test.assert(blob.bytes == "\0bytes\255" and sqlite3.Blob("").bytes == "",
+              "Blob.new lost its bytes")
+  const new_column: function (string, string?): (sqlite3.Column) = sqlite3.Column.new
+  const declared = new_column("identifier", "INTEGER")
+  const expression = sqlite3.Column("total", nil)
+  test.assert(declared.name == "identifier" and declared.declared_type == "INTEGER" and
+              expression.name == "total" and expression.declared_type == nil,
+              "Column.new lost its name or declared type")
+  const new_error: function (string, integer?, integer?, string): (sqlite3.Error) =
+    sqlite3.Error.new
+  const failure = new_error("application failure", 19, 2067, "import")
+  test.assert(failure.message == "application failure" and failure.code == 19 and
+              failure.extended_code == 2067 and failure.operation == "import",
+              "Error.new lost a field")
+  const caught = expect_sqlite_error(function () raise failure end)
+  test.assert(caught == failure, "a raised sqlite3.Error lost its identity")
+end

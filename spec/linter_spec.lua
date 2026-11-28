@@ -1655,15 +1655,15 @@ describe("driver.lint_modules analysis boundary", function()
         local imported, registry = driver.imported, types.registry
         local native = driver.new_resolver_context({ analysis_only = true })
         local loader = driver.defaultloader({}, { context = native })
-        assert.is_true((loader("titan.sqlite3")))
-        local consumer, entry = driver.imported, driver.imported["titan.sqlite3"]
+        assert.is_true((loader("titan.net")))
+        local consumer, entry = driver.imported, driver.imported["titan.net"]
         assert.truthy(entry)
         for _, case in ipairs({ { "page", true }, { "broken", false } }) do
             local lint_result, lint_errors = lint(path, { case[1] }, { target = "browser" })
             assert.equal(case[2], lint_result ~= nil, lint_errors and table.concat(lint_errors, "\n"))
             assert.is_true(pcall(driver.assert_target_context, native))
             assert.equal(consumer, driver.imported)
-            assert.equal(entry, driver.imported["titan.sqlite3"])
+            assert.equal(entry, driver.imported["titan.net"])
         end
         assert.is_true(driver.close_loader(loader))
         assert.is_true(driver.close_resolver_context(native))
@@ -1673,8 +1673,8 @@ describe("driver.lint_modules analysis boundary", function()
         local browser = driver.new_resolver_context({ target = "browser", analysis_only = true,
             browser_analysis_target = handle })
         local browser_loader = driver.defaultloader({}, { context = browser })
-        assert.is_false((browser_loader("titan.sqlite3")))
-        assert.are_not.equal(entry, driver.imported["titan.sqlite3"])
+        assert.is_false((browser_loader("titan.net")))
+        assert.are_not.equal(entry, driver.imported["titan.net"])
         assert.is_true(driver.close_loader(browser_loader))
         assert.is_true(driver.close_resolver_context(browser))
         driver.imported, types.registry = imported, registry

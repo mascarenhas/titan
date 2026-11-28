@@ -1,0 +1,64 @@
+-- Filesystem fixture ownership for fs.tests on the browser target. The guest
+-- filesystem completes C calls synchronously, so setup and cleanup also work
+-- outside a Task, as the native fixture's C helpers do.
+local test = import "test"
+local fs = import "fs"
+local strings = import "string"
+local system = import "os"
+foreign import "errno.h"
+foreign import "stdio.h"
+foreign import "sys/stat.h"
+foreign import "unistd.h"
+
+local workspace_count = 0
+
+local function remove_native(path: string)
+  if ffi.unlink(path) == 0 or ffi.errno == ffi.ENOENT then return end
+  test.assert(ffi.rmdir(path) == 0 or ffi.errno == ffi.ENOENT,
+              "could not remove browser fixture path")
+end
+
+local function cleanup_path(context: test.Context, path: string)
+  context:cleanup(function ()
+    remove_native(path)
+  end)
+end
+
+local function new_workspace(context: test.Context): string
+  const parent = system.getenv("TITAN_TEST_ROOT") or fs.tmpdir()
+  while true do
+    workspace_count = workspace_count + 1
+    const root = parent .. "/titan-fs-ação世界-" .. workspace_count
+    if ffi.mkdir(root, 448 as foreign mode_t) == 0 then
+      cleanup_path(context, root)
+      return root
+    end
+    test.assert(ffi.errno == ffi.EEXIST, "could not create browser workspace")
+  end
+end
+
+local function set_fixture_environment(context: test.Context,
+                                       name: string, contents: string)
+  const old_value? = system.getenv(name)
+  context:cleanup(function ()
+    if old_value then
+      system.setenv(name, old_value)
+    else
+      system.unsetenv(name)
+    end
+  end)
+  system.setenv(name, contents)
+end
+
+local function write_file_synchronously(path: string, contents: string)
+  const file = ffi.fopen(path, "wb")
+  test.assert(file ~= nil, "could not open browser fixture file")
+  local failed = #contents ~= 0 and
+    ffi.fwrite(contents, 1, #contents as foreign size_t, file) as integer ~= #contents
+  if ffi.fclose(file) ~= 0 then failed = true end
+  test.assert(not failed, "could not write browser fixture file")
+end
+
+local function make_boundary_payload(): string
+  return strings.rep("x", 65535) .. "\0Ytail\r\n\255"
+end
