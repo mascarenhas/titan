@@ -1,3 +1,5 @@
+-- Native-only: compiles and runs a fixture process whose C gates hold and
+-- fault SQLite's libuv worker-pool requests (sqlite3_worker_fixture.h).
 local command = import "support.command.titan"
 
 local function worker_fixture_case(context: test.Context, workspace: string,

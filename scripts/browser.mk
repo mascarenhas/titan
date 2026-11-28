@@ -1,7 +1,7 @@
 # Browser Lua, SDK and stdlib recipes shared by the two host Makefiles.
 BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
 	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser \
-	titan.async titan.timer titan.os titan.io titan.lua titan.http titan.websocket
+	titan.async titan.timer titan.os titan.io titan.fs titan.lua titan.sqlite3 titan.http titan.websocket
 BROWSER_LPEGLABEL_SOURCES ?= $(LPEGLABEL_SOURCES)
 BROWSER_INSTALL_TREE ?= $(TITAN_INSTALL_TREE)
 BROWSER_EXE_SUFFIX ?=

@@ -1,0 +1,74 @@
+local directory_common = import "support.common.titan"
+
+local function assert_directory_error(action: function (): (), operation: string,
+                                      name: string)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+    test.assert(support.error_string_field(error, "operation") == operation and
+                support.error_string_field(error, "name") == name,
+                "expected " .. name .. " from " .. operation .. ", got " ..
+                support.error_text(error))
+  end
+  test.assert(caught, "expected " .. name .. " from " .. operation)
+end
+
+-- The working directory C, Lua and titan.fs share, and the standard
+-- directories with libuv's environment precedence.
+function test_working_and_standard_directories(_context: test.Context)
+  support.assert_operation_error(function()
+    system.chdir(system.cwd() .. "\0suffix")
+  end, "os.chdir")
+  const original = system.cwd()
+  local target = system.tmpdir()
+  if target == original then target = system.homedir() end
+  if target == original then target = "/" end
+  test.assert(target ~= original,
+              "host exposes no distinct standard directory for chdir")
+
+  do
+    defer system.chdir(original)
+    system.chdir(target)
+    test.assert(system.cwd() ~= original, "chdir did not update cwd")
+  end
+  test.assert(system.cwd() == original,
+              "cwd was not restored after chdir")
+  assert_directory_error(function()
+    system.chdir(system.tmpdir() .. "/titan-os-missing-directory/child")
+  end, "os.chdir", "ENOENT")
+  test.assert(system.cwd() == original, "failed chdir changed cwd")
+
+  test.assert(#system.homedir() > 0, "homedir returned an empty path")
+  test.assert(#system.tmpdir() > 0, "tmpdir returned an empty path")
+  if directory_common.is_windows() then return end
+
+  const home? = system.getenv("HOME")
+  defer support.restore_environment("HOME", home)
+  const tmpdir? = system.getenv("TMPDIR")
+  defer support.restore_environment("TMPDIR", tmpdir)
+  const tmp? = system.getenv("TMP")
+  defer support.restore_environment("TMP", tmp)
+  const temp? = system.getenv("TEMP")
+  defer support.restore_environment("TEMP", temp)
+  const tempdir? = system.getenv("TEMPDIR")
+  defer support.restore_environment("TEMPDIR", tempdir)
+
+  system.setenv("HOME", "/titan-os-home")
+  test.assert(system.homedir() == "/titan-os-home", "homedir ignored HOME")
+  system.unsetenv("TMPDIR")
+  system.unsetenv("TMP")
+  system.unsetenv("TEMP")
+  system.unsetenv("TEMPDIR")
+  test.assert(system.tmpdir() == "/tmp", "tmpdir did not default to /tmp")
+  system.setenv("TEMPDIR", "/titan-os-tempdir/")
+  test.assert(system.tmpdir() == "/titan-os-tempdir",
+              "tmpdir kept a trailing slash or ignored TEMPDIR")
+  system.setenv("TEMP", "/titan-os-temp")
+  test.assert(system.tmpdir() == "/titan-os-temp", "TEMP did not precede TEMPDIR")
+  system.setenv("TMP", "/titan-os-tmp")
+  test.assert(system.tmpdir() == "/titan-os-tmp", "TMP did not precede TEMP")
+  system.setenv("TMPDIR", "/")
+  test.assert(system.tmpdir() == "/", "tmpdir shortened the root directory")
+end

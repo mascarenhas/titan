@@ -2992,7 +2992,7 @@ int main(void) {
                 "LICENSES/ta-regex-LICENSE", "LICENSES/lua-LICENSE",
                 "LICENSES/llhttp-LICENSE", "LICENSES/sqlite3-LICENSE",
                 "LICENSES/openssl-LICENSE", "LICENSES/go-LICENSE",
-                "LICENSES/libbacktrace-LICENSE",
+                "LICENSES/libbacktrace-LICENSE", "LICENSES/uwasi-LICENSE",
             }, makefile_words("STDLIB_LICENSES"))
             assert.same({ "out/" .. STDLIB_CONTAINER },
                 makefile_words("STDLIB_CONTAINER"))

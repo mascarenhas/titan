@@ -1,0 +1,30 @@
+-- Public titan.fs behavior tests shared by the native and browser
+-- compositions; native-only cases are in the .native.titan contributors.
+local test = import "test"
+local runtime_test = import "support.runtime.titan"
+local async = import "async"
+local fs = import "fs"
+local stream = import "io"
+local strings = import "string"
+local timer = import "timer"
+local support = import "fs.test_support.titan"
+local common = import "support.common.titan"
+local task_support = import "support.async.titan"
+local transfer_lua = import "lua"
+
+local function contains_entry(entries: {string}, wanted: string): boolean
+  for index = 1, #entries do
+    if entries[index] == wanted then return true end
+  end
+  return false
+end
+
+local function expect_failure(action: function (): (), message: string)
+  local failed = false
+  do
+    action()
+  catch
+    failed = true
+  end
+  test.assert(failed, message)
+end

@@ -1,26 +1,6 @@
 local command = import "support.command.titan"
 
 function test_paths_and_process_identity(_context: test.Context)
-  support.assert_operation_error(function()
-    system.chdir(system.cwd() .. "\0suffix")
-  end, "os.chdir")
-  const original = system.cwd()
-  local target = system.tmpdir()
-  if target == original then target = system.homedir() end
-  if target == original then target = "/" end
-  test.assert(target ~= original,
-              "host exposes no distinct standard directory for chdir")
-
-  do
-    defer system.chdir(original)
-    system.chdir(target)
-    test.assert(system.cwd() ~= original, "chdir did not update cwd")
-  end
-  test.assert(system.cwd() == original,
-              "cwd was not restored after chdir")
-
-  test.assert(#system.homedir() > 0, "homedir returned an empty path")
-  test.assert(#system.tmpdir() > 0, "tmpdir returned an empty path")
   test.assert(#system.hostname() > 0, "hostname returned an empty name")
   test.assert(#system.exepath() > 0,
               "compiled Titan exepath returned an empty path")

@@ -1,0 +1,51 @@
+-- The stock-novfs control program of spec/browser/vfs-durable.test.mjs. It
+-- uses none of titan.fs, titan.sqlite3, os.cwd, os.chdir or titan.lua, so its
+-- image links no filesystem runtime (D14). Its Lua state still opens the
+-- stock io and os libraries, whose file operations then fail with ordinary
+-- Lua errors instead of reaching any file.
+local io = import "io"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+
+local type StockChunk = function (): (string)
+
+-- Every stock file operation, each of which must refuse.
+local const CHECKS = [[
+  local accepted = {}
+  local function refused(name, ok, message)
+    if ok or type(message) ~= 'string' then accepted[#accepted + 1] = name end
+  end
+  refused('io.open', io.open('/tmp/stock-novfs.txt', 'w'))
+  refused('io.tmpfile', io.tmpfile())
+  refused('os.tmpname', pcall(os.tmpname))
+  refused('os.remove', os.remove('/tmp/stock-novfs.txt'))
+  refused('os.rename', os.rename('/tmp/a', '/tmp/b'))
+  refused('io.lines', pcall(io.lines, '/tmp/stock-novfs.txt'))
+  refused('dofile', pcall(dofile, '/tmp/stock-novfs.lua'))
+  refused('loadfile', loadfile('/tmp/stock-novfs.lua'))
+  return table.concat(accepted, ',')
+]]
+
+local function stock_chunk(chunk: string): StockChunk
+  const top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for the stock chunk"
+  end
+  if ffi.luaL_loadbufferx(L, chunk, #chunk as foreign size_t, "=stock-novfs", nil) ~= ffi.LUA_OK then
+    const failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  const callable: value = ffi.lua_totvalue(L, -1)
+  return callable as StockChunk
+end
+
+function main(_: {string}): integer
+  const accepted = stock_chunk(CHECKS)()
+  if accepted ~= "" then
+    raise "stock Lua file operations succeeded without a filesystem: " .. accepted
+  end
+  io.print("STOCK-NOVFS PASS")
+  return 0
+end

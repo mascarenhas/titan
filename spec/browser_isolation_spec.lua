@@ -102,7 +102,7 @@ describe("published browser analysis target", function()
         assert.equal("import", import.kind)
         assert.equal(target.provider_file, catalog["titan.browser"].filename)
         assert.equal("static", catalog["titan.browser"].kind)
-        assert.is_nil(catalog["titan.fs"])
+        assert.is_nil(catalog["titan.net"])
         assert.is_nil(subject.imported["titan.browser"])
 
         -- Each private check rehydrates only its captured catalog, not the
@@ -180,7 +180,7 @@ end
         files.write(path.join(root, "active/first.titan"), "function first(): integer return 1 end\n")
         files.write(path.join(root, "active/first.native.titan"), "inactive")
         files.write(path.join(root, "active/last.browser.titan"), "function last(): integer return 2 end\n")
-        files.write(path.join(root, "absent.titan"), 'local fs = import "fs"\n')
+        files.write(path.join(root, "absent.titan"), 'local net = import "net"\n')
         files.write(path.join(root, "numeric.titan"),
             "function narrow(x: foreign long): integer return x end\n")
         files.write(path.join(root, "foreign_header.titan"), 'foreign import "stddef.h"\n')
@@ -200,7 +200,7 @@ end
         local ok, _, diagnostics = loader("absent")
         assert.is_true(ok)
         assert.truthy(table.concat(diagnostics, "\n"):find(
-            "module 'titan.fs' is not available for target 'browser': requires a filesystem", 1, true))
+            "module 'titan.net' is not available for target 'browser': requires native sockets", 1, true))
         assert(subject.finalize_resolver_context(browser))
         local catalog = subject.completion_binary_catalog(browser)
         assert.equal(selected.provider_file, catalog["titan.json"].filename)

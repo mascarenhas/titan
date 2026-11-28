@@ -1,0 +1,400 @@
+-- The real-browser durable storage gate's program
+-- (spec/browser/vfs-durable.test.mjs). `main(MODE, ROOT)` runs one step of a
+-- scenario against the files under ROOT, usually a durable OPFS mount, and
+-- prints one report line the harness compares. Steps that end a page or a
+-- worker before the next step reads the files run in separate instances.
+local async = import "async"
+local fs = import "fs"
+local io = import "io"
+local lua = import "lua"
+local os = import "os"
+local sqlite3 = import "sqlite3"
+local strings = import "string"
+
+-- Bytes no text codec preserves: NUL, a lone 0xff and multibyte UTF-8.
+local const NOTE_BYTES = "durable a\195\167\195\163o \228\184\150\231\149\140\n\0\1\255 end"
+local const BULK_BYTES = 262144
+
+-- What a step leaves open for the harness's forced disposal: an idle
+-- connection or one holding a write, and a flushed file.
+local held_connection: sqlite3.Connection? = nil
+local held_file: fs.File? = nil
+
+local function hex(bytes: string): string
+  const out = strings.writer()
+  defer out:close()
+  for index = 1, #bytes do
+    out:write(strings.format("%02x", strings.byte(bytes, index)))
+  end
+  return out:drain()
+end
+
+local function execute(db: sqlite3.Connection, sql: string, ...: value): integer
+  const statement = db:prepare(sql)
+  defer statement:close()
+  return statement:execute(...)
+end
+
+local function rows(db: sqlite3.Connection, sql: string, ...: value): {sqlite3.Row}
+  const statement = db:prepare(sql)
+  defer statement:close()
+  const cursor = statement:query(...)
+  defer cursor:close()
+  const result: {sqlite3.Row} = {}
+  for row in cursor:fetch do result[#result + 1] = row end
+  return result
+end
+
+local function scalar(db: sqlite3.Connection, sql: string, ...: value): value
+  const found = rows(db, sql, ...)
+  if #found ~= 1 then raise "expected one row from " .. sql end
+  return found[1]:get(1)
+end
+
+local function cell_text(cell: value): string
+  if cell == nil then return "null" end
+  if cell is integer then return "i" .. (cell as integer) end
+  if cell is float then return "f" .. strings.format("%.17g", cell as float) end
+  if cell is string then return "t" .. hex(cell as string) end
+  if cell is sqlite3.Blob then return "b" .. hex((cell as sqlite3.Blob).bytes) end
+  raise "unexpected SQLite cell"
+end
+
+local function table_text(db: sqlite3.Connection, sql: string): string
+  const out = strings.writer()
+  defer out:close()
+  const found = rows(db, sql)
+  for index = 1, #found do
+    const row = found[index]
+    for column = 1, #row.columns do
+      if column > 1 then out:write(",") end
+      out:write(cell_text(row:get(column)))
+    end
+    out:write(";")
+  end
+  return out:drain()
+end
+
+-- SQLite's primary result code of a failed action, or 0 when it succeeds.
+local function failure_code(action: function (): ()): integer
+  local code = 0
+  do
+    action()
+  catch
+    if not (error is sqlite3.Error) then raise end
+    const failure: sqlite3.Error = error
+    code = failure.code or -1
+  end
+  return code
+end
+
+local function bulk(): string
+  return strings.rep("0123456789abcdef", BULK_BYTES // 16)
+end
+
+-- Scenario 1 and 8: files and rows written here survive the page.
+local function persist_write(root: string)
+  fs.mkdir(root .. "/notes")
+  fs.write_file(root .. "/notes/hello.bin", NOTE_BYTES)
+  const file = fs.open(root .. "/notes/chunks.txt", "w")
+  defer file:close()
+  for index = 1, 3 do file:write("chunk " .. index .. "\n") end
+  file:flush()
+  file:close()
+  const db = sqlite3.connect(root .. "/app.db")
+  defer db:close()
+  execute(db, "CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT, raw BLOB, score REAL, extra)")
+  db:set_autocommit(false)
+  execute(db, "INSERT INTO note VALUES (?, ?, ?, ?, ?)", 1,
+    "a\195\167\195\163o \228\184\150\231\149\140", sqlite3.Blob("\0\1\255"), 1.5, nil)
+  execute(db, "INSERT INTO note VALUES (?, ?, ?, ?, ?)", 2, "", sqlite3.Blob(""), -0.25, nil)
+  execute(db, "INSERT INTO note VALUES (?, ?, ?, ?, ?)", 3, "line\nbreak", sqlite3.Blob("x"),
+    1e300, 9007199254740993)
+  db:commit()
+  io.print("persist-write ok")
+end
+
+local function persist_read(root: string)
+  const db = sqlite3.connect(root .. "/app.db")
+  defer db:close()
+  io.print("hello.bin " .. hex(fs.read_file(root .. "/notes/hello.bin")))
+  io.print("chunks.txt " .. hex(fs.read_file(root .. "/notes/chunks.txt")))
+  io.print("note " .. table_text(db, "SELECT id, body, raw, score, extra FROM note ORDER BY id"))
+end
+
+-- Scenario 2: a committed row, a written file and a flushed open file need
+-- no disposal to survive, and an idle connection loses nothing.
+local function commit(root: string)
+  const db = sqlite3.connect(root .. "/crash.db")
+  held_connection = db
+  execute(db, "CREATE TABLE IF NOT EXISTS entry (body TEXT)")
+  execute(db, "INSERT INTO entry VALUES ('committed')")
+  fs.write_file(root .. "/written.txt", "written")
+  const file = fs.open(root .. "/flushed.txt", "w")
+  held_file = file
+  file:write("flushed")
+  file:flush()
+  io.print("commit ok")
+end
+
+local function check_commit(root: string)
+  const db = sqlite3.connect(root .. "/crash.db")
+  defer db:close()
+  io.print("entry " .. table_text(db, "SELECT body FROM entry ORDER BY rowid") ..
+    " written " .. fs.read_file(root .. "/written.txt") ..
+    " flushed " .. fs.read_file(root .. "/flushed.txt"))
+end
+
+-- An explicit transaction holds a write a forced stop loses.
+local function open_transaction(root: string)
+  const db = sqlite3.connect(root .. "/crash.db")
+  held_connection = db
+  execute(db, "CREATE TABLE IF NOT EXISTS entry (body TEXT)")
+  db:set_autocommit(false)
+  execute(db, "INSERT INTO entry VALUES ('uncommitted')")
+  io.print("open-transaction ok")
+end
+
+-- With synchronous=OFF a committed row is never flushed.
+local function unsynchronized(root: string)
+  const db = sqlite3.connect(root .. "/unsynchronized.db")
+  defer db:close()
+  execute(db, "PRAGMA synchronous=OFF")
+  execute(db, "CREATE TABLE entry (body TEXT)")
+  execute(db, "INSERT INTO entry VALUES ('unflushed')")
+  io.print("unsynchronized ok")
+end
+
+-- Scenario 4: four Tasks keep running while one statement runs in the
+-- storage worker.
+local function tasks(root: string)
+  const db = sqlite3.connect(root .. "/tasks.db")
+  defer db:close()
+  local running = true
+  const counts: {integer} = {0, 0, 0, 0}
+  const workers: {async.Task<|nil, value|>} = {}
+  for index = 1, 4 do
+    workers[index] = async.run(function (): nil
+      while running do
+        counts[index] = counts[index] + 1
+        async.yield()
+      end
+      return nil
+    end)
+  end
+  async.yield()
+  const before = {counts[1], counts[2], counts[3], counts[4]}
+  const total = scalar(db, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c " ..
+    "WHERE x < 1500000) SELECT sum(x) FROM c")
+  const after = {counts[1], counts[2], counts[3], counts[4]}
+  running = false
+  for index = 1, 4 do async.join(workers[index]) end
+  local least = after[1] - before[1]
+  for index = 2, 4 do
+    if after[index] - before[index] < least then least = after[index] - before[index] end
+  end
+  io.print("tasks " .. cell_text(total) .. " least " .. least)
+end
+
+-- Scenario 5: titan.fs, stock Lua io and os, and SQLite share one tree and
+-- one working directory.
+local function stock(chunk: string, ...: value): value
+  return lua.load(chunk, "=durable-stock")(...)
+end
+
+local function coherence(root: string)
+  const sub = root .. "/sub"
+  fs.mkdir(sub)
+  fs.write_file(sub .. "/titan.txt", "from titan\0\nsecond\n")
+  const seen: string = stock([[
+    local file = assert(io.open(..., 'rb'))
+    local bytes = file:read('a')
+    assert(file:close())
+    return bytes
+  ]], sub .. "/titan.txt")
+  if seen ~= "from titan\0\nsecond\n" then raise "stock io.open read other bytes than titan.fs wrote" end
+  stock([[
+    local file = assert(io.open(..., 'wb'))
+    assert(file:write('from lua\0\n'))
+    assert(file:close())
+  ]], sub .. "/lua.txt")
+  if fs.read_file(sub .. "/lua.txt") ~= "from lua\0\n" then
+    raise "titan.fs read other bytes than stock io.open wrote"
+  end
+  const lines: integer = stock("local n = 0 for _ in io.lines(...) do n = n + 1 end return n",
+    sub .. "/titan.txt")
+  const temporary = #fs.list("/tmp")
+  const anonymous: string = stock([[
+    local file = assert(io.tmpfile())
+    assert(file:write('anonymous'))
+    assert(file:seek('set', 0))
+    local bytes = file:read('a')
+    assert(file:close())
+    return bytes
+  ]])
+  const name: string = stock("return os.tmpname()")
+  const made? = fs.stat(name)
+  if made == nil or made.kind ~= "file" or strings.sub(name, 1, 9) ~= "/tmp/lua_" then
+    raise "os.tmpname made no file under /tmp"
+  end
+  stock("assert(os.remove(...))", name)
+  if fs.stat(name) ~= nil or #fs.list("/tmp") ~= temporary then
+    raise "stock temporary files outlived their removal"
+  end
+  os.chdir(sub)
+  const relative: string = stock([[
+    local file = assert(io.open('lua.txt', 'rb'))
+    local bytes = file:read('a')
+    assert(file:close())
+    return bytes
+  ]])
+  const db = sqlite3.connect(root .. "/main.db")
+  defer db:close()
+  execute(db, "ATTACH ? AS aux", "rel.db")
+  execute(db, "CREATE TABLE aux.place (cwd TEXT)")
+  execute(db, "INSERT INTO aux.place VALUES (?)", os.cwd())
+  execute(db, "DETACH aux")
+  if fs.stat(sub .. "/rel.db") == nil then raise "ATTACH ? did not create rel.db in the working directory" end
+  io.print("coherence lines " .. lines .. " anonymous " .. anonymous .. " relative " .. hex(relative) ..
+    " cwd " .. os.cwd())
+end
+
+local function coherence_check(root: string)
+  const db = sqlite3.connect(root .. "/sub/rel.db")
+  defer db:close()
+  io.print("place " .. table_text(db, "SELECT cwd FROM place") ..
+    " lua.txt " .. hex(fs.read_file(root .. "/sub/lua.txt")))
+end
+
+local function flag_text(flag: boolean): string
+  if flag then return "true" end
+  return "false"
+end
+
+local function count_items(db: sqlite3.Connection): integer
+  return scalar(db, "SELECT count(*) FROM item")
+end
+
+-- Scenario 6: two connections contend for one database file. The service's
+-- dot-file locks admit one connection at a time, readers included, and
+-- SQLite never waits for a lock in the browser, so the loser fails with
+-- SQLITE_BUSY until the winner's transaction ends.
+local function contention(root: string)
+  const path = root .. "/contention.db"
+  const first = sqlite3.connect(path)
+  defer first:close()
+  const second = sqlite3.connect(path)
+  defer second:close()
+  execute(first, "CREATE TABLE item (v INTEGER)")
+  execute(first, "BEGIN EXCLUSIVE")
+  const exclusive_read = failure_code(function () count_items(second) end)
+  const exclusive_write = failure_code(function () execute(second, "INSERT INTO item VALUES (2)") end)
+  execute(first, "INSERT INTO item VALUES (1)")
+  first:commit()
+  execute(second, "INSERT INTO item VALUES (2)")
+  execute(second, "BEGIN IMMEDIATE")
+  execute(second, "INSERT INTO item VALUES (3)")
+  const immediate_read = failure_code(function () count_items(first) end)
+  const immediate_write = failure_code(function () execute(first, "INSERT INTO item VALUES (4)") end)
+  second:commit()
+  io.print("contention exclusive " .. exclusive_read .. "," .. exclusive_write ..
+    " immediate " .. immediate_read .. "," .. immediate_write .. " count " .. count_items(first) ..
+    " autocommit " .. flag_text(first:get_autocommit() and second:get_autocommit()))
+end
+
+-- Scenario 6, write-ahead log: without shared memory a connection keeps its
+-- rollback journal unless it holds the file exclusively. Then the other
+-- connection is locked out until it closes, and needs exclusive locking
+-- itself to read the log-mode file.
+local function wal_contention(root: string)
+  const path = root .. "/wal.db"
+  const writer = sqlite3.connect(path)
+  defer writer:close()
+  const reader = sqlite3.connect(path)
+  defer reader:close()
+  const shared_mode: string = scalar(writer, "PRAGMA journal_mode=WAL")
+  scalar(writer, "PRAGMA locking_mode=EXCLUSIVE")
+  const exclusive_mode: string = scalar(writer, "PRAGMA journal_mode=WAL")
+  execute(writer, "CREATE TABLE item (v INTEGER)")
+  execute(writer, "INSERT INTO item VALUES (1)")
+  const locked_out = failure_code(function () count_items(reader) end)
+  writer:close()
+  const shared_reader = failure_code(function () count_items(reader) end)
+  scalar(reader, "PRAGMA locking_mode=EXCLUSIVE")
+  io.print("wal " .. shared_mode .. " " .. exclusive_mode .. " locked " .. locked_out ..
+    " shared " .. shared_reader .. " count " .. count_items(reader))
+end
+
+local function adoption_refused(payload: string): boolean
+  sqlite3.Connection.from_transfer_payload(payload):close()
+  return false
+catch
+  return true
+end
+
+-- Scenario 7 (PB-5): a child state adopts two connections, returns one and
+-- keeps the other. Closing the donor retires only the kept one; the
+-- returned one, still in transit, keeps its open transaction.
+local function donor_close(root: string)
+  const path = root .. "/donor.db"
+  const moved = sqlite3.connect(path)
+  defer moved:close()
+  const kept = sqlite3.connect(path)
+  defer kept:close()
+  execute(moved, "CREATE TABLE item (body TEXT)")
+  moved:set_autocommit(false)
+  execute(moved, "INSERT INTO item VALUES ('in transit')")
+  const kept_packet = async.TransferValue.from_value(kept)
+  const donor = lua.new()
+  defer donor:close()
+  const returned = {donor:run([[
+    local moved, kept = ...
+    held = kept
+    return moved
+  ]], "=durable-donor", async.TransferValue.from_value(moved), kept_packet)}
+  donor:close()
+  const adopted: sqlite3.Connection = returned[1]:to_value()
+  defer adopted:close()
+  if adopted:get_autocommit() then raise "the adopted connection lost its transaction" end
+  execute(adopted, "INSERT INTO item VALUES ('adopted')")
+  adopted:commit()
+  case kept_packet
+  when is_record_payload(_, _, payload) then
+    if not adoption_refused(payload) then raise "the donor's kept connection survived the donor" end
+  else raise "a connection transfer is not a record payload"
+  end
+  io.print("donor " .. table_text(adopted, "SELECT body FROM item ORDER BY rowid"))
+end
+
+-- Scenario 10: a mount holding more than maxHydratedBytes.
+local function bulk_write(root: string)
+  fs.write_file(root .. "/bulk.bin", bulk())
+  io.print("bulk-write ok")
+end
+
+local function bulk_check(root: string)
+  if fs.read_file(root .. "/bulk.bin") ~= bulk() then raise "the bulk file changed" end
+  io.print("bulk-check ok")
+end
+
+function main(args: {string}): integer
+  const mode = args[1] or ""
+  const root = args[2] or "/data"
+  if mode == "persist-write" then persist_write(root)
+  elseif mode == "persist-read" then persist_read(root)
+  elseif mode == "commit" then commit(root)
+  elseif mode == "check-commit" then check_commit(root)
+  elseif mode == "open-transaction" then open_transaction(root)
+  elseif mode == "unsynchronized" then unsynchronized(root)
+  elseif mode == "tasks" then tasks(root)
+  elseif mode == "coherence" then coherence(root)
+  elseif mode == "coherence-check" then coherence_check(root)
+  elseif mode == "contention" then contention(root)
+  elseif mode == "wal" then wal_contention(root)
+  elseif mode == "donor-close" then donor_close(root)
+  elseif mode == "bulk-write" then bulk_write(root)
+  elseif mode == "bulk-check" then bulk_check(root)
+  else raise "unknown durable mode '" .. mode .. "'"
+  end
+  return 0
+end

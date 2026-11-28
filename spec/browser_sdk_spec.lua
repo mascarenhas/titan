@@ -45,9 +45,10 @@ local EXPECTED_LPEGLABEL_SYMBOLS = {
 }
 
 local EXPECTED_PROVIDER_MODULES = {
-    "titan.async", "titan.browser", "titan.coroutine", "titan.gc", "titan.http", "titan.io", "titan.iteration",
-    "titan.json", "titan.lua", "titan.math", "titan.os", "titan.path", "titan.peg", "titan.protobuf",
-    "titan.reflect", "titan.string", "titan.test", "titan.timer", "titan.transfer", "titan.url", "titan.websocket",
+    "titan.async", "titan.browser", "titan.coroutine", "titan.fs", "titan.gc", "titan.http", "titan.io",
+    "titan.iteration", "titan.json", "titan.lua", "titan.math", "titan.os", "titan.path", "titan.peg",
+    "titan.protobuf", "titan.reflect", "titan.sqlite3", "titan.string", "titan.test", "titan.timer",
+    "titan.transfer", "titan.url", "titan.websocket",
 }
 
 local function contains(text, fragment)

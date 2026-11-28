@@ -66,7 +66,7 @@ plan:
         return relative
     end
 
-    it("keeps all twenty-three portable owners in the single-image root inventory", function()
+    it("keeps all twenty-five portable owners in the single-image root inventory", function()
         local result = root_plan()
         assert.is_true(result.ok, result.output)
         local roots, count = {}, 0
@@ -74,7 +74,7 @@ plan:
             assert.is_nil(roots[root], root)
             roots[root], count = true, count + 1
         end
-        assert.equal(23, count, "the audited browser inventory has 23 owners; change this deliberately")
+        assert.equal(25, count, "the audited browser inventory has 25 owners; change this deliberately")
         assert.is_true(roots["transfer.tests"])
         assert.is_true(roots["protobuf.tests"])
         assert.is_true(roots["protobuf.portable_tests"])
@@ -82,7 +82,9 @@ plan:
         assert.is_true(roots["timer.tests"])
         assert.is_true(roots["os.tests"])
         assert.is_true(roots["io.tests"])
+        assert.is_true(roots["fs.tests"])
         assert.is_true(roots["lua.tests"])
+        assert.is_true(roots["sqlite3.tests"])
         assert.is_true(roots["http.tests"])
         assert.is_true(roots["websocket.tests"])
     end)
@@ -263,6 +265,39 @@ plan:
         end
     end)
 
+    -- titan/sqlite3/sqlite3.browser.h puts titan/sqlite3/ on the C search
+    -- path, so its includes record missing probes there.
+    it("ignores only missing titan/sqlite3 search probes for ordinary header names", function()
+        local missing = "c-header-search-v2;exists=no;kind=missing;open=unreadable"
+        local found = "c-header-search-v2;exists=yes;kind=file;open=readable"
+        local function headers(dependency)
+            return checks.check_headers({ c_header_dependencies = { dependency } })
+        end
+        for _, path in ipairs({ "/repo/titan/sqlite3/errno.h", "/repo/titan/sqlite3/stdint.h",
+            "/repo/titan/sqlite3/titan/ffi.h", "C:\\Repo\\Titan\\SQLite3\\errno.h" }) do
+            assert(headers({ kind = "search", path = path, identity = missing }), path)
+        end
+        assert(headers({ kind = "file", path = "/repo/titan/sqlite3/sqlite3.browser.h", identity = "fixture" }))
+        local rejected = {
+            { kind = "file", path = "/repo/titan/sqlite3/errno.h", identity = "fixture" },
+            { kind = "search", path = "/repo/titan/sqlite3/errno.h", identity = found },
+            { kind = "search", path = "/repo/titan/sqlite3/native.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/sqlite3.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/sqlite3ext.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/uv.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/openssl/ssl.h", identity = missing },
+            { kind = "search", path = "/repo/titan/sqlite3/titan/sqlite3/native.h", identity = missing },
+            { kind = "search", path = "/repo/vendor/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/libuv/include/errno.h", identity = missing },
+            { kind = "search", path = "/repo/libuv/include/uv.h", identity = missing },
+        }
+        for _, dependency in ipairs(rejected) do
+            local ok, err = headers(dependency)
+            assert.is_nil(ok, dependency.path)
+            assert.truthy(err:find("forbidden browser stdlib dependency: " .. dependency.path, 1, true), err)
+        end
+    end)
+
     it("rejects defined and undefined symbols from every excluded C library", function()
         for _, name in ipairs({ "uv_run", "SSL_new", "OPENSSL_init_crypto", "llhttp_init", "sqlite3_open" }) do
             for _, defined in ipairs({ true, false }) do
@@ -275,6 +310,34 @@ plan:
                 assert.truthy(err:find(name, 1, true), err)
             end
         end
+    end)
+
+    -- Titan names a module's symbols after the module, so the browser test
+    -- owner sqlite3.tests defines and references sqlite3_tests_* names.
+    it("lets a Titan module extend a C library prefix with its own names only", function()
+        local prefixes = { ["sqlite3_tests_"] = true }
+        for _, name in ipairs({ "sqlite3_tests_init", "sqlite3_tests_\226\132\179_test_case_titan" }) do
+            assert(checks.check_symbol(name, "owner.o", prefixes))
+            local ok, err = checks.check_symbol(name, "owner.o")
+            assert.is_nil(ok)
+            assert.truthy(err:find(name, 1, true), err)
+        end
+        for _, name in ipairs({ "sqlite3_open", "sqlite3_test_control", "uv_run" }) do
+            local ok, err = checks.check_symbol(name, "owner.o", prefixes)
+            assert.is_nil(ok, name)
+            assert.truthy(err:find(name, 1, true), err)
+        end
+        -- A module named after the library itself exempts nothing.
+        assert.is_nil((checks.check_symbol("sqlite3_open", "owner.o", { ["sqlite3_"] = true })))
+        local member = function(module, name)
+            return { display_name = name .. ".o", bytes = "", object = {
+                metadata = { module = module }, symbols = { { name = name, defined = true } } } }
+        end
+        assert(checks.check_archive("tests.a", { members = { member("sqlite3.tests", "sqlite3_tests_init") } }))
+        local ok, err = checks.check_archive("tests.a", { members = {
+            member("sqlite3.tests", "sqlite3_tests_init"), member("intruder", "sqlite3_open") } })
+        assert.is_nil(ok)
+        assert.truthy(err:find("sqlite3_open", 1, true), err)
     end)
 
     it("audits internal image names independently of optimizer retention", function()
@@ -439,13 +502,13 @@ plan:
 
     it("uses folder-before-flat and inactive-main fallback in the source audit", function()
         local root = source_fixture()
-        files.write(root .. "/titan/owner.titan", 'local missing = import "fs"\n')
+        files.write(root .. "/titan/owner.titan", 'local missing = import "net"\n')
         files.write(root .. "/titan/owner/owner.titan", "function value(): integer return 1 end\n")
         assert.same({ "titan/owner/owner.titan" }, selected_sources(root))
         assert(os.rename(root .. "/titan/owner/owner.titan", root .. "/titan/owner/owner.native.titan"))
         local ok, err = source_check(root)
         assert.is_nil(ok)
-        assert.truthy(err:find("titan.fs", 1, true), err)
+        assert.truthy(err:find("titan.net", 1, true), err)
     end)
 
     it("rejects absent-module artifacts and metadata even under neutral archive member names", function()
@@ -607,8 +670,8 @@ plan:
         end
     end)
 
-    it("drops the omitted Lua methods but compares the owner and every retained method", function()
-        assert.same({ omitted = { "Lua:run_async", "Lua:run_async_from_loader", "dofile" } },
+    it("drops the omitted Lua methods but compares the owner, dofile and every retained method", function()
+        assert.same({ omitted = { "Lua:run_async", "Lua:run_async_from_loader" } },
             checks.omissions(checks.status_inventory)["titan.lua"])
         local retained = { "close", "detach", "run", "run_from_loader" }
         local function provider(browser, changed)
@@ -624,19 +687,16 @@ plan:
             end
             local members = {
                 types.ModuleMember("titan.lua", "Lua", types.Record(owner, {}, {}, methods, 2), nil),
+                types.ModuleMember("titan.lua", "dofile", types.Function({}, {}, false, nil, nil), {}),
             }
-            if not browser then
-                members[#members + 1] = types.ModuleMember("titan.lua", "dofile",
-                    types.Function({}, {}, false, nil, nil), {})
-            end
             return { key_order = { "titan.lua" }, entries = {
                 ["titan.lua"] = { types = types.serialize(types.Module("titan.lua", members, {})) },
             } }
         end
         local rows, modules, differences = checks.inventory(provider(false), provider(true))
         assert.equal(1, modules)
-        assert.equal(#retained + 1, #rows)
-        assert.equal(3, #differences)
+        assert.equal(#retained + 2, #rows)
+        assert.equal(2, #differences)
         for _, name in ipairs(retained) do
             local ok, err = checks.inventory(provider(false), provider(true, name))
             assert.is_nil(ok)

@@ -57,6 +57,37 @@ function test_binding_scalar_tags_integer_limits_and_trailing_null(
   end)
 end
 
+function test_binding_float_values_round_trip_exactly(context: test.Context)
+  runtime_test.run(function ()
+    const connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    execute_sql(connection, "CREATE TABLE real_value (value REAL)")
+    const largest = 1.7976931348623157e308
+    const smallest_normal = 2.2250738585072014e-308
+    const values: {float} = {
+      0.1, -2.5, 1.0e15 + 0.5, largest, -largest, smallest_normal,
+      smallest_normal / 4.0,
+    }
+    const insert = connection:prepare("INSERT INTO real_value VALUES (?)")
+    defer insert:close()
+    const echo = connection:prepare("SELECT ?")
+    defer echo:close()
+    for index = 1, #values do
+      insert:execute(values[index])
+      const cursor = echo:query(values[index])
+      defer cursor:close()
+      assert_float_cell(required_row(cursor), 1, values[index])
+    end
+    const select = connection:prepare("SELECT value FROM real_value ORDER BY rowid")
+    defer select:close()
+    const stored = select:query()
+    defer stored:close()
+    for index = 1, #values do
+      assert_float_cell(required_row(stored), 1, values[index])
+    end
+  end)
+end
+
 function test_binding_distinguishes_text_and_empty_or_binary_blobs(
     context: test.Context)
   runtime_test.run(function ()

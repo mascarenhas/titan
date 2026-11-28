@@ -423,8 +423,8 @@ describe("playground compiler", function()
         assert.is_nil(labels["titan.json.titan"])
         assert.is_nil(labels.main)
         assert.is_nil(labels["main.titan"])
-        assert.is_nil(labels.fs)
-        assert.is_nil(labels["titan.fs"])
+        assert.is_nil(labels.net)
+        assert.is_nil(labels["titan.net"])
         for _, typed in ipairs({ "data.se", "titan.br" }) do
             local partial = 'local j = import "' .. typed .. '"\n'
             completed = service:complete({ ["main.titan"] = partial, ["data/sets.titan"] = MOONS },
