@@ -132,4 +132,15 @@ export interface FSBackend {
     toParent: DirectoryNode,
     toName: string,
   ): void;
+
+  /**
+   * Titan seam: notified after a syscall updates `node`'s timestamps (`atim`
+   * and/or `mtim`; `undefined` means unchanged), so a replicating backend can
+   * journal the exact values assigned by the syscall.
+   */
+  setTimes?(
+    node: FSNode,
+    atim: bigint | undefined,
+    mtim: bigint | undefined,
+  ): void;
 }

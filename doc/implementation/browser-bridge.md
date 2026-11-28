@@ -756,7 +756,7 @@ loader, using `vendor/uwasi` code bundled and verified by
 * **Single mutation ordering (`StorageBackend`):** Guest and worker trees share
   logical inode numbers (`idOf(node)`: even on the guest, odd in the worker)
   and guarded idempotent ops (`create`, `link`, `unlink`, `rename`, `write`,
-  `resize`, `sync`, `hold`, `release`). `hold`/`release` keep an unlinked open
+  `resize`, `times`, `sync`, `hold`, `release`). `hold`/`release` keep an unlinked open
   file's backend handle (including real OPFS handles in the worker) alive until
   both sides close it. The guest applies its own changes immediately and
   journals them; `ack { seq, unflushed }` trims acknowledged ops without

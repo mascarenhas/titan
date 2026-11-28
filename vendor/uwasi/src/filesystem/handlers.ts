@@ -182,6 +182,8 @@ function resizeFile(
   if (size === backend.fileSize(node)) return WASIAbi.WASI_ESUCCESS;
   handle.resize(size);
   node.mtim = nowNs();
+  // Titan seam: report the syscall's exact mtim for replication.
+  backend.setTimes?.(node, undefined, node.mtim);
   return WASIAbi.WASI_ESUCCESS;
 }
 
@@ -197,16 +199,23 @@ function validateFstflags(fstflags: number): boolean {
 }
 
 function applyTimes(
+  backend: FSBackend,
   node: FSNode,
   atim: bigint,
   mtim: bigint,
   fstflags: number,
 ): void {
   const now = nowNs();
-  if (fstflags & WASIAbi.WASI_FSTFLAGS_ATIM) node.atim = atim;
-  if (fstflags & WASIAbi.WASI_FSTFLAGS_ATIM_NOW) node.atim = now;
-  if (fstflags & WASIAbi.WASI_FSTFLAGS_MTIM) node.mtim = mtim;
-  if (fstflags & WASIAbi.WASI_FSTFLAGS_MTIM_NOW) node.mtim = now;
+  let nextAtim: bigint | undefined;
+  let nextMtim: bigint | undefined;
+  if (fstflags & WASIAbi.WASI_FSTFLAGS_ATIM) nextAtim = node.atim = atim;
+  if (fstflags & WASIAbi.WASI_FSTFLAGS_ATIM_NOW) nextAtim = node.atim = now;
+  if (fstflags & WASIAbi.WASI_FSTFLAGS_MTIM) nextMtim = node.mtim = mtim;
+  if (fstflags & WASIAbi.WASI_FSTFLAGS_MTIM_NOW) nextMtim = node.mtim = now;
+  // Titan seam: report only explicitly updated timestamps for replication.
+  if (nextAtim !== undefined || nextMtim !== undefined) {
+    backend.setTimes?.(node, nextAtim, nextMtim);
+  }
 }
 
 /**
@@ -350,7 +359,11 @@ export function bindFSSyscallsWithController(
     } catch (error) {
       if (written === 0) throw error;
     }
-    if (written > 0) node.mtim = nowNs();
+    if (written > 0) {
+      node.mtim = nowNs();
+      // Titan seam: report the syscall's exact mtim for replication.
+      backend.setTimes?.(node, undefined, node.mtim);
+    }
     return written;
   };
 
@@ -491,7 +504,7 @@ export function bindFSSyscallsWithController(
       if (!validateFstflags(fstflags)) return WASIAbi.WASI_ERRNO_INVAL;
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
-      applyTimes(file.node, atim, mtim, fstflags);
+      applyTimes(backend, file.node, atim, mtim, fstflags);
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -781,7 +794,7 @@ export function bindFSSyscallsWithController(
       const resolved = resolveAt(fd, pathPtr, pathLen, follow);
       if (resolved.errno !== undefined) return resolved.errno;
       if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
-      applyTimes(resolved.node, atim, mtim, fstflags);
+      applyTimes(backend, resolved.node, atim, mtim, fstflags);
       return WASIAbi.WASI_ESUCCESS;
     },
 

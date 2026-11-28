@@ -51,6 +51,7 @@ const serviceFlags = ['--target=wasm32-wasip1', '-O2', '-std=c99', '-DSQLITE_THR
 const probeSource = String.raw`
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -75,6 +76,35 @@ EXPORT("probe_unlink") int probe_unlink(const char *path) { return unlink(path) 
 EXPORT("probe_mkdir") int probe_mkdir(const char *path) { return mkdir(path, 0755) ? -errno : 0; }
 EXPORT("probe_rename") int probe_rename(const char *from, const char *to) { return rename(from, to) ? -errno : 0; }
 EXPORT("probe_link") int probe_link(const char *from, const char *to) { return link(from, to) ? -errno : 0; }
+EXPORT("probe_atime_ns") int64_t probe_atime_ns(const char *path) {
+  struct stat st;
+  if (stat(path, &st) != 0) return -errno;
+  return (int64_t)st.st_atim.tv_sec * 1000000000LL + st.st_atim.tv_nsec;
+}
+EXPORT("probe_mtime_ns") int64_t probe_mtime_ns(const char *path) {
+  struct stat st;
+  if (stat(path, &st) != 0) return -errno;
+  return (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+}
+EXPORT("probe_size") int64_t probe_size(const char *path) {
+  struct stat st;
+  if (stat(path, &st) != 0) return -errno;
+  return (int64_t)st.st_size;
+}
+EXPORT("probe_set_times") int probe_set_times(const char *path, int64_t atim_sec, int64_t mtim_sec) {
+  struct timespec times[2] = {
+    { atim_sec < 0 ? 0 : (time_t)atim_sec, atim_sec < 0 ? UTIME_OMIT : 0 },
+    { mtim_sec < 0 ? 0 : (time_t)mtim_sec, mtim_sec < 0 ? UTIME_OMIT : 0 },
+  };
+  return utimensat(AT_FDCWD, path, times, 0) ? -errno : 0;
+}
+EXPORT("probe_fset_times") int probe_fset_times(int fd, int64_t atim_sec, int64_t mtim_sec) {
+  struct timespec times[2] = {
+    { atim_sec < 0 ? 0 : (time_t)atim_sec, atim_sec < 0 ? UTIME_OMIT : 0 },
+    { mtim_sec < 0 ? 0 : (time_t)mtim_sec, mtim_sec < 0 ? UTIME_OMIT : 0 },
+  };
+  return futimens(fd, times) ? -errno : 0;
+}
 /* POSIX checks inside directory dir: 0, or check * 1000 + errno. */
 EXPORT("probe_posix") int probe_posix(const char *dir) {
   char file[256], symbolic[256], hard[256], target[256];
@@ -288,6 +318,11 @@ function guestOf(storage) {
     rename: (from, to) => exports.probe_rename(place(from), place(to)),
     link: (from, to) => exports.probe_link(place(from), place(to)),
     posix: dir => exports.probe_posix(place(dir)),
+    atimeNs: path => exports.probe_atime_ns(place(path)),
+    mtimeNs: path => exports.probe_mtime_ns(place(path)),
+    size: path => Number(exports.probe_size(place(path))),
+    setTimes: (path, atimSec, mtimSec) => exports.probe_set_times(place(path), BigInt(atimSec), BigInt(mtimSec)),
+    fsetTimes: (fd, atimSec, mtimSec) => exports.probe_fset_times(fd, BigInt(atimSec), BigInt(mtimSec)),
   };
 }
 
@@ -490,7 +525,7 @@ test('PB-1: an acknowledgement of an earlier write never overwrites a later one'
   assert.equal(guest.pwrite(task2, 'BBBB', 0), 4);
   await flushed;
   assert.equal(text(storage, '/data/q'), 'BBBB');
-  assert.equal(storage.journal.length, 1, 'only the later write awaits its acknowledgement');
+  assert.equal(storage.journal.length, 2, 'only the later write and its timestamp await acknowledgement');
   await sync(storage, task2);
   assert.equal(storage.journal.length, 0);
   const flushes = readFileSync(join(store, '..', 'flushes.log'), 'utf8');
@@ -567,6 +602,106 @@ test('statement file changes (INSERT ... RETURNING, PRAGMA) reach the guest mirr
   await sql.run(conn, 'PRAGMA user_version = 7');
   assert.equal(new DataView(storage.fileSystem.lookup('/tmp/mirror.db').content.buffer).getUint32(60), 7);
   await storage.dispose();
+});
+
+test('SQLite writes and truncations update mtim in the guest mirror', wasm, async () => {
+  const pastSec = 1234567890, pastNs = BigInt(pastSec) * 1_000_000_000n;
+  const storage = await storageOf({store: newStore(), vfs: {mounts: {'/data': {backend: 'opfs'}}}});
+  const guest = guestOf(storage), sql = client(storage);
+  try {
+    for (const path of ['/tmp/stat.db', '/data/stat.db']) {
+      const conn = await sql.open(path);
+      await sql.run(conn, 'CREATE TABLE t(x)');
+      await sql.run(conn, 'INSERT INTO t VALUES (1)');
+      // In-place SQLite write (op.write + op.times) refreshes the guest mirror's mtim.
+      assert.equal(guest.setTimes(path, pastSec, pastSec), 0);
+      assert.equal(guest.mtimeNs(path), pastNs);
+      const beforeWrite = BigInt(Date.now()) * 1_000_000n;
+      await sql.run(conn, 'INSERT INTO t VALUES (2)');
+      assert.ok(guest.mtimeNs(path) >= beforeWrite, `${path}: write mtim stayed stale`);
+      assert.equal(guest.atimeNs(path), pastNs, `${path}: write disturbed atim`);
+      // Read-only SELECT leaves mtim untouched.
+      assert.equal(guest.setTimes(path, pastSec, pastSec), 0);
+      assert.deepEqual(await sql.rows(conn, 'SELECT count(*) FROM t'), [[2n]]);
+      assert.equal(guest.mtimeNs(path), pastNs, `${path}: read-only SELECT disturbed mtim`);
+      // Pure truncation (op.resize + op.times) refreshes mtim on -journal.
+      assert.deepEqual(await sql.rows(conn, 'PRAGMA journal_mode=TRUNCATE'), [['truncate']]);
+      await sql.run(conn, 'PRAGMA cache_size = 1');
+      await sql.run(conn, 'BEGIN');
+      await sql.run(conn, 'INSERT INTO t VALUES (randomblob(32768))');
+      const journal = `${path}-journal`;
+      assert.ok(guest.size(journal) > 0, `${journal}: expected populated rollback journal`);
+      assert.equal(guest.setTimes(journal, pastSec, pastSec), 0);
+      assert.equal(guest.mtimeNs(journal), pastNs);
+      const beforeTrunc = BigInt(Date.now()) * 1_000_000n;
+      await sql.run(conn, 'ROLLBACK');
+      assert.equal(guest.size(journal), 0, `${journal}: expected truncated journal`);
+      assert.ok(guest.mtimeNs(journal) >= beforeTrunc, `${journal}: truncate mtim stayed stale`);
+      assert.equal(guest.atimeNs(journal), pastNs, `${journal}: truncate disturbed atim`);
+      await sql.ok(OP.CLOSE, conn);
+    }
+  } finally {
+    await storage.dispose();
+  }
+});
+
+test('utimensat, futimens and stepped-clock writes survive statement replay in causal order', wasm, async () => {
+  const atimSec = 1111111111, atimNs = BigInt(atimSec) * 1_000_000_000n;
+  const mtimSec = 1234567890, mtimNs = BigInt(mtimSec) * 1_000_000_000n;
+  const storage = await storageOf({store: newStore(), vfs: {mounts: {'/data': {backend: 'opfs'}}}});
+  const guest = guestOf(storage), sql = client(storage);
+  try {
+    const conn = await sql.open('/data/replay.db');
+    await sql.run(conn, 'CREATE TABLE t(x)');
+    await sql.run(conn, 'INSERT INTO t VALUES (1)');
+    // MTIM-1: pwrite + utimensat (with UTIME_OMIT on atim) during an in-flight SELECT.
+    const fd = guest.open('/data/other', 1);
+    assert.equal(guest.pwrite(fd, 'init', 0), 4);
+    assert.equal(guest.setTimes('/data/other', atimSec, atimSec), 0);
+    const reading = sql.rows(conn, 'SELECT count(*) FROM t');
+    assert.equal(guest.pwrite(fd, 'more', 0), 4);
+    assert.equal(guest.setTimes('/data/other', -1, mtimSec), 0);
+    assert.deepEqual(await reading, [[1n]]);
+    assert.equal(guest.mtimeNs('/data/other'), mtimNs, 'utimensat mtim lost across replay');
+    assert.equal(guest.atimeNs('/data/other'), atimNs, 'UTIME_OMIT atim disturbed across replay');
+    // pwrite + futimens (explicit mtim, then UTIME_OMIT on mtim) during an in-flight SELECT.
+    const atim2Sec = 1300000000, atim2Ns = BigInt(atim2Sec) * 1_000_000_000n;
+    const mtim2Sec = 1234567891, mtim2Ns = BigInt(mtim2Sec) * 1_000_000_000n;
+    const reading2 = sql.rows(conn, 'SELECT count(*) FROM t');
+    assert.equal(guest.pwrite(fd, 'fdts', 0), 4);
+    assert.equal(guest.fsetTimes(fd, -1, mtim2Sec), 0);
+    assert.equal(guest.fsetTimes(fd, atim2Sec, -1), 0);
+    assert.deepEqual(await reading2, [[1n]]);
+    assert.equal(guest.mtimeNs('/data/other'), mtim2Ns, 'futimens mtim lost across replay');
+    assert.equal(guest.atimeNs('/data/other'), atim2Ns, 'futimens atim lost across replay');
+    guest.close(fd);
+    // MTIM-2: a clock that steps on every Date.now() call must never drift backward on replay.
+    const wfd = guest.open('/data/clock-w', 1);
+    const tfd = guest.open('/data/clock-t', 1);
+    assert.equal(guest.pwrite(tfd, 'abcdef', 0), 6);
+    guest.close(tfd);
+    const realNow = Date.now;
+    let tick = 1_700_000_000_000;
+    Date.now = () => ++tick;
+    let writeStamp, truncStamp;
+    try {
+      const reading3 = sql.rows(conn, 'SELECT count(*) FROM t');
+      assert.equal(guest.pwrite(wfd, 'step', 0), 4);
+      writeStamp = guest.mtimeNs('/data/clock-w');
+      const truncFd = guest.open('/data/clock-t', 2);
+      truncStamp = guest.mtimeNs('/data/clock-t');
+      guest.close(truncFd);
+      assert.deepEqual(await reading3, [[1n]]);
+    } finally {
+      Date.now = realNow;
+    }
+    guest.close(wfd);
+    assert.equal(guest.mtimeNs('/data/clock-w'), writeStamp, 'write mtim drifted on replay');
+    assert.equal(guest.mtimeNs('/data/clock-t'), truncStamp, 'resize mtim drifted on replay');
+    await sql.ok(OP.CLOSE, conn);
+  } finally {
+    await storage.dispose();
+  }
 });
 
 test('maxHydratedBytes bounds both replicas under concurrent guest growth and a held unlinked file', wasm, async () => {
@@ -874,6 +1009,15 @@ test('SQLite\'s dot-file locks stay private to the service, so no program direct
   await sql.run(app, 'CREATE TABLE t(x)');
   await sql.ok(OP.CLOSE, app);
   assert.equal(guest.mkdir('/data/app.db.lock'), 0);
+  const lockSec = 1234567890, lockNs = BigInt(lockSec) * 1_000_000_000n;
+  assert.equal(guest.setTimes('/data/app.db.lock', lockSec, lockSec), 0);
+  const app2 = await sql.open('/data/app.db');
+  await sql.ok(OP.BEGIN, app2);
+  await sql.run(app2, 'INSERT INTO t VALUES (1)');
+  await sql.ok(OP.COMMIT, app2);
+  await sql.ok(OP.CLOSE, app2);
+  assert.equal(guest.atimeNs('/data/app.db.lock'), lockNs, 'SQLite dotlock utimes disturbed program dir atim');
+  assert.equal(guest.mtimeNs('/data/app.db.lock'), lockNs, 'SQLite dotlock utimes disturbed program dir mtim');
   // An open transaction holds its lock outside the namespace; another connection waits for it.
   const conn = await sql.open('/data/x.db'), other = await sql.open('/data/x.db');
   await sql.run(conn, 'CREATE TABLE t(x)');

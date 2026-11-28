@@ -1506,6 +1506,8 @@ function resizeFile(
   if (size === backend.fileSize(node)) return WASIAbi.WASI_ESUCCESS;
   handle.resize(size);
   node.mtim = nowNs();
+  // Titan seam: report the syscall's exact mtim for replication.
+  backend.setTimes?.(node, undefined, node.mtim);
   return WASIAbi.WASI_ESUCCESS;
 }
 
@@ -1521,16 +1523,23 @@ function validateFstflags(fstflags        )          {
 }
 
 function applyTimes(
+  backend           ,
   node        ,
   atim        ,
   mtim        ,
   fstflags        ,
 )       {
   const now = nowNs();
-  if (fstflags & WASIAbi.WASI_FSTFLAGS_ATIM) node.atim = atim;
-  if (fstflags & WASIAbi.WASI_FSTFLAGS_ATIM_NOW) node.atim = now;
-  if (fstflags & WASIAbi.WASI_FSTFLAGS_MTIM) node.mtim = mtim;
-  if (fstflags & WASIAbi.WASI_FSTFLAGS_MTIM_NOW) node.mtim = now;
+  let nextAtim                    ;
+  let nextMtim                    ;
+  if (fstflags & WASIAbi.WASI_FSTFLAGS_ATIM) nextAtim = node.atim = atim;
+  if (fstflags & WASIAbi.WASI_FSTFLAGS_ATIM_NOW) nextAtim = node.atim = now;
+  if (fstflags & WASIAbi.WASI_FSTFLAGS_MTIM) nextMtim = node.mtim = mtim;
+  if (fstflags & WASIAbi.WASI_FSTFLAGS_MTIM_NOW) nextMtim = node.mtim = now;
+  // Titan seam: report only explicitly updated timestamps for replication.
+  if (nextAtim !== undefined || nextMtim !== undefined) {
+    backend.setTimes?.(node, nextAtim, nextMtim);
+  }
 }
 
 /**
@@ -1667,7 +1676,11 @@ function bindFSSyscallsWithController(
     } catch (error) {
       if (written === 0) throw error;
     }
-    if (written > 0) node.mtim = nowNs();
+    if (written > 0) {
+      node.mtim = nowNs();
+      // Titan seam: report the syscall's exact mtim for replication.
+      backend.setTimes?.(node, undefined, node.mtim);
+    }
     return written;
   };
 
@@ -1808,7 +1821,7 @@ function bindFSSyscallsWithController(
       if (!validateFstflags(fstflags)) return WASIAbi.WASI_ERRNO_INVAL;
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
-      applyTimes(file.node, atim, mtim, fstflags);
+      applyTimes(backend, file.node, atim, mtim, fstflags);
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -2098,7 +2111,7 @@ function bindFSSyscallsWithController(
       const resolved = resolveAt(fd, pathPtr, pathLen, follow);
       if (resolved.errno !== undefined) return resolved.errno;
       if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
-      applyTimes(resolved.node, atim, mtim, fstflags);
+      applyTimes(backend, resolved.node, atim, mtim, fstflags);
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -4660,8 +4673,8 @@ const {FSError, nowNs} = uwasi;
 // this side opened a file's first handle or closed its last; the other side
 // keeps a handle of its own open meanwhile, so an unlinked file and its
 // stored bytes live on both sides while either side holds it.
-const op = Object.freeze({create: 1, link: 2, unlink: 3, rename: 4, write: 5, resize: 6, sync: 7, hold: 8,
-  release: 9});
+const op = Object.freeze({create: 1, link: 2, unlink: 3, rename: 4, write: 5, resize: 6, times: 7, sync: 8, hold: 9,
+  release: 10});
 const fsErrno = Object.freeze({busy: 10, nospc: 51, notsup: 58, xdev: 75});
 
 function idOf(node) { return Number(node.ino); }
@@ -4811,13 +4824,17 @@ class StorageBackend {
 
   syncDirectory(dir) { this.backend(dir).syncDirectory(dir); }
 
+  setTimes(node, atim, mtim) {
+    if (this.journal) this.record([op.times, idOf(node), atim, mtim]);
+  }
+
   createChild(parent, name, node) {
     this.reap();
     const restore = this.saved([[parent, name]], [node]);
     this.backend(parent).createChild(parent, name, node);
     // A node named again after losing its name already counts.
     if (!this.dead.delete(node)) this.index(node, this.mounts.get(parent));
-    this.note([op.create, idOf(parent), name, idOf(node), node.type, node.target ?? null], restore);
+    this.note([op.create, idOf(parent), name, idOf(node), node.type, node.target ?? null, node.mtim], restore);
   }
 
   // A durable mount keeps one name per file, as the OPFS store does.
@@ -4908,8 +4925,8 @@ class StorageBackend {
   }
 }
 
-function materialize([, , , id, type, target]) {
-  const now = nowNs(), node = type === 'dir' ? {type, entries: Object.create(null)} :
+function materialize([, , , id, type, target, mtim]) {
+  const now = mtim ?? nowNs(), node = type === 'dir' ? {type, entries: Object.create(null)} :
     type === 'file' ? {type, content: new Uint8Array(0), nlink: 1} :
     type === 'symlink' ? {type, target, nlink: 1} : {type, kind: 'devnull', nlink: 1};
   return Object.assign(node, {ino: BigInt(id), atim: now, mtim: now, ctim: now});
@@ -4961,6 +4978,11 @@ function applyOp(storage, entry) {
       held.close();
       storage.prune(node);
     }
+  } else if (kind === op.times) {
+    const node = nodes.get(a);
+    if (!node) return;
+    if (b != null) node.atim = b;
+    if (c != null) node.mtim = c;
   } else if (kind !== op.sync && nodes.get(a)?.type === 'file') {
     const handle = storage.openFile(nodes.get(a), {read: false, write: true});
     try {
@@ -5061,6 +5083,10 @@ async function loadService({url, sha256}) {
       memoryView().setBigUint64(out + 24, 1n, true);
       return 0;
     },
+    path_filestat_set_times(fd, flags, at, length, atim, mtim, fstflags) {
+      if (locks.has(lockOf(fd, at, length))) return 0;
+      return syscalls.path_filestat_set_times(fd, flags, at, length, atim, mtim, fstflags);
+    },
     clock_time_get(id, _precision, out) {
       if (id >>> 0 > 3) return uwasi.WASIAbi.WASI_ERRNO_INVAL;
       memoryView().setBigUint64(out, id === 0 ? BigInt(Date.now()) * 1000000n : BigInt(Math.round(performance.now() * 1e6)), true);
@@ -5085,7 +5111,7 @@ async function loadService({url, sha256}) {
 function hydration(dir, store, entries = []) {
   for (const name in dir.entries) {
     const node = dir.entries[name];
-    entries.push([op.create, idOf(dir), name, idOf(node), node.type, node.target ?? null]);
+    entries.push([op.create, idOf(dir), name, idOf(node), node.type, node.target ?? null, node.mtim]);
     if (node.type === 'dir') hydration(node, store, entries);
     if (node.type !== 'file' || !store.fileSize(node)) continue;
     const bytes = new Uint8Array(store.fileSize(node)), handle = store.openFile(node, {read: true, write: false});

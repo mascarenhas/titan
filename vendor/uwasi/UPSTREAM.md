@@ -65,6 +65,11 @@ Each change is marked `Titan seam` in its file.
   syscalls with an `FdController` over their descriptor table: the node a
   descriptor refers to, and `fd_close` for a host that retires a descriptor
   without a guest call. `bindFSSyscalls` keeps its signature.
+- `src/filesystem/backend.ts` and `src/filesystem/handlers.ts`: optional
+  `FSBackend.setTimes(node, atim, mtim)` hook invoked by `resizeFile`,
+  `writeIovecs`, and `applyTimes` with the exact timestamp values assigned by
+  the syscall (`undefined` for omitted fields), so `StorageBackend` replicates
+  exact timestamps and explicit `utimensat`/`futimens` updates in causal order.
 - `src/filesystem/index.ts`: exports `NamespaceOptions`,
   `bindFSSyscallsWithController` and `FdController`.
 - `src/opfs/backend.ts`: `ExclusiveOPFSBackend.create` passes a `namespace`
