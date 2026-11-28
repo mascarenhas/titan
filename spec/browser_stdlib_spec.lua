@@ -290,6 +290,12 @@ plan:
             { kind = "search", path = "/repo/vendor/sqlite3/errno.h", identity = missing },
             { kind = "search", path = "/repo/libuv/include/errno.h", identity = missing },
             { kind = "search", path = "/repo/libuv/include/uv.h", identity = missing },
+            -- A forbidden directory above titan/sqlite3/ still rejects the probe.
+            { kind = "search", path = "/repo/libuv/titan/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/vendor/sqlite3/titan/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/openssl/titan/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/uv/titan/sqlite3/errno.h", identity = missing },
+            { kind = "search", path = "/repo/llhttp/titan/sqlite3/errno.h", identity = missing },
         }
         for _, dependency in ipairs(rejected) do
             local ok, err = headers(dependency)
@@ -313,31 +319,56 @@ plan:
     end)
 
     -- Titan names a module's symbols after the module, so the browser test
-    -- owner sqlite3.tests defines and references sqlite3_tests_* names.
-    it("lets a Titan module extend a C library prefix with its own names only", function()
-        local prefixes = { ["sqlite3_tests_"] = true }
-        for _, name in ipairs({ "sqlite3_tests_init", "sqlite3_tests_\226\132\179_test_case_titan" }) do
-            assert(checks.check_symbol(name, "owner.o", prefixes))
-            local ok, err = checks.check_symbol(name, "owner.o")
-            assert.is_nil(ok)
-            assert.truthy(err:find(name, 1, true), err)
-        end
-        for _, name in ipairs({ "sqlite3_open", "sqlite3_test_control", "uv_run" }) do
-            local ok, err = checks.check_symbol(name, "owner.o", prefixes)
+    -- owner sqlite3.tests defines sqlite3_tests_* names and its test runner
+    -- references them. Only names an audited Titan object defines are exempt.
+    it("exempts exactly the library-prefixed names a Titan module's own objects define", function()
+        local defined = { ["sqlite3_tests_init"] = true }
+        assert(checks.check_symbol("sqlite3_tests_init", "owner.o", defined))
+        for _, name in ipairs({ "sqlite3_tests_other", "sqlite3_open", "sqlite3_test_control", "uv_run" }) do
+            local ok, err = checks.check_symbol(name, "owner.o", defined)
             assert.is_nil(ok, name)
             assert.truthy(err:find(name, 1, true), err)
         end
-        -- A module named after the library itself exempts nothing.
-        assert.is_nil((checks.check_symbol("sqlite3_open", "owner.o", { ["sqlite3_"] = true })))
-        local member = function(module, name)
-            return { display_name = name .. ".o", bytes = "", object = {
-                metadata = { module = module }, symbols = { { name = name, defined = true } } } }
+        assert.is_nil((checks.check_symbol("sqlite3_tests_init", "owner.o")))
+        local function member(module, symbols)
+            return { display_name = (module or "c") .. ".o", bytes = "", object = {
+                metadata = module and { module = module } or nil, symbols = symbols } }
         end
-        assert(checks.check_archive("tests.a", { members = { member("sqlite3.tests", "sqlite3_tests_init") } }))
+        local test_case = "sqlite3_tests_\226\132\179_test_case_titan"
+        local lambda = "sqlite3_tests_\226\132\153_lambda_7"
+        -- The owner and its metadata-free part objects define its names, and
+        -- the runner references them.
+        assert(checks.check_archive("tests.a", { members = {
+            member("sqlite3.tests", { { name = "sqlite3_tests_init", defined = true } }),
+            member(nil, { { name = test_case, defined = true }, { name = lambda, defined = true } }),
+            member("tests__test_runner", { { name = test_case, defined = false } }),
+        } }))
+        local function rejected(members, name)
+            local ok, err = checks.check_archive("tests.a", { members = members })
+            assert.is_nil(ok, name)
+            assert.truthy(err:find("forbidden browser stdlib symbol " .. name, 1, true), err)
+        end
+        -- A separator-mangled name of a module the audit does not hold, and a
+        -- part object's name without a separator.
+        rejected({ member(nil, { { name = test_case, defined = true } }) }, test_case)
+        rejected({ member("sqlite3.tests", { { name = "sqlite3_tests_init", defined = true } }),
+            member(nil, { { name = "sqlite3_tests_open", defined = true } }) }, "sqlite3_tests_open")
+        -- A module whose prefix extends a library prefix references a real
+        -- library call: nothing Titan defines exempts it.
+        rejected({ member("sqlite3.bind", { { name = "sqlite3_bind_init", defined = true },
+            { name = "sqlite3_bind_text64", defined = false } }) }, "sqlite3_bind_text64")
+        -- A non-Titan object defines a name under such a module's prefix.
+        rejected({ member("sqlite3.bind", { { name = "sqlite3_bind_init", defined = true } }),
+            member(nil, { { name = "sqlite3_bind_text64", defined = true } }) }, "sqlite3_bind_text64")
+        rejected({ member("uv.tcp", { { name = "uv_tcp_init", defined = true } }),
+            member(nil, { { name = "uv_tcp_init_ex", defined = true } }) }, "uv_tcp_init_ex")
+        -- A module named after the library itself exempts nothing.
+        rejected({ member("sqlite3", { { name = "sqlite3_open", defined = true } }) }, "sqlite3_open")
+        -- An absent module exempts nothing either.
         local ok, err = checks.check_archive("tests.a", { members = {
-            member("sqlite3.tests", "sqlite3_tests_init"), member("intruder", "sqlite3_open") } })
+            member("titan.uv", { { name = "titan_uv_init", defined = true } }) } })
         assert.is_nil(ok)
-        assert.truthy(err:find("sqlite3_open", 1, true), err)
+        assert.truthy(err:find("forbidden browser stdlib module titan.uv", 1, true), err)
     end)
 
     it("audits internal image names independently of optimizer retention", function()

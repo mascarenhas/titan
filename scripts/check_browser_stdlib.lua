@@ -22,10 +22,10 @@ if action == "closure" then
     local closed, close_error = driver.close_resolver_context(context)
     need(source_ok, source_error)
     need(closed, close_error)
-    local output_ok, prefixes = checks.check_output(strategy, first)
-    need(output_ok, prefixes)
+    local output_ok, defined = checks.check_output(strategy, first)
+    need(output_ok, defined)
     need(checks.check_archive(second))
-    need(checks.check_image(need(strategy:read_file(third)), third, prefixes))
+    need(checks.check_image(need(strategy:read_file(third)), third, defined))
     print("Browser stdlib closure: selected sources, provider, certified headers, objects and image have no forbidden dependencies.")
 elseif action == "inventory" or action == "inventory-fixture" then
     assert(first and (action == "inventory-fixture" or second), "inventory requires native and browser providers")

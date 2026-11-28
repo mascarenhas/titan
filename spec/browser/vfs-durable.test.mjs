@@ -34,12 +34,23 @@ const fixture = join(root, 'spec/fixtures/browser_durable');
 const strict = process.env.TITAN_REQUIRE_BROWSER_TOOLCHAIN === '1';
 const output = process.env.TITAN_BRIDGE_OUTPUT ? resolve(process.env.TITAN_BRIDGE_OUTPUT) : undefined;
 if (!output && strict) throw new Error('TITAN_BRIDGE_OUTPUT must name the spec/browser/build-bridge.lua output');
-const images = {skip: !output && 'TITAN_BRIDGE_OUTPUT is unset'};
+const images = {skip: !output && 'TITAN_BRIDGE_OUTPUT is unset', timeout: 20 * 60 * 1000};
 const engines = (process.env.TITAN_PLAYWRIGHT_TEST_ENGINES ?? '').split(',').filter(Boolean);
 const exec = promisify(execFile);
 const diagnostic = text => process.stderr.write(`vfs-durable: ${text}\n`);
 const image = (name, suffix) => join(output, 'images', name + suffix);
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+// Every instance or page step settles within this bound, so a lost reply
+// fails its step and the scenario's cleanup still runs.
+const stepTimeout = 120000;
+function bounded(promise, label) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not settle within ${stepTimeout} ms`)), stepTimeout);
+  });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
 
 // The policy of every response under /csp/: scripts, workers and fetches
 // from the page's origin only, WebAssembly compilation, and nothing else (no
@@ -64,8 +75,9 @@ const contended = 'contention exclusive 5,5 immediate 5,5 count 3 autocommit tru
 // exclusive locking; the other connection is then SQLITE_BUSY (5), and
 // SQLITE_CANTOPEN (14) on the log-mode file until it locks exclusively too.
 const logged = 'wal delete wal locked 5 shared 14 count 1\n';
-const donated = `donor t${hex('in transit')};t${hex('adopted')};\n`;
+const donated = `donor busy 5 released 0 kept t${hex('probe')}; moved t${hex('in transit')};t${hex('adopted')};\n`;
 const progressed = /^tasks i1125000750000 least (\d+)\n$/;
+const cancelled = 'cancel waiting cancelled true returned false rows i200000 autocommit true deleted 200000\n';
 const dirty = 'TITAN_BROWSER_DISPOSED_DIRTY';
 
 function assertRan(report, stdout) {
@@ -151,6 +163,9 @@ async function portableScenarios(t, client, urls, vfs) {
     const report = await client.call('run', urls.durable, ['tasks'], {vfs});
     assertClean(report, progressed);
     assert.ok(Number(progressed.exec(report.stdout)[1]) >= 3, report.stdout);
+    // D16: a Task cancelled while the worker runs its accepted write waits
+    // for the write, which commits, then ends cancelled.
+    assertClean(await client.call('run', urls.durable, ['cancel'], {vfs}), cancelled);
   });
   await t.test('6. SQLITE_BUSY between two connections: BEGIN EXCLUSIVE, BEGIN IMMEDIATE and WAL', async () => {
     assertClean(await client.call('run', urls.durable, ['contention'], {vfs}), contended);
@@ -175,7 +190,7 @@ if (!engines.length) {
   test('Node 26: storage scenarios on a memory mount, and the control image', images, async t => {
     const urls = {durable: pathToFileURL(image('durable', '.mjs')).href,
       control: pathToFileURL(image('stock-novfs', '.mjs')).href};
-    const client = {call: (name, ...args) => host[name](...args)};
+    const client = {call: (name, ...args) => bounded(host[name](...args), `${name} ${JSON.stringify(args)}`)};
     const vfs = {mounts: {'/data': {backend: 'memory'}}};
     await portableScenarios(t, client, urls, vfs);
     await t.test('5. titan.fs, stock Lua io and os, os.chdir and ATTACH ? share one tree', async () => {
@@ -349,6 +364,7 @@ class DevTools {
     for (const listener of this.listeners) listener(message);
   }
   request(method, params = {}, session) {
+    if (this.stopped) return Promise.reject(this.stopped);
     const id = ++this.next;
     return new Promise((resolve, reject) => {
       this.pending.set(id, {resolve, reject, method});
@@ -357,11 +373,16 @@ class DevTools {
   }
   // The next `method` event of `session`, registered before its cause runs.
   event(method, session) {
-    return new Promise(resolve => this.waiters.add({method, session, resolve}));
+    if (this.stopped) return Promise.reject(this.stopped);
+    return new Promise((resolve, reject) => this.waiters.add({method, session, resolve, reject}));
   }
+  // The connection ended: every outstanding request and event wait fails.
   stop(error) {
+    this.stopped ??= error;
     for (const request of this.pending.values()) request.reject(error);
     this.pending.clear();
+    for (const waiter of this.waiters) waiter.reject(error);
+    this.waiters.clear();
   }
 }
 
@@ -397,30 +418,32 @@ async function launchChromium(chrome) {
   });
   diagnostic(`${chrome.version}; profile ${profile}`);
   return {
-    async page() {
+    page: () => bounded((async () => {
       const {targetId} = await devtools.request('Target.createTarget', {url: 'about:blank'});
       const {sessionId: session} = await devtools.request('Target.attachToTarget', {targetId, flatten: true});
       await devtools.request('Page.enable', {}, session);
       await devtools.request('Runtime.enable', {}, session);
       const load = async navigate => {
         const loaded = devtools.event('Page.loadEventFired', session);
+        // Awaited below, or abandoned when the navigation itself fails.
+        loaded.catch(() => {});
         const {errorText} = await navigate();
         if (errorText) throw new Error(errorText);
         await loaded;
       };
       return {
-        goto: url => load(() => devtools.request('Page.navigate', {url}, session)),
-        reload: () => load(() => devtools.request('Page.reload', {ignoreCache: true}, session)),
-        async call(name, ...args) {
+        goto: url => bounded(load(() => devtools.request('Page.navigate', {url}, session)), `goto ${url}`),
+        reload: () => bounded(load(() => devtools.request('Page.reload', {ignoreCache: true}, session)), 'reload'),
+        call: (name, ...args) => bounded((async () => {
           const {result, exceptionDetails} = await devtools.request('Runtime.evaluate', {
             expression: `globalThis.titanDurable.${name}(...${JSON.stringify(args)})`,
             awaitPromise: true, returnByValue: true}, session);
           if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
           return result.value;
-        },
-        close: () => devtools.request('Target.closeTarget', {targetId}),
+        })(), `${name} ${JSON.stringify(args)}`),
+        close: () => bounded(devtools.request('Target.closeTarget', {targetId}), 'close page'),
       };
-    },
+    })(), 'open page'),
     async close() {
       try {
         await Promise.race([devtools.request('Browser.close').catch(() => {}), delay(2000)]);
@@ -449,18 +472,19 @@ async function launchPlaywright(engine) {
   diagnostic(`${engine} ${context.browser()?.version() ?? ''}; Playwright 1.64.1; profile ${profile}`);
   let first = context.pages()[0];
   return {
-    async page() {
+    page: () => bounded((async () => {
       const page = first ?? await context.newPage();
       first = undefined;
       page.on('pageerror', error => diagnostic(`page exception: ${error.message}`));
       page.on('console', message => { if (message.type() === 'error') diagnostic(`page error: ${message.text()}`); });
       return {
-        goto: async url => { await page.goto(url, {waitUntil: 'load'}); },
-        reload: async () => { await page.reload({waitUntil: 'load'}); },
-        call: (name, ...args) => page.evaluate(([name, args]) => globalThis.titanDurable[name](...args), [name, args]),
-        close: () => page.close(),
+        goto: url => bounded(page.goto(url, {waitUntil: 'load'}).then(() => {}), `goto ${url}`),
+        reload: () => bounded(page.reload({waitUntil: 'load'}).then(() => {}), 'reload'),
+        call: (name, ...args) => bounded(page.evaluate(([name, args]) => globalThis.titanDurable[name](...args),
+          [name, args]), `${name} ${JSON.stringify(args)}`),
+        close: () => bounded(page.close(), 'close page'),
       };
-    },
+    })(), 'open page'),
     async close() {
       try {
         await context.close();

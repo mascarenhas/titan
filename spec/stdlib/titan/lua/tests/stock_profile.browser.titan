@@ -159,6 +159,44 @@ function test_lua_browser_stock_filesystem_operations(context: test.Context)
     assert(ok and loaded.name == 'stock_vfs_module' and loaded.file == module, tostring(loaded))
     assert(os.remove(module))
   ]])
+  -- The unmodified default package.path finds `./?.lua` and `./?/init.lua`
+  -- in the working directory, for stock require and for lua.require alike.
+  context:run("default_package_path", function (_: test.Context)
+    runtime_test.run(function ()
+      const root = stock_directory()
+      fs.write_file(root .. "/stock_default_module.lua", "return { name = ..., file = select(2, ...) }")
+      fs.mkdir(root .. "/stock_default_package")
+      fs.write_file(root .. "/stock_default_package/init.lua", "return 'package init'")
+      const original = browser_os.cwd()
+      browser_os.chdir(root)
+      defer browser_os.chdir(original)
+      const chunk = [[
+        assert(package.path:find('./?.lua', 1, true) and package.path:find('./?/init.lua', 1, true),
+          package.path)
+        assert(package.searchpath('stock_default_module', package.path) == './stock_default_module.lua')
+        assert(package.searchpath('stock_default_package', package.path) == './stock_default_package/init.lua')
+        local missing, message = package.searchpath('stock_default_missing', package.path)
+        assert(missing == nil and message:find('./stock_default_missing.lua', 1, true), message)
+        package.loaded.stock_default_module, package.loaded.stock_default_package = nil, nil
+        local ok, module = pcall(require, 'stock_default_module')
+        local package_ok, init = pcall(require, 'stock_default_package')
+        package.loaded.stock_default_module, package.loaded.stock_default_package = nil, nil
+        assert(ok and module.name == 'stock_default_module' and module.file == './stock_default_module.lua',
+          tostring(module))
+        assert(package_ok and init == 'package init', tostring(init))
+        return true
+      ]]
+      test.assert(tlua.load(chunk, "=browser-stock-default-path")() == true)
+      const state = tlua.new()
+      defer state:close()
+      assert_transfer_boolean(state:run(chunk, "=browser-state-stock-default-path"), true)
+      const loaded = tlua.load("return package.loaded")() as {string: value}
+      defer loaded["stock_default_module"] = nil
+      const module = tlua.require("stock_default_module") as {string: value}
+      test.assert(module["file"] == "./stock_default_module.lua",
+                  "lua.require did not search the default package.path")
+    end)
+  end)
   -- titan.fs and stock Lua share one tree and its bytes.
   context:run("titan_fs_coherence", function (_: test.Context)
     runtime_test.run(function ()

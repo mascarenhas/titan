@@ -10,6 +10,7 @@ local lua = import "lua"
 local os = import "os"
 local sqlite3 = import "sqlite3"
 local strings = import "string"
+local timer = import "timer"
 
 -- Bytes no text codec preserves: NUL, a lone 0xff and multibyte UTF-8.
 local const NOTE_BYTES = "durable a\195\167\195\163o \228\184\150\231\149\140\n\0\1\255 end"
@@ -165,35 +166,94 @@ local function unsynchronized(root: string)
   io.print("unsynchronized ok")
 end
 
--- Scenario 4: four Tasks keep running while one statement runs in the
--- storage worker.
+-- Scenario 4: four Tasks of different kinds (yield, timer, channel, resident
+-- /tmp read) keep running while one long statement runs in the storage
+-- worker. Progress counts across that single QUERY request only.
 local function tasks(root: string)
   const db = sqlite3.connect(root .. "/tasks.db")
   defer db:close()
+  const resident = "/tmp/durable-tasks.txt"
+  fs.write_file(resident, "resident")
+  defer fs.unlink(resident)
+  const statement = db:prepare("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c " ..
+    "WHERE x < 1500000) SELECT sum(x) FROM c")
+  defer statement:close()
+  const send, receive, close_channel = async.channel<|integer|>(1)
+  defer close_channel()
   local running = true
   const counts: {integer} = {0, 0, 0, 0}
-  const workers: {async.Task<|nil, value|>} = {}
-  for index = 1, 4 do
-    workers[index] = async.run(function (): nil
+  const bodies: {function (): nil} = {
+    function (): nil
+      while running do counts[1] = counts[1] + 1; async.yield() end
+      return nil
+    end,
+    function (): nil
+      while running do counts[2] = counts[2] + 1; timer.sleep(0) end
+      return nil
+    end,
+    function (): nil
+      while running do send(counts[3]); counts[3] = counts[3] + 1 end
+      return nil
+    end,
+    function (): nil
       while running do
-        counts[index] = counts[index] + 1
-        async.yield()
+        receive()
+        if fs.read_file(resident) ~= "resident" then raise "the resident /tmp file changed" end
+        counts[4] = counts[4] + 1
       end
       return nil
-    end)
-  end
-  async.yield()
+    end,
+  }
+  const workers: {async.Task<|nil, value|>} = {}
+  for index = 1, 4 do workers[index] = async.run(bodies[index]) end
+  for _ = 1, 4 do async.yield() end
   const before = {counts[1], counts[2], counts[3], counts[4]}
-  const total = scalar(db, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c " ..
-    "WHERE x < 1500000) SELECT sum(x) FROM c")
+  const cursor = statement:query()
   const after = {counts[1], counts[2], counts[3], counts[4]}
+  defer cursor:close()
+  const row = cursor:fetch()
+  if not row then raise "the long query returned no row" end
   running = false
+  for index = 1, 4 do workers[index]:cancel(async.CancellationReason.simple("scenario finished")) end
   for index = 1, 4 do async.join(workers[index]) end
   local least = after[1] - before[1]
   for index = 2, 4 do
     if after[index] - before[index] < least then least = after[index] - before[index] end
   end
-  io.print("tasks " .. cell_text(total) .. " least " .. least)
+  io.print("tasks " .. cell_text(row:get(1)) .. " least " .. least)
+end
+
+local function flag_text(flag: boolean): string
+  if flag then return "true" end
+  return "false"
+end
+
+-- D16: cancelling a Task whose SQLite request the worker accepted waits for
+-- that request, which completes, and only then delivers the cancellation;
+-- the connection stays usable.
+local function cancel_in_flight(root: string)
+  const db = sqlite3.connect(root .. "/cancel.db")
+  defer db:close()
+  execute(db, "CREATE TABLE item (v INTEGER)")
+  const insert = db:prepare("INSERT INTO item WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL " ..
+    "SELECT x + 1 FROM c WHERE x < 200000) SELECT x FROM c")
+  defer insert:close()
+  local submitted, returned = false, false
+  const writer = async.run<|nil, value|>(function (): nil
+    submitted = true
+    insert:execute()
+    returned = true
+    return nil
+  end)
+  while not submitted do async.yield() end
+  const state = writer:status():as_string()
+  writer:cancel(async.CancellationReason.simple("cancel the accepted insert"))
+  async.join(writer)
+  const cancelled = writer:status():has_cancelled()
+  const inserted = scalar(db, "SELECT count(*) FROM item")
+  io.print("cancel " .. state .. " cancelled " .. flag_text(cancelled) .. " returned " ..
+    flag_text(returned) .. " rows " .. cell_text(inserted) .. " autocommit " ..
+    flag_text(db:get_autocommit()) .. " deleted " .. execute(db, "DELETE FROM item"))
 end
 
 -- Scenario 5: titan.fs, stock Lua io and os, and SQLite share one tree and
@@ -266,11 +326,6 @@ local function coherence_check(root: string)
     " lua.txt " .. hex(fs.read_file(root .. "/sub/lua.txt")))
 end
 
-local function flag_text(flag: boolean): string
-  if flag then return "true" end
-  return "false"
-end
-
 local function count_items(db: sqlite3.Connection): integer
   return scalar(db, "SELECT count(*) FROM item")
 end
@@ -325,45 +380,42 @@ local function wal_contention(root: string)
     " shared " .. shared_reader .. " count " .. count_items(reader))
 end
 
-local function adoption_refused(payload: string): boolean
-  sqlite3.Connection.from_transfer_payload(payload):close()
-  return false
-catch
-  return true
-end
-
 -- Scenario 7 (PB-5): a child state adopts two connections, returns one and
--- keeps the other. Closing the donor retires only the kept one; the
--- returned one, still in transit, keeps its open transaction.
+-- keeps the other, which holds a write lock on its own database. Closing the
+-- donor retires only the kept one, so that lock goes and its row rolls
+-- back; the returned one, still in transit, keeps its open transaction.
 local function donor_close(root: string)
-  const path = root .. "/donor.db"
-  const moved = sqlite3.connect(path)
+  const moved = sqlite3.connect(root .. "/donor.db")
   defer moved:close()
-  const kept = sqlite3.connect(path)
-  defer kept:close()
   execute(moved, "CREATE TABLE item (body TEXT)")
   moved:set_autocommit(false)
   execute(moved, "INSERT INTO item VALUES ('in transit')")
-  const kept_packet = async.TransferValue.from_value(kept)
+  const kept_path = root .. "/kept.db"
+  const kept = sqlite3.connect(kept_path)
+  defer kept:close()
+  execute(kept, "CREATE TABLE item (body TEXT)")
+  execute(kept, "BEGIN IMMEDIATE")
+  execute(kept, "INSERT INTO item VALUES ('held by the donor')")
+  const probe = sqlite3.connect(kept_path)
+  defer probe:close()
   const donor = lua.new()
   defer donor:close()
   const returned = {donor:run([[
     local moved, kept = ...
     held = kept
     return moved
-  ]], "=durable-donor", async.TransferValue.from_value(moved), kept_packet)}
+  ]], "=durable-donor", async.TransferValue.from_value(moved), async.TransferValue.from_value(kept))}
+  const busy = failure_code(function () execute(probe, "INSERT INTO item VALUES ('probe')") end)
   donor:close()
+  const released = failure_code(function () execute(probe, "INSERT INTO item VALUES ('probe')") end)
   const adopted: sqlite3.Connection = returned[1]:to_value()
   defer adopted:close()
   if adopted:get_autocommit() then raise "the adopted connection lost its transaction" end
   execute(adopted, "INSERT INTO item VALUES ('adopted')")
   adopted:commit()
-  case kept_packet
-  when is_record_payload(_, _, payload) then
-    if not adoption_refused(payload) then raise "the donor's kept connection survived the donor" end
-  else raise "a connection transfer is not a record payload"
-  end
-  io.print("donor " .. table_text(adopted, "SELECT body FROM item ORDER BY rowid"))
+  io.print("donor busy " .. busy .. " released " .. released .. " kept " ..
+    table_text(probe, "SELECT body FROM item ORDER BY rowid") .. " moved " ..
+    table_text(adopted, "SELECT body FROM item ORDER BY rowid"))
 end
 
 -- Scenario 10: a mount holding more than maxHydratedBytes.
@@ -387,6 +439,7 @@ function main(args: {string}): integer
   elseif mode == "open-transaction" then open_transaction(root)
   elseif mode == "unsynchronized" then unsynchronized(root)
   elseif mode == "tasks" then tasks(root)
+  elseif mode == "cancel" then cancel_in_flight(root)
   elseif mode == "coherence" then coherence(root)
   elseif mode == "coherence-check" then coherence_check(root)
   elseif mode == "contention" then contention(root)

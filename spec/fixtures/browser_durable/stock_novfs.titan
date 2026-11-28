@@ -10,20 +10,36 @@ foreign import "titan/ffi.h"
 
 local type StockChunk = function (): (string)
 
--- Every stock file operation, each of which must refuse.
+-- Every stock file operation, each of which must refuse: the ones that
+-- report failures return (nil, message, errno), loadfile (nil, message),
+-- and the ones that raise raise a message.
 local const CHECKS = [[
   local accepted = {}
-  local function refused(name, ok, message)
+  local function triple(name, result, message, code, ...)
+    if result ~= nil or type(message) ~= 'string' or type(code) ~= 'number' or select('#', ...) ~= 0 then
+      accepted[#accepted + 1] = name
+    end
+  end
+  local function raises(name, ok, message)
     if ok or type(message) ~= 'string' then accepted[#accepted + 1] = name end
   end
-  refused('io.open', io.open('/tmp/stock-novfs.txt', 'w'))
-  refused('io.tmpfile', io.tmpfile())
-  refused('os.tmpname', pcall(os.tmpname))
-  refused('os.remove', os.remove('/tmp/stock-novfs.txt'))
-  refused('os.rename', os.rename('/tmp/a', '/tmp/b'))
-  refused('io.lines', pcall(io.lines, '/tmp/stock-novfs.txt'))
-  refused('dofile', pcall(dofile, '/tmp/stock-novfs.lua'))
-  refused('loadfile', loadfile('/tmp/stock-novfs.lua'))
+  triple('io.open', io.open('/tmp/stock-novfs.txt', 'w'))
+  triple('io.open read', io.open('/tmp/stock-novfs.txt', 'r'))
+  triple('io.tmpfile', io.tmpfile())
+  triple('os.remove', os.remove('/tmp/stock-novfs.txt'))
+  triple('os.rename', os.rename('/tmp/a', '/tmp/b'))
+  raises('os.tmpname', pcall(os.tmpname))
+  raises('io.lines', pcall(io.lines, '/tmp/stock-novfs.txt'))
+  raises('io.input', pcall(io.input, '/tmp/stock-novfs.txt'))
+  raises('io.output', pcall(io.output, '/tmp/stock-novfs.txt'))
+  raises('dofile', pcall(dofile, '/tmp/stock-novfs.lua'))
+  if select('#', loadfile('/tmp/stock-novfs.lua')) ~= 2 then accepted[#accepted + 1] = 'loadfile' end
+  local chunk, message = loadfile('/tmp/stock-novfs.lua')
+  if chunk ~= nil or type(message) ~= 'string' then accepted[#accepted + 1] = 'loadfile result' end
+  local found, searched = package.searchpath('stock_novfs_module', package.path)
+  if found ~= nil or type(searched) ~= 'string' then accepted[#accepted + 1] = 'package.searchpath' end
+  local loaded = pcall(require, 'stock_novfs_module')
+  if loaded then accepted[#accepted + 1] = 'require' end
   return table.concat(accepted, ',')
 ]]
 

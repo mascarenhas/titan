@@ -786,7 +786,7 @@ return {
         { "io.popen os.execute", "implemented", "lua.tests.test_lua_browser_stock_profile_failures" },
         { "io.read io.stdin:read", "implemented", "lua.tests.test_lua_browser_stock_profile_failures" },
         { "package.loadlib", "implemented", "lua.tests.test_lua_browser_stock_profile_failures.package_loadlib" },
-        { "package.path", "implemented", "lua.tests.test_lua_browser_stock_filesystem_operations.package_paths" },
+        { "package.path", "implemented", "lua.tests.test_lua_browser_stock_filesystem_operations.default_package_path" },
         { "package.cpath", "implemented", "lua.tests.test_lua_browser_stock_profile_failures.package_cpath" },
         { "os.getenv", "implemented", "os.browser_tests:stock-getenv-sees-embedding-and-titan-mutations:owner" },
         { "print io.write io.stdout io.stderr", "implemented",

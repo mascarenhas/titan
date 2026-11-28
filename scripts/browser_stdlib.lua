@@ -134,31 +134,56 @@ function M.check_path(path)
     return true
 end
 
--- Titan's linkage names for a module begin with its mangled name and `_`
--- (coder/names.lua `mangle_qn`), so a Titan module of the audited build may
--- extend a C library's prefix: the browser test owner sqlite3.tests defines
--- and references `sqlite3_tests_*`. Such a prefix exempts its names only when
--- it is longer than the library prefix it extends.
-local function titan_prefix(modname)
-    return (modname:gsub("[%-.]", "_")) .. "_"
+local LIBRARY_PREFIXES = { "uv_", "SSL_", "OPENSSL_", "llhttp_", "sqlite3_" }
+
+local function library_prefix(name)
+    if type(name) ~= "string" then return nil end
+    for _, prefix in ipairs(LIBRARY_PREFIXES) do
+        if name:sub(1, #prefix) == prefix then return prefix end
+    end
+    return nil
 end
 
-local function titan_prefixes(objects)
+-- Titan's linkage names for a module begin with its mangled name and `_`
+-- (coder/names.lua `mangle_qn`), so a Titan module may extend a C library's
+-- prefix: the browser test owner sqlite3.tests defines `sqlite3_tests_*`.
+-- Only names an audited object defines are exempt, never a reference: those
+-- under its prefix that the module's own metadata-bearing object defines,
+-- and those its part objects (which carry no metadata) define, which follow
+-- the prefix with one of Titan's separators ℳ, ℙ or ℱ that no C identifier
+-- spells. A module whose prefix is the library prefix itself exempts nothing.
+local TITAN_SEPARATORS = { ["\226\132\179"] = true, ["\226\132\153"] = true, ["\226\132\177"] = true }
+
+local function titan_definitions(objects)
     local prefixes = {}
     for _, object in ipairs(objects) do
         local module = object.metadata and object.metadata.module
-        if type(module) == "string" then prefixes[titan_prefix(module)] = true end
+        if type(module) == "string" and not absent_modules[module] then
+            local prefix = (module:gsub("[%-.]", "_")) .. "_"
+            local library = library_prefix(prefix)
+            if library and #prefix > #library then prefixes[prefix] = module end
+        end
     end
-    return prefixes
+    local defined = {}
+    for _, object in ipairs(objects) do
+        local owner = object.metadata and object.metadata.module
+        for _, symbol in ipairs(object.symbols or {}) do
+            local name = symbol.name
+            if symbol.defined and type(name) == "string" then
+                for prefix, module in pairs(prefixes) do
+                    if name:sub(1, #prefix) == prefix and
+                        (owner == module or TITAN_SEPARATORS[name:sub(#prefix + 1, #prefix + 3)]) then
+                        defined[name] = true
+                    end
+                end
+            end
+        end
+    end
+    return defined
 end
 
-function M.check_symbol(name, origin, prefixes)
-    local library = type(name) == "string" and (name:match("^uv_") or name:match("^SSL_") or
-        name:match("^OPENSSL_") or name:match("^llhttp_") or name:match("^sqlite3_"))
-    if library then
-        for prefix in pairs(prefixes or {}) do
-            if #prefix > #library and name:sub(1, #prefix) == prefix then return true end
-        end
+function M.check_symbol(name, origin, defined)
+    if library_prefix(name) and not (defined and defined[name]) then
         return nil, origin .. ": forbidden browser stdlib symbol " .. name
     end
     return true
@@ -167,7 +192,7 @@ end
 -- titan.sqlite3's source-relative browser header puts titan/sqlite3/ on the
 -- C search path, so its includes (`<errno.h>`, `"titan/ffi.h"`) first probe
 -- there and miss. Such a miss names no header the build read, provided the
--- name it searched for is itself allowed and is not the native carrier.
+-- path without that component is itself allowed and is not the native carrier.
 local function missing_sqlite3_search(dependency)
     local identity = tostring(dependency.identity or "")
     if dependency.kind ~= "search" or not identity:find(";exists=no;", 1, true) or
@@ -175,8 +200,8 @@ local function missing_sqlite3_search(dependency)
         return false
     end
     local normalized = "/" .. tostring(dependency.path):gsub("\\", "/"):lower()
-    local searched = normalized:match("/titan/sqlite3/(.+%.h)$")
-    return searched ~= nil and searched ~= "native.h" and M.check_path("/" .. searched) == true
+    local before, searched = normalized:match("^(.-)/titan/sqlite3/(.+%.h)$")
+    return searched ~= nil and searched ~= "native.h" and M.check_path(before .. "/" .. searched) == true
 end
 
 function M.check_headers(record)
@@ -189,17 +214,17 @@ function M.check_headers(record)
     return true
 end
 
-local function check_object_symbols(object, origin, prefixes)
+local function check_object_symbols(object, origin, defined)
     local module = object.metadata and object.metadata.module
     if absent_modules[module] then
         return nil, origin .. ": forbidden browser stdlib module " .. module
     end
     for _, symbol in ipairs(object.symbols or {}) do
-        local ok, err = M.check_symbol(symbol.name, origin, prefixes)
+        local ok, err = M.check_symbol(symbol.name, origin, defined)
         if not ok then return nil, err end
     end
     for _, import in ipairs(object.imports or {}) do
-        local ok, err = M.check_symbol(import.name, origin, prefixes)
+        local ok, err = M.check_symbol(import.name, origin, defined)
         if not ok then return nil, err end
     end
     return true
@@ -216,8 +241,8 @@ local function check_object_headers(object, bytes, origin)
     return true
 end
 
-local function check_object(object, bytes, origin, prefixes)
-    local ok, err = check_object_symbols(object, origin, prefixes)
+local function check_object(object, bytes, origin, defined)
+    local ok, err = check_object_symbols(object, origin, defined)
     if not ok then return nil, err end
     return check_object_headers(object, bytes, origin)
 end
@@ -231,12 +256,12 @@ function M.check_archive(filename, scanned)
     end
     local objects = {}
     for _, member in ipairs(scanned.members or {}) do objects[#objects + 1] = member.object end
-    local prefixes = titan_prefixes(objects)
+    local defined = titan_definitions(objects)
     for _, member in ipairs(scanned.members or {}) do
         local origin = filename .. "(" .. member.display_name .. ")"
         ok, err = M.check_path(member.display_name)
         if not ok then return nil, err end
-        ok, err = check_object(member.object, member.bytes, origin, prefixes)
+        ok, err = check_object(member.object, member.bytes, origin, defined)
         if not ok then return nil, err end
     end
     return true
@@ -245,21 +270,22 @@ end
 -- Inspect the image's imports, exports and internal function names, not just
 -- its public exports: dead-stripping must not conceal a linked host dependency.
 -- Which host imports an image may have is scripts/browser_imports.lua's rule.
--- `prefixes` are the Titan module prefixes check_output found in the build.
-function M.check_image(bytes, origin, prefixes)
+-- `defined` holds the library-prefixed names the build's own Titan objects
+-- define, as check_output returns them.
+function M.check_image(bytes, origin, defined)
     local image, err = staticmetadata.browser_trace_image(bytes, origin)
     if not image then return nil, err end
     for _, inventory in ipairs({ image.imports, image.exports }) do
         for _, symbol in ipairs(inventory) do
             local ok
-            ok, err = M.check_symbol(symbol.name, origin, prefixes)
+            ok, err = M.check_symbol(symbol.name, origin, defined)
             if not ok then return nil, err end
         end
     end
     if next(image.function_names) == nil then return nil, origin .. ": missing function name inventory" end
     for _, name in pairs(image.function_names) do
         local ok
-        ok, err = M.check_symbol(name, origin, prefixes)
+        ok, err = M.check_symbol(name, origin, defined)
         if not ok then return nil, err end
     end
     return true
@@ -407,7 +433,7 @@ function M.check_service_symbols(undefined, origin)
 end
 
 -- Audits every object of a compiler output directory, and returns true and
--- the Titan module prefixes it found, for check_image.
+-- the library-prefixed names its Titan objects define, for check_image.
 function M.check_output(strategy, directory)
     local root, err = strategy:realpath(directory)
     if not root then return nil, err end
@@ -548,12 +574,12 @@ function M.check_output(strategy, directory)
     if not ok then return nil, visit_error end
     local scanned = {}
     for index, entry in ipairs(objects) do scanned[index] = entry.object end
-    local prefixes = titan_prefixes(scanned)
+    local defined = titan_definitions(scanned)
     for _, entry in ipairs(objects) do
-        ok, visit_error = check_object_symbols(entry.object, entry.origin, prefixes)
+        ok, visit_error = check_object_symbols(entry.object, entry.origin, defined)
         if not ok then return nil, visit_error end
     end
-    return true, prefixes
+    return true, defined
 end
 
 -- Inventory public declarations, nominal fields, variants, methods and statics.
