@@ -51,9 +51,10 @@ The implementation is spread over:
   which fold the descriptor identity, the link profile, and the SDK assets
   into object and link certificates;
 * `titanc`, which validates the target, requires `--output`, locks and marks
-  the output root early, selects the archive-only or four-file image output
-  set (`.mjs`, `.wasm`, `.wasm.trace`, `.wasm.map`), and checks the SDK before
-  linking;
+  the output root early, selects the archive-only or image output set
+  (`.mjs`, `.wasm`, `.wasm.trace`, `.wasm.map`, with `<stem>.worker.mjs` and
+  `<stem>.sqlite3.wasm` reserved as `optional = true` outputs), and checks the
+  SDK before linking;
 * the runtime sources `titan.c`, `titan_path.c`, and `ltitanlib.c`, whose
   host-only paths compile out under `TITAN_TARGET_BROWSER`, and the runtime
   headers `titan.h`, `titan/ffi.h`, and `transfer.h`, which carry a `__wasm__`
@@ -62,9 +63,9 @@ The implementation is spread over:
   `titan/browser.browser.titan` ([browser bridge runtime](browser-bridge.md));
 * `titan-runtime/browser/`: the private C/JS trace adapter header
   `titan-browser-trace.h`, the zero-dependency WebAssembly factory
-  `titan-wasm-factory.mjs` (owning JSPI, the 18 WASI imports, bridge/calendar
-  imports, `create({ imports })` merging, and the trace adapter), the loader
-  source `titan-browser.mjs` that `browserlink.embed` places alongside the
+  `titan-wasm-factory.mjs` (owning JSPI, the 19 WASI imports, bridge and
+  calendar imports, `create({ imports })` merging, and the trace adapter), the
+  loader source `titan-browser.mjs` that `browserlink.embed` places alongside the
   factory in every image, the standalone portable peer `titan-protobuf.mjs`,
   and the runner `titan-browser-run` with `titan-browser-run.mjs`,
   `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`; and
@@ -292,16 +293,21 @@ prefix`.
 | Key | File | Contents |
 | --- | --- | --- |
 | `runtime` | `libtitan.a` (`paths.libtitan`) | `titan.o`, `minicoro.o`, `titan_path.o`, `ltitanlib.o`, compiled for the browser |
-| `factory` | `titan-wasm-factory.mjs` | the zero-dependency WebAssembly factory embedded into generated images (JSPI owner, 18 WASI imports, bridge/calendar imports, `create({ imports })` merging, and the trace adapter) |
+| `factory` | `titan-wasm-factory.mjs` | the zero-dependency WebAssembly factory embedded into generated images (JSPI owner, 19 WASI imports, bridge/calendar imports, `create({ imports })` merging, and the trace adapter) |
 | `loader` | `titan-browser.mjs` | the [loader](#the-loader) source embedded into generated images, not a deployment import |
+| `vfs` | `titan-browser-vfs.mjs` | the [browser storage runtime](#the-browser-storage-runtime) (`uwasi` resident VFS, journal, and worker bridge), embedded only when an image links filesystem imports |
+| `sql` | `titan-browser-sql.mjs` | the `titan:sqlite3` transport and per-state lease ledger, embedded alongside `vfs` only when an image links `titan.sqlite3` |
+| `storage_worker` | `titan-storage-worker.mjs` | [the storage worker](#the-storage-worker) (`uwasi` OPFS and memory mirror and SQLite service host), published as `<stem>.worker.mjs` only when `vfs` is embedded |
+| `sqlite_service` | `titan-sqlite3-service.wasm` | the standalone SQLite service reactor (`sqlite3_service.c` + pinned SQLite amalgamation, no Lua or Titan runtime), published as `<stem>.sqlite3.wasm` only when `sql` is embedded |
 | `runner` | `titan-browser-run` | the [runner](#the-runner)'s POSIX shell launcher (mode 0755) |
 | `runner_module` | `titan-browser-run.mjs` | the runner's supervisor |
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
 | `build_profile` | `build-profile` | the descriptor's `build_profile` and a newline, written by `make browser-sdk` and [checked at every link](#readiness-and-the-missing-sdk-diagnostic); `sdk-digests` records it |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
-| `provider` | `titan.a` | the browser standard provider: fourteen shared roots including `io`, browser compositions of `async`, `timer`, synchronous `lua`, the `os` subset, and the `http` and `websocket` clients, browser-only `titan.browser`, and five LPegLabel members |
+| `provider` | `titan.a` | the browser standard provider: fourteen shared roots including `io`, browser compositions of `async`, `timer`, `fs`, `sqlite3`, `lua`, the `os` subset, and the `http` and `websocket` clients, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
+
 The SDK also installs `titan-protobuf.mjs` in `titan_bin`. This standalone ES
 module encodes and decodes copied JavaScript values using a portable protobuf
 description. Pages deploy and import it separately; the compiler neither
@@ -397,8 +403,8 @@ WebAssembly build and image-runtime files are not part of this artifact.
 
 `browserlink.require_sdk(context, descriptor, install)` checks, in the order
 `runtime`, `factory`, `loader`, `runner`, `runner_module`, `node_worker`,
-`page`, `build_profile`, that each asset is a regular file that `context.io`
-can open and read (a bounded
+`page`, `vfs`, `sql`, `storage_worker`, `sqlite_service`, `build_profile`, that
+each asset is a regular file that `context.io` can open and read (a bounded
 read of at most one byte). It executes nothing, reads no manifest, and does
 not require `lpeglabel`, `provider`, or `sdk_digests`: the initial provider
 publication runs before either exists. The first missing asset returns:
@@ -468,15 +474,25 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    `driver.build_static_archive` (the descriptor's `llvm-ar`/`llvm-ranlib` and
    the member-verification path), rejects any member that imports a `GOT.*`
    symbol or refers to `dlopen`, `dlsym`, `dlerror`, or a `backtrace_` name,
-   copies the JavaScript and runner assets (the launcher executable), writes
-   the descriptor's profile and a newline to `build-profile`, and checks
+   copies the JavaScript, storage-worker, and runner assets (the launcher
+   executable), builds `titan-sqlite3-service.wasm` (`build_sqlite_service`)
+   from `titan-runtime/browser/sqlite3_service.c` and the pinned SQLite
+   amalgamation (`-O2 -std=c99 -DSQLITE_THREADSAFE=0
+   -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_TEMP_STORE=3`, linked with
+   `-mexec-model=reactor -Wl,--gc-sections -Wl,--strip-all`, zero Lua or Titan
+   runtime) in a sibling `.sqlite3-service` directory, validates its objects
+   with `check_service_symbols` (forbidding `dlopen`, `dlsym`, `dlclose`,
+   `dlerror`, `getentropy`, `__wasi_random_get`, and `lua[L_]*`) and the final
+   reactor with `check_service` (requiring the exact five `SERVICE_EXPORTS`
+   with their kinds and signatures and all 23 `service:sqlite3` WASI imports),
+   writes the descriptor's profile and a newline to `build-profile`, and checks
    readiness with `browserlink.require_sdk` and
    `driver.browser_node_ready` against the staged runner.
 4. `titanc --target browser --output <build> --source-first --incremental
    -X <titan_bin>/libtitan-lpeglabel.a <BROWSER_STDLIB_ROOTS>` publishes
    `<build>/titan.a` through ordinary library mode, which runs the executing
-   protocol check against the runtime and runner staged in step 3. The twenty-one
-   roots and the payload are described in [the browser standard
+   protocol check against the runtime and runner staged in step 3. The
+   twenty-three roots and the payload are described in [the browser standard
    library](#the-browser-standard-library). No `titan.a` or manifest exists
    yet, and none is required.
 5. `browser_sdk.lua finalize` rescans the staged provider with the descriptor
@@ -485,22 +501,26 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    runs the [dependency-closure
    check](#the-dependency-closure-check) over the staged provider, the
    LPegLabel archive, and every object and link certificate under `<build>`,
-   requires exactly twenty-one keys, in bytewise order: `titan.async`,
-   `titan.browser`, `titan.coroutine`, `titan.gc`, `titan.http`, `titan.io`,
-   `titan.iteration`, `titan.json`, `titan.lua`, `titan.math`, `titan.os`,
-   `titan.path`, `titan.peg`, `titan.protobuf`, `titan.reflect`,
-   `titan.string`, `titan.test`, `titan.timer`, `titan.transfer`, `titan.url`,
-   and `titan.websocket`; copies it to `titan.a`; writes `absent-modules`
-   from the [status inventory](#subset-parity-gate) and `analysis-target`
-   from the validated compiler descriptor; and finally writes
-   `sdk-digests` with `incremental.write_sdk_digests` and the existing
-   schema.
+   requires exactly twenty-three keys, in bytewise order: `titan.async`,
+   `titan.browser`, `titan.coroutine`, `titan.fs`, `titan.gc`, `titan.http`,
+   `titan.io`, `titan.iteration`, `titan.json`, `titan.lua`, `titan.math`,
+   `titan.os`, `titan.path`, `titan.peg`, `titan.protobuf`, `titan.reflect`,
+   `titan.sqlite3`, `titan.string`, `titan.test`, `titan.timer`,
+   `titan.transfer`, `titan.url`, and `titan.websocket`; copies it to `titan.a`;
+   writes `absent-modules` from the [status inventory](#subset-parity-gate) and
+   `analysis-target` from the validated compiler descriptor; and finally writes
+   `sdk-digests` with `incremental.write_sdk_digests` and the existing schema.
 
 The manifest records the browser `liblua.a` and its record, every browser Lua
 header, the five common Titan headers, and the other browser assets, hashed at
 their installed destinations; the manifest never records itself. Every copy
 goes through a temporary file and a rename. A missing or invalid manifest is
 a digest-reuse miss, never evidence that the runtime is unavailable.
+
+Third-party notices, including `LICENSES/uwasi-LICENSE`, are installed into
+`$(TITAN_SHARE_DIR)/LICENSES/` by the native standard-library install recipe
+(`STDLIB_LICENSES` in `Makefile` and `TITAN_LICENSE_FILES` in `Makefile.win`),
+not by `make browser-sdk`.
 
 **Differing roots.** When `ROCKS_TREE` is set and resolves to a different
 directory than `PREFIX`, `prepare` first builds a descriptor against
@@ -564,21 +584,35 @@ fields, which the gate's normalization leaves out of the comparison.
 
 `titan.os` composes its shared main with browser clock, environment, process,
 and stdio contributors. Calendar and locale code stays shared; environment
-and wall time use libc, Task exit uses `async.request_exit`, and parent
-streams use SDK sources. Native host queries, CPU time, processes, options,
-and signals are absent. The status inventory records those absences;
-`InputStream` and `OutputStream` hold browser-specific private fields and
-keep every public method. See [the browser owner](os-library.md#browser-parent-stream-owner).
-The complete shared `titan.io` facade imports that composition and adds no
-foreign boundary or target variant.
+and wall time use libc, `cwd`/`chdir`/`homedir`/`tmpdir` use `wasi-libc` and
+instance environment defaults, Task exit uses `async.request_exit`, and parent
+streams use SDK sources. Native host identity (`hostname`, `exepath`, `pid`,
+`ppid`), CPU time, processes, options, and signals are absent. The status
+inventory records those absences; `InputStream` and `OutputStream` hold
+browser-specific private fields and keep every public method. See
+[the browser owner](os-library.md#browser-parent-stream-owner). The complete
+shared `titan.io` facade imports that composition and adds no foreign boundary
+or target variant.
 
-`titan.lua` selects its shared main and worker with the browser source-search
-contributor. It keeps synchronous independent states in the same instance;
-`dofile`, `Lua:run_async`, and `Lua:run_async_from_loader` have no browser
-declaration. Source lookup contributes a fixed no-filesystem miss. The Titan
-package searcher keeps canonical/preload lookup, then contributes a fixed
-no-dynamic-providers miss without reading the environment or probing files.
-See [the Lua composition](lua-library.md#browser-states-and-stock-profile).
+`titan.fs` selects `titan/fs.browser.titan` (with declaration-only
+`titan/fs.browser.h`) and delivers 27 of 35 members over the instance's
+resident `uwasi` VFS and the `titan:vfs` durability boundary
+([browser files](filesystem-library.md#browser-files)); `Watcher`,
+`WatcherEvent`, and `watcher` stay absent.
+
+`titan.sqlite3` composes its shared `validation.titan` and `row.titan` with
+`sqlite3.browser.titan`, `bindings.browser.titan`, and declaration-only
+`sqlite3.browser.h`, delivering all 26 members over the worker-hosted SQLite
+service without linking SQLite C headers or archives into the browser guest
+([browser connections](sqlite3-library.md#browser-connections)).
+
+`titan.lua` selects its shared main, shared `loading.titan` (`dofile` and
+`package.path` source search over `titan.fs`), and shared `worker.titan`,
+omitting only `background.native.titan` (`Lua:run_async` and
+`Lua:run_async_from_loader`). The Titan package searcher keeps canonical and
+preload lookup, then contributes a fixed no-dynamic-providers miss without
+reading the environment or probing files. See
+[the Lua composition](lua-library.md#browser-states-and-stock-profile).
 
 `titan.http` composes its shared main `titan/http/http.titan` with the shared
 `headers.titan` and `options.titan` and the browser contributor
@@ -592,21 +626,20 @@ SDK's `titan:websocket` source ([browser client](websocket-library.md#browser-cl
 Neither brings llhttp, OpenSSL, or libuv into the browser closure. The status
 inventory records their absent members.
 
-Six standard modules have only native mains and are absent at compile time:
-the flat `titan/{fs,net,ssl}.native.titan` and the folder mains
-`titan/{uv,sqlite3,thread}/<name>.native.titan`
+Four standard modules have only native mains and are absent at compile time:
+the flat `titan/{net,ssl}.native.titan` and the folder mains
+`titan/{uv,thread}/<name>.native.titan`
 ([Make inventories](target-source-selection.md#make-inventories-and-audits)).
 For `browser` the resolver finds no main, so an import fails with the
 [absent-module diagnostic](#the-absent-module-diagnostic), and a contributor
 of a folder whose main is unselected stays blocked rather than resolving as a
 flat module.
-The plan for the six absent modules is provisional:
+The plan for the four absent modules is provisional:
 
 | Modules | Browser plan (provisional) |
 | --- | --- |
-| `fs` | only together with a virtual filesystem |
 | `uv`, `net`, `ssl` | absent |
-| `sqlite3`, `thread` | absent; browser SQLite and Worker-based threads are possible later additions |
+| `thread` | absent; Worker-based threads are a possible later addition |
 
 No absent capability is exposed as a placeholder: the standard library has no
 member that always raises. The [subset parity gate](#subset-parity-gate)
@@ -623,8 +656,9 @@ unless it is built with `--no-uv-bootstrap`; otherwise the
 
 ### Provider recipe
 
-`BROWSER_STDLIB_ROOTS` in the `Makefile` names the twenty-one logical roots, and
-[`make browser-sdk`](#make-browser-sdk) step 4 compiles them in one library-mode
+`BROWSER_STDLIB_ROOTS` in the `Makefile` names the twenty-three logical roots,
+and [`make browser-sdk`](#make-browser-sdk) step 4 compiles them in one
+library-mode
 `titanc --target browser` invocation. The provider's native payload and
 include path are LPegLabel only:
 
@@ -647,14 +681,15 @@ include path ([standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image));
 native link inputs come from invocation options, not module metadata, so the
 browser recipe states its closure explicitly. The published `titan.a` holds
-the twenty-one module objects (with their split parts) and the five LPegLabel
+the twenty-three module objects (with their split parts) and the five LPegLabel
 members.
 
 ### The dependency-closure check
 
-`scripts/browser_stdlib.lua` rejects the six browser-absent standard modules
-by Titan import and module identity, and libuv, OpenSSL, llhttp, and SQLite by
-path, by symbol, and through the evidence each certified input carries:
+`scripts/browser_stdlib.lua` rejects the four browser-absent standard modules
+by Titan import and module identity, and libuv, OpenSSL, llhttp, and SQLite
+(outside `titan/sqlite3/*.browser.h`, which declares only `TITAN_WASM_IMPORT`)
+by path, by symbol, and through the evidence each certified input carries:
 
 * **Titan imports** (`check_sources`): logical source candidates below `titan/`
   are resolved through `driver.resolve_source` with a browser context. Only
@@ -981,7 +1016,9 @@ does not register a second driver.
 | `iteration` | No explicit module initializer. | [`iteration.titan`](../../titan/iteration.titan) |
 | `http` | No explicit initializer; the browser client opens the `titan:fetch` source on first use. | [`http.titan`](../../titan/http/http.titan) and [`client.browser.titan`](../../titan/http/client.browser.titan) |
 | `websocket` | No explicit initializer; the browser client opens the `titan:websocket` source on first use. The native main's `openings` ephemeron is not part of the browser composition. | [`websocket.browser.titan`](../../titan/websocket/websocket.browser.titan) and [`client.browser.titan`](../../titan/websocket/client.browser.titan) |
-| `uv`, `net`, `ssl`, `thread`, `sqlite3`, `fs` | No browser main is selected. Their imports and SDK module metadata are rejected by the closure checks. | [native-only mains](target-source-selection.md#make-inventories-and-audits), `selection.applies` in [`source_selection.lua`](../../titan-compiler/source_selection.lua), [absence checks](../../scripts/browser_stdlib.lua) |
+| `fs` | Builds its `File` transfer field descriptor; opens the `titan:vfs` binding lazily on the first durability sync. | [`fs.browser.titan`](../../titan/fs.browser.titan) |
+| `sqlite3` | Builds its `Connection` transfer field descriptor; discovers `state_token` and caches the `titan:sqlite3` binding lazily on first use. | [`sqlite3.browser.titan`](../../titan/sqlite3/sqlite3.browser.titan) |
+| `uv`, `net`, `ssl`, `thread` | No browser main is selected. Their imports and SDK module metadata are rejected by the closure checks. | [native-only mains](target-source-selection.md#make-inventories-and-audits), `selection.applies` in [`source_selection.lua`](../../titan-compiler/source_selection.lua), [absence checks](../../scripts/browser_stdlib.lua) |
 
 * **`math`.** The automatic seed has two components: `time(NULL) ~ clock()`
   and a value drawn from the generator with `next_random()`, and
@@ -1180,17 +1217,17 @@ fixture's direct imports, both combined fixtures, and the child-state module
 list against those same roots, and requires the directory's `init_*.titan`
 files to be exactly those fixtures, so a stale one cannot go unbuilt:
 
-* `init_<module>.titan`, one for each of the twenty-one delivered roots, imports
-  only that module (and the `titan.test` runner every test image has) and must
-  return status 0, run and pass exactly one case, and write nothing to stderr.
-  These images use `--no-uv-bootstrap`;
+* `init_<module>.titan`, one for each of the twenty-three delivered roots,
+  imports only that module (and the `titan.test` runner every test image has)
+  and must return status 0, run and pass exactly one case, and write nothing to
+  stderr. These images use `--no-uv-bootstrap`;
 * a second image of `init_async` omits `--no-uv-bootstrap`, so the same one-case
   proof also runs through the registered async bootstrap;
-* `init_subset.titan` imports all twenty-one roots and is initialized, run, and
-  disposed three times through one cached image creator, with a tick and a
+* `init_subset.titan` imports all twenty-three roots and is initialized, run,
+  and disposed three times through one cached image creator, with a tick and a
   collection between cycles;
 * `init_lua_states.titan` requires each root in a fresh `lua.new()` state, then
-  requires all twenty-one in one more fresh state. Every state is explicitly
+  requires all twenty-three in one more fresh state. Every state is explicitly
   closed; `async` only loads in the child, without trying to drive it; and
 * `fidelity_test.titan` imports the real `coroutine.tests` owner, so its
   browser cases create coroutines first, then writes a marker with NUL, `0xFF`,
@@ -2101,8 +2138,9 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
   `Type.Module` is an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
-twenty-one [browser stdlib](#the-browser-standard-library) modules resolve from it,
-ahead of the Titan path and source. Modules with native-only mains have no
+twenty-three [browser stdlib](#the-browser-standard-library) modules resolve
+from it, ahead of the Titan path and source. Modules with native-only mains
+have no
 browser source, so their imports fail with the [absent-module
 diagnostic](#the-absent-module-diagnostic), `module 'titan.<name>' is not
 available for target 'browser': <reason>`. The shared `os` main selects its
@@ -2429,12 +2467,14 @@ production measurements live under [Records](#records).
 `titanc` plans a browser program or test like a native one; the build
 coordinator's [output preflight](build-coordinator.md#pre-dispatch-output-preflight)
 reserves the executable (`.mjs`), its WebAssembly binary (`.wasm`), its trace
-table (`.wasm.trace`), and its source map (`.wasm.map`).
-`driver.browser_program_path(stem, explicit)` maps the output: the explicit
-`--exe` (which must end in `.mjs`: `browser executable output "<path>" must end
-in .mjs`) or `<stem>.mjs`, where the stem is the native program output path,
-plus its `.wasm`, `.wasm.trace`, and `.wasm.map` siblings. A test
-image's stem is the first root's. Before certification `titanc` requires the
+table (`.wasm.trace`), its source map (`.wasm.map`), and its optional storage
+companions (`.worker.mjs` and `.sqlite3.wasm`, computed by
+`browserlink.companion_names`). `driver.browser_program_path(stem, explicit)`
+maps the output: the explicit `--exe` (which must end in `.mjs`: `browser
+executable output "<path>" must end in .mjs`) or `<stem>.mjs`, where the stem
+is the native program output path, plus its `.wasm`, `.wasm.trace`,
+`.wasm.map`, and optional companion siblings. A test image's stem is the first
+root's. Before certification `titanc` requires the
 SDK and the program profile; the [executing
 check](#the-executing-protocol-runner) then runs for selected archives as on
 native hosts, and `driver.compile_program` renders the [browser
@@ -2483,44 +2523,66 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    `x_titan_function_names`) and the binary [trace table](#the-trace-table)
    bytes, then write `<staged>.wasm`, `<staged>.wasm.map`, and
    `<staged>.wasm.trace`;
-8. read the installed `titan-wasm-factory.mjs` and `titan-browser.mjs` and call
-   `browserlink.embed(factory, loader, wasm_name, identity)` to emit
-   `<staged>.mjs`: `embed` rewrites top-level `export function NAME(` test seams
-   in the factory to plain `function NAME(`, removes the factory's trailing
+8. inspect `inventory.imports` with `browserlink.storage(inventory.imports)` to
+   determine whether the linked Wasm imports the storage runtime: `"sql"` when
+   it imports `env.titan_browser_sql_retire_sync`, `"vfs"` when it imports
+   `env.titan_browser_vfs_linked` or `env.titan_browser_vfs_retire_sync`, or
+   `nil` otherwise. Read the installed `titan-wasm-factory.mjs` and
+   `titan-browser.mjs` (plus `titan-browser-vfs.mjs` and
+   `titan-storage-worker.mjs` for `"vfs"`, and `titan-browser-sql.mjs` and
+   `titan-sqlite3-service.wasm` for `"sql"`). Before writing companions,
+   verify ownership of any existing `<stem>.worker.mjs` (must begin with
+   Titan's `// Titan-Generated-Browser-Worker: <64-hex>` sentinel line via
+   `browserlink.generated_worker`) and `<stem>.sqlite3.wasm` (its SHA-256 must
+   match the digest embedded in the predecessor `<stem>.mjs` via
+   `browserlink.embedded_sqlite_digest`): a link refuses to overwrite an
+   unowned file before touching any predecessor, and retires an owned stale
+   companion when the new link no longer needs it. Stage any published
+   companions (`worker_module` prepends the sentinel with the new image
+   `identity`) and call `browserlink.embed(factory, loader, wasm_name,
+   identity, storage)` to emit `<staged>.mjs`: `embed` rewrites top-level
+   `export function NAME(` seams in the factory and any embedded storage
+   sources to plain `function NAME(`, removes the factory's trailing
    `export default IDENT;`, encloses the loader, and installs the single
    `export default function create(options)` wrapper binding `{identity, wasm,
-   directory}` with bundler-visible
-   `new URL("<basename>.wasm" | "<basename>.wasm.trace", import.meta.url)`
-   expressions (honoring caller `locateFile(name, directory)`). `directory` is
+   directory}` (plus `storage`, `worker`, and, for `"sql"`, `sql` and
+   `sqlite: {wasm, sha256}`) with bundler-visible literal
+   `new URL("<basename>.*", import.meta.url)` expressions (honoring caller
+   `locateFile(name, directory)`). `directory` is
    `new URL('.', import.meta.url).href`, except that a module evaluated from an
    opaque URL (`URL.canParse('.', import.meta.url)` is false: `blob:` and
    `data:` modules, which the playground builds from verified bytes) binds `''`
    when the caller supplies `locateFile`; without one, such a module still
-   fails in `create`, since neither default URL can resolve. Both factory
-   and loader digests participate in image/certificate identity. Then run
-   `before_commit` (which invalidates the link record);
+   fails in `create`, since neither default URL can resolve. Factory, loader,
+   and storage asset digests participate in image and certificate identity.
+   Then run `before_commit` (which invalidates the link record);
 9. validate that any existing destination in `{ <stem>.wasm.trace,
-   <stem>.wasm.map, <stem>.wasm, <stem>.mjs }` is a regular file (`browser
-   output '<path>' is not a regular file`) and reserve a sibling `.old` backup
-   path for each before touching any predecessor; then in order `.wasm.trace`,
-   `.wasm.map`, `.wasm`, `.mjs`, move any existing predecessor to its backup
-   and rename the staged artifact into place, and run `after_publish` (`titanc`
-   commits the link certificate there). The `.mjs` rename (followed by
-   `after_publish` when present) is the commit point: if any backup rename,
-   publication rename, or `after_publish` fails, rollback walks the outputs in
-   reverse order (`.mjs`, `.wasm`, `.wasm.map`, `.wasm.trace`), removes
-   published new files, and restores every backed-up predecessor (`cannot
-   restore browser artifact: <reason>; predecessor retained at <backup>` when
-   even restoration fails). An unextended `.wasm.map` is never visible at the
-   published path. The backups are removed after the commit.
+   <stem>.wasm.map, <stem>.wasm, <companions...>, <stem>.mjs }` is a regular
+   file (`browser output '<path>' is not a regular file`) and reserve a sibling
+   `.old` backup path for each before touching any predecessor; then in order
+   `.wasm.trace`, `.wasm.map`, `.wasm`, published or retired companions, and
+   `.mjs`, move any existing predecessor to its backup and rename each staged
+   artifact into place (retired owned companions stay backed up without a
+   replacement), and run `after_publish` (`titanc` commits the link certificate
+   there). The `.mjs` rename (followed by `after_publish` when present) is the
+   commit point: if any backup rename, publication rename, or `after_publish`
+   fails, rollback walks the outputs in reverse order, removes published new
+   files, and restores every backed-up predecessor (`cannot restore browser
+   artifact: <reason>; predecessor retained at <backup>` when even restoration
+   fails). An unextended `.wasm.map` is never visible at the published path.
+   The backups are removed after the commit.
 
 An image owns no DSO, debug bundle, or dSYM companion
 (`validate_program_output_paths` reserves the `.wasm`, `.wasm.trace`, and
-`.wasm.map` siblings in `extra_outputs` and omits `.dSYM` on Darwin hosts for
-a browser context). A warm link hit verifies all four files, and a missing or
-modified `.mjs`, `.wasm`, `.wasm.trace`, or `.wasm.map` forces a relink while
-objects still hit. Final images never read `.titan.meta`, `.titan.source`, or
-`.titan.cprobe`, and carry none of them. On Wasm the two metadata payloads are
+`.wasm.map` siblings plus the optional `.worker.mjs` and `.sqlite3.wasm`
+companions in `extra_outputs`, and omits `.dSYM` on Darwin hosts for a browser
+context). In `titan-compiler/linkcertificate.lua`, optional outputs
+(`optional = true`) snapshot as `{ kind = "absent" }` when unlinked so a warm
+link hit requires the exact same presence or absence of every companion as well
+as matching digests for all hashed SDK inputs and published outputs. A missing
+or modified `.mjs`, `.wasm`, `.wasm.trace`, `.wasm.map`, or companion forces a
+relink while objects still hit. Final images never read `.titan.meta`,
+`.titan.source`, or `.titan.cprobe`, and carry none of them. On Wasm the two metadata payloads are
 unreferenced external definitions rather than `used` statics, so objects and
 archives keep them for the metadata readers and `wasm-ld --gc-sections` drops
 them from every image. Their `<mangled>_\u2119_titan_metadata` and
@@ -2568,9 +2630,9 @@ Absent, empty, invalid or wholly unmapped source metadata produces an explicit
 `source unavailable` reason while preserving the size diagnostic.
 
 All program, generated-test and provider-protocol images share this check
-before map rewriting, `before_commit`, protocol execution or four-file
-publication. Guard rejection leaves predecessor bytes untouched; the failed
-link certificate stays invalidated and the staged candidate is retired.
+before map rewriting, `before_commit`, protocol execution or atomic image and
+companion publication. Guard rejection leaves predecessor bytes untouched; the
+failed link certificate stays invalidated and the staged candidate is retired.
 The compiler inventory hashes both guard and source-map Lua owners into the
 final-link recipe, so changing either owner invalidates certified links.
 Hit links return before linking or parsing an image again.
@@ -2584,11 +2646,13 @@ Linux x64 and macOS arm64 under Node and sandboxed Chromium.
 One generated `.mjs` serves pages, bundlers, and Node without external module
 imports. `browserlink.embed` concatenates the zero-dependency
 `titan-wasm-factory.mjs` (rewriting its named `export function NAME(` unit-test
-seams to plain `function NAME(` and stripping its trailing `export default`)
-with `titan-browser.mjs`, and emits a single `export default function
-create(options)` wrapper. Node local file and `file:` URL reads inside
-`titan-wasm-factory.mjs` use `process.getBuiltinModule('node:fs')` directly,
-with no `import` declarations, dynamic `import()`, or `require()`. Page
+seams to plain `function NAME(` and stripping its trailing `export default`),
+any linked storage modules (`titan-browser-vfs.mjs`, and `titan-browser-sql.mjs`
+for `titan.sqlite3`, rewritten the same way), and `titan-browser.mjs`, then
+emits a single `export default function create(options)` wrapper. Node local
+file and `file:` URL reads inside `titan-wasm-factory.mjs` use
+`process.getBuiltinModule('node:fs')` directly, with no `import` declarations,
+dynamic `import()`, or `require()`. Page
 JavaScript reaches Titan through `create({ bindings })` (`titan.browser`) or
 through custom WebAssembly imports passed to `create({ imports })`.
 
@@ -2603,18 +2667,29 @@ browser image may contain. The maintainer reviews every change to it, as for the
 * the signature is the Wasm function type as `(params)->(results)`, for
   example `(i32,i64,i32)->(i32)`; a non-function import names its kind
   (`memory`, `table`, `global`, or `tag` and its signature) instead;
-* the provider names the JavaScript that implements the import in the
-  generated `.mjs`: `titan-wasm-factory.mjs` (JSPI/bridge/trace/calendar or
-  `createWasiImports`) or a test fixture supplied via `create({ imports })`; and
+* the provider names the JavaScript that implements the import:
+  `titan-wasm-factory.mjs` (JSPI, bridge, trace, calendar, and
+  `createWasiImports`) and `titan-browser-vfs.mjs` (the `uwasi` VFS and
+  retirement imports) in the generated `.mjs`, `titan-storage-worker.mjs` for
+  the 23 `service:sqlite3` rows hosted inside the storage worker rather than
+  the generated `.mjs`, or a test fixture supplied via `create({ imports })`;
+  and
 * the reason says why images need it.
 
 Every image has the `entry` class: programs, test images, and provider protocol
-probes, which all link Titan's launcher. A repository test image adds one class
-for each test fixture it links, so one fixture's imports never pass in an
-image that does not link that fixture:
+probes, which all link Titan's launcher. An image that links the filesystem
+runtime adds the `vfs` class (and `sqlite3` when it links `titan.sqlite3`).
+`service:sqlite3` is never an image class: `make browser-sdk` checks the
+standalone `titan-sqlite3-service.wasm` reactor against exactly its 23
+`wasi_snapshot_preview1` rows via `check_service`. A repository test image
+adds one class for each test fixture it links, so one fixture's imports never
+pass in an image that does not link that fixture:
 
-| Class | Fixture |
+| Class | Scope / Fixture |
 | --- | --- |
+| `vfs` | images that link the filesystem runtime (`titan.fs`, `titan.sqlite3`, `os.cwd`, `os.chdir`, or `titan.lua`): `env.titan_browser_vfs_linked`, `env.titan_browser_vfs_retire_sync`, and the `wasi_snapshot_preview1` filesystem calls served by `uwasi` |
+| `sqlite3` | images that link `titan.sqlite3` (always alongside `vfs`): `env.titan_browser_sql_retire_sync` |
+| `service:sqlite3` | the SDK's standalone `titan-sqlite3-service.wasm` reactor (exact 23 WASI imports; never an image class) |
 | `fixture:controls` | `spec/fixtures/browser_runtime/fixture_controls.h`, the `TITAN_WASM_IMPORT` controls that several C helpers include |
 | `fixture:trace` | `spec/fixtures/browser_trace/trace_support.c` |
 | `fixture:click` | the DOM click counter `spec/fixtures/browser_bridge/click_host.h` (`counter.titan`, `env.titan_test_set_click_callback`) |
@@ -2634,13 +2709,13 @@ import fails the check.
 The `entry` rows are the bridge, completion, admission, coroutine, relinquish,
 trace, and calendar (`titan_browser_localtime`, `titan_browser_mktime`) `env`
 imports implemented by `titan-wasm-factory.mjs`, together with the
-`wasi_snapshot_preview1` imports implemented by `createWasiImports` (18 WASI
+`wasi_snapshot_preview1` imports implemented by `createWasiImports` (19 WASI
 functions: `clock_time_get`, `environ_sizes_get`, `environ_get`, `fd_write`,
 `fd_read`, `fd_close`, `fd_seek`, `fd_fdstat_get`, `fd_fdstat_set_flags`,
-`fd_renumber`, `fd_prestat_get`, `fd_prestat_dir_name`, `path_open`,
-`path_rename`, `path_unlink_file`, `path_remove_directory`, `random_get`, and
-`proc_exit`). The embedded factory therefore implements every `entry` import,
-and a browser image needs no external WASI host and no Node.
+`fd_renumber`, `fd_prestat_get`, `fd_prestat_dir_name`, `path_filestat_get`,
+`path_open`, `path_rename`, `path_unlink_file`, `path_remove_directory`,
+`random_get`, and `proc_exit`). The embedded factory therefore implements every
+`entry` import, and a browser image needs no external WASI host and no Node.
 
 `staticmetadata.browser_trace_image` reads each function or tag import's
 signature from the type section. It refuses:
@@ -2669,11 +2744,11 @@ classes:
 
 | Where | Images and classes |
 | --- | --- |
-| `make titan-stdlib-browser-test`, after the closure check | `images/stdlib.wasm`: `entry` |
+| `make titan-stdlib-browser-test`, after the closure check | `images/stdlib.wasm`: `entry,vfs,sqlite3` |
 | `spec/browser/build-trace.lua` | the runtime, uncaught and async images: `entry,fixture:trace` (the degraded variants copy the runtime image's `.wasm`) |
-| `spec/browser/build-bridge.lua` | the bridge and public-state images: `entry,fixture:controls`; `counter`: `entry,fixture:click`; `initializer-failure` and `responsive`: `entry` |
-| `spec/browser/build-net.lua` | `http`: `entry`; `websocket`: `entry,fixture:net` |
-| `spec/browser/build-delivery.lua` | the chapter's complete application `app`: `entry` |
+| `spec/browser/build-bridge.lua` | `bridge`: `entry,fixture:controls`; `public-states`: `entry,fixture:controls,vfs`; `counter`: `entry,fixture:click`; `durable`: `entry,vfs,sqlite3`; `initializer-failure`, `responsive`, and `stock-novfs`: `entry` |
+| `spec/browser/build-net.lua` | `http`: `entry,vfs`; `websocket`: `entry,fixture:net` |
+| `spec/browser/build-delivery.lua` | `hello`: `entry`; the chapter's complete application `app`: `entry,vfs` |
 | The [`browser-toolchain`](continuous-integration.md#browser-toolchain-job) runner and loader image steps | the runner images and `loader_names`: `entry`; `loader_app`, `fidelity`, and the optimized `loader_app` and `fidelity`: `entry,fixture:loader,fixture:controls` |
 | `spec/support/browser_toolchain.lua` `check_imports`, called by each spec's build | bridge spec: as `build-bridge.lua`; entry gate: the `gate.c` images `entry,fixture:gate,fixture:controls`, the `entry_lifetimes.c` image `entry,fixture:controls`; scheduler: the mini driver and the scheduler owner `entry,fixture:scheduler`, the others `entry`; images spec: `entry-close` `entry,fixture:images`, the other `entry-*`, `stdio-only`, `dynamic-guards`, and real-image cases `entry`; `browser_toolchain_spec`'s exnref image: `entry`; budget probes: `entry,fixture:budget`; the documented `hello` image of the documentation gate, the archive-only consumer of `browser_protocol_spec.lua`, and the stdlib gate, fixture and minicoro images: `entry` |
 
@@ -2687,6 +2762,75 @@ browser images, and are not checked.
 The allowlist is a repository check, not a compiler rule: an application
 image may declare its own `TITAN_WASM_IMPORT` functions and supply them via
 `create({ imports })`.
+
+## The browser storage runtime
+
+Storage linking is object-level and automatic—there is no CLI flag to enable or
+disable the browser VFS. Three mechanisms anchor storage imports in linked Wasm
+images so `wasm-ld --gc-sections` retains them if and only if a reached module
+uses them:
+
+* **Compiler marker (`coder/generate.lua`):** `coder._note_browser_storage`
+  (called from `coder/calls.lua` and `coder/expressions.lua`) sets
+  `tlcontext.browser_storage = true` whenever a browser unit calls or reads
+  `titan.os.cwd` or `titan.os.chdir`; `coder.generate` sets the same flag when
+  a browser unit has a top-level `import "titan.lua"`. When set, `coder.generate`
+  declares `TITAN_WASM_IMPORT("titan_browser_vfs_linked") int
+  titan_browser_vfs_linked(void);` and prepends
+  `(void)titan_browser_vfs_linked();` to the unit's module initializer.
+* **`titan.fs` retirement import (`titan/fs.browser.h`):** `titan/fs.browser.titan`
+  calls `TITAN_WASM_IMPORT("titan_browser_vfs_retire_sync")`, anchoring the VFS
+  runtime for every image that links `titan.fs`.
+* **`titan.sqlite3` retirement import (`titan/sqlite3/sqlite3.browser.h`):**
+  `titan/sqlite3/sqlite3.browser.titan` calls
+  `TITAN_WASM_IMPORT("titan_browser_sql_retire_sync")`, anchoring both the VFS
+  runtime and the SQLite transport and service for every image that links
+  `titan.sqlite3`.
+
+Because the marker lives in the compiled `.o`, warm incremental links and
+precompiled browser archives preserve storage demand automatically, while
+images reaching none of those modules embed zero storage JavaScript and publish
+no companions. At link time `browserlink.storage(inventory.imports)` classifies
+the image (`nil`, `"vfs"`, or `"sql"`), embeds `titan-browser-vfs.mjs` (and
+`titan-browser-sql.mjs` for `"sql"`) into `<stem>.mjs`, and publishes
+`<stem>.worker.mjs` (and `<stem>.sqlite3.wasm` for `"sql"`).
+
+`titan-browser-vfs.mjs` bundles the guest-side `uwasi` namespace (`vendor/uwasi`,
+generated and verified by `node scripts/build_uwasi_bundle.mjs --check`) and
+`BrowserStorage`: it creates an ephemeral in-memory root `/` (with `/tmp` and
+`/home`), routes WASI preview 1 filesystem syscalls for descriptors above `2`
+while leaving descriptors `0..2` to `titan-wasm-factory.mjs`, journals guest
+mutations against even inode IDs, enforces `maxHydratedBytes` (default 64 MiB)
+on durable mounts, and exposes `titan:vfs` and `env.titan_browser_vfs_*`
+([Storage and SQLite host bindings](browser-bridge.md#storage-and-sqlite-host-bindings)).
+
+### The storage worker
+
+`titan-storage-worker.mjs` runs in a dedicated Web Worker (or Node
+`worker_threads` worker) spawned lazily by `BrowserStorage.start()` only when
+at least one `"opfs"` mount is configured or the image links `titan.sqlite3`.
+It owns:
+
+* **Durable OPFS stores (`ExclusiveOPFSBackend`):** opens each configured OPFS
+  directory with an exclusive lock (throwing `OPFSStoreBusyError` inside the
+  worker, revived on the guest as a plain `Error` with
+  `name === "OPFSStoreBusyError"`), hydrates its tree into the guest at
+  `initialize()`, applies journaled guest ops in sequence order, settles and
+  flushes synced files via `FileSystemSyncAccessHandle.flush()`, and tracks an
+  `unflushed` set plus any latched permanent writeback failure across both
+  guest and SQLite writes.
+* **SQLite service hosting:** verifies the SHA-256 digest of the fetched
+  `<stem>.sqlite3.wasm` bytes before compiling the standalone reactor,
+  dispatches version-1 binary frames with the caller's working directory and
+  durable byte allowance, captures actual worker filesystem mutations via its
+  journaling backend, and serves SQLite's `unix-dotfile` lock directories from
+  a private in-memory set so lock artifacts never enter the user namespace.
+* **Graceful vs. forced disposal:** `dispose()` drains pending SQLite frames
+  and ops, runs `persistAll()` and `close()` on every OPFS store, and stops the
+  worker; `dispose({ force: true })` terminates the worker immediately and
+  reports `TITAN_BROWSER_DISPOSED_DIRTY` whenever unapplied guest ops,
+  in-flight requests, unflushed durable writes, a latched writeback failure, or
+  an active SQLite write transaction may have been lost.
 
 ## The browser entrypoint
 
@@ -2713,9 +2857,10 @@ operations are served directly by `createWasiImports` in
 `__syscall_*` shims.
 
 Initialization creates the owner Lua state and enters the image initializer
-under the shared protected gateway. After `luaL_openlibs` and
-`titan_install_searcher`, the generated Titan initializer loads and executes
-`TITAN_LUA_BROWSER_PROFILE` from `titan/ffi.h`; load or runtime failure reaches
+under the shared protected gateway. After `luaL_openlibs`,
+`titan_browser_install_tmp_io`, and `titan_install_searcher`, the generated
+Titan initializer loads and executes `TITAN_LUA_BROWSER_PROFILE` from
+`titan/ffi.h`; load or runtime failure reaches
 that same protected gateway before any application module loads. The chunk
 replaces only stock `os.clock` and `os.exit`; independent states apply the same
 chunk in their protected opener ([Lua profile](lua-library.md#browser-states-and-stock-profile)).
@@ -4401,7 +4546,7 @@ same texts.
   expected line and exits 0 under Node and Chromium.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
-  `TITAN_EXTRA_CPPFLAGS`, the twenty-one-module provider whose non-compiler
+  `TITAN_EXTRA_CPPFLAGS`, the twenty-three-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
   order and contents, retirement on an interrupted build, installed modes
   under a restrictive umask, the three-file semantic pack relocated without

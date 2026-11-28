@@ -9,8 +9,8 @@ table.
 
 **Target availability:** Native (complete on Linux and macOS; Windows omits
 `"usr1"`/`"usr2"` signals and TCP parent streams) & Browser (subset: calendars,
-wall time, locale, instance environment, Task `exit`, and embedding parent
-streams; see [On the browser](#on-the-browser)).
+wall time, locale, instance environment, `cwd`/`chdir`/`homedir`/`tmpdir`, Task
+`exit`, and embedding parent streams; see [On the browser](#on-the-browser)).
 
 ## Example
 
@@ -162,13 +162,15 @@ function pid(): integer
 function ppid(): integer
 ```
 
-All eight helpers are native-only. `cwd` and `chdir` read and change the
-process working directory; `homedir` and `tmpdir` follow libuv's platform and
-environment-variable rules; `hostname` returns the host name; `pid` and `ppid`
-return process and parent process IDs. `exepath` returns the executable path in
-compiled Titan programs and raises `"os.exepath is only available in a compiled
-Titan program"` under external embedding hosts. Paths reject embedded NUL bytes,
-and buffer-backed queries resize automatically.
+`cwd`, `chdir`, `homedir`, and `tmpdir` are available on both native and
+browser targets; `hostname`, `exepath`, `pid`, and `ppid` are native-only.
+`cwd` and `chdir` read and change the working directory; `homedir` and `tmpdir`
+follow libuv's platform and environment-variable rules natively (and instance
+environment defaults on the browser); `hostname` returns the host name; `pid`
+and `ppid` return process and parent process IDs. `exepath` returns the
+executable path in compiled Titan programs and raises `"os.exepath is only
+available in a compiled Titan program"` under external embedding hosts. Paths
+reject embedded NUL bytes, and buffer-backed queries resize automatically.
 
 ## Waiting for a signal
 
@@ -508,16 +510,25 @@ the module interface rather than raising stubs):
 | --- | --- |
 | `Date`, `date`, `time`, `difftime`, `setlocale` | Available (`time()` reads the host wall clock). |
 | `getenv`, `setenv`, `unsetenv` | Available in the instance's isolated environment. |
+| `cwd`, `chdir`, `homedir`, `tmpdir` | Available (`cwd`/`chdir` use the browser VFS; `homedir` defaults to `"/home"`, `tmpdir` to `"/tmp"`). |
 | `exit` | Available inside an async Task. |
 | `InputStream`, `OutputStream`, `stdin`, `stdout`, `stderr` | Available as [Browser parent streams](#browser-parent-streams). |
 | `clock` | Absent. |
-| `cwd`, `chdir`, `homedir`, `tmpdir`, `hostname`, `exepath`, `pid`, `ppid` | Absent. |
+| `hostname`, `exepath`, `pid`, `ppid` | Absent. |
 | `spawn`, `popen`, `with_*`, `wait_signal` | Absent. |
 | `ExitStatus`, `SpawnConfig`, `SpawnOption`, `Process`, `InputOutputStream` | Absent. |
 
 - **Instance environment:** `create({ env })` seeds the instance's environment
   map (empty by default, including `HOME` and `USER`). Mutations affect only
   that instance.
+- **Directories and working directory:** Referencing `os.cwd` or `os.chdir`
+  automatically links the
+  [browser filesystem runtime](browser-target.md#filesystem-and-durable-storage);
+  changes to the working directory are shared across `titan.os`, `titan.fs`,
+  stock Lua, and `titan.sqlite3`. `homedir()` returns `HOME` when set and
+  `"/home"` otherwise; `tmpdir()` returns the first set variable among
+  `TMPDIR`, `TMP`, `TEMP`, and `TEMPDIR`, or `"/tmp"` otherwise (stripping a
+  trailing `/`).
 - **Time zone and locale:** Local calendar conversion uses the JavaScript
   host's time zone; changing `TZ` modifies only the environment variable, while
   a leading `"!"` in `date` selects UTC. Under `wasi-libc` (musl), `setlocale`

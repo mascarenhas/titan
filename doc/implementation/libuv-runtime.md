@@ -900,7 +900,7 @@ before its work item:
 | Entry | Runs |
 | --- | --- |
 | `lua_state_run_worker` (`titan/lua/background.native.titan`) | each `Lua:run_async` job, then `lua_state_run` |
-| `sqlite_run_worker` (`titan/sqlite3/worker.titan`) | each SQLite operation, through `run_foreign` or the cleanup `queue_work` |
+| `sqlite_run_worker` (`titan/sqlite3/worker.native.titan`) | each SQLite operation, through `run_foreign` or the cleanup `queue_work` |
 | `thread_worker_main` (`titan/thread/spawn.titan`) | each `thread.spawn` and `Group` thread, once at thread start |
 
 Synchronous `Lua:run` calls `lua_state_run` directly and keeps the calling

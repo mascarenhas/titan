@@ -213,8 +213,8 @@ Interfaces and operations. `io.print` writes through browser `os.stdout`
 (awaiting the embedding's output sink), and `io.lines` works over any
 browser-available `ReaderCloser`.
 
-Browser-available implementations from the table above are `os.InputStream`,
-`os.OutputStream` (embedding parent streams), `string.StringReader`,
-`string.StringWriter`, `async.ChannelReader`, `async.ChannelWriter`,
-`http.ClientResponse`, `websocket.Connection`, and `timer.Ticker`. Filesystem,
-socket, HTTP server, and shell stream types are native-only.
+Browser-available implementations from the table above are `fs.File` (all seven
+Interfaces), `os.InputStream`, `os.OutputStream` (embedding parent streams),
+`string.StringReader`, `string.StringWriter`, `async.ChannelReader`,
+`async.ChannelWriter`, `http.ClientResponse`, `websocket.Connection`, and
+`timer.Ticker`. Socket, HTTP server, and shell stream types are native-only.

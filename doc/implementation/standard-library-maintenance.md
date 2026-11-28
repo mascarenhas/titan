@@ -81,8 +81,8 @@ variant for a real behavioral difference. Native-only modules with no shared
 main keep their canonical mains as `<name>.native.titan`. The complete shared
 `io` facade instead imports `os`, whose shared main composes with native or
 browser clock, environment, process, and stdio contributors.
-The `lua` composition shares its main and worker; the browser selects a
-no-filesystem loading contributor and omits native background execution
+The `lua` composition shares its main, `loading.titan` (over `titan.fs`), and
+worker; the browser omits only native background execution
 ([Lua composition](lua-library.md#browser-states-and-stock-profile)).
 
 `titan.async` is a browser module through its own browser composition: its
@@ -114,9 +114,14 @@ browser JavaScript](#the-same-rules-for-browser-javascript)).
 
 Only these browser files may import `titan.browser`: those of `async`
 (`runtime.browser.titan` and `external.browser.titan`), `timer.browser.titan`,
-`os/stdio.browser.titan`, `http/client.browser.titan`, and the WebSocket
-browser main `websocket/websocket.browser.titan`, whose import the browser
+`fs.browser.titan`, `sqlite3/sqlite3.browser.titan`, `os/stdio.browser.titan`,
+`http/client.browser.titan`, and the WebSocket browser main
+`websocket/websocket.browser.titan`, whose import the browser
 `websocket/client.browser.titan` uses within the same module.
+`scripts/browser_stdlib.lua`'s `check_path` continues to forbid `sqlite3.h`,
+`sqlite3ext.h`, and native SQLite paths in browser builds, with one narrow
+carve-out for `titan/sqlite3/*.browser.h` (which declares only Titan's
+`TITAN_WASM_IMPORT` retirement hook, never SQLite C APIs).
 
 The browser provider's other target-specific module, `titan.browser`
 (`titan/browser.browser.titan`), is the one reviewed browser-only exception.

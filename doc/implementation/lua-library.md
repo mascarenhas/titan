@@ -3,15 +3,14 @@
 The user-facing contract is in the
 [Lua states and loading standard-library chapter](../language/standard-library-lua.md).
 `titan.lua` is a folder module built against the pinned Lua 5.5 API. Shared
-code uses `titan.io` for the Reader interface and `string.StringWriter` for
-binary-safe accumulation; native contributors add `titan.fs` and background
-execution. The public operations need no compiler intrinsic.
+code uses `titan.io` for the Reader interface, `titan.fs` for file loading, and
+`string.StringWriter` for binary-safe accumulation; native contributors add
+background execution. The public operations need no compiler intrinsic.
 
 | File | Owns |
 | --- | --- |
 | `titan/lua/lua.titan` | shared current-state loading and `require`; the public `Lua` owner, `LuaCall`, synchronous execution, admission, argument preparation and host-side result copy |
-| `titan/lua/loading.native.titan` | the `fs` import, source-file search and `dofile` |
-| `titan/lua/loading.browser.titan` | the fixed no-filesystem source miss |
+| `titan/lua/loading.titan` | shared `fs` import, `package.path` source-file search (`source_search`), and `dofile` |
 | `titan/lua/background.native.titan` | `Lua:run_async`, `Lua:run_async_from_loader`, worker submission and abandoned-call release |
 | `titan/lua/worker.titan` | shared source-defined foreign entries on the independent state: `lua_state_open`, `lua_state_run`, `lua_state_execute` and result converters |
 | `titan/lua/native.h` | the `titan_lua_open`/`titan_lua_preload` initialization packet and the `titan_lua_call`/`titan_lua_value` call carrier |
@@ -104,9 +103,34 @@ is checked against the state that exists when reading completes.
 
 Browser independent states use synchronous `run` and `run_from_loader` in the
 same WebAssembly instance and on its owner thread. The native background
-contributor is not selected; there are no declarations for either async
-method or `dofile`. A child cannot create or drive browser Tasks: the browser
+contributor is not selected; there are no declarations for `run_async` or
+`run_async_from_loader`. `loading.titan` is shared with native targets, so
+`dofile` and `require`'s `package.path` source search operate over `titan.fs`
+and the browser VFS (importing `titan.lua` automatically anchors the browser
+storage runtime). A child cannot create or drive browser Tasks: the browser
 driver belongs to the original instance state.
+
+In the pinned `lua-5.5.1` fork (`LUA_USE_BROWSER`), `src/lauxlib.c`,
+`src/lauxlib.h`, `src/liolib.c`, and `src/loslib.c` remain byte-identical to
+stock Lua 5.5.1; standalone `LUA_USE_BROWSER` fallbacks live solely in
+`src/luaconf.h` (`gmtime_r` and `localtime_r` for `os.date` and `os.time`,
+`os.execute` reporting no shell, `os.tmpname` failing with `"unable to generate
+a unique filename"`, and `io.tmpfile` failing with `ENOSYS`). Instead, Titan's
+browser runtime (`titan-runtime/titan.c`, `titan_browser_install_tmp_io(L)`
+declared in `titan-runtime/titan/ffi.h`) installs `/tmp/lua_XXXXXXXXXXXX`
+replacements for `io.tmpfile` and `os.tmpname` via Lua's public `luaL_Stream`
+and `LUA_FILEHANDLE` in both the owner browser entrypoint (`driver.lua`) and
+`lua.new()` child states (`titan/lua/native.h` `titan_lua_openlibs`), so stock
+Lua 5.5.1 builds also receive full browser temporary-file support. Candidates
+are opened with `O_RDWR | O_CREAT | O_EXCL` (retrying `EEXIST` up to 64 times
+using a SplitMix64-scrambled counter and `clock_gettime(CLOCK_REALTIME, ...)`
+rather than adding a `random_get` WASI import, and always targeting `/tmp`
+rather than `TMPDIR` so durable mounts never receive anonymous temporary
+files). `io.tmpfile()` unlinks the path immediately and wraps the descriptor
+with `fdopen`, while `os.tmpname()` closes the descriptor and returns the path;
+without a linked filesystem runtime or `/tmp`, `io.tmpfile()` returns
+`nil, "No such file or directory", 44` (`ENOENT`) and `os.tmpname()` raises
+`"unable to generate a unique filename"`.
 
 `titan/ffi.h` defines `TITAN_LUA_BROWSER_PROFILE` as a Lua source string on the
 browser and an empty string on native targets. The one chunk replaces only
@@ -128,9 +152,10 @@ a child does not grant driver ownership, so its `os.exit` still raises. It
 never reaches C `exit()`.
 
 The [browser initializer](browser-target.md#the-browser-entrypoint) runs the
-same chunk immediately after `luaL_openlibs` and `titan_install_searcher`.
-`lua_state_open_libraries` applies it after installing the independent state's
-searcher, only when the macro is nonempty:
+same chunk immediately after `luaL_openlibs`, `titan_browser_install_tmp_io`,
+and `titan_install_searcher`. `lua_state_open_libraries` applies it after
+calling `titan_lua_openlibs` (which calls `titan_browser_install_tmp_io`) and
+installing the independent state's searcher, only when the macro is nonempty:
 
 | Step | Stack obligation |
 | --- | --- |
@@ -399,9 +424,9 @@ Lua's own `require`; a reassigned public `package.loaded` field does not
 redirect it. `package`, `package.searchers` and `package.path` are read for
 each uncached load and validated at their dynamic boundary.
 
-The native source pass (`loading.native.titan`'s `source_search`) maps dots to
+The shared source pass (`loading.titan`'s `source_search`) maps dots to
 slashes, substitutes every literal `?` in each semicolon-separated template,
-and attempts `fs.open`. An
+and attempts `fs.open` on both native and browser targets. An
 `async.OperationError` from the open is a candidate miss
 (`open_source_candidate`); cancellation and other errors keep their types and
 propagate. After a candidate opens, a read or load error is wrapped with the
@@ -409,11 +434,6 @@ module and filename and ends the search. A deferred close owns the opened
 candidate on every path. Even when that wrapper transforms an injected
 `async.CancellationReason`, the Task's stored cancellation request is
 authoritative and terminalizes the Task as cancelled with the original reason.
-
-The browser contributor has the same private signature and returns only the
-miss line `no source search: the browser target has no filesystem`; it does
-not inspect templates or perform I/O. The rest of `find_loader` and `require`
-is shared.
 
 Name substitution, Reader chunk loading, and source-miss and cross-searcher
 diagnostics all use `string.StringWriter`, preserving binary strings and

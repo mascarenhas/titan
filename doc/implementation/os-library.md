@@ -19,7 +19,7 @@ process and stdio policy stays here.
 | `clock.browser.titan` | Current timestamp through libc `time`; no CPU-clock member. |
 | `environment.browser.titan` | Instance-local libc environment operations and browser `OperationError` construction. |
 | `environment.browser.h` | The two POSIX `setenv`/`unsetenv` declarations hidden by `wasi-libc`'s `stdlib.h` without feature macros; a feature macro here would arrive too late in the generated translation unit. No function bodies. |
-| `process.browser.titan` | Task-only graceful exit through `async.request_exit`. |
+| `process.browser.titan` | Task-only graceful exit through `async.request_exit`, plus `cwd`/`chdir` over `wasi-libc` (`getcwd`/`chdir`, mapping `ENOTCAPABLE` to `EBADF`) and `homedir`/`tmpdir` over instance environment defaults (`HOME` → `"/home"`, `TMPDIR`/`TMP`/`TEMP`/`TEMPDIR` → `"/tmp"`). |
 | `stdio.browser.titan` | SDK-backed parent streams, declared kinds, read state, and parent-only transfer hooks. |
 
 Contributors share the module's private namespace. The main calls `os_time`,
@@ -27,8 +27,9 @@ Contributors share the module's private namespace. The main calls `os_time`,
 targets define those seams and the private `Stdio` named by the unchanged
 stream fields. `captured_input_is_closed` is shared because it reads only
 `InputStream` fields. Shared imports precede the stream variables and
-transfer-field initializers. Native-only process, signal, host-query, and CPU
-clock members have no browser declarations.
+transfer-field initializers. Native-only process, signal, host-identity
+(`hostname`, `exepath`, `pid`, `ppid`), and CPU clock members have no browser
+declarations.
 
 Calendar, formatting, locale, and time-difference operations keep their ISO C
 implementation, adapted from Lua 5.5.1 `loslib.c`, with Lua-compatible

@@ -1,6 +1,6 @@
 # WebAssembly and the Browser Target
 
-`titanc --target browser` compiles Titan programs, tests, and libraries to WebAssembly with `wasi-sdk` and Binaryen so they run in web pages, bundled web apps, and Node 26+. A compiled program consists of an ES module (`.mjs`), its WebAssembly binary (`.wasm`), and its trace table (`.wasm.trace`), plus a source map (`.wasm.map`) for browser developer tools. Pages run the program through Titan's embedded JavaScript [loader](#the-loader-api); command-line tests run the same files through [`titan-browser-run`](#testing-from-the-command-line) under Node or headless Chrome.
+`titanc --target browser` compiles Titan programs, tests, and libraries to WebAssembly with `wasi-sdk` and Binaryen so they run in web pages, bundled web apps, and Node 26+. A compiled program consists of an ES module (`.mjs`), its WebAssembly binary (`.wasm`), and its trace table (`.wasm.trace`), plus a source map (`.wasm.map`) for browser developer tools; programs that use the browser filesystem or SQLite also emit companion runtime files (`.worker.mjs` and, for SQLite, `.sqlite3.wasm`). Pages run the program through Titan's embedded JavaScript [loader](#the-loader-api); command-line tests run the same files through [`titan-browser-run`](#testing-from-the-command-line) under Node or headless Chrome.
 
 ## A first web page
 
@@ -206,9 +206,11 @@ cp -R /path/to/titan/doc/language/browser-app .
 cd browser-app
 titanc --target browser -o out app
 mkdir -p site
-cp index.html greeting.txt out/app.mjs out/app.wasm out/app.wasm.trace site/
+cp index.html greeting.txt out/app.mjs out/app.wasm out/app.wasm.trace out/app.worker.mjs site/
 cp "$PREFIX/lib/titan-browser/0.6/titan-protobuf.mjs" site/
 ```
+
+Because `app.titan` imports `lua`, `titanc` links the browser filesystem runtime and emits `out/app.worker.mjs` beside `out/app.mjs`. The page fetches `app.worker.mjs` lazily only when durable mounts or SQLite are used, but staging it with the other outputs keeps the deployment complete.
 
 Serve with `../http-dev-server site 8000`. The first panel displays standard output:
 
@@ -282,8 +284,10 @@ Browser Lua, Titan's runtime, generated C, and authored C helpers all compile an
 | File | Purpose |
 | --- | --- |
 | `libtitan.a`, `libtitan-lpeglabel.a` | Browser runtime and LPegLabel archives |
-| `titan.a` | The 21-module [browser standard library](#the-browser-standard-library) archive |
+| `titan.a` | The 23-module [browser standard library](#the-browser-standard-library) archive |
 | `titan-browser.mjs`, `titan-wasm-factory.mjs` | Embedded loader and zero-dependency WebAssembly factory (inlined into each `<stem>.mjs`, not copied separately to pages) |
+| `titan-browser-vfs.mjs`, `titan-browser-sql.mjs` | Embedded browser filesystem and SQLite transport modules (inlined into `<stem>.mjs` only when linked) |
+| `titan-storage-worker.mjs`, `titan-sqlite3-service.wasm` | Storage worker and standalone SQLite service Wasm reactor (copied beside `<stem>.mjs` as `<stem>.worker.mjs` and `<stem>.sqlite3.wasm` only when linked) |
 | `titan-protobuf.mjs` | Standalone JavaScript peer for typed `protobuf` record exchange |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-page.mjs`, `titan-browser-node-worker.mjs` | Command-line runner for Node and Chromium |
 | `build-profile`, `absent-modules`, `analysis-target`, `sdk-digests` | SDK profile (`production`/`validation`), absent-module diagnostics, editor target profile, and digests |
@@ -323,7 +327,7 @@ titanc --target browser -o out-lib geom.shapes geom.area         # browser libra
 titanc --target browser -o out-obj -c app.widgets                # object-only compilation
 ```
 
-- **Programs:** Explicit `--exe` paths must end in `.mjs`. `main` uses the standard signature `function main(args: {string}): integer`, with `args[1]` as the first user argument. All four output files are published atomically.
+- **Programs:** Explicit `--exe` paths must end in `.mjs`. `main` uses the standard signature `function main(args: {string}): integer`, with `args[1]` as the first user argument. `titanc` automatically links the browser storage runtime whenever a program statically imports `titan.fs`, `titan.sqlite3`, or `titan.lua`, or references `os.cwd` or `os.chdir`, publishing `<stem>.worker.mjs` (and `<stem>.sqlite3.wasm` when `titan.sqlite3` is linked) alongside the four base outputs. Programs that do not use those modules carry zero VFS overhead and emit no companion files. All published outputs are written atomically.
 - **Library archives:** Non-`main` builds emit only a static archive `<prefix>.a` (no `.so` or Lua loaders). A browser library archive may import an installed source-only module without compiling or owning it (keeping that dependency external; compiled browser archive dependencies retain browser's preexisting separate archive composition). Before publishing, `titanc` validates the archive structurally and runs a quick export and startup check under Node 26+. When a browser program or `--test` image imports prebuilt browser libraries whose reached members recorded dependencies from installed source, `titanc` satisfies each logical module once through ordinary browser lookup—selecting an eligible WebAssembly `.a` archive (standalone or canonical prefix bundle) or compiling `.browser.titan`/shared `.titan` source once into the image (never native host binaries or dynamic loading)—and binds those libraries through the checked public ABI without rebuilding them; see [Source-only modules](modules.md#source-only-modules).
 - **Browser dependency path:** Imports resolve in order from (1) `<PREFIX>/lib/titan-browser/0.6/`, (2) `TITAN_PATH_0_6` / `TITAN_PATH` (browser archives only; native ELF/Mach-O/COFF archives are rejected), and (3) source from authored `--tree` roots followed by the read-only installed source fallback `<PREFIX>/lib/titan/0.6/` (searched for `.titan` source only, selecting `.browser.titan` and shared `.titan` variants; native compiled providers there are never eligible). Clear native `TITAN_PATH_0_6` and native `TITAN_EXTRA_*` flags (`-fPIC`, `-flto`, `-march=...`, `-O*`, `-g*`, `--no-line-directives`) when compiling for the browser; browser builds define `TITAN_TARGET_BROWSER=1` and `TITAN_COROUTINE_STACK_SIZE=262144`.
 
@@ -365,7 +369,7 @@ All async methods (`initialize`, `run`, `call`, `callTask`, `drain`, `dispose`) 
 - **`callTask(callable, args = [], { signal } = {})`** (or `callable.callTask(...)`) — Runs a callable as an `async.Task` ([Task-form calls](#task-form-calls)).
 - **`notify(callable, ...args)`** — Synchronously snapshots arguments and enqueues a notification without entering Wasm; throws `TypeError` or `TitanBrowserError` immediately on invalid arguments or state.
 - **`drain(): Promise<void>`** — Delivers one detached FIFO batch of queued notifications. Handler failures report through `onNotificationError` without skipping remaining notifications.
-- **`dispose(): Promise<void>`** — Closes admission immediately, cancels active Tasks (if an `async` Runtime is active), retires host requests, runs Lua finalizers, flushes output, and releases the instance permanently.
+- **`dispose(options = {}): Promise<void>`** — Closes admission immediately, cancels active Tasks (if an `async` Runtime is active), retires host requests, runs Lua finalizers, flushes output and durable mounts, stops any storage worker, and releases the instance permanently. Pass `{ force: true }` to terminate the storage worker immediately without waiting for in-flight durable writes or SQLite work (see [Filesystem and durable storage](#filesystem-and-durable-storage)).
 - **`callable.release()`** — Synchronously and idempotently invalidates a callable wrapper and drops Titan's pin immediately without running user Titan code or finalizers.
 - **`instance.trace`** — Fresh frozen `{ state, reason }` snapshot of the trace table's status.
 
@@ -377,11 +381,12 @@ All async methods (`initialize`, `run`, `call`, `callTask`, `drain`, `dispose`) 
 | `stdin` | Function called per `os.stdin` read, returning a `Uint8Array`, `null`/`undefined`, or a Promise of one. |
 | `stdinKind`, `stdoutKind`, `stderrKind` | Optional declared stream kind strings reported by `os.InputStream:kind()` / `OutputStream:kind()`. |
 | `stdoutEnd`, `stderrEnd` | Optional hooks called when Titan finishes (`shutdown()`) `os.stdout` or `os.stderr`. |
-| `locateFile(name, directory)` | Custom URL resolver for `<stem>.wasm` and `<stem>.wasm.trace`; `directory` is the module's folder URL, or `""` for a module evaluated from an opaque (`blob:` or `data:`) URL. |
+| `locateFile(name, directory)` | Custom URL resolver for `<stem>.wasm`, `<stem>.wasm.trace`, `<stem>.worker.mjs`, and `<stem>.sqlite3.wasm`; `directory` is the module's folder URL, or `""` for a module evaluated from an opaque (`blob:` or `data:`) URL. |
 | `requireTrace` | If `true` (default `false`), fail initialization if `<stem>.wasm.trace` cannot be loaded or mismatches. |
 | `bindings` | Object of explicit per-instance JS functions/values for `browser.binding(name)` (names starting with `titan:` are reserved). |
 | `imports` | Plain object (ordinary or null-prototype, from any realm; module maps must also be plain objects) or `(context) => importObject` supplying user WebAssembly imports declared by `--c-source` or C headers (`wasi_snapshot_preview1.*`, `env.titan_browser_*`, and `env.titan_mco_*` are reserved; invalid/reserved object forms throw `TypeError` synchronously in `create()`, while invalid/reserved function forms reject `initialize()`/`run()` with `TITAN_BROWSER_PROTOCOL` whose `cause` is that `TypeError`). |
 | `env` | Initial instance environment map (string keys/values; default empty; isolated from host and peers). |
+| `vfs` | Optional [filesystem and durable-mount configuration](#filesystem-and-durable-storage) (`{ mounts, maxHydratedBytes }`) for images that link the browser storage runtime. |
 | `onNotificationError({ kind, operation, error })` | Observes errors that cannot return to a caller (notification callback failures, secondary cleanup errors); defaults to `console.error`. |
 | `requestDrain()` | Coalesced hook notified whenever work is queued while idle. |
 | `onEngineFailure({ kind, cause })` | Observes terminal `"abort"`, `"trap"`, or `"protocol"` engine failures that poison the instance. |
@@ -396,6 +401,7 @@ All async methods (`initialize`, `run`, `call`, `callTask`, `drain`, `dispose`) 
 | `TITAN_BROWSER_CANCELLED` | `callTask` cancelled by `AbortSignal` or Titan cancellation (`reason` holds signal reason or text). |
 | `TITAN_BROWSER_EXITED` | Operation rejected because the instance latched an exit status (`status`). |
 | `TITAN_BROWSER_DISPOSED` | Operation rejected or interrupted by `dispose()`. |
+| `TITAN_BROWSER_DISPOSED_DIRTY` | `dispose({ force: true })` terminated the storage worker while unapplied guest changes, in-flight requests, unflushed durable writes, a prior writeback failure, or an open SQLite write transaction may have been lost. |
 | `TITAN_BROWSER_HANDLE` | Released or foreign callable wrapper, or handle of a closed Lua state. |
 | `TITAN_BROWSER_SINK` | Output sink threw, rejected, or returned an invalid value (`stream` names the stream). |
 | `TITAN_BROWSER_HOST` | Host cleanup hook (`cancel`, `unregister`, `onNotificationError`) threw. |
@@ -430,7 +436,38 @@ Calling `os.exit(code)` / `async.request_exit(code)` inside a browser Task latch
 
 ### Disposal with a running Runtime
 
-Calling `dispose()` closes application admission immediately, rejects unsettled queued calls with `TITAN_BROWSER_DISPOSED`, drops queued application notifications, and wakes the `async` Runtime to cancel all running Tasks with `"instance disposed"`. Host requests already started before `dispose()` continue delivering settlements so `defer` cleanup can finish; new host requests fail with `"browser state is closing"`. Once cleanup completes, remaining requests are cancelled and Lua closes.
+Calling `dispose()` closes application admission immediately, rejects unsettled queued calls with `TITAN_BROWSER_DISPOSED`, drops queued application notifications, and wakes the `async` Runtime to cancel all running Tasks with `"instance disposed"`. Host requests already started before `dispose()` continue delivering settlements so `defer` cleanup can finish; new host requests fail with `"browser state is closing"`. Once cleanup completes, remaining requests are cancelled, Lua closes, and any storage worker finishes pending work and persists durable mounts before stopping. For forced termination with `dispose({ force: true })`, see [Filesystem and durable storage](#filesystem-and-durable-storage).
+
+### Filesystem and durable storage
+
+`titanc --target browser` links the browser filesystem runtime automatically—with no extra CLI flag—whenever a program statically imports `fs`, `sqlite3`, or `lua`, or references `os.cwd` or `os.chdir`. Programs that do not reach those modules embed no filesystem code, emit no companion files, and incur zero VFS overhead; passing `vfs` to `create()` on such an image throws `TypeError`.
+
+**Default ephemeral filesystem.** When the filesystem runtime is linked and `options.vfs` is omitted, `create()` mounts an isolated ephemeral in-memory filesystem at `/` with empty `/tmp` and `/home` directories. Ephemeral mounts require no browser storage APIs and spawn no worker unless the image also links `titan.sqlite3`.
+
+**Opt-in durable OPFS mounts.** Pass `options.vfs` to mount persistent Origin Private File System (OPFS) directories or additional in-memory mounts:
+
+```javascript
+const instance = create({
+  vfs: {
+    mounts: {
+      "/data": { backend: "opfs", directory: "titan.data" },
+      "/scratch": { backend: "memory" },
+    },
+    maxHydratedBytes: 64 * 1024 * 1024, // default (64 MiB)
+  },
+});
+```
+
+- **Backends and mount paths:** Each mount selects `backend: "opfs"` (durable) or `backend: "memory"` (ephemeral). Mount paths must be normalized absolute paths other than `/`, outside `/dev`, and non-nested. On an `"opfs"` mount, `directory` names the single OPFS subdirectory (default `"titan"` plus the mount path with `/` replaced by `.`, such as `"titan.data"`). Invalid options throw `TypeError` synchronously from `create()`.
+- **Hydration cap (`maxHydratedBytes`):** Bounds the total resident file bytes stored on durable `"opfs"` mounts (default `67,108,864` bytes, 64 MiB; ephemeral root and `"memory"` mounts are not counted). At `initialize()`, durable mounts hydrate into the instance's resident tree; exceeding `maxHydratedBytes` rejects `initialize()` with `RangeError` without poisoning the instance. While SQLite statements are in flight, free capacity is split between guest growth (failing with `ENOSPC`) and SQLite (failing with `SQLITE_FULL`).
+- **Exclusive locking and browser context:** Durable `"opfs"` mounts require a secure context with OPFS `FileSystemSyncAccessHandle` support inside a dedicated Web Worker. Only one instance may hold an OPFS directory at a time; a concurrent open rejects `initialize()` with a plain `Error` whose `name` is `"OPFSStoreBusyError"` (check `error.name` rather than `instanceof`).
+- **Cross-mount rules:** Hard links on durable mounts fail with `ENOTSUP`, renames across mounts or between a mount and `/` fail with `EXDEV`, and removing or renaming a mount root or an ancestor of a mount fails with `EBUSY`.
+
+**Companion files and Content Security Policy.** Linked images publish `<stem>.worker.mjs` (whenever the filesystem runtime is linked) and `<stem>.sqlite3.wasm` (whenever `titan.sqlite3` is linked) beside `<stem>.mjs`. The default `locateFile` resolves both with literal `new URL("<file>", import.meta.url)` expressions so static hosts and bundlers work under strict CSP (`worker-src 'self'`, without `blob:` URLs or `unsafe-eval`). Before compiling `<stem>.sqlite3.wasm`, the storage worker verifies its SHA-256 digest embedded in `<stem>.mjs`.
+
+**Disposal and durability.** Graceful `await instance.dispose()` waits for accepted SQLite operations and queued storage updates, flushes and persists every durable mount, and stops the worker. Calling `await instance.dispose({ force: true })` terminates the worker immediately (rejecting in-flight requests with `"browser storage worker was terminated"`) and rejects with `TITAN_BROWSER_DISPOSED_DIRTY` if unapplied guest changes, unanswered requests, unflushed durable writes (regardless of SQLite `PRAGMA synchronous` or `journal_mode`), a prior storage writeback failure, or an open SQLite write transaction may have been lost. In both cases, all instance storage is released afterwards.
+
+**Stock Lua filesystem APIs.** When the filesystem runtime is linked, stock Lua `io.open`, `io.lines`, `io.input`, `io.output`, `io.tmpfile` (creating an immediately unlinked file under `/tmp`), `os.tmpname` (creating a unique path under `/tmp`), `os.remove`, `os.rename`, `dofile`, `loadfile`, and `package.path` operate directly against the instance's VFS. Without a linked filesystem runtime, `wasi-libc` has no preopened directory, so path calls (`io.open`, `io.lines`, `os.remove`, `os.rename`, `dofile`, `loadfile`) fail with `ENOENT` (`"No such file or directory"`).
 
 ### Synchronous C callbacks
 
@@ -470,15 +507,17 @@ At initialization, the loader eagerly fetches `<stem>.wasm.trace` (derived from 
 
 ## The browser standard library
 
-The browser SDK's `titan.a` provides **21 standard modules**: **14 complete shared modules**, **6 browser-adapted shared modules**, and **1 browser-only module** (`browser`):
+The browser SDK's `titan.a` provides **23 standard modules**: **14 complete shared modules**, **8 browser-adapted shared modules**, and **1 browser-only module** (`browser`):
 
 | Module | Browser support | Notes |
 | --- | --- | --- |
 | [`coroutine`](coroutines.md), [`gc`](standard-library-gc.md), [`io`](standard-library-io.md), [`iteration`](standard-library-iteration.md), [`json`](standard-library-json.md), [`math`](standard-library-math.md), [`path`](standard-library-path.md), [`peg`](standard-library-peg.md), [`protobuf`](standard-library-protobuf.md), [`reflect`](standard-library-reflect.md), [`string`](standard-library-string.md), [`test`](standard-library-test.md), [`transfer`](standard-library-transfer.md), [`url`](standard-library-url.md) | **Complete** (14 modules) | Full native public API. `path` uses POSIX rules (`/`). |
 | [`timer`](standard-library-timer.md#on-the-browser) | **Browser-adapted** (complete API) | `sleep`, `yield`, and coalescing `Ticker` backed by JavaScript timers (subject to browser clamping/throttling). |
+| [`sqlite3`](standard-library-sqlite3.md#on-the-browser) | **Browser-adapted** (complete API) | All 26 members: cooperative async SQLite connections, statements, cursors, transactions, and `Connection` transfer over the worker-hosted SQLite service. |
+| [`fs`](standard-library-fs.md#on-the-browser) | **Browser-adapted** (subset) | 27 of 35 members: binary files, metadata, directories, `realpath`, `tmpname`, `File` transfer, and all seven `io` Interfaces over the browser VFS. `Watcher`, `WatcherEvent`, and `watcher` are absent. |
 | [`async`](async-io.md#the-browser-target) | **Browser-adapted** (subset) | Tasks, cancellation, `async.channel`, `reader_writer_channel`, combinators, and subscriptions on the owner state. Libuv waits, `run_foreign`, `Receiver`, and `current_loop` are absent. |
-| [`os`](standard-library-os.md#on-the-browser) | **Browser-adapted** (subset) | Calendars, wall time, locale, per-instance `getenv`/`setenv`/`unsetenv`, Task `exit`, and embedding `stdin`/`stdout`/`stderr`. CPU `clock`, host paths, processes, and signals are absent. |
-| [`lua`](standard-library-lua.md) | **Browser-adapted** (subset) | `load`, `load_from_reader`, preload/custom-searcher `require`, and synchronous `lua.new()` states. `dofile`, `run_async`, and filesystem searches are absent. |
+| [`os`](standard-library-os.md#on-the-browser) | **Browser-adapted** (subset) | Calendars, wall time, locale, per-instance `getenv`/`setenv`/`unsetenv`, `cwd`/`chdir`/`homedir`/`tmpdir`, Task `exit`, and embedding `stdin`/`stdout`/`stderr`. CPU `clock`, host identity (`hostname`, `exepath`, `pid`, `ppid`), processes, and signals are absent. |
+| [`lua`](standard-library-lua.md#on-the-browser) | **Browser-adapted** (subset) | `load`, `load_from_reader`, `dofile`, `require` (including `package.path` VFS search), and synchronous `lua.new()` states. `Lua:run_async` and `Lua:run_async_from_loader` are absent. |
 | [`http`](standard-library-http.md#on-the-browser) | **Browser-adapted** (subset) | Streaming HTTP client (`Client`, `get`, `request`, `Headers`, `RequestOptions`) over browser `fetch` (follows redirects by default; respects browser CORS/cookies/cache). Servers and upgrades are absent. |
 | [`websocket`](standard-library-websocket.md#on-the-browser) | **Browser-adapted** (subset) | Message-oriented client over host `WebSocket`. Server upgrades, `ping`, custom dial headers/`ca_file`, and transfer hooks are absent. |
 | [`browser`](standard-library-browser.md) | **Browser only** (1 module) | JavaScript `bindings`, `BrowserValue` marshalling, handles, pinned callables, tracked requests/listeners, and synchronous C callbacks. |
@@ -489,13 +528,11 @@ C target differences on WebAssembly (`wasm32`): `size_t` and C `long` are 4 byte
 
 ### Modules that are not available
 
-Six native standard-library modules are absent on the browser target and fail at compile time with `"not available for target 'browser': <reason>"`:
+Four native standard-library modules are absent on the browser target and fail at compile time with `"not available for target 'browser': <reason>"`:
 
 | Module | Reason |
 | --- | --- |
-| `fs` | requires a filesystem |
 | `net` | requires native sockets |
-| `sqlite3` | requires the native SQLite library |
 | `ssl` | requires OpenSSL and native sockets |
 | `thread` | requires OS threads |
 | `uv` | requires libuv |
