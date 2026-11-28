@@ -2934,7 +2934,7 @@ int main(void) {
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
             assert.same({ "titan/lua/lua.titan", "titan/lua/background.native.titan",
-                "titan/lua/loading.browser.titan", "titan/lua/loading.native.titan", "titan/lua/worker.titan" },
+                "titan/lua/loading.titan", "titan/lua/worker.titan" },
                 makefile_words("LUA_TITAN_SOURCES"))
             assert.same({}, undeclared_folder_sources(
                 makefile_words("LUA_TITAN_SOURCES"), "titan/lua", "titan/lua/"))
@@ -3026,7 +3026,8 @@ int main(void) {
                 "titan/async/external.native.titan", "titan/async/external.browser.titan",
                 "titan/async/foreign.native.titan", "titan/async/receiver.native.titan",
                 "titan/async/runtime.native.titan", "titan/async/runtime.browser.titan",
-                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
+                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan",
+                "titan/fs.native.titan", "titan/fs.browser.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.native.titan", "titan/http/client.browser.titan",
                 "titan/http/native_imports.native.titan",
@@ -3053,11 +3054,13 @@ int main(void) {
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
                 "titan/math.titan", "titan/lua/lua.titan", "titan/lua/background.native.titan",
-                "titan/lua/loading.browser.titan", "titan/lua/loading.native.titan", "titan/lua/worker.titan",
+                "titan/lua/loading.titan", "titan/lua/worker.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
                 "titan/reflect.titan",
-                "titan/sqlite3/sqlite3.native.titan", "titan/sqlite3/bindings.titan",
-                "titan/sqlite3/row.titan", "titan/sqlite3/worker.titan",
+                "titan/sqlite3/sqlite3.native.titan", "titan/sqlite3/sqlite3.browser.titan",
+                "titan/sqlite3/bindings.native.titan", "titan/sqlite3/bindings.browser.titan",
+                "titan/sqlite3/row.titan", "titan/sqlite3/validation.titan",
+                "titan/sqlite3/worker.native.titan",
                 "titan/json/json.titan", "titan/json/parser.titan",
                 "titan/json/decoder.titan", "titan/json/writer.titan",
                 "titan/json/numbers.titan",
@@ -4050,7 +4053,8 @@ esac
             end
             local sources = {
                 "titan/coroutine.titan",
-                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
+                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan",
+                "titan/fs.native.titan", "titan/fs.browser.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/path.titan",
                 "titan/peg/peg.titan",

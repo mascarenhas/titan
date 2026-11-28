@@ -1,3 +1,5 @@
+foreign import "unistd.h"
+
 local function os_exit(code: integer)
   do
     async.running()
@@ -5,4 +7,81 @@ local function os_exit(code: integer)
     raise "os.exit is unavailable outside an async Task on the browser target"
   end
   async.request_exit(code)
+end
+
+-- The working directory is wasi-libc's, which C, Lua and titan.fs paths
+-- share. Changing it changes no file, so it never waits for the storage
+-- worker; titan.sqlite3 sends it with each frame for SQL that names
+-- relative files. The image links the filesystem runtime whenever a module
+-- calls cwd or chdir.
+
+-- Names and messages as native uv.strerror gives them, for the failures
+-- a path lookup or the working directory reports; make_error has the rest.
+local function directory_error(code: integer, operation: string): async.OperationError
+  -- A lookup without the rights it needs is EBADF, as natively.
+  local errno = code
+  if errno == ffi.ENOTCAPABLE then errno = ffi.EBADF end
+  if errno == ffi.ENOENT then
+    return async.OperationError(-errno, "ENOENT", "no such file or directory", operation)
+  elseif errno == ffi.ENOTDIR then
+    return async.OperationError(-errno, "ENOTDIR", "not a directory", operation)
+  elseif errno == ffi.EACCES then
+    return async.OperationError(-errno, "EACCES", "permission denied", operation)
+  elseif errno == ffi.ENAMETOOLONG then
+    return async.OperationError(-errno, "ENAMETOOLONG", "name too long", operation)
+  elseif errno == ffi.ELOOP then
+    return async.OperationError(-errno, "ELOOP", "too many symbolic links encountered", operation)
+  elseif errno == ffi.ERANGE then
+    return async.OperationError(-errno, "ERANGE", "result too large", operation)
+  elseif errno == ffi.EBADF then
+    return async.OperationError(-errno, "EBADF", "bad file descriptor", operation)
+  elseif errno == ffi.EPERM then
+    return async.OperationError(-errno, "EPERM", "operation not permitted", operation)
+  end
+  return make_error(errno, operation)
+end
+
+--- Return the process current working directory.
+-- @usage standard-library-os.md
+function cwd(): string
+  const directory = ffi.getcwd(nil, 0)
+  if directory == nil then
+    const code: integer = ffi.errno
+    raise directory_error(code, "os.cwd")
+  end
+  defer ffi.free(directory)
+  return directory as string
+end
+
+--- Change the process-wide working directory.
+-- @param path New directory; coordinate and restore temporary changes.
+-- @usage standard-library-os.md
+function chdir(path: string)
+  checked_text(path, "os.chdir")
+  if ffi.chdir(path) ~= 0 then
+    const code: integer = ffi.errno
+    raise directory_error(code, "os.chdir")
+  end
+end
+
+-- libuv's choices, as on native targets: HOME, else the default mount's
+-- /home; the first of TMPDIR, TMP, TEMP and TEMPDIR that is set, else /tmp,
+-- without a trailing slash.
+
+--- Return the current user home directory.
+-- @usage standard-library-os.md
+function homedir(): string
+  return os_getenv("HOME") or "/home"
+end
+
+--- Return the operating-system temporary directory.
+-- @usage standard-library-os.md
+function tmpdir(): string
+  const directory = os_getenv("TMPDIR") or os_getenv("TMP") or os_getenv("TEMP") or
+    os_getenv("TEMPDIR") or "/tmp"
+  if #directory > 1 then
+    const last: integer = string.byte(directory, #directory)
+    if last == 47 then return string.sub(directory, 1, #directory - 1) end
+  end
+  return directory
 end

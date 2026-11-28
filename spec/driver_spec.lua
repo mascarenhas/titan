@@ -14305,9 +14305,8 @@ describe("target-aware source resolver", function()
 
     local stdlib_root = paths.to_slash(lfs.currentdir())
     local excluded_stdlib = {
-        { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" },
+        { "net", "net" }, { "ssl", "ssl" },
         { "uv", "uv/uv", "tcp" },
-        { "sqlite3", "sqlite3/sqlite3", "bindings" },
         { "thread", "thread/thread", "channel" },
     }
     for _, entry in ipairs(excluded_stdlib) do
@@ -14512,7 +14511,37 @@ describe("target-aware source resolver", function()
         end
     end)
 
-    it("composes titan.lua with synchronous browser and native worker contributors", function()
+    it("selects titan.fs's native variant on native targets and its browser variant on the browser", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local member = target == "browser" and "browser" or "native"
+            local selected = assert(driver.resolve_source(context(target), "titan.fs", stdlib_root))
+            assert.equal("flat", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/fs." .. member .. ".titan", paths.to_slash(selected.main), target)
+            assert.equal(stdlib_root .. "/titan/fs.titan", paths.to_slash(selected.native_output), target)
+            assert.same({ selected.main }, selected.files, target)
+        end
+    end)
+
+    it("composes titan.sqlite3 from shared contributors and the target's main and bindings", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local member = target == "browser" and "browser" or "native"
+            local selected = assert(driver.resolve_source(context(target), "titan.sqlite3", stdlib_root))
+            assert.equal("folder", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/sqlite3/sqlite3." .. member .. ".titan",
+                paths.to_slash(selected.main), target)
+            assert.equal(stdlib_root .. "/titan/sqlite3/sqlite3.titan", paths.to_slash(selected.native_output), target)
+            local files = {}
+            for index, filename in ipairs(selected.files) do files[index] = paths.basename(filename) end
+            assert.same(target == "browser" and {
+                "sqlite3.browser.titan", "bindings.browser.titan", "row.titan", "validation.titan",
+            } or {
+                "sqlite3.native.titan", "bindings.native.titan", "row.titan", "validation.titan",
+                "worker.native.titan",
+            }, files, target)
+        end
+    end)
+
+    it("composes titan.lua with shared loading, synchronous browser and native worker contributors", function()
         for _, target in ipairs(driver.SOURCE_LABELS) do
             local selected = assert(driver.resolve_source(context(target), "titan.lua", stdlib_root))
             assert.equal("folder", selected.kind, target)
@@ -14521,9 +14550,9 @@ describe("target-aware source resolver", function()
             local files = {}
             for index, filename in ipairs(selected.files) do files[index] = paths.basename(filename) end
             assert.same(target == "browser" and {
-                "lua.titan", "loading.browser.titan", "worker.titan",
+                "lua.titan", "loading.titan", "worker.titan",
             } or {
-                "lua.titan", "background.native.titan", "loading.native.titan", "worker.titan",
+                "lua.titan", "background.native.titan", "loading.titan", "worker.titan",
             }, files, target)
             for _, part in ipairs({ "background", "loading", "worker" }) do
                 local blocked = driver.resolve_source(context(target), "titan.lua." .. part, stdlib_root)
@@ -14531,8 +14560,7 @@ describe("target-aware source resolver", function()
                     assert.is_nil(blocked, part)
                 else
                     assert.equal("blocked", assert(blocked, part).kind, part)
-                    local member = part == "worker" and "" or
-                        (target == "browser" and ".browser" or ".native")
+                    local member = part == "background" and ".native" or ""
                     assert.equal(stdlib_root .. "/titan/lua/" .. part .. member .. ".titan",
                         paths.to_slash(blocked.contributor), target .. " " .. part)
                 end

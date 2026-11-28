@@ -1,0 +1,673 @@
+--- Task-aware files, filesystem metadata, and path operations.
+-- @module titan.fs
+-- @usage standard-library-fs.md
+
+local async = import "async"
+local browser = import "browser"
+local string = import "string"
+local os = import "os"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+local gc = import "gc"
+foreign import "errno.h"
+foreign import "fcntl.h"
+foreign import "unistd.h"
+foreign import "stdlib.h"
+foreign import "dirent.h"
+foreign import "sys/stat.h"
+foreign import "titan/ffi.h"
+foreign import "fs.browser.h"
+
+-- Browser files are wasi-libc descriptors of the instance's resident
+-- filesystem: every POSIX call completes at once, and C, Lua and SQLite see
+-- its effect. Only durability waits for the storage worker, through
+-- titan:vfs. Operations that wait natively still need a running Task.
+-- Implementation notes: doc/implementation/filesystem-library.md#browser-files
+
+local type Value = browser.BrowserValue
+
+local const READ_CHUNK_BYTES = 64 * 1024
+local const TEMPORARY_ATTEMPTS = 100
+local const TEMPORARY_CHARACTERS =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+--- Application-owned binary file descriptor; close it explicitly after use.
+-- @usage standard-library-fs.md
+record File
+  local handle: integer
+  local excess: string
+  local pending_operations: integer
+end
+
+local const file_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_string(),
+}
+
+--- Filesystem metadata with an opaque device/inode identity pair.
+-- @field size File size in bytes.
+-- @field kind file, directory, symlink, or other.
+-- @field mode Host file mode bits.
+-- @field device Opaque host device bit pattern; may be negative.
+-- @field inode Opaque host inode bit pattern; may be negative.
+-- @field modified_seconds Modification timestamp seconds.
+-- @field modified_nanoseconds Nanosecond component of the modification timestamp.
+-- @usage standard-library-fs.md
+record Stat
+  size: integer
+  kind: string
+  mode: integer
+  device: integer
+  inode: integer
+  modified_seconds: integer
+  modified_nanoseconds: integer
+end
+
+local record ErrorName
+  const name: string
+  const message: string
+end
+
+-- The names and messages native uv.strerror gives the errno values that
+-- wasi-libc reports. Codes are negative errno values, as in the other
+-- browser modules.
+local const error_names: {integer: ErrorName} = {
+  [ffi.EACCES] = ErrorName("EACCES", "permission denied"),
+  [ffi.EAGAIN] = ErrorName("EAGAIN", "resource temporarily unavailable"),
+  [ffi.EBADF] = ErrorName("EBADF", "bad file descriptor"),
+  [ffi.EBUSY] = ErrorName("EBUSY", "resource busy or locked"),
+  [ffi.ECANCELED] = ErrorName("ECANCELED", "operation canceled"),
+  [ffi.EEXIST] = ErrorName("EEXIST", "file already exists"),
+  [ffi.EFBIG] = ErrorName("EFBIG", "file too large"),
+  [ffi.EINTR] = ErrorName("EINTR", "interrupted system call"),
+  [ffi.EINVAL] = ErrorName("EINVAL", "invalid argument"),
+  [ffi.EIO] = ErrorName("EIO", "i/o error"),
+  [ffi.EISDIR] = ErrorName("EISDIR", "illegal operation on a directory"),
+  [ffi.ELOOP] = ErrorName("ELOOP", "too many symbolic links encountered"),
+  [ffi.EMFILE] = ErrorName("EMFILE", "too many open files"),
+  [ffi.EMLINK] = ErrorName("EMLINK", "too many links"),
+  [ffi.ENAMETOOLONG] = ErrorName("ENAMETOOLONG", "name too long"),
+  [ffi.ENFILE] = ErrorName("ENFILE", "file table overflow"),
+  [ffi.ENODEV] = ErrorName("ENODEV", "no such device"),
+  [ffi.ENOENT] = ErrorName("ENOENT", "no such file or directory"),
+  [ffi.ENOMEM] = ErrorName("ENOMEM", "not enough memory"),
+  [ffi.ENOSPC] = ErrorName("ENOSPC", "no space left on device"),
+  [ffi.ENOSYS] = ErrorName("ENOSYS", "function not implemented"),
+  [ffi.ENOTDIR] = ErrorName("ENOTDIR", "not a directory"),
+  [ffi.ENOTEMPTY] = ErrorName("ENOTEMPTY", "directory not empty"),
+  [ffi.ENOTSUP] = ErrorName("ENOTSUP", "operation not supported on socket"),
+  [ffi.ENXIO] = ErrorName("ENXIO", "no such device or address"),
+  [ffi.EOVERFLOW] = ErrorName("EOVERFLOW", "value too large for defined data type"),
+  [ffi.EPERM] = ErrorName("EPERM", "operation not permitted"),
+  [ffi.EPIPE] = ErrorName("EPIPE", "broken pipe"),
+  [ffi.EROFS] = ErrorName("EROFS", "read-only file system"),
+  [ffi.ESPIPE] = ErrorName("ESPIPE", "invalid seek"),
+  [ffi.ETXTBSY] = ErrorName("ETXTBSY", "text file is busy"),
+  [ffi.EXDEV] = ErrorName("EXDEV", "cross-device link not permitted"),
+}
+
+local function operation_error(code: integer, operation: string): async.OperationError
+  -- A descriptor without the rights an operation needs is EBADF, as natively.
+  local errno = code
+  if errno == ffi.ENOTCAPABLE then errno = ffi.EBADF end
+  const known? = error_names[errno]
+  if known == nil then
+    return async.OperationError(-errno, "UNKNOWN", "unknown error", operation)
+  end
+  return async.OperationError(-errno, known.name, known.message, operation)
+end
+
+-- The failure of the libc call that just returned.
+local function last_error(operation: string): async.OperationError
+  const code: integer = ffi.errno
+  return operation_error(code, operation)
+end
+
+local function checked_path(path: string, operation: string): string
+  if string.find(path, "\0", 1) then
+    raise operation_error(ffi.EINVAL, operation)
+  end
+  return path
+end
+
+-- This Lua state's titan:vfs binding.
+local vfs: browser.BrowserHandle? = nil
+
+local function vfs_source(): browser.BrowserHandle
+  local source? = vfs
+  if source == nil then
+    source = browser.binding("titan:vfs")
+    vfs = source
+  end
+  return source
+end
+
+-- A stopped storage worker reports the host's message as an I/O error: the
+-- browser has no error code for it. The thrown JavaScript value is released.
+local function storage_error(message: Value, thrown: Value,
+                             operation: string): async.OperationError
+  return async.OperationError(-ffi.EIO, "EIO",
+    browser.failure_text(message, thrown) or "browser storage failed", operation)
+end
+
+-- Wait until the storage worker holds every change made so far and, for a
+-- descriptor of a durable file, has flushed that file. titan:vfs settles
+-- with 0, or with the WASI errno of a change the worker could not apply,
+-- and rejects only when the worker stopped. The request is retained, so a
+-- cancelled Task still waits for it; a cleanup wait also starts in a
+-- cancelled Task. Returns the storage failure, if any.
+local function sync_storage(descriptor: integer?, operation: string,
+                            cleanup: boolean): async.OperationError?
+  const source = vfs_source()
+  local request: browser.BrowserRequest? = nil
+  defer if request ~= nil then request:close() end
+  const register = function (resolve: function (nil): (),
+                             reject: function (async.OperationError): (),
+                             fatal: function (value, string): ())
+    const completed = function (...: Value): Value
+      case ...[1]
+      when is_integer(status) then
+        if status == 0 then resolve(nil) else reject(operation_error(status, operation)) end
+      when is_handle(handle) then
+        handle:close()
+        reject(async.OperationError(-ffi.EIO, "EIO", "titan:vfs sync settled without a status", operation))
+      else
+        reject(async.OperationError(-ffi.EIO, "EIO", "titan:vfs sync settled without a status", operation))
+      end
+      return Value.is_nil()
+    catch
+      fatal(error, traceback)
+      raise
+    end
+    const failed = function (...: Value): Value
+      reject(storage_error(...[1], ...[2], operation))
+      return Value.is_nil()
+    catch
+      fatal(error, traceback)
+      raise
+    end
+    local target = Value.is_nil()
+    if descriptor ~= nil then target = Value.is_integer(descriptor) end
+    request = source:start(completed, failed, Value.is_string("sync"), target)
+  catch
+    if not (error is browser.BrowserError) then raise end
+    const failure: browser.BrowserError = error
+    const message = failure.message
+    failure:close()
+    reject(async.OperationError(-ffi.EIO, "EIO", message, operation))
+  end
+  local failure: async.OperationError? = nil
+  if cleanup then
+    case async.await_cleanup<|nil, async.OperationError|>(register)
+    when error(rejected) then failure = rejected
+    else
+    end
+  else
+    case async.await<|nil, async.OperationError|>(register)
+    when error(rejected) then failure = rejected
+    else
+    end
+  end
+  return failure
+end
+
+-- A namespace change is durable once the worker has applied it.
+local function namespace_changed(operation: string)
+  const failure? = sync_storage(nil, operation, false)
+  if failure ~= nil then raise failure end
+end
+
+local function open_flags(mode: string): integer
+  if mode == "r" or mode == "rb" then return ffi.O_RDONLY end
+  if mode == "w" or mode == "wb" then
+    return ffi.O_WRONLY | ffi.O_CREAT | ffi.O_TRUNC
+  end
+  if mode == "a" or mode == "ab" then
+    return ffi.O_WRONLY | ffi.O_CREAT | ffi.O_APPEND
+  end
+  if mode == "r+" or mode == "r+b" or mode == "rb+" then
+    return ffi.O_RDWR
+  end
+  if mode == "w+" or mode == "w+b" or mode == "wb+" then
+    return ffi.O_RDWR | ffi.O_CREAT | ffi.O_TRUNC
+  end
+  if mode == "a+" or mode == "a+b" or mode == "ab+" then
+    return ffi.O_RDWR | ffi.O_CREAT | ffi.O_APPEND
+  end
+  raise "invalid file mode '" .. mode .. "'"
+end
+
+local function File:require_open()
+  if self.handle < 0 then raise "File is closed" end
+end
+
+-- Implementation notes: doc/implementation/filesystem-library.md#browser-files
+local function File:close_with(operation: string)
+  const descriptor = self.handle
+  if descriptor < 0 then
+    self.excess = ""
+    return
+  end
+  -- Lua state close cannot wait for the worker: retire the descriptor at
+  -- once. The worker still flushes a durable file before disposal ends.
+  -- The storage keeps no per-state descriptor ledger, so the state
+  -- argument is unused.
+  if ffi.titan_state_closing(L) ~= 0 then
+    self.excess = ""
+    self.handle = -1
+    const status: integer = ffi.titan_browser_vfs_retire_sync(0, descriptor)
+    if status ~= 0 then raise operation_error(status, operation) end
+    return
+  end
+  -- As natively, a close outside a Task leaves the File, buffered bytes
+  -- included, as it was.
+  async.running()
+  self.excess = ""
+  self.handle = -1
+  -- This frame now owns the descriptor: it closes it after the flush, or
+  -- when anything unwinds the wait, a Lua state close included.
+  local retired = false
+  defer do
+    if not retired then
+      if ffi.titan_state_closing(L) ~= 0 then
+        ffi.titan_browser_vfs_retire_sync(0, descriptor)
+      else
+        ffi.close(descriptor)
+      end
+    end
+  end
+  -- A writable File's data is durable only once the worker has flushed it.
+  const flags: integer = ffi.fcntl(descriptor, ffi.F_GETFL)
+  local failure: async.OperationError? = nil
+  if flags < 0 or (flags & ffi.O_WRONLY) ~= 0 then
+    failure = sync_storage(descriptor, operation, true)
+  end
+  retired = true
+  if ffi.close(descriptor) ~= 0 and failure == nil then
+    failure = last_error(operation)
+  end
+  if failure ~= nil then raise failure end
+end
+
+-- Lua state close releases a File that no close retired. Ordinary
+-- collection leaves the descriptor to its owner.
+local function finalize_file(candidate: value)
+  if ffi.titan_state_closing(L) == 0 then return end
+  const file: File = candidate
+  file:close_with("fs.close")
+end
+
+--- Open a binary file in a running Task; the caller owns its close.
+-- @param path File path without embedded NUL.
+-- @param mode r, w, a, or their + forms, with optional b.
+-- @return Open File.
+-- @usage standard-library-fs.md
+function open(path: string, mode: string): File
+  checked_path(path, "fs.open")
+  const flags = open_flags(mode)
+  async.checkpoint()
+  const file = File(-1, "", 0)
+  gc.finalizable<|value|>(file, finalize_file)
+  file.handle = ffi.open(path, flags, 438 as foreign mode_t)
+  if file.handle < 0 then raise last_error("fs.open") end
+  return file
+end
+
+--- Read a byte chunk, returning nil only when no bytes remain at EOF.
+-- @param max_bytes Maximum chunk size; nil defaults to 64 KiB.
+-- @return Read bytes or nil at EOF.
+-- @usage standard-library-fs.md
+function File:read(max_bytes: integer?): string?
+  local requested = READ_CHUNK_BYTES
+  if max_bytes then requested = max_bytes end
+  if requested <= 0 then
+    raise "file read size must be positive"
+  end
+  if self.handle < 0 then
+    self.excess = ""
+    return nil
+  end
+  if #self.excess > 0 then
+    local length = requested
+    if length > #self.excess then length = #self.excess end
+    const result = string.sub(self.excess, 1, length)
+    self.excess = string.sub(self.excess, length + 1)
+    return result
+  end
+  async.checkpoint()
+  const buffer: owned char[] = foreign char.new_array(requested)
+  const count: integer = ffi.read(self.handle, buffer, requested)
+  if count < 0 then raise last_error("fs.read") end
+  if count == 0 then return nil end
+  const bytes: foreign *char = buffer
+  return bytes as string(count)
+end
+
+--- Read through a delimiter, retaining bytes beyond it for the next read.
+-- @param delimiter Nonempty binary delimiter, matched across chunk boundaries.
+-- @param chop True removes the delimiter from the returned bytes.
+-- @return Delimited bytes or final suffix, or nil at EOF.
+-- @usage standard-library-fs.md
+function File:read_until(delimiter: string,
+                         chop: boolean?): string?
+  if self.handle < 0 then
+    self.excess = ""
+    return nil
+  end
+  if #delimiter == 0 then
+    raise "read delimiter must not be empty"
+  end
+
+  const builder = string.writer()
+  local tail = ""
+  for chunk in self:read do
+    local boundary = chunk
+    if #tail > 0 then boundary = tail .. chunk end
+    const match: integer? = string.find(boundary, delimiter)
+    if match then
+      const match_first = match
+      const match_end = match_first + #delimiter - 1
+      local result_end = match_end
+      if chop then result_end = match_first - 1 end
+      if result_end > 0 then
+        builder:write(string.sub(boundary, 1, result_end))
+      end
+      self.excess = string.sub(boundary, match_end + 1)
+      return builder:drain()
+    end
+    local keep = #delimiter - 1
+    if keep > #boundary then keep = #boundary end
+    const committed = #boundary - keep
+    if committed > 0 then
+      if committed == #boundary then
+        builder:write(boundary)
+      else
+        builder:write(string.sub(boundary, 1, committed))
+      end
+    end
+    tail = string.sub(boundary, committed + 1)
+  end
+  if #tail > 0 then builder:write(tail) end
+  const result = builder:drain()
+  if #result == 0 then return nil end
+  return result
+end
+
+--- Write all supplied binary bytes to the file.
+-- @param data Bytes to write, including any embedded NUL.
+-- @return Number of bytes written.
+-- @usage standard-library-fs.md
+function File:write(data: string): integer
+  self:require_open()
+  const length = #data
+  if length == 0 then return 0 end
+  async.checkpoint()
+  const bytes = data as foreign const *char
+  local offset = 0
+  while offset < length do
+    const written: integer = ffi.write(self.handle, bytes + offset, length - offset)
+    if written < 0 then raise last_error("fs.write") end
+    offset = offset + written
+  end
+  return offset
+end
+
+--- Flush file data to stable storage before returning.
+-- @usage standard-library-fs.md
+function File:flush()
+  self:require_open()
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
+  const failure? = sync_storage(self.handle, "fs.flush", false)
+  if failure ~= nil then raise failure end
+end
+
+--- Close the owned descriptor; repeated terminal closes are safe.
+-- @usage standard-library-fs.md
+function File:close()
+  self:close_with("fs.close")
+end
+
+--- Report whether the File descriptor has been closed.
+-- @return True after descriptor retirement.
+-- @usage standard-library-fs.md
+function File:is_closed(): boolean
+  return self.handle < 0
+end
+
+--- Detach an idle descriptor and retained bytes into a manually owned payload.
+-- @return This browser instance's descriptor and retained bytes, to be adopted exactly once.
+-- @usage standard-library-fs.md#transferring-files
+function File:to_transfer_payload(): string
+  -- Every Lua state of one browser instance shares its descriptor table.
+  self:require_open()
+  if self.pending_operations ~= 0 then
+    raise "cannot transfer a File with a pending operation"
+  end
+  const payload = protobuf.serialize_fields(file_transfer_fields, self.handle, self.excess)
+  self.handle = -1
+  self.excess = ""
+  return payload
+end
+
+--- Adopt a manually transferred descriptor and its retained read bytes.
+-- @param payload Exact opaque byte payload returned by to_transfer_payload.
+-- @return File owning the descriptor; the caller must close it.
+-- @usage standard-library-fs.md#transferring-files
+function File.from_transfer_payload(payload: string): File
+  local descriptor: integer, excess: string =
+    protobuf.deserialize_fields(payload, file_transfer_fields)
+  if descriptor < 0 or descriptor > 2147483647 then
+    raise "invalid File transfer descriptor"
+  end
+  const file = File(-1, excess, 0)
+  gc.finalizable<|value|>(file, finalize_file)
+  file.handle = descriptor
+  return file
+end
+
+--- Read a complete binary file and close the temporary File on every exit.
+-- @param path File path.
+-- @return Entire file contents.
+-- @usage standard-library-fs.md
+function read_file(path: string): string
+  const file = open(path, "r")
+  defer file:close()
+
+  const builder = string.writer()
+  for bytes in file:read do
+    builder:write(bytes)
+  end
+  return builder:drain()
+end
+
+--- Replace a file with binary bytes and close the temporary File on every exit.
+-- @param path Destination path.
+-- @param data Complete replacement contents.
+-- @usage standard-library-fs.md
+function write_file(path: string, data: string)
+  const file = open(path, "w")
+  defer file:close()
+  file:write(data)
+end
+
+local function path_metadata(path: string, follow: boolean,
+                             operation: string): Stat?
+  checked_path(path, operation)
+  async.checkpoint()
+  local info = foreign stat.new()
+  local status: integer = 0
+  if follow then status = ffi.stat(path, info)
+  else status = ffi.lstat(path, info) end
+  if status ~= 0 then
+    const code: integer = ffi.errno
+    if code == ffi.ENOENT then return nil end
+    raise operation_error(code, operation)
+  end
+  local kind = "other"
+  const file_type = info.st_mode & ffi.S_IFMT
+  if file_type == ffi.S_IFREG then kind = "file"
+  elseif file_type == ffi.S_IFDIR then kind = "directory"
+  elseif file_type == ffi.S_IFLNK then kind = "symlink"
+  end
+  return Stat(info.st_size, kind, info.st_mode, info.st_dev as foreign int64_t,
+              info.st_ino as foreign int64_t, info.st_mtim.tv_sec, info.st_mtim.tv_nsec)
+end
+
+--- Read metadata for a path, following symbolic links.
+-- @param path Path to inspect.
+-- @return Metadata, or nil for a missing path; other errors raise.
+-- @usage standard-library-fs.md
+function stat(path: string): Stat?
+  return path_metadata(path, true, "fs.stat")
+end
+
+--- Read metadata for a path without following its final symbolic link.
+-- @param path Path to inspect.
+-- @return Metadata, or nil for a missing path; other errors raise.
+-- @usage standard-library-fs.md
+function lstat(path: string): Stat?
+  return path_metadata(path, false, "fs.lstat")
+end
+
+-- Six characters of the platform's entropy (WASI random_get), so temporary
+-- names neither follow nor advance the application's math.random sequence.
+local function temporary_name(prefix: string): string
+  local name = foreign char.new_array(6)
+  if ffi.getentropy(name, 6) ~= 0 then raise last_error("fs.tmpname") end
+  const characters = TEMPORARY_CHARACTERS as foreign const *char
+  for index = 0, 5 do
+    name[index] = characters[(name[index] as foreign unsigned char) % #TEMPORARY_CHARACTERS]
+  end
+  const bytes: foreign *char = name
+  return prefix .. (bytes as string(6))
+end
+
+--- Create an empty temporary file and return its caller-owned path.
+-- @return Temporary path whose file must be removed by the caller.
+-- @usage standard-library-fs.md
+function tmpname(): string
+  async.checkpoint()
+  -- wasi-libc has no mkstemp: create random names exclusively, as it does.
+  const prefix = tmpdir() .. "/titan-fs-"
+  const file = File(-1, "", 0)
+  defer file:close_with("fs.tmpname.close")
+  for _ = 1, TEMPORARY_ATTEMPTS do
+    const path = temporary_name(prefix)
+    file.handle = ffi.open(path, ffi.O_RDWR | ffi.O_CREAT | ffi.O_EXCL, 384 as foreign mode_t)
+    if file.handle >= 0 then return path end
+    const code: integer = ffi.errno
+    if code ~= ffi.EEXIST then raise operation_error(code, "fs.tmpname") end
+  end
+  raise operation_error(ffi.EEXIST, "fs.tmpname")
+end
+
+--- Return the operating-system temporary directory.
+-- @return Directory path.
+-- @usage standard-library-fs.md
+function tmpdir(): string
+  return os.tmpdir()
+end
+
+--- Return the current user home directory.
+-- @return Directory path.
+-- @usage standard-library-fs.md
+function homedir(): string
+  return os.homedir()
+end
+
+--- Return the process current working directory.
+-- @return Directory path.
+-- @usage standard-library-fs.md
+function pwd(): string
+  const directory = ffi.getcwd(nil, 0)
+  if directory == nil then raise last_error("fs.pwd") end
+  defer ffi.free(directory)
+  return directory as string
+end
+
+--- Change the process-wide working directory.
+-- @param path New working directory; coordinate and restore temporary changes.
+-- @usage standard-library-fs.md
+function chdir(path: string)
+  if ffi.chdir(checked_path(path, "fs.chdir")) ~= 0 then
+    raise last_error("fs.chdir")
+  end
+end
+
+--- Create a directory.
+-- @param path Filesystem path without embedded NUL.
+-- @usage standard-library-fs.md
+function mkdir(path: string)
+  checked_path(path, "fs.mkdir")
+  async.checkpoint()
+  if ffi.mkdir(path, 511) ~= 0 then raise last_error("fs.mkdir") end
+  namespace_changed("fs.mkdir")
+end
+
+--- Remove a file or symbolic link.
+-- @param path Filesystem path without embedded NUL.
+-- @usage standard-library-fs.md
+function unlink(path: string)
+  checked_path(path, "fs.unlink")
+  async.checkpoint()
+  if ffi.unlink(path) ~= 0 then raise last_error("fs.unlink") end
+  namespace_changed("fs.unlink")
+end
+
+--- Remove an empty directory.
+-- @param path Filesystem path without embedded NUL.
+-- @usage standard-library-fs.md
+function rmdir(path: string)
+  checked_path(path, "fs.rmdir")
+  async.checkpoint()
+  if ffi.rmdir(path) ~= 0 then raise last_error("fs.rmdir") end
+  namespace_changed("fs.rmdir")
+end
+
+--- Rename or move a filesystem entry.
+-- @param from Existing path.
+-- @param to Destination path.
+-- @usage standard-library-fs.md
+function rename(from: string, to: string)
+  checked_path(from, "fs.rename")
+  checked_path(to, "fs.rename")
+  async.checkpoint()
+  if ffi.rename(from, to) ~= 0 then raise last_error("fs.rename") end
+  namespace_changed("fs.rename")
+end
+
+--- List a directory without dot entries or an ordering guarantee.
+-- @param path Directory to list.
+-- @return Entry names excluding the dot and parent-directory entries.
+-- @usage standard-library-fs.md
+function list(path: string): {string}
+  checked_path(path, "fs.list")
+  async.checkpoint()
+  local entries: foreign *(*dirent) = nil
+  const count: integer = ffi.scandir(path, entries, nil, nil)
+  if count < 0 then raise last_error("fs.list") end
+  defer do
+    for index = 0, count - 1 do ffi.free(entries[index]) end
+    ffi.free(entries)
+  end
+  const names: {string} = {}
+  for index = 0, count - 1 do
+    const entry: foreign *char = entries[index].d_name
+    const name = entry as string
+    if name ~= "." and name ~= ".." then names[#names + 1] = name end
+  end
+  return names
+end
+
+--- Resolve a path to its canonical absolute filesystem path.
+-- @param path Existing path to resolve.
+-- @return Canonical absolute path.
+-- @usage standard-library-fs.md
+function realpath(path: string): string
+  checked_path(path, "fs.realpath")
+  async.checkpoint()
+  const resolved = ffi.realpath(path, nil)
+  if resolved == nil then raise last_error("fs.realpath") end
+  defer ffi.free(resolved)
+  return resolved as string
+end

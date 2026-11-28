@@ -15,19 +15,6 @@ local const connection_transfer_fields: const {reflect.Type} = {
   reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {}),
 }
 
---- A SQLite validation or native-operation failure with optional SQLite result codes.
--- @field message Human-readable failure description.
--- @field code Primary native result code, or nil when no native code is available.
--- @field extended_code Extended SQLite result code, or nil for a nonnative validation failure.
--- @field operation Operation that reported the failure.
--- @usage standard-library-sqlite3.md#errors-and-cancellation
-record Error
-  const message: string
-  const code: integer?
-  const extended_code: integer?
-  const operation: string
-end
-
 --- An owned SQLite database connection with serialized native work.
 -- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 record Connection
