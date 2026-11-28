@@ -1,0 +1,112 @@
+name: Bundled Dependencies
+
+on:
+  schedule:
+    # Weekly on Mondays at 13:00 UTC.
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: bundled-deps-check
+  cancel-in-progress: false
+
+jobs:
+  check-dependencies:
+    name: check bundled and rockspec dependencies
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'mascarenhas/titan'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run offline unit tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v spec/check_bundled_deps_test.py
+
+      - name: Check bundled and rockspec dependencies
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/check_bundled_deps.py \
+            --format json \
+            --output "$RUNNER_TEMP/deps.json"
+          rc=$?
+          set -e
+          if [ -f "$RUNNER_TEMP/deps.json" ]; then
+            python3 - "$RUNNER_TEMP/deps.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          print(data["markdown"])
+          PY
+          fi
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Sync rolling tracking issue
+        if: steps.check.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - "$RUNNER_TEMP/deps.json" <<'PY'
+          import json, os, subprocess, sys, tempfile
+
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          repo = os.environ["REPO"]
+          marker = "<!-- titan-bundled-deps-tracker -->"
+          title = "Bundled and rockspec dependencies: upstream updates available"
+
+          def gh(*args):
+              proc = subprocess.run(["gh", *args], check=True, text=True, capture_output=True)
+              return proc.stdout
+
+          issues = json.loads(
+              gh(
+                  "issue", "list", "--repo", repo, "--state", "open",
+                  "--search", f'"{title}" in:title',
+                  "--limit", "20", "--json", "number,title,body",
+              )
+          )
+          existing = next(
+              (item for item in issues if marker in (item.get("body") or "") or item.get("title") == title),
+              None,
+          )
+
+          if data["outdated_count"] > 0:
+              subprocess.run(
+                  [
+                      "gh", "label", "create", "dependencies",
+                      "--repo", repo,
+                      "--color", "0366d6",
+                      "--description", "Bundled stdlib and LuaRocks dependency updates",
+                      "--force",
+                  ],
+                  check=True,
+              )
+              with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+                  tmp.write(data["issue_body"])
+                  body_path = tmp.name
+              try:
+                  if existing:
+                      num = str(existing["number"])
+                      gh("issue", "edit", num, "--repo", repo, "--title", title, "--add-label", "dependencies", "--body-file", body_path)
+                      print(f"Updated rolling tracking issue #{num} ({data['outdated_count']} outdated).")
+                  else:
+                      out = gh("issue", "create", "--repo", repo, "--title", title, "--label", "dependencies", "--body-file", body_path)
+                      print(f"Created rolling tracking issue: {out.strip()} ({data['outdated_count']} outdated).")
+              finally:
+                  os.unlink(body_path)
+          elif existing:
+              num = str(existing["number"])
+              gh("issue", "close", num, "--repo", repo, "--comment", "All tracked bundled and rockspec dependencies are now up to date.")
+              print(f"Closed rolling tracking issue #{num}: all dependencies up to date.")
+          else:
+              print("All tracked dependencies are up to date; no tracking issue needed.")
+          PY

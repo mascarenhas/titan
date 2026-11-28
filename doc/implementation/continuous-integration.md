@@ -1,8 +1,9 @@
 # Continuous integration and platform validation
 
 The executable definitions are `.github/workflows/ci.yml`,
-`.github/workflows/macos.yml`, `.github/workflows/windows.yml`, and
-`spec/support/ci_*.sh`. This chapter explains their ownership and ordering
+`.github/workflows/macos.yml`, `.github/workflows/windows.yml`,
+`.github/workflows/bundled-deps.yml`, and `spec/support/ci_*.sh`. This chapter
+explains their ownership and ordering
 contracts and is the canonical description of the
 CI lanes. Local setup and commands are in [repository
 workflow](repository-workflow.md); test implementation, local Busted
@@ -994,3 +995,17 @@ but caches saved on feature branches do not warm the default branch.
 Hosted and local validation are separate evidence. Record the exact source,
 architecture, SDK profile, and all relevant dependency modes when using a local
 VM to establish platform behavior that the hosted workflow does not cover.
+
+## Scheduled dependency freshness check
+
+`.github/workflows/bundled-deps.yml` runs on a weekly schedule (Mondays at
+13:00 UTC) and on manual `workflow_dispatch`; it never triggers on pushes or
+pull requests. The job runs the offline regressions in
+`spec/check_bundled_deps_test.py`, executes `scripts/check_bundled_deps.py`
+against GitHub and the LuaRocks 5.5 manifest, writes the Markdown table to the
+job summary, and maintains a single rolling tracking issue (tagged with the
+hidden marker `<!-- titan-bundled-deps-tracker -->` and label `dependencies`)
+when any tracked bundled dependency (`libuv`, `llhttp`, `sqlite3`,
+`libbacktrace`, `lpeglabel`, `uwasi`, or optional bundled `openssl` on the
+`4.*` track) or locked rockspec dependency is behind upstream. Transient lookup
+errors fail the job without closing an existing tracking issue.
