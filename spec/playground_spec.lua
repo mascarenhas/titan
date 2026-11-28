@@ -506,25 +506,18 @@ describe("playground compiler", function()
         assert.truthy(emitted.files["peek.c"]:find("} _titan_nominal_a_2eBox_payload;", 1, true))
     end)
 
-    it("links emitted C into an image whose trace names the program's frames", function()
-        local opened, why = open(); if not opened then pending(why); return end
-        local info
-        info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
-        local workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
-        local identity = string.rep("fedcba9876543210", 4)
-        local program = 'local io = import "io"\nlocal moons = import "moons"\nlocal fmt = import "lib.fmt.titan"\n\n' ..
-            'function main(args: {string}): integer\n  if #args > 0 then raise "boom" end\n' ..
-            '  io.print(fmt.line(moons.count()))\n  return 0\nend\n'
-        local emitted = service:emit_c({ ["main.titan"] = program, ["moons.titan"] = MOONS, ["lib/fmt.titan"] =
-            'local function line(count: integer): string\n  return "Saturn has " .. count .. " moons"\nend\n' },
-            identity)
-        assert.same({}, emitted.diagnostics)
+    -- The page's link of emitted C: compile every unit, link with the SDK's
+    -- archives and optimize, as titanc.mjs's host does. Returns the
+    -- optimized image bytes.
+    local function link_emitted(workspace, emitted, extra_sources)
         for name, contents in pairs(emitted.files) do files.write(path.join(workspace, name), contents) end
         local context = driver.new_resolver_context({ target = "browser" })
         local descriptor = assert(driver.context_target_descriptor(context))
         local plan = assert(driver.browserlink.profile(descriptor, { purpose = "program" }))
         local objects = {}
-        for _, unit in ipairs({ emitted.entry, table.unpack(emitted.units) }) do
+        local units = { emitted.entry, table.unpack(emitted.units) }
+        for _, source in ipairs(extra_sources or {}) do units[#units + 1] = source end
+        for _, unit in ipairs(units) do
             local argv = driver._browser_target.compiler_argv(descriptor.tools)
             for _, flag in ipairs(descriptor.compile_flags) do argv[#argv + 1] = flag end
             for _, directory in ipairs(descriptor.include_dirs) do argv[#argv + 1] = "-I" .. directory end
@@ -550,21 +543,100 @@ describe("playground compiler", function()
         ok, output = run(optimize, workspace)
         assert.is_true(ok, output)
         assert(driver.close_resolver_context(context))
-        local image = assert(playground.build_trace(read(path.join(workspace, "app.optimized.wasm")), identity,
-            read(path.join(SDK, "titan-wasm-factory.mjs")), read(path.join(SDK, "titan-browser.mjs"))))
-        assert.truthy(image.map:find('"./main.titan"', 1, true))
+        return read(path.join(workspace, "app.optimized.wasm"))
+    end
+
+    local function publish(workspace, image)
         for name, contents in pairs({ ["app.mjs"] = image.mjs, ["app.wasm"] = image.wasm,
                 ["app.wasm.trace"] = image.trace, ["app.wasm.map"] = image.map }) do
             files.write(path.join(workspace, name), contents)
         end
+        for _, companion in ipairs(image.companions) do
+            files.write(path.join(workspace, companion.name), companion.bytes)
+        end
+    end
+
+    it("links emitted C into an image whose trace names the program's frames", function()
+        local opened, why = open(); if not opened then pending(why); return end
+        local info
+        info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        local workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local identity = string.rep("fedcba9876543210", 4)
+        local program = 'local io = import "io"\nlocal moons = import "moons"\nlocal fmt = import "lib.fmt.titan"\n\n' ..
+            'function main(args: {string}): integer\n  if #args > 0 then raise "boom" end\n' ..
+            '  io.print(fmt.line(moons.count()))\n  return 0\nend\n'
+        local emitted = service:emit_c({ ["main.titan"] = program, ["moons.titan"] = MOONS, ["lib/fmt.titan"] =
+            'local function line(count: integer): string\n  return "Saturn has " .. count .. " moons"\nend\n' },
+            identity)
+        assert.same({}, emitted.diagnostics)
+        assert.is_nil(emitted.files["main.c"]:find("titan_browser_vfs_linked", 1, true))
+        local image = assert(playground.build_trace(link_emitted(workspace, emitted), identity,
+            read(path.join(SDK, "titan-wasm-factory.mjs")), read(path.join(SDK, "titan-browser.mjs"))))
+        assert.truthy(image.map:find('"./main.titan"', 1, true))
+        assert.same({}, image.companions)
+        assert.is_nil(image.mjs:find("titanBrowserStorage", 1, true))
+        publish(workspace, image)
         local runner = path.join(SDK, "titan-browser-run")
-        ok, output = run({ runner, "--engine", "node", path.join(workspace, "app.mjs") })
+        local ok, output = run({ runner, "--engine", "node", path.join(workspace, "app.mjs") })
         assert.is_true(ok, output)
         assert.equal("Saturn has 274 moons\n", output)
         ok, output = run({ runner, "--engine", "node", path.join(workspace, "app.mjs"), "--", "fail" })
         assert.is_false(ok)
         assert.truthy(output:find("boom", 1, true), output)
         assert.truthy(output:find("main.titan:6: in main.main", 1, true), output)
+        files.remove(workspace)
+    end)
+
+    -- D14 through the playground: a unit importing titan.lua retains the
+    -- filesystem marker, and build_trace embeds the bundle's storage runtime
+    -- and returns the companions named after the image (`app.*`).
+    it("publishes the storage companions of an image that links the storage runtime", function()
+        local opened, why = open(); if not opened then pending(why); return end
+        local info
+        info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        local workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local identity = string.rep("0123456789abcdef", 4)
+        local storage = { vfs = read(path.join(SDK, "titan-browser-vfs.mjs")),
+            sql = read(path.join(SDK, "titan-browser-sql.mjs")),
+            worker = read(path.join(SDK, "titan-storage-worker.mjs")),
+            sqlite = read(path.join(SDK, "titan-sqlite3-service.wasm")) }
+        local factory, loader = read(path.join(SDK, "titan-wasm-factory.mjs")), read(path.join(SDK, "titan-browser.mjs"))
+        local emitted = service:emit_c({ ["main.titan"] = 'local io = import "io"\nlocal lua = import "lua"\n\n' ..
+            'function main(args: {string}): integer\n  local state = lua.new()\n  state:close()\n' ..
+            '  io.print("vfs")\n  return 0\nend\n' }, identity)
+        assert.same({}, emitted.diagnostics)
+        assert.truthy(emitted.files["main.c"]:find("(void)titan_browser_vfs_linked();", 1, true))
+        local linked = link_emitted(workspace, emitted)
+        assert.same({ nil, "this image links the browser storage runtime; pass the bundle's storage sources" },
+            { playground.build_trace(linked, identity, factory, loader) })
+        local image = assert(playground.build_trace(linked, identity, factory, loader, storage))
+        assert.same({ { name = "app.worker.mjs", bytes = driver.browserlink.worker_module(storage.worker, identity) } },
+            image.companions)
+        assert.truthy(image.mjs:find('storage: titanBrowserStorage, worker: "app.worker.mjs"});', 1, true))
+        assert.is_nil(image.mjs:find("titanBrowserSql", 1, true))
+        publish(workspace, image)
+        local runner = path.join(SDK, "titan-browser-run")
+        local ok, output = run({ runner, "--engine", "node", path.join(workspace, "app.mjs") })
+        assert.is_true(ok, output)
+        assert.equal("vfs\n", output)
+
+        -- An image importing titan.sqlite3's retirement also gets the service.
+        files.write(path.join(workspace, "sql_probe.c"), '#include <stdint.h>\n' ..
+            '__attribute__((import_module("env"), import_name("titan_browser_sql_retire_sync")))\n' ..
+            "void titan_browser_sql_retire_sync(int32_t state, int64_t conn_id);\n" ..
+            '__attribute__((export_name("sql_probe"))) void sql_probe(void) { titan_browser_sql_retire_sync(0, 0); }\n')
+        local sql_linked = link_emitted(workspace, emitted, { "sql_probe.c" })
+        assert.same({ nil, "the bundle's storage source 'sql' must be a string" },
+            { playground.build_trace(sql_linked, identity, factory, loader, { vfs = storage.vfs, worker = storage.worker }) })
+        image = assert(playground.build_trace(sql_linked, identity, factory, loader, storage))
+        assert.same({ "app.worker.mjs", "app.sqlite3.wasm" }, { image.companions[1].name, image.companions[2].name })
+        assert.equal(storage.sqlite, image.companions[2].bytes)
+        assert.equal(require("titan-compiler.sha256").hex(storage.sqlite),
+            driver.browserlink.embedded_sqlite_digest(image.mjs))
+        publish(workspace, image)
+        ok, output = run({ runner, "--engine", "node", path.join(workspace, "app.mjs") })
+        assert.is_true(ok, output)
+        assert.equal("vfs\n", output)
         files.remove(workspace)
     end)
 end)
@@ -643,9 +715,17 @@ describe("playground wire protocol", function()
         assert.equal(string.rep("a", 64), calls.emit_c[2])
 
         assert.same({ "error", "not an optimized image" }, reply("build_trace", "wasm", "id", "factory", "loader"))
-        assert.same({ "wasm", "id", "factory", "loader", n = 4 }, calls.build_trace)
-        results.build_trace = { mjs = "m", wasm = "w", trace = "t", map = "p" }
-        assert.same({ "ok", "null", "m", "w", "t", "p" }, reply("build_trace", "wasm", "id", "factory", "loader"))
+        assert.same({ "wasm", "id", "factory", "loader", n = 5 }, calls.build_trace)
+        results.build_trace = { mjs = "m", wasm = "w", trace = "t", map = "p", companions = {} }
+        assert.same({ "ok", "[]", "m", "w", "t", "p" }, reply("build_trace", "wasm", "id", "factory", "loader"))
+        -- The bundle's storage sources follow the loader; companions follow the map.
+        results.build_trace.companions = { { name = "app.worker.mjs", bytes = "W" },
+            { name = "app.sqlite3.wasm", bytes = "S" } }
+        assert.same({ "ok", '["app.worker.mjs","app.sqlite3.wasm"]', "m", "w", "t", "p", "W", "S" },
+            reply("build_trace", "wasm", "id", "factory", "loader", "vfs", "sql", "worker", "sqlite"))
+        assert.same({ vfs = "vfs", sql = "sql", worker = "worker", sqlite = "sqlite" }, calls.build_trace[5])
+        assert.same({ "error", "incomplete browser storage sources" },
+            reply("build_trace", "wasm", "id", "factory", "loader", "vfs", "sql", "worker"))
 
         results.check = { { line = 1.5 } }
         assert.same({ "error", "cannot encode number as JSON" }, reply("check", "main.titan", "x"))

@@ -349,7 +349,8 @@ local validation_prefix = installed.active()
 local platform = require "titan-compiler.platform"
 
 local SDK_ASSETS = { "libtitan.a", "titan-wasm-factory.mjs", "titan-browser.mjs", "titan-browser-run",
-    "titan-browser-run.mjs", "titan-browser-node-worker.mjs", "titan-browser-page.mjs" }
+    "titan-browser-run.mjs", "titan-browser-node-worker.mjs", "titan-browser-page.mjs", "titan-browser-vfs.mjs",
+    "titan-browser-sql.mjs", "titan-storage-worker.mjs", "titan-sqlite3-service.wasm" }
 local NODE_OK = { path = "/opt/node26/bin/node", version = "v26.13.0", ok = true }
 local CHROME_OK = { path = "/opt/chrome/chrome-headless-shell",
     version = "Google Chrome for Testing 156.0.8078.80", ok = true }
@@ -752,7 +753,8 @@ local directory = os.getenv("SDK_DIRECTORY")
 local lfs = require "lfs"
 assert(lfs.mkdir(directory))
 for _, name in ipairs({ "libtitan.a", "titan-wasm-factory.mjs", "titan-browser.mjs", "titan-browser-run",
-        "titan-browser-run.mjs", "titan-browser-node-worker.mjs", "titan-browser-page.mjs" }) do
+        "titan-browser-run.mjs", "titan-browser-node-worker.mjs", "titan-browser-page.mjs", "titan-browser-vfs.mjs",
+        "titan-browser-sql.mjs", "titan-storage-worker.mjs", "titan-sqlite3-service.wasm" }) do
     local file = assert(io.open(directory .. "/" .. name, "wb"))
     assert(file:write("")); assert(file:close())
 end

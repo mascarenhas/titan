@@ -71,7 +71,11 @@ describe("browser stdlib initialization and byte fidelity gate", function()
         end
         local names = { "init_subset", "init_lua_states", "init_async_bootstrap", "fidelity_test" }
         for _, module in ipairs(modules) do names[#names + 1] = "init_" .. module end
-        for _, name in ipairs(names) do toolchain.check_imports(workspace .. "/" .. image(name), { "entry" }) end
+        -- The images importing titan.lua link the filesystem runtime (D14).
+        local storage = { init_lua = true, init_lua_states = true, init_subset = true }
+        for _, name in ipairs(names) do
+            toolchain.check_imports(workspace .. "/" .. image(name), storage[name] and { "entry", "vfs" } or { "entry" })
+        end
         for _, engine in ipairs({ "node", "chromium" }) do
             local argv = toolchain.runner(info, "--engine", engine,
                 "--timeout", "120000", "--grace", "1500", "--root", workspace,

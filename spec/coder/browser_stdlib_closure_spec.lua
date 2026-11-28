@@ -442,4 +442,94 @@ end
             assert.equal(expected.entries[modname].types, scanned.entries[modname].types, modname)
         end
     end)
+
+    -- Only the SDK's service reactor holds SQLite: titan.sqlite3's browser
+    -- contributors may declare Titan's imports in `*.browser.h`, nothing else
+    -- under a sqlite3 directory passes, and an image that links the storage
+    -- runtime needs its classes.
+    it("keeps SQLite in the SDK's service alone and storage imports in their own classes", function()
+        for _, allowed in ipairs({ "titan/sqlite3/sqlite3.browser.h", "/repo/titan/sqlite3/wire.browser.h",
+                "C:\\Repo\\Titan\\SQLite3\\sqlite3.browser.h" }) do
+            assert(checks.check_path(allowed))
+        end
+        for _, forbidden in ipairs({ "titan/sqlite3/native.h", "/repo/titan/sqlite3/native.h",
+                "vendor/sqlite3/sqlite3.h", "vendor/sqlite3/config.browser.h", "/usr/include/sqlite3/extra.h",
+                "titan/sqlite3/nested/x.browser.h", "/sdk/sqlite3.h", "/sdk/sqlite3ext.h" }) do
+            local ok, err = checks.check_path(forbidden)
+            assert.is_nil(ok, forbidden)
+            assert.equal("forbidden browser stdlib dependency: " .. forbidden, err)
+        end
+        assert(checks.check_service_symbols({ "malloc", "sqlite3_open_v2", "fsync", "getcwd" }, "service.o"))
+        for _, name in ipairs({ "dlopen", "dlsym", "dlclose", "dlerror", "getentropy", "__wasi_random_get",
+                "lua_pushnil", "luaL_error" }) do
+            assert.same({ nil, "service.o: SQLite service references forbidden symbol " .. name },
+                { checks.check_service_symbols({ "malloc", name }, "service.o") })
+        end
+
+        local info = fixture()
+        if not info then return end
+        local service = info.sdk_root .. "/titan-sqlite3-service.wasm"
+        local real = assert(strategy:read_file(service))
+        assert(checks.check_service(real, service))
+        -- Structurally valid variants: an export of another kind, another
+        -- name, and two exports with each other's function (signature).
+        local function export_entry(name)
+            local first, last = real:find(string.char(#name) .. name, 1, true)
+            assert.truthy(first, name)
+            assert.is_nil(real:find(string.char(#name) .. name, last + 1, true), name)
+            return last + 1
+        end
+        local function replaced(position, bytes)
+            return real:sub(1, position - 1) .. bytes .. real:sub(position + #bytes)
+        end
+        local kind = export_entry("memory")
+        assert.equal(2, real:byte(kind))
+        assert.same({ nil, "kind.wasm: SQLite service export memory is global, expected memory" },
+            { checks.check_service(replaced(kind, "\3"), "kind.wasm") })
+        local named = export_entry("titan_sql_svc_free") - #"free"
+        assert.same({ nil, "name.wasm: SQLite service export titan_sql_svc_fred is function (i32)->(), " ..
+            "expected no such export" }, { checks.check_service(replaced(named, "fred"), "name.wasm") })
+        -- Two function exports whose indices take as many bytes swap
+        -- functions, so each has the other's signature.
+        local indices = {}
+        for _, name in ipairs({ "_initialize", "titan_sql_svc_alloc", "titan_sql_svc_dispatch", "titan_sql_svc_free" }) do
+            local at = export_entry(name)
+            assert.equal(0, real:byte(at))
+            local finish = at + 1
+            while real:byte(finish) >= 0x80 do finish = finish + 1 end
+            indices[#indices + 1] = { name = name, at = at + 1, bytes = real:sub(at + 1, finish) }
+        end
+        local left, right
+        for first = 1, #indices do
+            for second = first + 1, #indices do
+                if not left and #indices[first].bytes == #indices[second].bytes then
+                    left, right = indices[first], indices[second]
+                end
+            end
+        end
+        assert.truthy(left, "no two function exports share an index width")
+        local swapped = replaced(left.at, right.bytes)
+        swapped = swapped:sub(1, right.at - 1) .. left.bytes .. swapped:sub(right.at + #left.bytes)
+        local ok, err = checks.check_service(swapped, "swap.wasm")
+        assert.is_nil(ok)
+        local function mismatch(export, other)
+            return "swap.wasm: SQLite service export " .. export.name .. " is " .. checks.SERVICE_EXPORTS[other.name] ..
+                ", expected " .. checks.SERVICE_EXPORTS[export.name]
+        end
+        assert.truthy(err == mismatch(left, right) or err == mismatch(right, left), err)
+        write("intruder.titan", 'local io = import "io"\nlocal lua = import "lua"\n\n' ..
+            'function main(args: {string}): integer\n  local state = lua.new()\n  state:close()\n' ..
+            '  io.print("vfs")\n  return 0\nend\n')
+        local output = workspace .. "/vfs"
+        compile(info, output)
+        local image = assert(strategy:read_file(output .. "/intruder.wasm"))
+        ok, err = checks.check_imports(image, "intruder.wasm", { "entry" })
+        assert.is_nil(ok)
+        assert.truthy(err:find("unlisted browser import env.titan_browser_vfs_linked ()->(i32) (classes entry)",
+            1, true), err)
+        assert(checks.check_imports(image, "intruder.wasm", { "entry", "vfs" }))
+        ok, err = checks.check_service(image, "intruder.wasm")
+        assert.is_nil(ok)
+        assert.truthy(err:find("unlisted browser import", 1, true), err)
+    end)
 end)

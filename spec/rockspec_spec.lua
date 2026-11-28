@@ -410,7 +410,7 @@ describe("standalone-prefix source installation", function()
             "libuv-inet-LICENSE", "lpeglabel-LICENSE", "lpeg-LICENSE",
             "lpeg-patterns-LICENSE", "ta-regex-LICENSE", "lua-LICENSE",
             "llhttp-LICENSE", "sqlite3-LICENSE", "openssl-LICENSE", "go-LICENSE",
-            "libbacktrace-LICENSE",
+            "libbacktrace-LICENSE", "uwasi-LICENSE",
         }) do
             assert_file(PREFIX .. "/share/titan/LICENSES/" .. license)
         end
@@ -433,6 +433,7 @@ describe("standalone-prefix source installation", function()
             "LICENSES/libuv-LICENSE-extra", "LICENSES/libuv-tree-LICENSE",
             "LICENSES/libuv-inet-LICENSE", "Niels Provos", "Internet Systems Consortium",
             "The Luvit Authors", "luv `1.52.1-0`",
+            "## uwasi", "LICENSES/uwasi-LICENSE",
         }) do
             assert.truthy(notices:find(notice, 1, true), notice)
         end
@@ -596,7 +597,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         -- browser-sdk` installs outside LuaRocks; documentation examples are
         -- the only Titan source.
         local function assert_binary_payload(path, name)
-            assert.falsy(name:match("^titan%-browser") or name == "titan-protobuf.mjs", path)
+            assert.falsy(name:match("^titan%-browser") or name == "titan-protobuf.mjs" or
+                name == "titan-storage-worker.mjs" or name == "titan-sqlite3-service.wasm", path)
             assert.falsy(name:match("%.browser%.titan$"), path)
             assert.truthy(not name:match("%.titan$") or path:match("^doc/"), path)
         end
@@ -1073,6 +1075,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "LICENSES/llhttp-LICENSE",
             "LICENSES/sqlite3-LICENSE",
             "LICENSES/openssl-LICENSE",
+            "LICENSES/uwasi-LICENSE",
             "THIRD_PARTY_NOTICES.md",
         }) do
             assert.truthy(contains_suffix(expected), expected)
@@ -1157,9 +1160,12 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         assert.truthy(headers["titan/transfer_native.h"])
         local assets = browserlink.sdk_assets({ titan_bin = "sdk", libtitan = "sdk/libtitan.a",
             sdk_digests = "sdk/sdk-digests" })
-        for _, key in ipairs({ "factory", "loader", "runner", "runner_module", "node_worker", "page" }) do
+        for _, key in ipairs({ "factory", "loader", "runner", "runner_module", "node_worker", "page",
+                "vfs", "sql", "storage_worker" }) do
             derived[#derived + 1] = "titan-runtime/browser/" .. assets[key]:match("[^/\\]+$")
         end
+        -- `make browser-sdk` builds the SDK's SQLite service from this source.
+        derived[#derived + 1] = "titan-runtime/browser/sqlite3_service.c"
         for _, expected in ipairs(derived) do
             assert.truthy(contains_suffix(expected), expected)
         end

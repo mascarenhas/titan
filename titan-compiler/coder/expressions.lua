@@ -207,6 +207,7 @@ function codevar(ctx, node)
             -- index the canonical closure out of that module's `_mod` directly
             -- (the closure slot is reconstructed in import_module), so the
             -- reference is O(1) and identity-preserving.
+            coder._note_browser_storage(ctx, node._decl.modname, node.name)
             return "", getslot(node._type, nil, render(
                 "&(uvalue(&_mod->uv[$MODINDEX].uv)->uv[$FNINDEX].uv)", {
                 MODINDEX = c_integer_literal(node.exp.var._decl._upvalue),

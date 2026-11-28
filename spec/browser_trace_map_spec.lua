@@ -95,7 +95,14 @@ describe("browser final trace map", function()
         local parsed = assert(metadata.browser_trace_image(wasm))
         assert.same({ { module = "env", name = "input", kind = 0,
             signature = "(i32,i64,f32,f64,v128,funcref,externref)->()" } }, parsed.imports)
-        assert.same({ { name = "exported", kind = 0, index = 0 } }, parsed.exports)
+        assert.same({ { name = "exported", kind = 0, index = 0,
+            signature = "(i32,i64,f32,f64,v128,funcref,externref)->()" } }, parsed.exports)
+        -- A local function's export names its own type.
+        local exported = assert(metadata.browser_trace_image(HEADER .. section(1, "\2\96\0\0\96\1\127\1\127") ..
+            section(3, "\1\1") .. section(7, "\2" .. text("run") .. "\0\0" .. text("memory") .. "\2\0") ..
+            section(10, "\1\4\0\32\0\11")))
+        assert.same({ { name = "run", kind = 0, index = 0, signature = "(i32)->(i32)" },
+            { name = "memory", kind = 2, index = 0 } }, exported.exports)
     end)
 
     local bad_wasm = {

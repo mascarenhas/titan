@@ -2327,6 +2327,7 @@ local function lower_call(ctx, node)
                 fname = func_name(
                     fnode._decl.modname, fnode.name, fnode._decl.islocal)
                 local mod = fnode._decl.modname
+                coder._note_browser_storage(ctx, mod, fnode.name)
                 if mod ~= ctx.module then
                     ctx.functions[mod .. "." .. fnode.name] = {
                         module = mod,

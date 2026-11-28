@@ -62,8 +62,9 @@ local util = require "titan-compiler.util"
 local cdriver = require "c-parser.cdriver"
 
 local strategy = compiler_io.new_sync()
--- titan.a is a public asset; the page's static host refuses larger files.
-local MAX_PROVIDER_BYTES = 25 * 1024 * 1024
+-- Every bundle file is a public asset; the page's static host refuses larger
+-- files.
+local MAX_ASSET_BYTES = 25 * 1024 * 1024
 
 local function fail(message)
     io.stderr:write("playground-sdk: ", tostring(message), "\n")
@@ -185,12 +186,18 @@ end
 -- replaces; only the build directory's own contents are ever removed.
 local BUILD_MARKER = ".playground-build"
 local OUT_MARKER = ".playground-bundle"
+-- The storage runtime's JavaScript, worker and SQLite service let the page
+-- publish an image that links titan.fs, titan.sqlite3, os.cwd, os.chdir or
+-- titan.lua (`app.worker.mjs`, `app.sqlite3.wasm`).
+local STORAGE = { "titan-browser-vfs.mjs", "titan-browser-sql.mjs", "titan-storage-worker.mjs",
+    "titan-sqlite3-service.wasm" }
 local BUNDLE = { ["titanc.wasm"] = "file", ["titanc.mjs"] = "file", ["stdlib_catalog.bin"] = "file",
     ["analysis-target"] = "file", ["absent-modules"] = "file", ["stdlib-sources.json"] = "file",
     ["titan.a"] = "file", ["libtitan.a"] = "file", ["libtitan-lpeglabel.a"] = "file", ["liblua.a"] = "file",
     ["headers.tar"] = "file", ["link-plan.json"] = "file", ["titan-browser.mjs"] = "file",
     ["titan-wasm-factory.mjs"] = "file", ["LICENSE"] = "file", ["THIRD_PARTY_NOTICES.md"] = "file",
     ["LICENSES"] = "directory" }
+for _, name in ipairs(STORAGE) do BUNDLE[name] = "file" end
 local NOTICES = {}
 for name in lfs.dir(paths.join(repository, "LICENSES")) do
     if name:sub(1, 1) ~= "." then NOTICES[#NOTICES + 1] = name end
@@ -316,15 +323,17 @@ write(paths.join(out_dir, OUT_MARKER), "")
 
 -- Every C object the bundle ships is compiled by the same titanc browser
 -- recipe as the SDK's, plus prefix maps: line tables and `__FILE__` name the
--- checkout, SDK and wasi-sdk logically, so the bytes do not depend on where
--- those trees are. Clang applies the last matching map, so the most specific
+-- checkout, SDK, wasi-sdk and this build's provider tree logically, so the
+-- bytes do not depend on where those trees are. The provider's generated C
+-- lives in its output root and its source copy below that root; both read as
+-- `./titan/...`. Clang applies the last matching map, so the most specific
 -- (longest) prefix comes last.
 local lean_dir = paths.join(build_dir, "provider")
 local provider_sources = paths.join(lean_dir, "src")
 local titanc_environment
 do
     local maps = { { repository, "." }, { install_tree, "titan-sdk" }, { wasi_sdk, "wasi-sdk" },
-        { provider_sources, "." } }
+        { lean_dir, "." }, { provider_sources, "." } }
     table.sort(maps, function(left, right) return #left[1] < #right[1] end)
     local flags = {}
     for index, map in ipairs(maps) do
@@ -431,8 +440,8 @@ do
     titanc(arguments, "building the link-only provider", provider_sources)
 end
 local provider = read(paths.join(lean_dir, "titan.a"))
-if #provider >= MAX_PROVIDER_BYTES then
-    fail("the link-only provider is " .. #provider .. " bytes; the limit is " .. MAX_PROVIDER_BYTES)
+if #provider >= MAX_ASSET_BYTES then
+    fail("the link-only provider is " .. #provider .. " bytes; the limit is " .. MAX_ASSET_BYTES)
 end
 write(output("titan.a"), provider)
 
@@ -571,7 +580,7 @@ end
 write(output("liblua.a"), read(lua_archive))
 write(output("libtitan.a"), read(runtime_archive))
 write(output("libtitan-lpeglabel.a"), read(lpeglabel_archive))
-for _, name in ipairs({ "titan-browser.mjs", "titan-wasm-factory.mjs" }) do
+for _, name in ipairs({ "titan-browser.mjs", "titan-wasm-factory.mjs", table.unpack(STORAGE) }) do
     write(output(name), read(paths.join(sdk.titan_bin, name)))
 end
 write(output("titanc.mjs"), read(paths.join(repository, "titan-runtime/playground/titanc.mjs")))
@@ -580,6 +589,20 @@ for _, name in ipairs({ "LICENSE", "THIRD_PARTY_NOTICES.md" }) do
 end
 for _, name in ipairs(NOTICES) do
     write(output("LICENSES/" .. name), read(paths.join(repository, "LICENSES/" .. name)))
+end
+-- Every published file, each notice included, must exist under the cap.
+local published = {}
+for name, kind in pairs(BUNDLE) do
+    if kind == "file" then published[#published + 1] = name end
+end
+for _, name in ipairs(NOTICES) do published[#published + 1] = "LICENSES/" .. name end
+table.sort(published, util.bytewise_less)
+for _, name in ipairs(published) do
+    local size = lfs.symlinkattributes(output(name), "mode") == "file" and lfs.attributes(output(name), "size")
+    if not size then fail("the bundle file '" .. name .. "' was not written") end
+    if size >= MAX_ASSET_BYTES then
+        fail("the bundle file '" .. name .. "' is " .. size .. " bytes; the limit is " .. MAX_ASSET_BYTES)
+    end
 end
 
 -- 9. The compiler must open over its own catalog and emit a program.

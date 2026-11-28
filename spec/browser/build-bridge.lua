@@ -46,10 +46,11 @@ for _, target in ipairs({
     source=path.join(fixture, "independent_states.c"), wrap=true, imports={"entry", "fixture:controls"}},
   {name="initializer-failure", owner="initializer_failure", tree=fixture, imports={"entry"}},
   -- integration.mjs's third image: public lua.new lifetimes, kept apart so the
-  -- legacy bridge image stays without Lua's async owner driver.
+  -- legacy bridge image stays without Lua's async owner driver. Importing
+  -- titan.lua links the filesystem runtime (D14).
   {name="public-states", owner="browser.public_state_tests", testing=true,
     tree=path.join(repository, "spec/stdlib/titan"),
-    source=path.join(fixture, "independent_states.c"), wrap=true, imports={"entry", "fixture:controls"}},
+    source=path.join(fixture, "independent_states.c"), wrap=true, imports={"entry", "fixture:controls", "vfs"}},
   -- Page tests of their own images, which need a DOM: the click counter of
   -- synchronous callbacks and the async driver's responsiveness.
   {name="counter", owner="counter", tree=fixture, imports={"entry", "fixture:click"}},

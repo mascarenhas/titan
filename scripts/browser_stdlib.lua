@@ -122,7 +122,9 @@ function M.check_path(path)
         name == "uv.h" or normalized:find("/uv/", 1, true) or
         normalized:find("/libuv/", 1, true) or normalized:find("/openssl/", 1, true) or
         name == "llhttp.h" or normalized:find("/llhttp/", 1, true) or
-        name == "sqlite3.h" or name == "sqlite3ext.h" or normalized:find("/sqlite3/", 1, true))
+        name == "sqlite3.h" or name == "sqlite3ext.h" or
+        -- titan.sqlite3's browser contributors declare only Titan's imports.
+        (normalized:find("/sqlite3/", 1, true) and not normalized:match("/titan/sqlite3/[^/]+%.browser%.h$")))
     local archive = name:match("%.a$") and (
         name:match("^libuv[%._-]") or name:match("^libssl[%._-]") or
         name:match("^libcrypto[%._-]") or name:match("^libopenssl[%._-]") or
@@ -281,6 +283,74 @@ function M.check_file_imports(strategy, image, classes)
     local bytes, err = strategy:read_file(wasm)
     if not bytes then return nil, err end
     return M.check_imports(bytes, wasm, classes)
+end
+
+-- The SQLite service reactor the browser SDK publishes as
+-- titan-sqlite3-service.wasm. Only it holds SQLite: titan.a and every image
+-- stay free of SQLite headers, archives and symbols (`check_path`,
+-- `check_symbol`). It exports exactly its memory and reactor entry points
+-- with the worker's ABI, and imports exactly the `service:sqlite3` rows.
+M.SERVICE_EXPORTS = {
+    _initialize = "function ()->()",
+    memory = "memory",
+    titan_sql_svc_alloc = "function (i32)->(i32)",
+    titan_sql_svc_dispatch = "function (i32,i32)->(i32)",
+    titan_sql_svc_free = "function (i32)->()",
+}
+local EXPORT_KINDS = { [0] = "function", [1] = "table", [2] = "memory", [3] = "global", [4] = "tag" }
+function M.check_service(bytes, origin)
+    local ok, err = M.check_imports(bytes, origin, { "service:sqlite3" })
+    if not ok then return nil, err end
+    local image
+    image, err = staticmetadata.browser_trace_image(bytes, origin)
+    if not image then return nil, err end
+    local imported, expected = {}, 0
+    for _, import in ipairs(image.imports) do imported[import.module .. "." .. import.name] = true end
+    for _, row in ipairs(M.import_allowlist.imports) do
+        if row[1] == "service:sqlite3" then
+            expected = expected + 1
+            if not imported[row[2] .. "." .. row[3]] then
+                return nil, origin .. ": SQLite service does not import " .. row[2] .. "." .. row[3]
+            end
+        end
+    end
+    if #image.imports ~= expected then
+        return nil, string.format("%s: SQLite service has %d imports, expected %d", origin, #image.imports, expected)
+    end
+    local exported = {}
+    for _, export in ipairs(image.exports) do
+        local kind = EXPORT_KINDS[export.kind]
+        local found = export.kind == 0 and (kind .. " " .. tostring(export.signature)) or kind
+        if M.SERVICE_EXPORTS[export.name] ~= found then
+            return nil, string.format("%s: SQLite service export %s is %s, expected %s", origin, export.name, found,
+                M.SERVICE_EXPORTS[export.name] or "no such export")
+        end
+        exported[export.name] = true
+    end
+    local names = {}
+    for name in pairs(M.SERVICE_EXPORTS) do names[#names + 1] = name end
+    table.sort(names, util.bytewise_less)
+    for _, name in ipairs(names) do
+        if not exported[name] then
+            return nil, string.format("%s: SQLite service does not export %s (%s)", origin, name,
+                M.SERVICE_EXPORTS[name])
+        end
+    end
+    return true
+end
+
+-- An object of the SQLite service references no dynamic loading, entropy or
+-- Lua: the reactor runs alone in the storage worker. `undefined` lists the
+-- object's undefined symbol names.
+local SERVICE_FORBIDDEN = { dlopen = true, dlsym = true, dlclose = true, dlerror = true, getentropy = true,
+    __wasi_random_get = true }
+function M.check_service_symbols(undefined, origin)
+    for _, name in ipairs(undefined) do
+        if SERVICE_FORBIDDEN[name] or name:match("^lua[L_]") then
+            return nil, origin .. ": SQLite service references forbidden symbol " .. name
+        end
+    end
+    return true
 end
 
 function M.check_output(strategy, directory)

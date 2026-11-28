@@ -239,6 +239,79 @@ local function archive_certified_objects(context, descriptor, output_archive, me
     return built
 end
 
+-- The SQLite service reactor (titan-sqlite3-service.wasm) the storage worker
+-- runs: titan-runtime/browser/sqlite3_service.c and the host Makefile's
+-- pinned SQLite amalgamation, built by the SDK's clang alone (no Lua or
+-- Titan runtime) on every SDK build and checked before it is installed.
+-- Only this file holds SQLite; titan.a and every image stay free of it.
+local SERVICE_FLAGS = { "-O2", "-std=c99", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+    "-DSQLITE_TEMP_STORE=3" }
+local function build_sqlite_service(descriptor, build_dir, repo_root, destination)
+    local sqlite_dir = getenv("TITAN_BROWSER_SQLITE3_SRC_DIR")
+    if not sqlite_dir or lfs.attributes(sqlite_dir .. "/sqlite3.c", "mode") ~= "file" then
+        fail("the SQLite service needs SQLite's amalgamation" ..
+            (sqlite_dir and (" in '" .. sqlite_dir .. "'") or "") ..
+            "; set BROWSER_SQLITE3_SRC_DIR to an extracted sqlite-autoconf tree, or run " ..
+            (platform.windows and "'mingw32-make -f Makefile.win native-source', which extracts the one " ..
+                "vendor/windows-native/dependencies.tsv pins" or "'make sqlite3', which fetches the one Makefile pins"))
+    end
+    local sources = { repo_root .. "/titan-runtime/browser/sqlite3_service.c", sqlite_dir .. "/sqlite3.c" }
+    -- Beside the build directory, whose objects the stdlib closure audits
+    -- for SQLite symbols. A failed step leaves nothing for a later check.
+    local directory = build_dir .. ".sqlite3-service"
+    ensure_dir(directory)
+    local objects = { directory .. "/service.o", directory .. "/sqlite3.o" }
+    local output = directory .. "/titan-sqlite3-service.wasm"
+    for _, filename in ipairs({ objects[1], objects[2], output }) do
+        if lfs.symlinkattributes(filename, "mode") then
+            local removed, err = strategy:unlink(filename)
+            if not removed then fail("cannot remove '" .. filename .. "': " .. tostring(err)) end
+        end
+    end
+    local function run(argv, what)
+        local result = strategy:run(argv, { stderr_to_stdout = true })
+        if not result or not result.ok then
+            fail(what .. " failed: " .. tostring(result and (result.output or result.diagnostic)))
+        end
+    end
+    -- The stripped image names no path; the maps keep that true even if a
+    -- source names its own file (the more specific map comes last).
+    for index, source in ipairs(sources) do
+        local argv = browser_target.compiler_argv(descriptor.tools)
+        for _, flag in ipairs(SERVICE_FLAGS) do argv[#argv + 1] = flag end
+        for _, argument in ipairs({ "-ffile-prefix-map=" .. repo_root .. "=.",
+                "-ffile-prefix-map=" .. sqlite_dir .. "=sqlite3", "-I", sqlite_dir,
+                "-c", source, "-o", objects[index] }) do
+            argv[#argv + 1] = argument
+        end
+        run(argv, "compiling '" .. source .. "'")
+    end
+    local link = browser_target.compiler_argv(descriptor.tools)
+    for _, flag in ipairs({ "-mexec-model=reactor", "-Wl,--gc-sections", "-Wl,--strip-all",
+            objects[1], objects[2], "-o", output }) do
+        link[#link + 1] = flag
+    end
+    run(link, "linking the SQLite service")
+    for _, object in ipairs(objects) do
+        local bytes, err = strategy:read_file(object)
+        if not bytes then fail("cannot read '" .. object .. "': " .. tostring(err)) end
+        local classified, classify_err = staticmetadata.classify_object(bytes, object)
+        if not classified then fail(classify_err) end
+        local undefined = {}
+        for _, symbol in ipairs(classified.symbols or {}) do
+            if not symbol.defined then undefined[#undefined + 1] = symbol.name end
+        end
+        local clean, symbol_err = stdlib_checks.check_service_symbols(undefined, object)
+        if not clean then fail(symbol_err) end
+    end
+    local bytes, read_err = strategy:read_file(output)
+    if not bytes then fail("cannot read '" .. output .. "': " .. tostring(read_err)) end
+    local valid, service_err = stdlib_checks.check_service(bytes, output)
+    if not valid then fail(service_err) end
+    write_asset(destination, bytes)
+    io.stderr:write("browser-sdk: SQLite service passed (", #bytes, " bytes, exact exports and service:sqlite3 imports)\n")
+end
+
 if action == "prepare" then
     local build_dir = assert(select(2, ...), "build_dir is required")
     local repo_root = select(3, ...)
@@ -306,6 +379,10 @@ elseif action == "stage-runtime" then
     copy_file_atomic(browser_src .. "/titan-browser-run.mjs", assets.runner_module, false)
     copy_file_atomic(browser_src .. "/titan-browser-node-worker.mjs", assets.node_worker, false)
     copy_file_atomic(browser_src .. "/titan-browser-page.mjs", assets.page, false)
+    copy_file_atomic(browser_src .. "/titan-browser-vfs.mjs", assets.vfs, false)
+    copy_file_atomic(browser_src .. "/titan-browser-sql.mjs", assets.sql, false)
+    copy_file_atomic(browser_src .. "/titan-storage-worker.mjs", assets.storage_worker, false)
+    build_sqlite_service(descriptor, build_dir, repo_root, assets.sqlite_service)
     if platform.windows then
         for _, relative in ipairs(browserlink.windows_runner_files(driver.TITAN_LIBRARY_VERSION)) do
             copy_file_atomic(build_dir .. ".windows-host/" .. relative, install_tree .. "/" .. relative, true)
@@ -407,7 +484,8 @@ elseif action == "finalize" then
     end
     for _, key in ipairs({
         "runtime", "factory", "loader", "runner",
-        "runner_module", "node_worker", "page", "build_profile", "lpeglabel", "provider",
+        "runner_module", "node_worker", "page", "vfs", "sql", "storage_worker", "sqlite_service",
+        "build_profile", "lpeglabel", "provider",
     }) do
         local asset_path = assets[key]
         if lfs.attributes(asset_path, "mode") ~= "file" then

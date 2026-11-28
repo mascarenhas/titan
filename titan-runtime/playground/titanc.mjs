@@ -239,9 +239,21 @@ export async function openCompiler({wasm, catalog, analysisTarget, absentModules
       return {files: value.files, units: value.units, entry: value.entry,
         diagnostics: value.diagnostics.map(item => diagnostic(known, item))};
     },
-    build_trace({linked, identity, factory, loader}) {
-      const [mjs, wasmBytes, trace, map] = call(['build_trace', linked, identity, factory, loader]).rest;
-      return {mjs: decoder.decode(mjs), wasm: wasmBytes.slice(), trace: trace.slice(), map: decoder.decode(map)};
+    // The bundle's storage sources (titan-browser-vfs.mjs, titan-browser-sql.mjs,
+    // titan-storage-worker.mjs, titan-sqlite3-service.wasm) let an image that
+    // links the storage runtime embed it; `companions` maps each file to
+    // publish beside app.wasm to its bytes.
+    build_trace({linked, identity, factory, loader, vfs, sql, worker, sqlite}) {
+      const parts = [vfs, sql, worker, sqlite];
+      const storage = parts.every(part => part === undefined) ? [] : parts;
+      if (storage.some(part => typeof part !== 'string' && !(part instanceof Uint8Array))) {
+        throw new TypeError('build_trace storage sources are vfs, sql, worker and sqlite, each a string or bytes');
+      }
+      const {value, rest: [mjs, wasmBytes, trace, map, ...files]} =
+        call(['build_trace', linked, identity, factory, loader, ...storage]);
+      const companions = Object.fromEntries(value.map((name, index) => [name, files[index].slice()]));
+      return {mjs: decoder.decode(mjs), wasm: wasmBytes.slice(), trace: trace.slice(), map: decoder.decode(map),
+        companions};
     },
     dispose: retire,
   };

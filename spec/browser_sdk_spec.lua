@@ -176,6 +176,10 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             runner_module = expected_bin .. "/titan-browser-run.mjs",
             node_worker = expected_bin .. "/titan-browser-node-worker.mjs",
             page = expected_bin .. "/titan-browser-page.mjs",
+            vfs = expected_bin .. "/titan-browser-vfs.mjs",
+            sql = expected_bin .. "/titan-browser-sql.mjs",
+            storage_worker = expected_bin .. "/titan-storage-worker.mjs",
+            sqlite_service = expected_bin .. "/titan-sqlite3-service.wasm",
             build_profile = expected_bin .. "/build-profile",
             lpeglabel = expected_bin .. "/libtitan-lpeglabel.a",
             provider = expected_bin .. "/titan.a",
@@ -201,7 +205,8 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             end,
         }
         local required_order = {
-            "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page", "build_profile",
+            "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page",
+            "vfs", "sql", "storage_worker", "sqlite_service", "build_profile",
         }
         for _, key in ipairs(required_order) do
             local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
@@ -265,6 +270,82 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             assert.is_nil(invalid)
             assert.equal(string.format("browser SDK build profile %q is invalid; run '%s PREFIX=%s'",
                 descriptor_assets.build_profile, make, root), invalid_err)
+        end
+    end)
+
+    it("embeds the storage runtime and names its companions only for images that import it", function()
+        local function env(...)
+            local imports = {}
+            for index, name in ipairs({ ... }) do imports[index] = { kind = 0, module = "env", name = name } end
+            return imports
+        end
+        assert.is_nil(browserlink.storage(env("titan_browser_complete", "titan_browser_trace_capture")))
+        assert.equal("vfs", browserlink.storage(env("titan_browser_complete", "titan_browser_vfs_linked")))
+        assert.equal("vfs", browserlink.storage(env("titan_browser_vfs_retire_sync")))
+        assert.equal("sql", browserlink.storage(env("titan_browser_vfs_linked", "titan_browser_sql_retire_sync")))
+        assert.equal("sql", browserlink.storage(env("titan_browser_sql_retire_sync")))
+        assert.is_nil(browserlink.storage({ { kind = 0, module = "wasi_snapshot_preview1", name = "titan_browser_vfs_linked" },
+            { kind = 3, module = "env", name = "titan_browser_vfs_linked" } }))
+        assert.same({ "app.worker.mjs", "app.sqlite3.wasm" }, { browserlink.companion_names("app.wasm") })
+        assert.same({ "out/my.app.worker.mjs", "out/my.app.sqlite3.wasm" },
+            { browserlink.companion_names("out/my.app.wasm") })
+
+        local identity = string.rep("ab", 32)
+        local worker = browserlink.worker_module("// worker\nself.x = 1;\n", identity)
+        assert.equal("// Titan-Generated-Browser-Worker: " .. identity .. "\n// worker\nself.x = 1;\n", worker)
+        assert.is_true(browserlink.generated_worker(worker))
+        for _, bytes in ipairs({ "// worker\n", "// Titan-Generated-Browser-Worker: abc\n",
+                "// Titan-Generated-Browser-Worker: " .. identity, " // Titan-Generated-Browser-Worker: " .. identity .. "\n",
+                "// Titan-Generated-Browser-Worker: " .. string.rep("AB", 32) .. "\n" }) do
+            assert.is_false(browserlink.generated_worker(bytes), bytes)
+        end
+
+        local factory = "export function createWasiImports() {}\nasync function instantiate() {}\nexport default instantiate;\n"
+        local loader = "export function create(factory, options, image) { return image; }\n"
+        local vfs = "// vfs\nexport function titanBrowserStorage(owner, options, image) { return image; }\n"
+        local sql = "export function titanBrowserSql(storage) { return storage; }\n"
+        local plain = assert(browserlink.embed(factory, loader, "app.wasm", identity))
+        assert.is_nil(plain:find("titanBrowser", 1, true))
+        assert.is_nil(plain:find("worker", 1, true))
+        assert.is_nil(plain:find("sqlite", 1, true))
+        contains(plain, "{identity: \"" .. identity .. "\", wasm: \"app.wasm\", directory});\n}\n")
+        local fs = assert(browserlink.embed(factory, loader, "app.wasm", identity, { vfs = vfs }))
+        contains(fs, "\n// vfs\nfunction titanBrowserStorage(owner, options, image) {")
+        contains(fs, "name === \"app.worker.mjs\" ? new URL(\"app.worker.mjs\", import.meta.url).href :")
+        contains(fs, "directory,\n    storage: titanBrowserStorage, worker: \"app.worker.mjs\"});\n}\n")
+        assert.is_nil(fs:find("titanBrowserSql", 1, true))
+        assert.is_nil(fs:find("sqlite3", 1, true))
+        assert.is_nil(browserlink.embedded_sqlite_digest(fs))
+        local digest = string.rep("c0", 32)
+        local both = assert(browserlink.embed(factory, loader, "app.wasm", identity,
+            { vfs = vfs, sql = sql, sqlite_sha256 = digest }))
+        contains(both, "\nfunction titanBrowserSql(storage) {")
+        contains(both, "name === \"app.sqlite3.wasm\" ? new URL(\"app.sqlite3.wasm\", import.meta.url).href :")
+        contains(both, "worker: \"app.worker.mjs\",\n    sql: titanBrowserSql, sqlite: {wasm: \"app.sqlite3.wasm\", " ..
+            "sha256: \"" .. digest .. "\"}});\n}\n")
+        assert.equal(digest, browserlink.embedded_sqlite_digest(both))
+        assert.same({ nil, "browser filesystem runtime has an unsupported module surface" },
+            { browserlink.embed(factory, loader, "app.wasm", identity, { vfs = "import x from 'y';\n" .. vfs }) })
+        assert.same({ nil, "browser SQLite runtime has an unsupported module surface" },
+            { browserlink.embed(factory, loader, "app.wasm", identity, { vfs = vfs, sql = sql .. sql,
+                sqlite_sha256 = digest }) })
+        assert.same({ nil, "browser SQLite service digest must be 64 lowercase hexadecimal digits" },
+            { browserlink.embed(factory, loader, "app.wasm", identity, { vfs = vfs, sql = sql,
+                sqlite_sha256 = digest:upper() }) })
+
+        -- The SDK's own sources share one module scope at every level.
+        local info = toolchain.require({ node = true })
+        if not info then return end
+        local directory = new_workspace("-storage-embed")
+        local source = function(name) return assert(strategy:read_file(paths.join(repository, "titan-runtime/browser", name))) end
+        local real = { vfs = source("titan-browser-vfs.mjs"), sql = source("titan-browser-sql.mjs"), sqlite_sha256 = digest }
+        for level, storage in pairs({ plain = false, vfs = { vfs = real.vfs }, sql = real }) do
+            local module = assert(browserlink.embed(source("titan-wasm-factory.mjs"), source("titan-browser.mjs"),
+                level .. ".wasm", identity, storage or nil))
+            local filename = paths.join(directory, level .. ".mjs")
+            assert(strategy:write_file(filename, module))
+            local checked = strategy:run({ info.node.path, "--check", filename }, { stderr_to_stdout = true })
+            assert.is_true(checked.ok, checked.output)
         end
     end)
 
@@ -985,6 +1066,16 @@ end
         assert.equal(
             assert(strategy:read_file(paths.join(repository, "titan-runtime/browser/titan-protobuf.mjs"))),
             assert(strategy:read_file(paths.join(browser_paths.titan_bin, "titan-protobuf.mjs"))))
+        -- The storage runtime's sources are copied as they are; the SQLite
+        -- service is the reviewed reactor, with SQLite nowhere else.
+        for key, name in pairs({ vfs = "titan-browser-vfs.mjs", sql = "titan-browser-sql.mjs",
+                storage_worker = "titan-storage-worker.mjs" }) do
+            assert.equal(assert(strategy:read_file(paths.join(repository, "titan-runtime/browser", name))),
+                assert(strategy:read_file(assets[key])), name)
+        end
+        assert(dofile(paths.join(repository, "scripts/browser_stdlib.lua")).check_service(
+            assert(strategy:read_file(assets.sqlite_service)), assets.sqlite_service))
+        contains(sdk_res.output, "browser-sdk: SQLite service passed (")
         local absent_lines = {}
         for _, row in ipairs(dofile(paths.join(repository, "scripts/browser_stdlib.lua")).status_inventory.modules) do
             if row[2] == "absent" then absent_lines[#absent_lines + 1] = row[1] .. "\t" .. row.reason .. "\n" end
@@ -1125,8 +1216,8 @@ end
             expected_digest_files[#expected_digest_files + 1] = paths.join(browser_paths.include, rel)
         end
         for _, key in ipairs({
-            "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page", "build_profile",
-            "lpeglabel", "provider",
+            "runtime", "factory", "loader", "runner", "runner_module", "node_worker", "page",
+            "vfs", "sql", "storage_worker", "sqlite_service", "build_profile", "lpeglabel", "provider",
         }) do
             expected_digest_files[#expected_digest_files + 1] = assets[key]
         end
@@ -1273,6 +1364,174 @@ end
 
     end)
 
+    -- D14 and the image binding: a pure image ships no storage runtime; one
+    -- importing titan.lua embeds the filesystem and publishes the worker; one
+    -- importing titan.sqlite3's retirement adds the SQLite service, which the
+    -- worker verifies by digest. Relinks retire only companions Titan wrote,
+    -- and the final-link certificate records present and absent companions.
+    it("publishes storage companions only for images that link them and retires only Titan's", function()
+        local info, why = toolchain.require({ node = true, sdk = true })
+        if not info then pending(why) return end
+        local root = new_workspace("-browser-storage")
+        local out = paths.join(root, "out")
+        local image, wasm = paths.join(out, "app.mjs"), paths.join(out, "app.wasm")
+        local worker, sqlite = browserlink.companion_names(wasm)
+        local assets = browserlink.sdk_assets(driver.installed_paths(paths.dirname(paths.dirname(
+            paths.dirname(info.sdk_root))), "browser"))
+        local function write(name, text) assert(strategy:write_file(paths.join(root, name), text)) end
+        write("pure.titan", 'local io = import "io"\n\nfunction main(args: {string}): integer\n' ..
+            '  io.print("pure")\n  return 0\nend\n')
+        write("withlua.titan", 'local io = import "io"\nlocal lua = import "lua"\n\n' ..
+            'function main(args: {string}): integer\n  local state = lua.new()\n  state:close()\n' ..
+            '  io.print("lua")\n  return 0\nend\n')
+        write("sql_probe.h", "#ifndef SQL_PROBE_H\n#define SQL_PROBE_H\nvoid sql_probe(int run);\n#endif\n")
+        write("sql_probe.c", '#include <stdint.h>\n#include "sql_probe.h"\n' ..
+            '__attribute__((import_module("env"), import_name("titan_browser_sql_retire_sync")))\n' ..
+            "void titan_browser_sql_retire_sync(int32_t state, int64_t conn_id);\n" ..
+            "void sql_probe(int run) { if (run > 1000) titan_browser_sql_retire_sync(0, 0); }\n")
+        write("withsql.titan", 'local io = import "io"\nforeign import "sql_probe.h"\n\n' ..
+            'function main(args: {string}): integer\n  ffi.sql_probe(#args)\n  io.print("sql")\n  return 0\nend\n')
+        local function link(module)
+            local argv = { info.compiler, "--target", "browser", "-v", "--incremental", "--tree", root,
+                "--output", out, "--exe", image }
+            if module == "withsql" then
+                argv[#argv + 1] = "--c-source"
+                argv[#argv + 1] = paths.join(root, "sql_probe.c")
+            end
+            argv[#argv + 1] = module
+            return strategy:run(argv, { stderr_to_stdout = true })
+        end
+        local function build(module)
+            local result = link(module)
+            assert.is_true(result.ok, result.output)
+            return result.output:find("Titan link hit ", 1, true) ~= nil
+        end
+        local function run_image()
+            return run_with_env(strategy, { TITAN_NODE = info.node.path },
+                browserlink.runner_argv(assets.runner, "--engine", "node", image))
+        end
+        local function storage_imports()
+            local inventory = assert(browserlink.image_inventory(assert(strategy:read_file(wasm))))
+            return browserlink.storage(inventory.imports)
+        end
+        local function identity() return assert(assert(strategy:read_file(image)):match('identity: "(%x+)"')) end
+        local worker_source = assert(strategy:read_file(assets.storage_worker))
+        local service = assert(strategy:read_file(assets.sqlite_service))
+
+        -- A pure image: 0 B of storage runtime.
+        assert.is_false(build("pure"))
+        assert.is_nil(storage_imports())
+        assert.is_nil(strategy:lstat(worker))
+        assert.is_nil(strategy:lstat(sqlite))
+        local module = assert(strategy:read_file(image))
+        for _, absent in ipairs({ "titanBrowserStorage", "titanBrowserSql", "worker.mjs", "sqlite3.wasm" }) do
+            assert.is_nil(module:find(absent, 1, true), absent)
+        end
+        local result = run_image()
+        assert.is_true(result.ok, result.output)
+        assert.equal("pure\n", result.output)
+        assert.is_true(build("pure"))
+
+        -- titan.lua links the filesystem: the worker, no SQLite service.
+        assert.is_false(build("withlua"))
+        assert.equal("vfs", storage_imports())
+        assert.equal(browserlink.worker_module(worker_source, identity()), assert(strategy:read_file(worker)))
+        assert.is_nil(strategy:lstat(sqlite))
+        module = assert(strategy:read_file(image))
+        contains(module, 'storage: titanBrowserStorage, worker: "app.worker.mjs"});')
+        assert.is_nil(module:find("titanBrowserSql", 1, true))
+        result = run_image()
+        assert.is_true(result.ok, result.output)
+        assert.equal("lua\n", result.output)
+        -- A deleted companion is not up to date.
+        assert.is_true(build("withlua"))
+        assert(os.remove(worker))
+        assert.is_false(build("withlua"))
+        assert.equal(browserlink.worker_module(worker_source, identity()), assert(strategy:read_file(worker)))
+
+        -- SQLite adds the service, named by its digest; the worker refuses other bytes.
+        assert.is_false(build("withsql"))
+        assert.equal("sql", storage_imports())
+        assert.equal(service, assert(strategy:read_file(sqlite)))
+        assert.equal(browserlink.worker_module(worker_source, identity()), assert(strategy:read_file(worker)))
+        module = assert(strategy:read_file(image))
+        assert.equal(require("titan-compiler.sha256").hex_via(require("titan")._sha256_binary, service),
+            browserlink.embedded_sqlite_digest(module))
+        contains(module, "\nfunction titanBrowserSql(storage)")
+        result = run_image()
+        assert.is_true(result.ok, result.output)
+        assert.equal("sql\n", result.output)
+        assert(strategy:write_file(sqlite, service:sub(1, -2) .. string.char((service:byte(-1) + 1) % 256)))
+        result = run_image()
+        assert.is_false(result.ok)
+        contains(result.output, "digest")
+        assert(strategy:write_file(sqlite, service))
+
+        -- Dropping SQLite retires the service the predecessor named; dropping
+        -- the filesystem retires the worker carrying Titan's sentinel.
+        assert.is_false(build("withlua"))
+        assert.is_nil(strategy:lstat(sqlite))
+        assert.equal("file", strategy:lstat(worker).kind)
+        assert.is_false(build("pure"))
+        assert.is_nil(strategy:lstat(worker))
+        assert.is_true(build("pure"))
+
+        -- Files of those names that Titan did not write stay; a stale Titan
+        -- worker beside a pure image is not up to date and retires.
+        assert(strategy:write_file(worker, "// the user's worker\n"))
+        assert(strategy:write_file(sqlite, "the user's bytes"))
+        assert.is_false(build("pure"))
+        assert.equal("// the user's worker\n", assert(strategy:read_file(worker)))
+        assert.equal("the user's bytes", assert(strategy:read_file(sqlite)))
+        assert(os.remove(sqlite))
+        assert(strategy:write_file(worker, browserlink.worker_module(worker_source, identity())))
+        assert.is_false(build("pure"))
+        assert.is_nil(strategy:lstat(worker))
+        assert.is_nil(strategy:lstat(sqlite))
+        result = run_image()
+        assert.is_true(result.ok, result.output)
+        assert.equal("pure\n", result.output)
+
+        -- A link that would replace a companion Titan did not write fails
+        -- before touching any predecessor: the whole output set stays.
+        local function outputs()
+            local bytes = {}
+            for _, name in ipairs({ image, wasm, wasm .. ".map", wasm .. ".trace", worker, sqlite }) do
+                bytes[name] = strategy:read_file(name) or false
+            end
+            return bytes
+        end
+        local function refused(module, filename)
+            local before = outputs()
+            local failed = link(module)
+            assert.is_false(failed.ok, failed.output)
+            contains(failed.output, "browser output '" .. filename .. "' exists but Titan did not write it; " ..
+                "move it away or link the image under another name")
+            assert.same(before, outputs())
+        end
+        assert(strategy:write_file(worker, "// the user's worker\n"))
+        refused("withlua", worker)
+        refused("withsql", worker)
+        assert(os.remove(worker))
+        assert.is_false(build("withlua"))
+        assert(strategy:write_file(sqlite, "the user's bytes"))
+        refused("withsql", sqlite)
+        -- Not even bytes equal to the service this link publishes: only the
+        -- predecessor module's digest proves that Titan wrote the file.
+        assert(strategy:write_file(sqlite, service))
+        refused("withsql", sqlite)
+        assert(os.remove(sqlite))
+        assert.is_false(build("withsql"))
+        -- A later SQLite link replaces the service its predecessor names.
+        write("withsql.titan", 'local io = import "io"\nforeign import "sql_probe.h"\n\n' ..
+            'function main(args: {string}): integer\n  ffi.sql_probe(#args)\n  io.print("sql again")\n  return 0\nend\n')
+        assert.is_false(build("withsql"))
+        assert.equal(service, assert(strategy:read_file(sqlite)))
+        result = run_image()
+        assert.is_true(result.ok, result.output)
+        assert.equal("sql again\n", result.output)
+    end)
+
     it("installs the native static compiler SDK without wasi-sdk or Binaryen and checks its coroutine stack", function()
         if platform.windows then
             pending("platform: this native link fixture uses the Unix static Lua, Titan, and libbacktrace archives")
@@ -1334,5 +1593,94 @@ int main(void) {
         assert.is_true(cc_res.ok, cc_res.output)
         local probe_run = strategy:run({ native_probe_exe }, { stderr_to_stdout = true })
         assert.is_true(probe_run.ok, probe_run.output)
+    end)
+end)
+
+-- D14: a browser unit that reaches the filesystem through os.cwd, os.chdir
+-- or titan.lua calls the storage marker once from its module initialization,
+-- so linking the unit links the filesystem runtime. Other titan.os members,
+-- titan.os itself and the native target emit nothing. In-memory interfaces
+-- of titan.os, titan.io and titan.lua stand in for the standard library, so
+-- these cases need no installed provider, stdlib source or native header.
+describe("browser storage link demand", function()
+    local checker = require "titan-compiler.checker"
+    local coder = require "titan-compiler.coder"
+    local coder_internal = require("titan-compiler.coder.core").coder
+    local types = require "titan-compiler.types"
+    local MARKER = "(void)titan_browser_vfs_linked();"
+    local STDLIB = {
+        ["titan.os"] = "function cwd(): string\n  return \"/\"\nend\n\nfunction chdir(_path: string)\nend\n\n" ..
+            "function homedir(): string\n  return \"/home\"\nend\n\nfunction tmpdir(): string\n  return \"/tmp\"\nend\n\n" ..
+            "function getenv(_name: string): string?\n  return nil\nend\n",
+        ["titan.io"] = "function print(_text: string)\nend\n",
+        ["titan.lua"] = "record Lua\n  closed: boolean\nend\n\nfunction new(): Lua\n  return Lua.new(false)\nend\n",
+    }
+
+    local function generate(source, target)
+        types.registry, driver.imported = {}, {}
+        local modules, imported = { probe = source }, {}
+        for name, stub in pairs(STDLIB) do modules[name] = stub end
+        local context = driver.new_resolver_context({})
+        local loader = driver.tableloader(modules, imported, {}, { context = context })
+        local typ, errors = driver.with_loader(loader, function(active) return checker.checkimport("probe", active) end)
+        assert.truthy(typ, errors)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        -- Every module came from the table: no provider or stdlib source was read.
+        for name, mod in pairs(imported) do
+            assert.truthy(modules[name], name)
+            assert.equal("./" .. name .. ".titan", mod.filename)
+        end
+        local ast = imported.probe.ast
+        ast._ffi_header_output = "/generated/probe.ffi.h"
+        ast._foreign_header_output = "/generated/probe.titan.h"
+        local generated = coder.generate("probe", ast, {}, driver.TITAN_ABI_VERSION, false,
+            { target = target, c_parts = 1, source_output_stem = "/generated/probe" })
+        assert(driver.close_resolver_context(context))
+        local parts = {}
+        for _, part in ipairs(generated.parts) do parts[#parts + 1] = part.code end
+        return table.concat(parts, "\n")
+    end
+    local function markers(code)
+        local count = select(2, code:gsub(MARKER:gsub("%p", "%%%0"), ""))
+        if count > 0 then
+            assert.truthy(code:find('TITAN_WASM_IMPORT("titan_browser_vfs_linked") int titan_browser_vfs_linked(void);',
+                1, true), code)
+        end
+        return count
+    end
+
+    it("marks units that call or take os.cwd or os.chdir, or import titan.lua, once", function()
+        for _, source in ipairs({
+            'local os = import "os"\nfunction here(): string\n  return os.cwd()\nend\n',
+            'local os = import "titan.os"\nfunction go(path: string)\n  os.chdir(path)\n  os.chdir(path)\nend\n',
+            'local system = import "os"\nfunction getter(): function(): string\n  return system.cwd\nend\n',
+            'local os = import "os"\nlocal mover: function(string) = os.chdir\nfunction go()\n  mover("/")\nend\n',
+            'local os = import "os"\nfunction later(): string\n  if false then return os.cwd() end\n  return ""\nend\n',
+            'local lua = import "lua"\nfunction fresh(): lua.Lua\n  return lua.new()\nend\n',
+            'local _ = import "titan.lua"\n',
+        }) do
+            assert.equal(1, markers(generate(source, "browser")), source)
+            assert.equal(0, markers(generate(source, nil)), source)
+        end
+    end)
+
+    it("leaves other titan.os members, other names and titan.os itself unmarked", function()
+        for _, source in ipairs({
+            'local os = import "os"\nfunction home(): string\n  return os.homedir() .. os.tmpdir()\nend\n',
+            'local os = import "os"\nfunction name(): string?\n  return os.getenv("HOME")\nend\n',
+            'record Shell\n  cwd: string\nend\nfunction cwd(shell: Shell): string\n  return shell.cwd\nend\n',
+            'local io = import "io"\nfunction say()\n  io.print("pure")\nend\n',
+        }) do
+            assert.equal(0, markers(generate(source, "browser")), source)
+        end
+        local tlcontext = {}
+        coder_internal._note_browser_storage({ module = "titan.os", tlcontext = tlcontext }, "titan.os", "cwd")
+        assert.is_nil(tlcontext.browser_storage)
+        coder_internal._note_browser_storage({ module = "app", tlcontext = tlcontext }, "titan.os", "homedir")
+        assert.is_nil(tlcontext.browser_storage)
+        coder_internal._note_browser_storage({ module = "app", tlcontext = tlcontext }, "app.os", "cwd")
+        assert.is_nil(tlcontext.browser_storage)
+        coder_internal._note_browser_storage({ module = "app", tlcontext = tlcontext }, "titan.os", "chdir")
+        assert.is_true(tlcontext.browser_storage)
     end)
 end)

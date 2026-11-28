@@ -21,7 +21,7 @@ NOTICES = (
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     *(f"LICENSES/{name}-LICENSE" for name in (
-        "go", "lpeg", "lpeg-patterns", "lpeglabel", "lua", "ta-regex"
+        "go", "lpeg", "lpeg-patterns", "lpeglabel", "lua", "sqlite3", "ta-regex", "uwasi"
     )),
 )
 

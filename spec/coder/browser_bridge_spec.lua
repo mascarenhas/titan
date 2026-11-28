@@ -39,8 +39,12 @@ local function build(info, tree, module, name, is_test, c_source, wrap, cppflags
     end
     -- The independent-state helper includes the fixture controls; the click
     -- counter imports the page's click registration; the rest link no helper.
-    toolchain.check_imports(image, c_source and { "entry", "fixture:controls" } or
-        module == "counter" and { "entry", "fixture:click" } or { "entry" })
+    -- The public-state owner imports titan.lua, which links the filesystem
+    -- runtime (D14).
+    local classes = c_source and { "entry", "fixture:controls" } or
+        module == "counter" and { "entry", "fixture:click" } or { "entry" }
+    if module == "browser.public_state_tests" then classes[#classes + 1] = "vfs" end
+    toolchain.check_imports(image, classes)
     return "out/images/" .. name .. ".mjs"
 end
 

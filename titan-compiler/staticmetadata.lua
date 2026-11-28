@@ -1442,8 +1442,9 @@ function staticmetadata.browser_trace_image(bytes, origin)
         end
         local result = { imports = {}, exports = {}, function_imports = 0,
             function_ranges = {}, function_names = {} }
-        -- Function signatures by type index, as "(i32,i64)->(f64)".
-        local signatures = {}
+        -- Function signatures by type index, as "(i32,i64)->(f64)", and by
+        -- function index (imports first) for function exports.
+        local signatures, function_signatures = {}, {}
         local seen, last_order, function_count, code_count = {}, 0, 0, 0
         local names_seen, named = false, {}
         local function text(pos, limit)
@@ -1552,7 +1553,10 @@ function staticmetadata.browser_trace_image(bytes, origin)
                             type_index, pos = wasm_u32_leb(reader, pos, finish, origin)
                             record.signature = signatures[type_index + 1] or
                                 fail(origin, "Wasm import type index is out of range")
-                            if kind == 0 then result.function_imports = result.function_imports + 1 end
+                            if kind == 0 then
+                                result.function_imports = result.function_imports + 1
+                                function_signatures[result.function_imports] = record.signature
+                            end
                         elseif kind == 1 or kind == 3 then
                             if pos >= finish then fail(origin, "truncated Wasm import type") end
                             pos = pos + 1
@@ -1568,9 +1572,10 @@ function staticmetadata.browser_trace_image(bytes, origin)
                     end
                 elseif id == 3 then
                     function_count = count
-                    for _ = 1, count do
-                        local ignored
-                        ignored, pos = wasm_u32_leb(reader, pos, finish, origin)
+                    for index = 1, count do
+                        local type_index
+                        type_index, pos = wasm_u32_leb(reader, pos, finish, origin)
+                        function_signatures[result.function_imports + index] = signatures[type_index + 1]
                     end
                 elseif id == 7 then
                     local exports = {}
@@ -1583,7 +1588,9 @@ function staticmetadata.browser_trace_image(bytes, origin)
                         local kind = byte(bytes, pos + 1)
                         if kind > 4 then fail(origin, "invalid Wasm export kind") end
                         index, pos = wasm_u32_leb(reader, pos + 1, finish, origin)
-                        result.exports[#result.exports + 1] = { name = name, kind = kind, index = index }
+                        -- A function export also names its signature when its type is known.
+                        result.exports[#result.exports + 1] = { name = name, kind = kind, index = index,
+                            signature = kind == 0 and function_signatures[index + 1] or nil }
                     end
                 else
                     code_count = count

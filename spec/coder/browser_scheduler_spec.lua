@@ -42,9 +42,11 @@ local function build_image(info, purpose, name, arguments)
     local result = fixture:run(argv, { TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
     fixture.collector:collect()
     assert.is_true(result.ok, result.output)
-    -- Only the scheduler owner links a scheduler fixture helper.
-    toolchain.check_imports(output .. "/" .. name .. ".mjs",
-        name == "scheduler" and { "entry", "fixture:scheduler" } or { "entry" })
+    -- Only the scheduler owner links a scheduler fixture helper; it and the
+    -- OS owner import titan.lua, which links the filesystem runtime (D14).
+    local classes = name == "scheduler" and { "entry", "fixture:scheduler", "vfs" } or
+        name == "os-streams" and { "entry", "vfs" } or { "entry" }
+    toolchain.check_imports(output .. "/" .. name .. ".mjs", classes)
     return "out/" .. name .. "/" .. name .. ".mjs"
 end
 

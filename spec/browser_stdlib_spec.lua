@@ -165,7 +165,12 @@ plan:
                 if assignment then sources[#sources + 1] = assignment end
             end
         end
-        local sdk = table.concat(sources, "\n")
+        -- Only the SDK's standalone SQLite service, which the storage worker
+        -- runs, compiles SQLite's amalgamation, named by this one directory.
+        -- SQLITE3_ARCHIVE, SQLITE3_CPPFLAGS and every SQLite object stay out
+        -- of the provider build (check_output, check_archive and check_path).
+        local sdk = table.concat(sources, "\n"):gsub("TITAN_BROWSER_SQLITE3_SRC_DIR", "")
+            :gsub("BROWSER_SQLITE3_SRC_DIR", "")
         for _, forbidden in ipairs({ "STDLIB_EXTRA_OBJECTS", "LIBUV_", "OPENSSL_", "LLHTTP_", "SQLITE3_" }) do
             assert.is_nil(sdk:find(forbidden, 1, true), forbidden)
         end

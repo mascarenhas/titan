@@ -443,7 +443,8 @@ STDLIB_LICENSES := LICENSES/libuv-LICENSE LICENSES/libuv-LICENSE-extra \
 	LICENSES/lpeglabel-LICENSE LICENSES/lpeg-LICENSE \
 	LICENSES/lpeg-patterns-LICENSE \
 	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE \
-	LICENSES/llhttp-LICENSE LICENSES/sqlite3-LICENSE LICENSES/openssl-LICENSE LICENSES/go-LICENSE LICENSES/libbacktrace-LICENSE
+	LICENSES/llhttp-LICENSE LICENSES/sqlite3-LICENSE LICENSES/openssl-LICENSE LICENSES/go-LICENSE LICENSES/libbacktrace-LICENSE \
+	LICENSES/uwasi-LICENSE
 # The `titan` Lua support module: ltitanlib plus the shared path code. The
 # checkout compiler loads it from here; installs deploy it to lib/lua/5.5.
 TITAN_SUPPORT_MODULE := titan-runtime/bootstrap/titan.so
