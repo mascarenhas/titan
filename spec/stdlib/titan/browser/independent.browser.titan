@@ -14,17 +14,17 @@ local failure: (function (...: browser.BrowserValue): browser.BrowserValue)?
 local state_close_marker: ({string: integer})?
 
 local record PublicationCapture
-  local marker: integer
+  local const marker: integer
 end
 local publication_collected = 0
 local function publication_finalize(candidate: value)
-  local capture: PublicationCapture = candidate
+  const capture: PublicationCapture = candidate
   publication_collected = publication_collected + capture.marker
 end
 
 local function make_captured_callable(weight: integer):
     function (...: browser.BrowserValue): browser.BrowserValue
-  local capture = PublicationCapture { marker = weight }
+  const capture = PublicationCapture { marker = weight }
   gc.finalizable<|value|>(capture, publication_finalize)
   return function(...: browser.BrowserValue): browser.BrowserValue
     return Value.is_integer(capture.marker)
@@ -32,11 +32,11 @@ local function make_captured_callable(weight: integer):
 end
 
 local function failed_publication()
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
-  local non_callable = browser.binding("false_value")
+  const non_callable = browser.binding("false_value")
   defer non_callable:close()
-  local bad_request = browser.binding("throw_error")
+  const bad_request = browser.binding("throw_error")
   defer bad_request:close()
 
   -- 1. Later argument raises during marshalling (invalid UTF-8 in is_string).
@@ -55,7 +55,7 @@ local function failed_publication()
   catch
     caught_call = true
     if error is browser.BrowserError then
-      local err: browser.BrowserError = error
+      const err: browser.BrowserError = error
       err:close()
     end
   end
@@ -71,7 +71,7 @@ local function failed_publication()
   catch
     caught_start_pre = true
     if error is browser.BrowserError then
-      local err: browser.BrowserError = error
+      const err: browser.BrowserError = error
       err:close()
     end
   end
@@ -86,7 +86,7 @@ local function failed_publication()
   catch
     caught_start = true
     if error is browser.BrowserError then
-      local err: browser.BrowserError = error
+      const err: browser.BrowserError = error
       err:close()
     end
   end
@@ -116,7 +116,7 @@ local function failed_publication()
 end
 
 local function try_alloc_wrapper_step(target: browser.BrowserHandle, step: integer): boolean
-  local cb = make_captured_callable(1)
+  const cb = make_captured_callable(1)
   local raised = false
   ffi.titan_bridge_test_arm_alloc_failure(L, step)
   do
@@ -124,14 +124,14 @@ local function try_alloc_wrapper_step(target: browser.BrowserHandle, step: integ
   catch
     raised = true
   end
-  local failures = ffi.titan_bridge_test_finish_alloc_failure(L)
+  const failures = ffi.titan_bridge_test_finish_alloc_failure(L)
   test.assert(raised, "wrapper pin step did not raise")
   return failures > 0
 end
 
 local function try_alloc_request_step(bad_request: browser.BrowserHandle, step: integer): boolean
-  local c1 = make_captured_callable(1)
-  local c2 = make_captured_callable(2)
+  const c1 = make_captured_callable(1)
+  const c2 = make_captured_callable(2)
   local raised = false
   ffi.titan_bridge_test_arm_alloc_failure(L, step)
   do
@@ -139,19 +139,19 @@ local function try_alloc_request_step(bad_request: browser.BrowserHandle, step: 
   catch
     raised = true
     if error is browser.BrowserError then
-      local err: browser.BrowserError = error
+      const err: browser.BrowserError = error
       err:close()
     end
   end
-  local failures = ffi.titan_bridge_test_finish_alloc_failure(L)
+  const failures = ffi.titan_bridge_test_finish_alloc_failure(L)
   test.assert(raised, "request pin step did not raise")
   return failures > 0
 end
 
 local function allocation_failure_publication()
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
-  local bad_request = browser.binding("throw_error")
+  const bad_request = browser.binding("throw_error")
   defer bad_request:close()
   local wrapper_oom = 0
   for step = 0, 5 do
@@ -183,7 +183,7 @@ function publication(_: integer)
   test.assert(publication_collected == 2047,
       "unpublished provisional pins retained their discarded captures")
   allocation_failure_publication()
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
   target:call(Value.is_string("r1_publication_recovery"),
     Value.is_callable(function(...: browser.BrowserValue): browser.BrowserValue
@@ -203,12 +203,12 @@ function prepare(number: integer)
     return Value.is_nil()
   end
   local pending: browser.BrowserHandle?
-  local source = browser.binding("state_close_request")
+  const source = browser.binding("state_close_request")
   defer source:close()
-  local request = source:start(success, failure)
+  const request = source:start(success, failure)
   request:cancel()
   early_close.set_finalizer(function()
-    local handle = pending
+    const handle = pending
     handle:close()
     handle:close()
     request:close()
@@ -216,17 +216,17 @@ function prepare(number: integer)
     ffi.titan_bridge_test_earlier_cleanup(index)
     browser.binding("state_close_handle") -- Must raise after record invalidation.
   end)
-  local marker: {string: integer} = {}
+  const marker: {string: integer} = {}
   gc.finalizable<|value|>(marker, function(_: value)
-    local handle = browser.binding("state_close_handle")
+    const handle = browser.binding("state_close_handle")
     handle:close()
     pending = browser.binding("state_close_handle")
-    local observer = browser.binding("state_close_observe")
+    const observer = browser.binding("state_close_observe")
     defer observer:close()
     observer:call(Value.is_integer(index))
   end)
   state_close_marker = marker
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
   target:call(Value.is_string("independent_" .. number),
     Value.is_callable(function(...: browser.BrowserValue): browser.BrowserValue
@@ -237,9 +237,9 @@ function prepare(number: integer)
     end))
   parked = coroutine.create(function(_: value): value
     defer do
-      local observer = browser.binding("independent_close")
-      local item = browser.binding("close_value")
-      local request_target = browser.binding("detachable_request")
+      const observer = browser.binding("independent_close")
+      const item = browser.binding("close_value")
+      const request_target = browser.binding("detachable_request")
       local rejected = false
       do
         request_target:start(success, failure)
@@ -253,10 +253,10 @@ function prepare(number: integer)
                     Value.is_boolean(rejected),
                     Value.is_handle(item))
       do
-        local throwing = browser.binding("throw_value")
+        const throwing = browser.binding("throw_value")
         throwing:call()
       catch
-        local error_value: browser.BrowserError = error
+        const error_value: browser.BrowserError = error
         observer:call(Value.is_integer(index),
                       Value.is_boolean(true),
                       Value.is_handle(error_value.thrown))
@@ -269,15 +269,15 @@ end
 
 function check()
   test.assert(index > 0 and parked:status() == "suspended")
-  local target = browser.binding("echo_integer")
+  const target = browser.binding("echo_integer")
   defer target:close()
   case target:call(Value.is_integer(index))
   when is_integer(actual) then test.assert(actual == index)
   else raise "echo_integer did not return an integer"
   end
-  local req_target = browser.binding("r1_close_source")
+  const req_target = browser.binding("r1_close_source")
   defer req_target:close()
-  local req = req_target:start(success, failure)
+  const req = req_target:start(success, failure)
   req:cancel()
   req:close()
   -- A C-created state is never the instance owner and cannot begin a drive.

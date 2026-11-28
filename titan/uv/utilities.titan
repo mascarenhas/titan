@@ -173,7 +173,7 @@ end
 -- @return Native string result with the documented lifetime and units.
 -- @usage uv/functions/errors.md#strerror_r
 function strerror_r(err: integer, capacity: integer): string
-  local buffer = foreign char.new_array(capacity)
+  const buffer = foreign char.new_array(capacity)
   ffi.uv_strerror_r(err, buffer, capacity)
   if capacity == 0 then return "" end
   return (buffer as foreign *char) as string
@@ -185,7 +185,7 @@ end
 -- @return Native string result with the documented lifetime and units.
 -- @usage uv/functions/errors.md#err_name_r
 function err_name_r(err: integer, capacity: integer): string
-  local buffer = foreign char.new_array(capacity)
+  const buffer = foreign char.new_array(capacity)
   ffi.uv_err_name_r(err, buffer, capacity)
   if capacity == 0 then return "" end
   return (buffer as foreign *char) as string
@@ -304,8 +304,8 @@ end
 -- @usage uv/functions/misc.md#cwd
 function cwd(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_cwd(buffer, size)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_cwd(buffer, size)
   if status ~= 0 then return status, nil, size end
   return status, (buffer as foreign *char) as string, size
 end
@@ -318,8 +318,8 @@ end
 -- @usage uv/functions/misc.md#exepath
 function exepath(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_exepath(buffer, size)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_exepath(buffer, size)
   if status ~= 0 then return status, nil, size end
   return status, (buffer as foreign *char) as string, size
 end
@@ -332,8 +332,8 @@ end
 -- @usage uv/functions/misc.md#os_gethostname
 function os_gethostname(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_os_gethostname(buffer, size)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_os_gethostname(buffer, size)
   if status ~= 0 then return status, nil, size end
   return status, (buffer as foreign *char) as string, size
 end
@@ -346,8 +346,8 @@ end
 -- @usage uv/functions/misc.md#os_homedir
 function os_homedir(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_os_homedir(buffer, size)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_os_homedir(buffer, size)
   if status ~= 0 then return status, nil, size end
   return status, (buffer as foreign *char) as string, size
 end
@@ -360,8 +360,8 @@ end
 -- @usage uv/functions/misc.md#os_tmpdir
 function os_tmpdir(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_os_tmpdir(buffer, size)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_os_tmpdir(buffer, size)
   if status ~= 0 then return status, nil, size end
   return status, (buffer as foreign *char) as string, size
 end
@@ -375,8 +375,8 @@ end
 -- @usage uv/functions/misc.md#os_getenv
 function os_getenv(name: string, capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_os_getenv(name, buffer, size)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_os_getenv(name, buffer, size)
   if status ~= 0 then return status, nil, size end
   return status, (buffer as foreign *char) as string, size
 end
@@ -387,8 +387,8 @@ end
 -- @return Copied or retained string result, or nil on failure or absence.
 -- @usage uv/functions/misc.md#get_process_title
 function get_process_title(capacity: integer): (integer, string?)
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_get_process_title(buffer, capacity)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_get_process_title(buffer, capacity)
   if status ~= 0 then return status, nil end
   return status, (buffer as foreign *char) as string
 end
@@ -400,7 +400,7 @@ end
 -- @usage uv/functions/misc.md#os_getpriority
 function os_getpriority(pid: integer): (integer, integer?)
   local priority: foreign int = 0
-  local status: integer = ffi.uv_os_getpriority(pid, priority)
+  const status: integer = ffi.uv_os_getpriority(pid, priority)
   if status ~= 0 then return status, nil end
   return status, priority
 end
@@ -411,7 +411,7 @@ end
 -- @usage uv/functions/misc.md#resident_set_memory
 function resident_set_memory(): (integer, integer?)
   local rss: foreign size_t = 0
-  local status: integer = ffi.uv_resident_set_memory(rss)
+  const status: integer = ffi.uv_resident_set_memory(rss)
   if status ~= 0 then return status, nil end
   return status, rss
 end
@@ -422,7 +422,7 @@ end
 -- @usage uv/functions/misc.md#uptime
 function uptime(): (integer, float?)
   local seconds: foreign double = 0.0
-  local status: integer = ffi.uv_uptime(seconds)
+  const status: integer = ffi.uv_uptime(seconds)
   if status ~= 0 then return status, nil end
   return status, seconds
 end
@@ -433,7 +433,7 @@ end
 -- @usage uv/functions/misc.md#getrusage
 function getrusage(): (integer, rusage_t?)
   local native = foreign uv_rusage_t.new()
-  local status: integer = ffi.uv_getrusage(native)
+  const status: integer = ffi.uv_getrusage(native)
   if status ~= 0 then return status, nil end
   return status, utility_copy_rusage(native)
 end
@@ -444,7 +444,7 @@ end
 -- @usage uv/functions/misc.md#getrusage_thread
 function getrusage_thread(): (integer, rusage_t?)
   local native = foreign uv_rusage_t.new()
-  local status: integer = ffi.uv_getrusage_thread(native)
+  const status: integer = ffi.uv_getrusage_thread(native)
   if status ~= 0 then return status, nil end
   return status, utility_copy_rusage(native)
 end
@@ -455,7 +455,7 @@ end
 -- @usage uv/functions/misc.md#gettimeofday
 function gettimeofday(): (integer, timeval64_t?)
   local native = foreign uv_timeval64_t.new()
-  local status: integer = ffi.uv_gettimeofday(native)
+  const status: integer = ffi.uv_gettimeofday(native)
   if status ~= 0 then return status, nil end
   return status, timeval64_t(native.tv_sec, native.tv_usec)
 end
@@ -467,7 +467,7 @@ end
 -- @usage uv/functions/misc.md#clock_gettime
 function clock_gettime(clock: clock_id): (integer, timespec64_t?)
   local native = foreign uv_timespec64_t.new()
-  local status: integer = ffi.uv_clock_gettime(utility_native_clock(clock), native)
+  const status: integer = ffi.uv_clock_gettime(utility_native_clock(clock), native)
   if status ~= 0 then return status, nil end
   return status, timespec64_t(native.tv_sec, native.tv_nsec)
 end
@@ -489,7 +489,7 @@ end
 -- @usage uv/functions/misc.md#os_uname
 function os_uname(): (integer, utsname_t?)
   local native = foreign uv_utsname_t.new()
-  local status: integer = ffi.uv_os_uname(native)
+  const status: integer = ffi.uv_os_uname(native)
   if status ~= 0 then return status, nil end
   return status, utsname_t {
     sysname = (native.sysname as foreign *char) as string,

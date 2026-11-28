@@ -4,14 +4,14 @@ foreign import "stdio.h"
 foreign import "../../io/print_capture.h"
 
 function test_runtime_close_listeners_follow_native_cleanup_and_allow_removal(context: test.Context)
-  local order: {integer} = {}
+  const order: {integer} = {}
   local native_closed = false
-  local task = async.run<|nil, nil|>(function (): nil return nil end)
-  local owner = uv.timer_t.new()
+  const task = async.run<|nil, nil|>(function (): nil return nil end)
+  const owner = uv.timer_t()
   test.assert(uv.timer_init(async.current_loop(), owner) == 0)
   uv.timer_close(owner, function (_: uv.timer_t) native_closed = true end)
   local remove_later: function (): () = function () end
-  local remove_first = async.add_close_listener(function ()
+  const remove_first = async.add_close_listener(function ()
     test.assert(task:status():has_finished() and native_closed,
       "Runtime listener ran before Task/native retirement")
     test.assert(async.is_closing(), "Runtime listener observed open Runtime")
@@ -33,7 +33,7 @@ function test_runtime_close_listeners_follow_native_cleanup_and_allow_removal(co
   end)
   remove_later = async.add_close_listener(function () order[#order + 1] = 2 end)
   async.add_close_listener(function () order[#order + 1] = 3 end)
-  local remove_early = async.add_close_listener(function () raise "removed listener ran" end)
+  const remove_early = async.add_close_listener(function () raise "removed listener ran" end)
   remove_early()
   remove_early()
   async.loop()
@@ -46,8 +46,8 @@ function test_runtime_close_listeners_follow_native_cleanup_and_allow_removal(co
 end
 
 local function close_exit_transfer_file(file: integer)
-  local request = uv.fs_t.new()
-  local status = uv.fs_close(nil, request, file)
+  const request = uv.fs_t()
+  const status = uv.fs_close(nil, request, file)
   uv.fs_req_cleanup(request)
   test.assert(status == 0, "exit transfer fixture could not close its descriptor")
 end
@@ -63,8 +63,8 @@ function test_exit_rejects_native_adoption_during_cleanup_and_preserves_payload(
                 "exit transfer fixture could not dispose its descriptor")
   end
   local rejected, cleanup_completed, closing_flag_preserved = false, false, false
-  local task = async.run<|nil, value|>(function (): nil
-    local writer = uv.pipe_t.new()
+  const task = async.run<|nil, value|>(function (): nil
+    const writer = uv.pipe_t()
     test.assert(uv.pipe_init(async.current_loop(), writer, 0) == 0)
     test.assert(uv.pipe_open(writer, write_file) == 0)
     write_file = -1
@@ -83,7 +83,7 @@ function test_exit_rejects_native_adoption_during_cleanup_and_preserves_payload(
           packet = nil
           uv.close(adopted:as_handle_t())
         end
-        local cleanup_timer = uv.timer_t.new()
+        const cleanup_timer = uv.timer_t()
         test.assert(uv.timer_init(async.current_loop(), cleanup_timer) == 0)
         test.assert(uv.timer_start(cleanup_timer, function (owner: uv.timer_t)
           uv.timer_close(owner, function (_: uv.timer_t)
@@ -103,7 +103,7 @@ function test_exit_rejects_native_adoption_during_cleanup_and_preserves_payload(
   test.assert(cleanup_completed, "exit prevented accepted cleanup callbacks from retiring")
   local retired = false
   runtime_test.run(function ()
-    local adopted = uv.pipe_t.from_transfer_payload(packet)
+    const adopted = uv.pipe_t.from_transfer_payload(packet)
     packet = nil
     test.assert(uv.handle_get_loop(adopted:as_handle_t()) == async.current_loop())
     test.assert(uv.is_writable(adopted:as_stream_t()),
@@ -133,7 +133,7 @@ local runtime_close_task_probe: RuntimeCloseTaskOracle? = nil
 local function runtime_close_task_code(task: async.Task, reason: string?): integer
   local code = 1
   do
-    local status = task:status()
+    const status = task:status()
     code = 2
     if reason == nil then
       if status:as_string() == "waiting" and not status:has_finished() then code = 3 end
@@ -151,7 +151,7 @@ local function runtime_close_task_oracle(owner: RuntimeCloseTaskOracle)
     runtime_close_record(owner.cells, index - 1,
       runtime_close_task_code(owner.tasks[index], owner.reasons[index]))
   end
-  local gated? = owner.gated
+  const gated? = owner.gated
   if gated ~= nil then
     runtime_close_record(owner.cells, #owner.tasks, runtime_close_task_code(gated, nil))
     -- The abandoned gate never unregistered; release the domain's own retain.
@@ -170,36 +170,36 @@ end
 -- received when lua_close unwinds it. A terminal listener on every Task
 -- records into cell 9 if it ever runs.
 function runtime_close_abandoned_task_bootstrap(cells_raw: value)
-  local cells = cells_raw as foreign *void
-  local oracle = RuntimeCloseTaskOracle(cells, {}, {}, nil, nil)
+  const cells = cells_raw as foreign *void
+  const oracle = RuntimeCloseTaskOracle(cells, {}, {}, nil, nil)
   runtime_close_gc.finalizable(oracle, runtime_close_task_oracle)
   runtime_close_task_probe = oracle
-  local parked_token = async.ResumeToken("abandoned parked Task")
-  local parked = async.run<|value, value|>(function (): value
+  const parked_token = async.ResumeToken("abandoned parked Task")
+  const parked = async.run<|value, value|>(function (): value
     async.suspend(parked_token)
     return 1
   end)
-  local cancelled_token = async.ResumeToken("abandoned cancelled Task")
-  local cancelled = async.run<|value, value|>(function (): value
+  const cancelled_token = async.ResumeToken("abandoned cancelled Task")
+  const cancelled = async.run<|value, value|>(function (): value
     async.suspend(cancelled_token)
     return 2
   end)
-  local returned_token = async.ResumeToken("abandoned cleanup after a returned body")
-  local returned = async.run_with_cleanup<|value, value|>(function (): value
+  const returned_token = async.ResumeToken("abandoned cleanup after a returned body")
+  const returned = async.run_with_cleanup<|value, value|>(function (): value
     return 5
   end, function (_: async.CancellationReason?)
     async.suspend(returned_token)
   end)
-  local raised_token = async.ResumeToken("abandoned cleanup after a raised body")
-  local raised = async.run_with_cleanup<|value, value|>(function (): value
+  const raised_token = async.ResumeToken("abandoned cleanup after a raised body")
+  const raised = async.run_with_cleanup<|value, value|>(function (): value
     raise "abandoned body failure"
     return 6
   end, function (_: async.CancellationReason?)
     async.suspend(raised_token)
   end)
   local gate, gate_fixture = external_wait_prepare_retirement(false)
-  local gated_token = async.ResumeToken("abandoned gated Task")
-  local gated = async.run_with_cleanup<|value, value|>(function (): value
+  const gated_token = async.ResumeToken("abandoned gated Task")
+  const gated = async.run_with_cleanup<|value, value|>(function (): value
     async.suspend(gated_token)
     return 7
   end, function (_: async.CancellationReason?)
@@ -207,8 +207,8 @@ function runtime_close_abandoned_task_bootstrap(cells_raw: value)
   end, gate)
   oracle.gated = gated
   oracle.gate_context = gate_fixture as foreign *void
-  local unwound_token = async.ResumeToken("abandoned Task with cleanup")
-  local unwound = async.run_with_cleanup<|value, value|>(function (): value
+  const unwound_token = async.ResumeToken("abandoned Task with cleanup")
+  const unwound = async.run_with_cleanup<|value, value|>(function (): value
     defer runtime_close_record(cells, 7, 3)
     async.suspend(unwound_token)
     return 8
@@ -237,15 +237,15 @@ function runtime_close_abandoned_task_bootstrap(cells_raw: value)
   cancelled:cancel(async.CancellationReason.simple("requested before state close"))
   test.assert(cancelled:status():as_string() == "waiting",
     "cancellation completed without a driven loop")
-  local observed = async.run<|value, value|>(function (): value return 3 end)
+  const observed = async.run<|value, value|>(function (): value return 3 end)
   test.assert(observed:status():as_string() == "ready", "queued Task did not report ready")
-  local unobserved = async.run<|value, value|>(function (): value return 4 end)
-  local abandoned = "async Runtime abandoned at Lua state close"
+  const unobserved = async.run<|value, value|>(function (): value return 4 end)
+  const abandoned = "async Runtime abandoned at Lua state close"
   oracle.tasks = {parked, cancelled, observed, unobserved, returned, raised}
   oracle.reasons = {abandoned, "requested before state close", abandoned, abandoned,
                     abandoned, abandoned}
-  local listener = function (_: async.TaskStatus) runtime_close_record(cells, 9, 1) end
-  local all: {async.Task} = {parked, cancelled, observed, unobserved, returned, raised,
+  const listener = function (_: async.TaskStatus) runtime_close_record(cells, 9, 1) end
+  const all: {async.Task} = {parked, cancelled, observed, unobserved, returned, raised,
                              gated, unwound}
   for index = 1, #all do all[index]:add_terminal_listener(listener) end
 end
@@ -253,16 +253,16 @@ end
 -- Run `action` with descriptor 2 redirected into a pipe, and return what it
 -- wrote there. The action must write less than a pipe buffer.
 local function runtime_close_capture_stderr(action: function (): ()): string
-  local descriptors: owned int[] = foreign int.new_array(2)
+  const descriptors: owned int[] = foreign int.new_array(2)
   test.assert((ffi.titan_spec_capture_pipe(descriptors as foreign *int) as integer) == 0,
     "could not create a stderr capture pipe")
-  local read_descriptor = descriptors[0]
+  const read_descriptor = descriptors[0]
   defer ffi.titan_spec_capture_close(read_descriptor)
-  local saved = ffi.titan_spec_capture_duplicate(2)
+  const saved = ffi.titan_spec_capture_duplicate(2)
   test.assert((saved as integer) >= 0, "could not duplicate stderr")
   defer ffi.titan_spec_capture_close(saved)
   ffi.fflush(nil)
-  local redirected = (ffi.titan_spec_capture_replace(descriptors[1], 2) as integer) == 2
+  const redirected = (ffi.titan_spec_capture_replace(descriptors[1], 2) as integer) == 2
   ffi.titan_spec_capture_close(descriptors[1])
   test.assert(redirected, "could not redirect stderr")
   do
@@ -272,16 +272,16 @@ local function runtime_close_capture_stderr(action: function (): ()): string
     end
     action()
   end
-  local capacity = 65536
-  local storage: owned char[] = foreign char.new_array(capacity)
-  local top = ffi.lua_gettop(L)
+  const capacity = 65536
+  const storage: owned char[] = foreign char.new_array(capacity)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0, "cannot reserve Lua stack for captured stderr")
   local count = ffi.titan_spec_capture_read(read_descriptor, storage as foreign *char,
     capacity as foreign titan_spec_size) as integer
   if count < 0 then count = 0 end
   ffi.lua_pushlstring(L, storage as foreign *char, count as foreign size_t)
-  local captured: value = ffi.lua_totvalue(L, -1)
+  const captured: value = ffi.lua_totvalue(L, -1)
   return captured as string
 end
 
@@ -291,26 +291,26 @@ end
 -- includes a body that finished while its cleanup was pending, no terminal
 -- listener runs, and no Task error is reported, not even the raised body's.
 function test_lua_close_publishes_consistent_status_for_abandoned_tasks(_: test.Context)
-  local cells: owned int[] = foreign int.new_array(10)
+  const cells: owned int[] = foreign int.new_array(10)
   for index = 0, 9 do cells[index] = 0 end
-  local state = runtime_close_lua.new()
+  const state = runtime_close_lua.new()
   defer state:close()
   state:run([[
     package.path, package.cpath = '', ''
     require('async.tests').runtime_close_abandoned_task_bootstrap(...)
   ]], "=abandoned-task-bootstrap", async.TransferValue.is_pointer(cells as foreign *void))
   -- The expected coroutine cleanup warning goes to the captured stderr too.
-  local diagnostics = runtime_close_capture_stderr(function () state:close() end)
+  const diagnostics = runtime_close_capture_stderr(function () state:close() end)
   test.assert(not support.contains(diagnostics, "uncaught error in async Task:"),
     "lua_close reported an abandoned Task's error: " .. diagnostics)
-  local names: {string} = {"parked", "cancel-requested", "observed-ready", "unobserved",
+  const names: {string} = {"parked", "cancel-requested", "observed-ready", "unobserved",
                            "body-returned-cleanup-pending", "body-raised-cleanup-pending",
                            "armed-retirement-gate"}
-  local outcomes: {string} = {"unobserved", "raised", "stale or wrong", "expected"}
+  const outcomes: {string} = {"unobserved", "raised", "stale or wrong", "expected"}
   local report = ""
   local consistent = true
   for index = 1, #names do
-    local code = cells[index - 1] as integer
+    const code = cells[index - 1] as integer
     consistent = consistent and code == 3
     report = report .. " " .. names[index] .. "=" .. outcomes[code + 1]
   end
@@ -334,8 +334,8 @@ end
 -- start, 2 a started Task body ran, 3 the caught run_with_cleanup, 4 the
 -- caught Runtime creation (async.receiver; 3 refused).
 function runtime_close_start_refused_bootstrap(cells_raw: value)
-  local cells = cells_raw as foreign *void
-  local older = runtime_close_coroutine.create(function (_: value): value
+  const cells = cells_raw as foreign *void
+  const older = runtime_close_coroutine.create(function (_: value): value
     defer do
       local code = 1
       do
@@ -351,12 +351,12 @@ function runtime_close_start_refused_bootstrap(cells_raw: value)
   end, "older")
   older:resume(nil)
   runtime_close_held = older
-  local started = function (): nil
+  const started = function (): nil
     runtime_close_record(cells, 2, 3)
     return nil
   end
-  local token = async.ResumeToken("parked Task that starts Tasks at close")
-  local parked = async.run<|nil, value|>(function (): nil
+  const token = async.ResumeToken("parked Task that starts Tasks at close")
+  const parked = async.run<|nil, value|>(function (): nil
     defer runtime_close_record(cells, 1, 3)
     defer async.run<|nil, value|>(started)
     defer do
@@ -388,9 +388,9 @@ end
 local runtime_close_held: value = nil
 
 function test_lua_close_refuses_task_start_from_unwinding_task(context: test.Context)
-  local cells: owned int[] = foreign int.new_array(5)
+  const cells: owned int[] = foreign int.new_array(5)
   for index = 0, 4 do cells[index] = 0 end
-  local state = runtime_close_lua.new()
+  const state = runtime_close_lua.new()
   defer state:close()
   state:run([[
     package.path, package.cpath = '', ''
@@ -416,20 +416,20 @@ record RuntimeCloseResolver
 end
 
 local function runtime_close_resolve_in_finalizer(candidate: value)
-  local holder: RuntimeCloseResolver = candidate
-  local resolve = holder.resolve as function (string): ()
+  const holder: RuntimeCloseResolver = candidate
+  const resolve = holder.resolve as function (string): ()
   resolve("from-finalizer")
 end
 
 local function runtime_close_drop_resolver(holder: RuntimeCloseResolver)
-  local finalized = RuntimeCloseResolver(holder.resolve)
+  const finalized = RuntimeCloseResolver(holder.resolve)
   runtime_close_gc.finalizable<|value|>(finalized, runtime_close_resolve_in_finalizer)
 end
 
 function test_unwind_finalizer_settles_completion_after_finalizer(_: test.Context)
-  local holder = RuntimeCloseResolver(nil)
-  local task = async.run<|string, value|>(function (): string
-    local result = async.await<|string, value|>(function (resolve, _reject, _fatal)
+  const holder = RuntimeCloseResolver(nil)
+  const task = async.run<|string, value|>(function (): string
+    const result = async.await<|string, value|>(function (resolve, _reject, _fatal)
       holder.resolve = resolve
     end)
     case result
@@ -456,13 +456,13 @@ record RuntimeCloseFatals
 end
 
 local function runtime_close_fatal_in_finalizer(candidate: value)
-  local holder: RuntimeCloseFatals = candidate
+  const holder: RuntimeCloseFatals = candidate
   holder.first("first-operation-error", "first-trace")
   holder.second("second-operation-error", "second-trace")
 end
 
 local function runtime_close_drop_fatals(holder: RuntimeCloseFatals)
-  local finalized = RuntimeCloseFatals(holder.first, holder.second)
+  const finalized = RuntimeCloseFatals(holder.first, holder.second)
   runtime_close_gc.finalizable<|value|>(finalized, runtime_close_fatal_in_finalizer)
 end
 
@@ -482,8 +482,8 @@ local function runtime_close_await_fatal(observed: {string}, index: integer,
 end
 
 function test_unwind_finalizer_fatal_delivers_each_operation_error(_: test.Context)
-  local holder = RuntimeCloseFatals(nil, nil)
-  local observed: {string} = {"pending", "pending"}
+  const holder = RuntimeCloseFatals(nil, nil)
+  const observed: {string} = {"pending", "pending"}
   runtime_close_await_fatal(observed, 1, function (fatal: function (value, string): ())
     holder.first = fatal
   end)

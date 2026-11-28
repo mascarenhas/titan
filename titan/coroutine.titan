@@ -26,10 +26,10 @@ record Coroutine
   -- destroyed it. `pending` roots the one pending transfer, which minicoro
   -- stores as bytes.
   local handle: foreign *mco_coro
-  local default_tag: value
-  local thread: value
-  local entry: function (Coroutine)
-  local body: function (value): (value)
+  local const default_tag: value
+  local const thread: value
+  local const entry: function (Coroutine)
+  local const body: function (value): (value)
   local pending: value
 end
 
@@ -48,7 +48,7 @@ end
 
 -- The record that owns `co`.
 local function owner_of(co: foreign *mco_coro): Coroutine
-  local owner: value = ffi.mco_get_user_data(co) as foreign *Udata
+  const owner: value = ffi.mco_get_user_data(co) as foreign *Udata
   return owner as Coroutine
 end
 
@@ -82,7 +82,7 @@ local function root_transfer(co: foreign *mco_coro, payload: value)
   if not co then
     return
   end
-  local owner = owner_of(co)
+  const owner = owner_of(co)
   owner.pending = payload
 end
 
@@ -101,7 +101,7 @@ local function push_transfer(source: foreign *mco_coro,
   end
   result = ffi.mco_push(source, ok, foreign int.sizeof)
   if result ~= ffi.MCO_SUCCESS then
-    local rollback = ffi.mco_pop(source, nil, foreign TValue.sizeof)
+    const rollback = ffi.mco_pop(source, nil, foreign TValue.sizeof)
     check_mco_result(rollback)
     clear_transfer(source)
     check_mco_result(result)
@@ -110,9 +110,9 @@ end
 
 local function discard_transfer(source: foreign *mco_coro)
   if source then
-    local ok_result = ffi.mco_pop(source, nil, foreign int.sizeof)
+    const ok_result = ffi.mco_pop(source, nil, foreign int.sizeof)
     check_mco_result(ok_result)
-    local payload_result = ffi.mco_pop(source, nil, foreign TValue.sizeof)
+    const payload_result = ffi.mco_pop(source, nil, foreign TValue.sizeof)
     check_mco_result(payload_result)
     clear_transfer(source)
   end
@@ -123,7 +123,7 @@ local function stash_trace_for_append(trace: string)
 end
 
 local function pop_trace_for_append(): string?
-  local trace? = pending_append_trace
+  const trace? = pending_append_trace
   pending_append_trace = nil
   return trace
 end
@@ -131,7 +131,7 @@ end
 local function raise_with_appended_trace(err: value)
   raise err
 catch
-  local inner? = pop_trace_for_append()
+  const inner? = pop_trace_for_append()
   if inner ~= nil then raise error, inner .. "\n" .. traceback end
   raise
 end
@@ -148,9 +148,9 @@ end
 local function pop_transfer(co: foreign *mco_coro): (boolean, value)
   local ok: foreign int = 0 as foreign int
   local payload: foreign TValue = nil
-  local ok_result = ffi.mco_pop(co, ok, foreign int.sizeof)
+  const ok_result = ffi.mco_pop(co, ok, foreign int.sizeof)
   check_mco_result(ok_result)
-  local payload_result = ffi.mco_pop(co, payload, foreign TValue.sizeof)
+  const payload_result = ffi.mco_pop(co, payload, foreign TValue.sizeof)
   check_mco_result(payload_result)
   clear_transfer(co)
   if ok == TRANSFER_ERROR then return true, payload end
@@ -181,7 +181,7 @@ end
 local function resume_switch(co: foreign *mco_coro, source: foreign *mco_coro,
                              tag: value): foreign *mco_coro
   local ctag: foreign TValue = tag
-  local result = ffi.mco_resume(co, ctag)
+  const result = ffi.mco_resume(co, ctag)
   if result ~= ffi.MCO_SUCCESS then
     discard_transfer(source)
     check_mco_result(result)
@@ -200,7 +200,7 @@ end
 
 local function yield_result_or_raise(co: foreign *mco_coro, tag: value): value
   local ctag: foreign TValue = tag
-  local result = ffi.mco_yield(co, ctag)
+  const result = ffi.mco_yield(co, ctag)
   if result ~= ffi.MCO_SUCCESS then
     discard_transfer(co)
     check_mco_result(result)
@@ -226,9 +226,9 @@ function Coroutine:resume(arg: value, tag: value): value
   if ffi.titan_no_switch(L) ~= 0 then
     raise "coroutine.resume is unavailable in a synchronous callback"
   end
-  local effective = effective_tag(self.default_tag, tag)
-  local co = self.handle
-  local source = transfer_source(co)
+  const effective = effective_tag(self.default_tag, tag)
+  const co = self.handle
+  const source = transfer_source(co)
   push_transfer(source, TRANSFER_VALUE, arg)
   return resume_result_or_raise(co, source, effective)
 end
@@ -243,9 +243,9 @@ function Coroutine:error(err: value, tag: value): value
   if ffi.titan_no_switch(L) ~= 0 then -- see Coroutine:resume
     raise "coroutine.error is unavailable in a synchronous callback"
   end
-  local effective = effective_tag(self.default_tag, tag)
-  local co = self.handle
-  local source = transfer_source(co)
+  const effective = effective_tag(self.default_tag, tag)
+  const co = self.handle
+  const source = transfer_source(co)
   push_transfer(source, TRANSFER_ERROR, err)
   return resume_result_or_raise(co, source, effective)
 end
@@ -262,9 +262,9 @@ function Coroutine:transfer(payload: value, tag: value,
   if ffi.titan_no_switch(L) ~= 0 then -- see Coroutine:resume
     raise "coroutine.transfer is unavailable in a synchronous callback"
   end
-  local effective = effective_tag(self.default_tag, tag)
-  local co = self.handle
-  local source = transfer_source(co)
+  const effective = effective_tag(self.default_tag, tag)
+  const co = self.handle
+  const source = transfer_source(co)
   if inject_error then
     push_transfer(source, TRANSFER_ERROR, payload)
   else
@@ -280,7 +280,7 @@ end
 -- @return suspended, running, normal, stacked, or dead.
 -- @usage coroutines.md
 function Coroutine:status(): string
-  local status = ffi.mco_status(self.handle)
+  const status = ffi.mco_status(self.handle)
   if status == ffi.MCO_SUSPENDED then
     return "suspended"
   end
@@ -311,7 +311,7 @@ function yield(arg: value, tag: value): value
   if ffi.titan_no_switch(L) ~= 0 then -- see Coroutine:resume
     raise "coroutine.yield is unavailable in a synchronous callback"
   end
-  local co = runtime.current_co
+  const co = runtime.current_co
   push_transfer(co, TRANSFER_VALUE, arg)
   return yield_result_or_raise(co, tag)
 end
@@ -335,7 +335,7 @@ end
 -- entry's first instruction until it returns.
 local function coroutine_started(co: foreign *mco_coro): boolean
   local owner: foreign TValue = owner_of(co).thread
-  local thread = ffi.lmacro_thvalue(owner)
+  const thread = ffi.lmacro_thvalue(owner)
   return thread.errorJmp ~= nil
 end
 
@@ -343,11 +343,11 @@ end
 -- Minicoro switches into the deepest stacked coroutine; each member unwinds,
 -- finishes dead and returns to its resumer, which unwinds in turn.
 local function unwind_chain(handler: foreign *mco_coro)
-  local source = transfer_source(handler)
+  const source = transfer_source(handler)
   push_transfer(source, TRANSFER_UNWIND, nil)
   -- No yield can compare this tag: yields raise inside finalizers.
   local nil_tag: foreign TValue = nil
-  local result = ffi.mco_resume(handler, nil_tag)
+  const result = ffi.mco_resume(handler, nil_tag)
   if result ~= ffi.MCO_SUCCESS then
     discard_transfer(source)
     return
@@ -359,8 +359,8 @@ end
 
 -- Implementation notes: doc/implementation/coroutines.md#unwinding-an-abandoned-coroutine
 local function coro_gc(finalized: value)
-  local owner = finalized as Coroutine
-  local co = owner.handle
+  const owner = finalized as Coroutine
+  const co = owner.handle
   if not co then
     -- No native stack: it was never created, or this record was resurrected
     -- and is finalized again.
@@ -398,8 +398,8 @@ local function coro_gc(finalized: value)
 end
 
 local function coro_entry(owner: Coroutine)
-  local co = owner.handle
-  local res = owner.body(pop_transfer_or_raise(co, false))
+  const co = owner.handle
+  const res = owner.body(pop_transfer_or_raise(co, false))
   push_transfer(co, TRANSFER_VALUE, res)
 catch
   stash_trace_for_append(traceback)
@@ -413,13 +413,13 @@ end
 -- @usage coroutines.md
 function create(func: function (value): (value), default_tag: value): Coroutine
   -- titan_newthread leaves the thread on the stack until the record holds it.
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for coroutine creation"
   end
   local _ = ffi.titan_newthread(L)
-  local co = Coroutine {
+  const co = Coroutine {
     handle = nil,
     default_tag = default_tag,
     thread = ffi.lua_totvalue(L, -1),
@@ -437,7 +437,7 @@ function create(func: function (value): (value), default_tag: value): Coroutine
   desc.user_data = co as foreign *void
 
   local handle: foreign *mco_coro = nil
-  local res = ffi.mco_create(handle, desc)
+  const res = ffi.mco_create(handle, desc)
   if res ~= ffi.MCO_SUCCESS then
     raise "could not create coroutine: " .. (ffi.mco_result_description(res) as string)
   end
@@ -453,6 +453,6 @@ function running(): Coroutine?
   -- inside a binding that a coroutine called.
   if ffi.titan_no_switch(L) ~= 0 then return nil end
   -- Outside a coroutine the user data is null, which boxes as nil.
-  local owner: value = ffi.mco_get_user_data(runtime.current_co) as foreign *Udata
+  const owner: value = ffi.mco_get_user_data(runtime.current_co) as foreign *Udata
   return owner as Coroutine?
 end

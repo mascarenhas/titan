@@ -9,11 +9,11 @@ function test_redirect_status_mode_location_matrix(context: test.Context)
             local mode = http.RedirectMode.follow()
             if policy == 2 then mode = http.RedirectMode.manual() end
             if policy == 3 then mode = http.RedirectMode.error() end
-            local options = http.RequestOptions {redirect = mode}
+            const options = http.RequestOptions {redirect = mode}
             if policy == 3 then
               operation_error(function () http.get(source, options) end, "http.request")
             else
-              local response = http.get(source, options)
+              const response = http.get(source, options)
               defer response:close()
               if policy == 2 then
                 test.assert(response.status == 0 and response.reason == "" and #response.headers:all() == 0 and
@@ -42,30 +42,30 @@ function test_redirect_rewrites_preservation_limit_and_authorization(_: test.Con
   runtime_test.run(function ()
     for _, status in iteration.ipairs({301, 302, 303, 307, 308}) do
       for _, method in iteration.ipairs({"POST", "PUT"}) do
-        local body = "redirect\0\255body"
-        local options = http.RequestOptions {body = body, redirect = http.RedirectMode.follow()}
-        local source = server() .. "/redirect/" .. status .. "/with"
-        local response = http.request(method, source, options)
+        const body = "redirect\0\255body"
+        const options = http.RequestOptions {body = body, redirect = http.RedirectMode.follow()}
+        const source = server() .. "/redirect/" .. status .. "/with"
+        const response = http.request(method, source, options)
         defer response:close()
-        local rewritten = status == 303 or (method == "POST" and (status == 301 or status == 302))
+        const rewritten = status == 303 or (method == "POST" and (status == 301 or status == 302))
         local expected = method .. "\n\n" .. body
         if rewritten then expected = "GET\n\n" end
         test.assert(response.status == 200 and response.redirected and all(response) == expected,
           "redirect method/body policy changed for " .. status .. " " .. method)
         -- An options snapshot remains usable after host redirect rewriting.
-        local echo = http.request(method, server() .. "/echo", options)
+        const echo = http.request(method, server() .. "/echo", options)
         defer echo:close()
         test.assert(all(echo) == body, "redirect mutated the RequestOptions snapshot")
       end
     end
-    local twenty = http.get(server() .. "/chain/20")
+    const twenty = http.get(server() .. "/chain/20")
     defer twenty:close()
     test.assert(twenty.status == 200 and twenty.redirected and twenty.url == server() .. "/chain/0")
     operation_error(function () http.get(server() .. "/chain/21") end, "http.request")
-    local cross_target = "http://localhost:" .. url.parse(server()).port .. "/inspect"
-    local redirected = http.get(server() .. "/cross", http.RequestOptions {headers = one_header("Authorization", "Bearer private")})
+    const cross_target = "http://localhost:" .. url.parse(server()).port .. "/inspect"
+    const redirected = http.get(server() .. "/cross", http.RequestOptions {headers = one_header("Authorization", "Bearer private")})
     defer redirected:close()
-    local received = all(redirected)
+    const received = all(redirected)
     test.assert(redirected.status == 200 and redirected.redirected and redirected.url == cross_target and received == "GET\n\n",
       "cross-origin redirect mismatch: " .. redirected.status .. " url=" .. (redirected.url or "") .. " body=" .. received)
   end)

@@ -6,14 +6,14 @@ local type ReuseAccept = function (): (io.ReaderWriterCloser, function (): ())
 
 local function run_reuse_case(action: ReuseAction)
   runtime_test.run(function ()
-    local exercise = async.run<|value, value|>(function (): value
+    const exercise = async.run<|value, value|>(function (): value
       action()
       return nil
     catch
       return async.Error(error, traceback)
     end)
     defer task_support.cancel_and_join_task(exercise, "HTTP reuse exercise cleanup")
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       return nil
     end)
@@ -34,12 +34,12 @@ local function run_reuse_case(action: ReuseAction)
 end
 
 local record ReuseRawServer
-  listener: io.Closer
-  port: integer
-  encrypted: boolean
-  connections: {io.ReaderWriterCloser}
-  aborts: {function (): ()}
-  workers: {async.Task}
+  const listener: io.Closer
+  const port: integer
+  const encrypted: boolean
+  const connections: {io.ReaderWriterCloser}
+  const aborts: {function (): ()}
+  const workers: {async.Task}
   accepting: async.Task?
 end
 
@@ -62,12 +62,10 @@ end
 
 local function reuse_tls_listener(first_port: integer): (ssl.Server, integer)
   for port = first_port, first_port + 99 do
-    do
-      return ssl.listen("127.0.0.1", port, support.CERTIFICATE, support.PRIVATE_KEY), port
-    catch
-      if not (error is async.OperationError) or
-         (error as async.OperationError).name ~= "EADDRINUSE" then raise end
-    end
+    return ssl.listen("127.0.0.1", port, support.CERTIFICATE, support.PRIVATE_KEY), port
+  catch
+    if not (error is async.OperationError) or
+       (error as async.OperationError).name ~= "EADDRINUSE" then raise end
   end
   raise "could not find an available raw HTTPS loopback port"
 end
@@ -75,24 +73,24 @@ end
 local function reuse_raw_server(first_port: integer,
                                handler: ReuseRawHandler,
                                encrypted: boolean?): ReuseRawServer
-  local bind = function (): (io.Closer, integer, ReuseAccept)
+  const bind = function (): (io.Closer, integer, ReuseAccept)
     if encrypted then
       local listener, port = reuse_tls_listener(first_port)
-      local accept: ReuseAccept = function ()
-        local connection = listener:accept()
+      const accept: ReuseAccept = function ()
+        const connection = listener:accept()
         return connection, connection:abort
       end
       return listener, port, accept
     end
     local listener, port = support.raw_listen(first_port)
-    local accept: ReuseAccept = function ()
-      local connection = listener:accept()
+    const accept: ReuseAccept = function ()
+      const connection = listener:accept()
       return connection, connection:close
     end
     return listener, port, accept
   end
   local listener, port, accept = bind()
-  local fixture = ReuseRawServer {
+  const fixture = ReuseRawServer {
     listener = listener, port = port, encrypted = encrypted or false,
     connections = {}, aborts = {}, workers = {}, accepting = nil,
   }
@@ -100,7 +98,7 @@ local function reuse_raw_server(first_port: integer,
   fixture.accepting = async.run<|value, value|>(function (): value
     while true do
       local connection, abort = accept()
-      local identity = #fixture.connections + 1
+      const identity = #fixture.connections + 1
       fixture.connections[identity] = connection
       fixture.aborts[identity] = abort
       fixture.workers[identity] = async.run<|value, value|>(function (): value
@@ -136,7 +134,7 @@ end
 
 local function reuse_assert_response(response: http.ClientResponse,
                                     identity: integer, body: string)
-  local actual = response.headers:get("X-Test-Connection")
+  const actual = response.headers:get("X-Test-Connection")
   test.assert(actual == "" .. identity,
               "HTTP client used connection " .. string.tostring(actual) ..
               "; expected " .. identity)
@@ -155,9 +153,9 @@ end
 -- a connection-reuse oracle for both TCP and verified TLS.
 local function reuse_http_server(encrypted: boolean, first_port: integer,
                                  handler: http.Handler): (string, {async.Task})
-  local owners: {async.Task} = {}
-  local wrapped: http.Handler = function (request: http.Request, response: http.Response)
-    local current = async.running()
+  const owners: {async.Task} = {}
+  const wrapped: http.Handler = function (request: http.Request, response: http.Response)
+    const current = async.running()
     local identity = 0
     for index = 1, #owners do
       if owners[index] == current then identity = index; break end
@@ -169,7 +167,7 @@ local function reuse_http_server(encrypted: boolean, first_port: integer,
     response:set_header("X-Test-Connection", "" .. identity)
     handler(request, response)
   end
-  local listen = function (): (http.Server, integer)
+  const listen = function (): (http.Server, integer)
     if encrypted then return support.https_listen(first_port, wrapped, 0) end
     return support.http_listen(first_port, wrapped, 0)
   end
@@ -180,7 +178,7 @@ local function reuse_http_server(encrypted: boolean, first_port: integer,
       task_support.cancel_and_join_task(owners[index], "HTTP reuse connection cleanup")
     end
   end)
-  local serving = async.run<|value, value|>(function (): value
+  const serving = async.run<|value, value|>(function (): value
     server:serve()
     return nil
   end)
@@ -200,16 +198,16 @@ local function add_reuse_framing(context: test.Context, name: string,
                                 body: string, expected: string)
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
-      local fixture = reuse_raw_server(25600, function (connection, identity)
+      const fixture = reuse_raw_server(25600, function (connection, identity)
         for _ in reuse_request, connection do
           connection:write("HTTP/1.1 " .. status .. "\r\nX-Test-Connection: " .. identity ..
                            "\r\n" .. framing .. "\r\n" .. body)
         end
       end)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
       for _ = 1, 2 do
-        local response = client:request(method, fixture:url() .. "/framing")
+        const response = client:request(method, fixture:url() .. "/framing")
         defer response:close()
         reuse_assert_response(response, 1, expected)
         if name == "chunked_trailers" then
@@ -237,10 +235,10 @@ function test_client_reuse_default_get_and_request(_: test.Context)
   run_reuse_case(function ()
     local base, owners = reuse_http_server(false, 25700, reuse_fixed_handler)
     defer http.close_idle_connections()
-    local first = http.get(base .. "/first")
+    const first = http.get(base .. "/first")
     defer first:close()
     reuse_assert_response(first, 1, "ok")
-    local second = http.request("POST", base .. "/second", http.RequestOptions { body = "request" })
+    const second = http.request("POST", base .. "/second", http.RequestOptions { body = "request" })
     defer second:close()
     reuse_assert_response(second, 1, "ok")
     test.assert(#owners == 1, "module GET and request used different pools")
@@ -250,21 +248,21 @@ end
 function test_client_reuse_verified_https_and_ca_isolation(_: test.Context)
   run_reuse_case(function ()
     local base, owners = reuse_http_server(true, 25800, reuse_fixed_handler)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local copied_ca = fs.tmpname()
+    const copied_ca = fs.tmpname()
     defer fs.unlink(copied_ca)
     fs.write_file(copied_ca, fs.read_file(support.TRUST_ROOT))
-    local first = client:get(base .. "/first", http.RequestOptions { ca_file = support.TRUST_ROOT })
+    const first = client:get(base .. "/first", http.RequestOptions { ca_file = support.TRUST_ROOT })
     defer first:close()
     reuse_assert_response(first, 1, "ok")
-    local second = client:get(base .. "/second", http.RequestOptions { ca_file = support.TRUST_ROOT })
+    const second = client:get(base .. "/second", http.RequestOptions { ca_file = support.TRUST_ROOT })
     defer second:close()
     reuse_assert_response(second, 1, "ok")
-    local alternate = client:get(base .. "/alternate", http.RequestOptions { ca_file = copied_ca })
+    const alternate = client:get(base .. "/alternate", http.RequestOptions { ca_file = copied_ca })
     defer alternate:close()
     reuse_assert_response(alternate, 2, "ok")
-    local original = client:get(base .. "/original", http.RequestOptions { ca_file = support.TRUST_ROOT })
+    const original = client:get(base .. "/original", http.RequestOptions { ca_file = support.TRUST_ROOT })
     defer original:close()
     reuse_assert_response(original, 1, "ok")
     test.assert(#owners == 2, "HTTPS reuse crossed distinct CA selections")
@@ -274,21 +272,21 @@ end
 function test_client_reuse_isolates_clients_and_host_authority(_: test.Context)
   run_reuse_case(function ()
     local base, owners = reuse_http_server(false, 25900, reuse_fixed_handler)
-    local first_client = http.Client()
+    const first_client = http.Client()
     defer first_client:close()
-    local second_client = http.Client()
+    const second_client = http.Client()
     defer second_client:close()
-    local first = first_client:get(base .. "/first")
+    const first = first_client:get(base .. "/first")
     defer first:close()
     reuse_assert_response(first, 1, "ok")
-    local second = second_client:get(base .. "/second")
+    const second = second_client:get(base .. "/second")
     defer second:close()
     reuse_assert_response(second, 2, "ok")
-    local headers = http.headers({http.Header("Host", "example.test")})
-    local virtual = first_client:get(base .. "/virtual", http.RequestOptions { headers = headers })
+    const headers = http.headers({http.Header("Host", "example.test")})
+    const virtual = first_client:get(base .. "/virtual", http.RequestOptions { headers = headers })
     defer virtual:close()
     reuse_assert_response(virtual, 3, "ok")
-    local original = first_client:get(base .. "/original")
+    const original = first_client:get(base .. "/original")
     defer original:close()
     reuse_assert_response(original, 1, "ok")
     test.assert(#owners == 3, "client or effective Host identity was omitted from pooling")
@@ -298,8 +296,8 @@ end
 local function add_reuse_background_drain(context: test.Context, name: string, encrypted: boolean)
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
-      local fixture = reuse_raw_server(26000, function (connection, identity)
-        local first? = reuse_request(connection)
+      const fixture = reuse_raw_server(26000, function (connection, identity)
+        const first? = reuse_request(connection)
         if not first then return end
         -- Send the complete small response together so close does not start
         -- its drain budget before the peer issues a second tiny TLS write.
@@ -308,11 +306,11 @@ local function add_reuse_background_drain(context: test.Context, name: string, e
                          "4\r\ntail\r\n0\r\nX-Drained: done\r\n\r\n")
         for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
       end, encrypted)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local first = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
+      const first = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
       defer first:close()
       -- Header acquisition pauses before the body. Closing without a read
       -- must defer even an already-buffered body and trailer to its worker.
@@ -324,7 +322,7 @@ local function add_reuse_background_drain(context: test.Context, name: string, e
       first:close()
       test.assert(first:read() == nil, "closed response remained readable during drain")
       reuse_wait_drained(first)
-      local next = client:get(fixture:url() .. "/next", http.RequestOptions { ca_file = ca })
+      const next = client:get(fixture:url() .. "/next", http.RequestOptions { ca_file = ca })
       defer next:close()
       reuse_assert_response(next, 1, "next")
     end)
@@ -339,7 +337,7 @@ end
 function test_client_reuse_active_and_draining_responses_are_exclusive(_: test.Context)
   run_reuse_case(function ()
     local release_tail = false
-    local fixture = reuse_raw_server(26100, function (connection, identity)
+    const fixture = reuse_raw_server(26100, function (connection, identity)
       if not reuse_request(connection) then return end
       if identity == 1 then
         connection:write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n" ..
@@ -351,23 +349,23 @@ function test_client_reuse_active_and_draining_responses_are_exclusive(_: test.C
       end
       for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local first = client:get(fixture:url() .. "/active")
+    const first = client:get(fixture:url() .. "/active")
     defer first:close()
     test.assert(first:read() == "a", "active response body prefix changed")
-    local active = client:get(fixture:url() .. "/while-active")
+    const active = client:get(fixture:url() .. "/while-active")
     defer active:close()
     test.assert(active.headers:get("X-Test-Connection") == "2",
                 "a second request borrowed an active response's connection")
     first:close()
-    local draining = client:get(fixture:url() .. "/while-draining")
+    const draining = client:get(fixture:url() .. "/while-draining")
     defer draining:close()
     test.assert(draining.headers:get("X-Test-Connection") == "3",
                 "a second request borrowed a draining response's connection")
     release_tail = true
     reuse_wait_drained(first)
-    local next = client:get(fixture:url() .. "/after-drain")
+    const next = client:get(fixture:url() .. "/after-drain")
     defer next:close()
     reuse_assert_response(next, 1, "next")
     reuse_assert_response(active, 2, "other")
@@ -379,7 +377,7 @@ local function add_reuse_drain_timeout(context: test.Context, name: string, encr
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
       local saw_eof = false
-      local fixture = reuse_raw_server(26200, function (connection, identity)
+      const fixture = reuse_raw_server(26200, function (connection, identity)
         if not reuse_request(connection) then return end
         if identity == 1 then
           connection:write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
@@ -395,15 +393,15 @@ local function add_reuse_drain_timeout(context: test.Context, name: string, encr
         connection:write(reuse_reply(identity, "next"))
         for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
       end, encrypted)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local first = client:get(fixture:url() .. "/stalled", http.RequestOptions { ca_file = ca })
+      const first = client:get(fixture:url() .. "/stalled", http.RequestOptions { ca_file = ca })
       defer first:close()
       first:close()
       while not saw_eof do timer.yield() end
-      local next = client:get(fixture:url() .. "/next", http.RequestOptions { ca_file = ca })
+      const next = client:get(fixture:url() .. "/next", http.RequestOptions { ca_file = ca })
       defer next:close()
       reuse_assert_response(next, 2, "next")
     end)
@@ -420,14 +418,14 @@ local function add_reuse_drain_limit(context: test.Context, name: string, size: 
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
       local completed = false
-      local fixture = reuse_raw_server(26300, function (connection, identity)
+      const fixture = reuse_raw_server(26300, function (connection, identity)
         if not reuse_request(connection) then return end
         if identity == 1 then
           connection:write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n" ..
                            "X-Test-Connection: 1\r\n\r\n" ..
                            string.format("%x", size) .. "\r\n" .. string.rep("x", size) ..
                            "\r\n0\r\nX-Drained: done\r\n\r\n")
-          local request? = reuse_request(connection)
+          const request? = reuse_request(connection)
           completed = true
           if not request then return end
           connection:write(reuse_reply(identity, "next"))
@@ -436,9 +434,9 @@ local function add_reuse_drain_limit(context: test.Context, name: string, size: 
         end
         for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
       end)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
-      local first = client:get(fixture:url() .. "/large")
+      const first = client:get(fixture:url() .. "/large")
       defer first:close()
       first:close()
       if expected_identity == 1 then
@@ -446,7 +444,7 @@ local function add_reuse_drain_limit(context: test.Context, name: string, size: 
       else
         while not completed do timer.yield() end
       end
-      local next = client:get(fixture:url() .. "/next")
+      const next = client:get(fixture:url() .. "/next")
       defer next:close()
       reuse_assert_response(next, expected_identity, "next")
     end)
@@ -463,7 +461,7 @@ local function add_reuse_nonpersistent(context: test.Context, name: string,
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
       local saw_eof = false
-      local fixture = reuse_raw_server(26400, function (connection, identity)
+      const fixture = reuse_raw_server(26400, function (connection, identity)
         if not reuse_request(connection) then return end
         if identity == 1 then
           connection:write("HTTP/1.1 200 OK\r\n" .. response_headers .. "\r\n")
@@ -474,15 +472,15 @@ local function add_reuse_nonpersistent(context: test.Context, name: string,
         connection:write(reuse_reply(identity, "next"))
         for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
       end)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
-      local headers = http.headers()
+      const headers = http.headers()
       if request_close then headers:add("Connection", "keep-alive, CLOSE") end
-      local first = client:get(fixture:url() .. "/discard", http.RequestOptions { headers = headers })
+      const first = client:get(fixture:url() .. "/discard", http.RequestOptions { headers = headers })
       defer first:close()
       first:close()
       while not saw_eof do timer.yield() end
-      local next = client:get(fixture:url() .. "/next")
+      const next = client:get(fixture:url() .. "/next")
       defer next:close()
       reuse_assert_response(next, 2, "next")
     end)
@@ -500,7 +498,7 @@ local function add_reuse_invalid_tail(context: test.Context, name: string, wire:
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
       local retired = false
-      local fixture = reuse_raw_server(26500, function (connection, identity)
+      const fixture = reuse_raw_server(26500, function (connection, identity)
         if not reuse_request(connection) then return end
         if identity == 1 then
           connection:write(wire)
@@ -511,13 +509,13 @@ local function add_reuse_invalid_tail(context: test.Context, name: string, wire:
         connection:write(reuse_reply(identity, "next"))
         for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
       end)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
-      local first = client:get(fixture:url() .. "/bad-tail")
+      const first = client:get(fixture:url() .. "/bad-tail")
       defer first:close()
       first:close()
       while not retired do timer.yield() end
-      local next = client:get(fixture:url() .. "/next")
+      const next = client:get(fixture:url() .. "/next")
       defer next:close()
       reuse_assert_response(next, 2, "next")
     end)
@@ -535,13 +533,13 @@ end
 function test_client_reuse_close_idle_connections_and_client_lifetime(_: test.Context)
   run_reuse_case(function ()
     local base, owners = reuse_http_server(false, 26600, reuse_fixed_handler)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local first = client:get(base .. "/first")
+    const first = client:get(base .. "/first")
     defer first:close()
     reuse_assert_response(first, 1, "ok")
     client:close_idle_connections()
-    local active = client:get(base .. "/active")
+    const active = client:get(base .. "/active")
     defer active:close()
     test.assert(active.headers:get("X-Test-Connection") == "2",
                 "close_idle_connections left an idle connection available")
@@ -550,7 +548,7 @@ function test_client_reuse_close_idle_connections_and_client_lifetime(_: test.Co
     client:close()
     local rejected = false
     do
-      local unexpected = client:get(base .. "/closed")
+      const unexpected = client:get(base .. "/closed")
       defer unexpected:close()
     catch
       rejected = true
@@ -564,15 +562,15 @@ end
 function test_client_reuse_client_close_aborts_pending_drain(_: test.Context)
   run_reuse_case(function ()
     local saw_eof = false
-    local fixture = reuse_raw_server(26700, function (connection, _: integer)
+    const fixture = reuse_raw_server(26700, function (connection, _: integer)
       if not reuse_request(connection) then return end
       connection:write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
       test.assert(connection:read() == nil, "client close wrote unexpected bytes")
       saw_eof = true
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local response = client:get(fixture:url() .. "/drain")
+    const response = client:get(fixture:url() .. "/drain")
     defer response:close()
     response:close()
     timer.yield()
@@ -584,17 +582,17 @@ end
 
 function test_client_reuse_close_interrupts_concurrent_reader(_: test.Context)
   run_reuse_case(function ()
-    local fixture = reuse_raw_server(26800, function (connection, _: integer)
+    const fixture = reuse_raw_server(26800, function (connection, _: integer)
       if not reuse_request(connection) then return end
       connection:write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
       test.assert(connection:read() == nil, "closed reader connection received another request")
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local response = client:get(fixture:url() .. "/read")
+    const response = client:get(fixture:url() .. "/read")
     defer response:close()
     test.assert(response:read() == "a", "concurrent-reader prefix changed")
-    local reading = async.run<|value, value|>(function (): value
+    const reading = async.run<|value, value|>(function (): value
       do response:read() catch end
       return nil
     end)
@@ -610,7 +608,7 @@ end
 function test_client_reuse_retries_stale_idle_get_once(_: test.Context)
   run_reuse_case(function ()
     local retired = false
-    local fixture = reuse_raw_server(26900, function (connection, identity)
+    const fixture = reuse_raw_server(26900, function (connection, identity)
       if not reuse_request(connection) then return end
       connection:write(reuse_reply(identity, "ok"))
       if identity == 1 then
@@ -624,12 +622,12 @@ function test_client_reuse_retries_stale_idle_get_once(_: test.Context)
       end
       for _ in reuse_request, connection do connection:write(reuse_reply(identity, "ok")) end
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local first = client:get(fixture:url() .. "/first")
+    const first = client:get(fixture:url() .. "/first")
     defer first:close()
     reuse_assert_response(first, 1, "ok")
-    local second = client:get(fixture:url() .. "/second")
+    const second = client:get(fixture:url() .. "/second")
     defer second:close()
     reuse_assert_response(second, 2, "ok")
     test.assert(retired and #fixture.connections == 2, "stale GET was replayed more than once")
@@ -641,7 +639,7 @@ local function add_reuse_no_retry(context: test.Context, name: string,
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
       local first_request_done = false
-      local fixture = reuse_raw_server(27000, function (connection, identity)
+      const fixture = reuse_raw_server(27000, function (connection, identity)
         if not reuse_request(connection) then return end
         connection:write(reuse_reply(identity, "ok"))
         first_request_done = true
@@ -650,15 +648,15 @@ local function add_reuse_no_retry(context: test.Context, name: string,
           if partial then connection:write("HTTP/1.1 200") end
         end
       end)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
-      local first = client:get(fixture:url() .. "/prime")
+      const first = client:get(fixture:url() .. "/prime")
       defer first:close()
       reuse_assert_response(first, 1, "ok")
       while not first_request_done do timer.yield() end
       local rejected = false
       do
-        local response = client:request(method, fixture:url() .. "/must-not-replay",
+        const response = client:request(method, fixture:url() .. "/must-not-replay",
                                         http.RequestOptions { body = body })
         defer response:close()
         support.read_response(response)
@@ -680,23 +678,23 @@ end
 function test_client_reuse_default_pool_does_not_cross_runtimes(_: test.Context)
   local previous: http.ClientResponse? = nil
   run_reuse_case(function ()
-    local fixture = reuse_raw_server(27100, function (connection, identity)
+    const fixture = reuse_raw_server(27100, function (connection, identity)
       if not reuse_request(connection) then return end
       connection:write(reuse_reply(identity, "first"))
       for _ in reuse_request, connection do connection:write(reuse_reply(identity, "stale")) end
     end)
-    local response = http.get(fixture:url() .. "/first")
+    const response = http.get(fixture:url() .. "/first")
     defer response:close()
     previous = response
     reuse_assert_response(response, 1, "first")
     -- Deliberately leave the default client's idle entry for Runtime teardown.
   end)
   run_reuse_case(function ()
-    local fixture = reuse_raw_server(27100, function (connection, identity)
+    const fixture = reuse_raw_server(27100, function (connection, identity)
       for _ in reuse_request, connection do connection:write(reuse_reply(identity, "fresh")) end
     end)
     defer http.close_idle_connections()
-    local response = http.get(fixture:url() .. "/next-runtime")
+    const response = http.get(fixture:url() .. "/next-runtime")
     defer response:close()
     reuse_assert_response(response, 1, "fresh")
     test.assert(previous:read() == nil, "old response reopened in a later Runtime")
@@ -709,7 +707,7 @@ local function add_reuse_late_input(context: test.Context, name: string, encrypt
       local send_poison = false
       local poison_sent = false
       local retired = false
-      local fixture = reuse_raw_server(27200, function (connection, identity)
+      const fixture = reuse_raw_server(27200, function (connection, identity)
         if not reuse_request(connection) then return end
         if identity == 1 then
           connection:write(reuse_reply(identity, "first"))
@@ -730,11 +728,11 @@ local function add_reuse_late_input(context: test.Context, name: string, encrypt
         connection:write(reuse_reply(identity, "actual"))
         do for _ in reuse_request, connection do connection:write(reuse_reply(identity, "actual")) end catch end
       end, encrypted)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local first = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
+      const first = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
       defer first:close()
       reuse_assert_response(first, 1, "first")
       send_poison = true
@@ -742,7 +740,7 @@ local function add_reuse_late_input(context: test.Context, name: string, encrypt
       -- A completed TLS write need not have reached the receiver yet. Wait
       -- for the idle observer's retirement instead of assuming delivery timing.
       while not retired do timer.yield() end
-      local second = client:get(fixture:url() .. "/second", http.RequestOptions { ca_file = ca })
+      const second = client:get(fixture:url() .. "/second", http.RequestOptions { ca_file = ca })
       defer second:close()
       reuse_assert_response(second, 2, "actual")
       test.assert(#fixture.connections == 2, "idle unsolicited input was accepted as a response")
@@ -758,7 +756,7 @@ end
 function test_client_reuse_public_headers_cannot_enable_closed_connection(_: test.Context)
   run_reuse_case(function ()
     local retired = false
-    local fixture = reuse_raw_server(27300, function (connection, identity)
+    const fixture = reuse_raw_server(27300, function (connection, identity)
       if not reuse_request(connection) then return end
       if identity == 1 then
         connection:write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n" ..
@@ -770,15 +768,15 @@ function test_client_reuse_public_headers_cannot_enable_closed_connection(_: tes
       connection:write(reuse_reply(identity, "next"))
       for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local first = client:get(fixture:url() .. "/closing")
+    const first = client:get(fixture:url() .. "/closing")
     defer first:close()
     first.headers:remove("Connection")
     first.headers:set("Content-Length", "0")
     first:close()
     while not retired do timer.yield() end
-    local next = client:get(fixture:url() .. "/next")
+    const next = client:get(fixture:url() .. "/next")
     defer next:close()
     reuse_assert_response(next, 2, "next")
   end)
@@ -786,18 +784,18 @@ end
 
 function test_client_reuse_mutable_headers_preserve_original_framing(_: test.Context)
   run_reuse_case(function ()
-    local fixture = reuse_raw_server(27400, function (connection, identity)
+    const fixture = reuse_raw_server(27400, function (connection, identity)
       for _ in reuse_request, connection do connection:write(reuse_reply(identity, "ab")) end
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local first = client:get(fixture:url() .. "/first")
+    const first = client:get(fixture:url() .. "/first")
     defer first:close()
     test.assert(first:read_until("ab", true) == "", "response body framing changed")
     first.headers:set("Content-Length", "9999999999999999999999999999999999999999")
     first.headers:set("Connection", "close")
     first:close()
-    local second = client:get(fixture:url() .. "/second")
+    const second = client:get(fixture:url() .. "/second")
     defer second:close()
     reuse_assert_response(second, 1, "ab")
   end)
@@ -805,7 +803,7 @@ end
 
 function test_client_reuse_does_not_repeat_failed_get_retry(_: test.Context)
   run_reuse_case(function ()
-    local fixture = reuse_raw_server(27500, function (connection, identity)
+    const fixture = reuse_raw_server(27500, function (connection, identity)
       if not reuse_request(connection) then return end
       if identity == 1 then
         connection:write(reuse_reply(identity, "prime"))
@@ -813,14 +811,14 @@ function test_client_reuse_does_not_repeat_failed_get_retry(_: test.Context)
       end
       -- Both the first reused attempt and its one fresh retry receive EOF.
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local first = client:get(fixture:url() .. "/prime")
+    const first = client:get(fixture:url() .. "/prime")
     defer first:close()
     reuse_assert_response(first, 1, "prime")
     local rejected = false
     do
-      local second = client:get(fixture:url() .. "/retry")
+      const second = client:get(fixture:url() .. "/retry")
       defer second:close()
     catch
       rejected = true
@@ -832,21 +830,21 @@ end
 
 function test_client_reuse_origin_port_isolation(_: test.Context)
   run_reuse_case(function ()
-    local first_peer = reuse_raw_server(27600, function (connection, identity)
+    const first_peer = reuse_raw_server(27600, function (connection, identity)
       for _ in reuse_request, connection do connection:write(reuse_reply(identity, "first-origin")) end
     end)
-    local second_peer = reuse_raw_server(27700, function (connection, identity)
+    const second_peer = reuse_raw_server(27700, function (connection, identity)
       for _ in reuse_request, connection do connection:write(reuse_reply(identity, "second-origin")) end
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
-    local first = client:get(first_peer:url() .. "/first")
+    const first = client:get(first_peer:url() .. "/first")
     defer first:close()
     reuse_assert_response(first, 1, "first-origin")
-    local second = client:get(second_peer:url() .. "/second")
+    const second = client:get(second_peer:url() .. "/second")
     defer second:close()
     reuse_assert_response(second, 1, "second-origin")
-    local original = client:get(first_peer:url() .. "/original")
+    const original = client:get(first_peer:url() .. "/original")
     defer original:close()
     reuse_assert_response(original, 1, "first-origin")
     test.assert(#first_peer.connections == 1 and #second_peer.connections == 1,
@@ -858,7 +856,7 @@ local function add_reuse_tls_retirement(context: test.Context, mode: string)
   context:run(mode, function (_: test.Context)
     run_reuse_case(function ()
       local outcome = "pending"
-      local fixture = reuse_raw_server(27800, function (connection, identity)
+      const fixture = reuse_raw_server(27800, function (connection, identity)
         if not reuse_request(connection) then return end
         local close_header = ""
         if mode == "response_close" then close_header = "Connection: close\r\n" end
@@ -871,9 +869,9 @@ local function add_reuse_tls_retirement(context: test.Context, mode: string)
           else outcome = string.tostring(error) end
         end
       end, true)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
-      local response = client:get(fixture:url() .. "/close", http.RequestOptions { ca_file = support.TRUST_ROOT })
+      const response = client:get(fixture:url() .. "/close", http.RequestOptions { ca_file = support.TRUST_ROOT })
       defer response:close()
       reuse_assert_response(response, 1, "ok")
       if mode == "client_close" then client:close()
@@ -895,7 +893,7 @@ local function add_reuse_idle_retirement(context: test.Context, name: string, en
     run_reuse_case(function ()
       local send_input = false
       local retired = false
-      local fixture = reuse_raw_server(27900, function (connection, identity)
+      const fixture = reuse_raw_server(27900, function (connection, identity)
         if not reuse_request(connection) then return end
         connection:write(reuse_reply(identity, "first"))
         while not send_input do timer.yield() end
@@ -909,11 +907,11 @@ local function add_reuse_idle_retirement(context: test.Context, name: string, en
         end
         retired = true
       end, encrypted)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local response = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
+      const response = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
       defer response:close()
       reuse_assert_response(response, 1, "first")
       send_input = true
@@ -935,15 +933,15 @@ local function add_reuse_post_runtime_close(context: test.Context, name: string,
     local retained: http.ClientResponse? = nil
     defer if retained ~= nil then retained:close() end
     run_reuse_case(function ()
-      local fixture = reuse_raw_server(28000, function (connection, identity)
+      const fixture = reuse_raw_server(28000, function (connection, identity)
         if not reuse_request(connection) then return end
         connection:write(reuse_reply(identity, "ok"))
         for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
       end, encrypted)
-      local client = http.Client()
+      const client = http.Client()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local response = client:get(fixture:url() .. "/retained", http.RequestOptions { ca_file = ca })
+      const response = client:get(fixture:url() .. "/retained", http.RequestOptions { ca_file = ca })
       retained = response
       test.assert(response:read_until("ok", false) == "ok", "final response chunk changed")
       -- Keep the complete response caller-owned instead of reading EOF. The

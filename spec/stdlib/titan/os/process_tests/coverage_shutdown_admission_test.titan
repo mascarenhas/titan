@@ -1,6 +1,6 @@
 local function check_coverage_shutdown_admission(mode: string)
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function () command.remove_tree(workspace) end)
@@ -13,7 +13,7 @@ local function check_coverage_shutdown_admission(mode: string)
     local result, exited, status = command.capture({
       command.program(workspace, "os_shutdown_admission_app"), mode,
     })
-    local expected = "OS_SHUTDOWN_ADMISSION_OK:" .. mode
+    const expected = "OS_SHUTDOWN_ADMISSION_OK:" .. mode
     test.assert(exited == "exit" and status == 0 and
                 (result == expected .. "\n" or result == expected .. "\r\n"),
                 "shutdown admission child failed (" .. exited .. "/" .. status .. "): " .. result)

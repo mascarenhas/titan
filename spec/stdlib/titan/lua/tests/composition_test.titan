@@ -1,13 +1,13 @@
 function test_lua_requires_initialized_module_once_in_each_state(_: test.Context)
-  local original = independent_preload.counter
+  const original = independent_preload.counter
   defer independent_preload.counter = original
   independent_preload.counter = 700
-  local first = tlua.require("lua.preload_fixture")
+  const first = tlua.require("lua.preload_fixture")
   test.assert(tlua.require("lua.preload_fixture") == first)
   test.assert(independent_preload.counter == 700)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local result = state:run([[
+  const result = state:run([[
     local first = require('lua.preload_fixture')
     assert(first.counter == 41)
     first.increment(1)
@@ -19,10 +19,10 @@ function test_lua_requires_initialized_module_once_in_each_state(_: test.Context
 end
 
 function test_lua_independent_synchronous_reader_is_borrowed(_: test.Context)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local reader = TrackingReader({ "", "return ", "...", "" }, 0, false)
-  local results: {async.TransferValue} = { state:run_from_loader(reader,
+  const reader = TrackingReader({ "", "return ", "...", "" }, 0, false)
+  const results: {async.TransferValue} = { state:run_from_loader(reader,
     "=portable-state-reader", async.TransferValue.is_integer(29),
     async.TransferValue.is_nil(), async.TransferValue.is_string("a\0b")) }
   test.assert(not reader.closed and #results == 3)
@@ -32,7 +32,7 @@ function test_lua_independent_synchronous_reader_is_borrowed(_: test.Context)
 end
 
 local function check_custom_searcher(slot: integer?)
-  local configure = tlua.load([[
+  const configure = tlua.load([[
     return function(slot)
       local name = 'lua.tests.portable_custom'
       local searchers = package.searchers
@@ -51,7 +51,7 @@ local function check_custom_searcher(slot: integer?)
       end
     end
   ]])() as function (integer?): (function (): ())
-  local restore = configure(slot)
+  const restore = configure(slot)
   defer restore()
   runtime_test.run(function ()
     test.assert(tlua.require("lua.tests.portable_custom") == "portable-result")

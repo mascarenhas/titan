@@ -518,6 +518,14 @@ jobs:
           done
           test "$(cat "$PREFIX/lib/titan-browser/0.6/build-profile")" = "$TITAN_BUILD_PROFILE"
 
+      # Every rule over the browser stdlib, its test owners and helpers, with
+      # the proof that the native and browser lint roots cover the test tree.
+      # Browser C header analysis needs the pinned wasi-sdk.
+      - name: Lint browser standard library and test suites
+        run: |
+          export WASI_SDK_PATH="$TITAN_WASI_SDK_ROOT" BINARYEN_ROOT="$TITAN_BINARYEN_ROOT"
+          make titan-stdlib-browser-lint PREFIX="$PREFIX"
+
       - name: Run the browser real-toolchain gate
         env:
           TITAN_ROOT: ${{ github.workspace }}/.lua
@@ -1824,6 +1832,11 @@ jobs:
 
       - name: Verify titanc shebang environment
         run: titanc --help
+
+      # Every rule over the native stdlib and its tests. An intentional
+      # exception is an in-source `-- titan-lint: allow(<rule-id>)` comment.
+      - name: Lint standard library and native test suites
+        run: make titan-stdlib-lint
 
       # Packaging needs the ordinary installed provider. Run its host specs
       # here, then run the native behavior aggregate only with coverage below.

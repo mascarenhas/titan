@@ -22,7 +22,7 @@ local function expect_error(action: function (): (), expected: value)
 end
 
 local function new_loop(): uv.loop_t
-  local loop = uv.loop_t()
+  const loop = uv.loop_t()
   success(uv.loop_init(loop))
   return loop
 end

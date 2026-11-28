@@ -9,12 +9,10 @@ end
 -- Slot codes: 0 the cleanup never ran, 1 it returned, 2 it raised.
 local function sqlite_close_attempt(cells: foreign *void, slot: integer,
                                     close: function (): ())
-  do
-    close()
-    sqlite_close_record(cells, slot, 1)
-  catch
-    sqlite_close_record(cells, slot, 2)
-  end
+  close()
+  sqlite_close_record(cells, slot, 1)
+catch
+  sqlite_close_record(cells, slot, 2)
 end
 
 local sqlite_close_parked = false
@@ -25,12 +23,12 @@ local sqlite_close_shared: sqlite3.Connection? = nil
 local function sqlite_close_hold(db: sqlite3.Connection, cells: foreign *void)
   defer sqlite_close_attempt(cells, 0, db:close)
   execute_sql(db, "BEGIN IMMEDIATE")
-  local insert = db:prepare("INSERT INTO item VALUES (2)")
+  const insert = db:prepare("INSERT INTO item VALUES (2)")
   defer sqlite_close_attempt(cells, 1, insert:close)
   insert:execute()
-  local select = db:prepare("SELECT value FROM item")
+  const select = db:prepare("SELECT value FROM item")
   defer sqlite_close_attempt(cells, 2, select:close)
-  local cursor = select:query()
+  const cursor = select:query()
   defer sqlite_close_attempt(cells, 3, cursor:close)
   sqlite_close_parked = true
   async.suspend(async.ResumeToken("SQLite connection parked at Lua state close"))
@@ -39,8 +37,8 @@ end
 -- Public only so a fresh independent state can call it; test infrastructure.
 -- The Connection is newer than its parked Task, so its finalizer runs first.
 function sqlite_close_park_with_new_connection(path: string, cells_raw: value)
-  local cells = cells_raw as foreign *void
-  local task = async.run<|nil, value|>(function (): nil
+  const cells = cells_raw as foreign *void
+  const task = async.run<|nil, value|>(function (): nil
     sqlite_close_hold(sqlite3.connect(path), cells)
     return nil
   end)
@@ -51,8 +49,8 @@ end
 -- The Connection is older than the parked Task, so the Task unwinds first.
 -- The opener stays parked too: a Runtime whose last Task finished is closing.
 function sqlite_close_park_with_older_connection(path: string, cells_raw: value)
-  local cells = cells_raw as foreign *void
-  local opener = async.run<|nil, value|>(function (): nil
+  const cells = cells_raw as foreign *void
+  const opener = async.run<|nil, value|>(function (): nil
     sqlite_close_shared = sqlite3.connect(path)
     async.suspend(async.ResumeToken("SQLite connection opener"))
     return nil
@@ -60,7 +58,7 @@ function sqlite_close_park_with_older_connection(path: string, cells_raw: value)
   task_support.drive_until(opener, function (): boolean
     return sqlite_close_shared ~= nil
   end)
-  local task = async.run<|nil, value|>(function (): nil
+  const task = async.run<|nil, value|>(function (): nil
     sqlite_close_hold(sqlite_close_shared as sqlite3.Connection, cells)
     return nil
   end)
@@ -73,14 +71,14 @@ end
 -- close; otherwise COMMIT waits in SQLite's busy handler behind the host's
 -- reader. Either way the abandoned Connection holds the RESERVED lock.
 function sqlite_close_park_in_worker(path: string, finish_first: boolean)
-  local task = async.run<|nil, value|>(function (): nil
-    local db = sqlite3.connect(path)
+  const task = async.run<|nil, value|>(function (): nil
+    const db = sqlite3.connect(path)
     defer db:close()
-    local timeout = db:prepare("PRAGMA busy_timeout = 300")
+    const timeout = db:prepare("PRAGMA busy_timeout = 300")
     defer timeout:close()
     timeout:query():close()
     db:set_autocommit(false)
-    local insert = db:prepare("INSERT INTO item VALUES (2)")
+    const insert = db:prepare("INSERT INTO item VALUES (2)")
     defer insert:close()
     if finish_first then
       sqlite_close_parked = true
@@ -97,8 +95,8 @@ function sqlite_close_park_in_worker(path: string, finish_first: boolean)
 end
 
 local function sqlite_close_database(): string
-  local path = fs.tmpname()
-  local setup = sqlite3.connect(path)
+  const path = fs.tmpname()
+  const setup = sqlite3.connect(path)
   defer setup:close()
   execute_sql(setup, "CREATE TABLE item (value INTEGER)")
   execute_sql(setup, "INSERT INTO item VALUES (1)")
@@ -111,7 +109,7 @@ local function sqlite_close_remove(path: string)
 end
 
 local function sqlite_close_child(entry: string, ...: async.TransferValue)
-  local state = sqlite_close_lua.new()
+  const state = sqlite_close_lua.new()
   defer state:close()
   state:run([[
     package.path, package.cpath = '', ''
@@ -124,7 +122,7 @@ end
 -- After the abandoned Connection is gone, no lock survives and its
 -- uncommitted row was rolled back.
 local function sqlite_close_assert_released(path: string)
-  local db = sqlite3.connect(path)
+  const db = sqlite3.connect(path)
   defer db:close()
   execute_sql(db, "BEGIN EXCLUSIVE")
   test.assert(scalar_integer(db, "SELECT count(*) FROM item") == 1,
@@ -136,16 +134,16 @@ local function sqlite_close_parked_case(context: test.Context, name: string,
                                         entry: string)
   context:run(name, function (_: test.Context)
     runtime_test.run(function ()
-      local path = sqlite_close_database()
+      const path = sqlite_close_database()
       defer sqlite_close_remove(path)
-      local cells: owned int[] = foreign int.new_array(4)
+      const cells: owned int[] = foreign int.new_array(4)
       for index = 0, 3 do cells[index] = 0 end
       sqlite_close_child(entry, async.TransferValue.is_string(path),
                          async.TransferValue.is_pointer(cells as foreign *void))
-      local owners: {string} = {"Connection", "INSERT Statement",
+      const owners: {string} = {"Connection", "INSERT Statement",
                                 "SELECT Statement", "Cursor"}
       for index = 1, 4 do
-        local code = cells[index - 1] as integer
+        const code = cells[index - 1] as integer
         test.assert(code == 1, owners[index] .. " close during Lua state close gave code " .. code)
       end
       sqlite_close_assert_released(path)
@@ -166,11 +164,11 @@ local function sqlite_close_worker_case(context: test.Context, name: string,
                                         finish_first: boolean)
   context:run(name, function (_: test.Context)
     runtime_test.run(function ()
-      local path = sqlite_close_database()
+      const path = sqlite_close_database()
       defer sqlite_close_remove(path)
-      local reader = sqlite3.connect(path)
+      const reader = sqlite3.connect(path)
       defer reader:close()
-      local select = reader:prepare("SELECT value FROM item")
+      const select = reader:prepare("SELECT value FROM item")
       defer select:close()
       -- An active Cursor holds SHARED, so the child's COMMIT cannot finish.
       local cursor: sqlite3.Cursor? = nil

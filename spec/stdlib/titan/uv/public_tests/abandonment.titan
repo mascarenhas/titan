@@ -7,7 +7,7 @@ local function assert_abandoned(loop: uv.loop_t, calls: integer)
 end
 
 function test_loop_abandon_retires_streams_and_connect_write_requests(_: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local calls = 0
   local reader, writer = open_pipe_pair(loop)
@@ -17,7 +17,7 @@ function test_loop_abandon_retires_streams_and_connect_write_requests(_: test.Co
       return uv.buf_t.allocate(64)
     end,
     function (_stream: uv.stream_t, _count: integer, _buffer: uv.buf_t?) calls = calls + 1 end))
-  local written = uv.write_t()
+  const written = uv.write_t()
   success(uv.write_string(written, writer:as_stream_t(), strings.rep("abandon\0", 32768),
     function (_request: uv.write_t, _status: integer) calls = calls + 1 end))
   test.assert(written:handle() ~= nil)
@@ -32,7 +32,7 @@ function test_loop_abandon_retires_streams_and_connect_write_requests(_: test.Co
     function (_stream: uv.stream_t, _status: integer) calls = calls + 1 end))
   local name_status, actual? = uv.tcp_getsockname(listener)
   success(name_status)
-  local connected = uv.connect_t()
+  const connected = uv.connect_t()
   success(uv.tcp_connect(connected, client, actual,
     function (_request: uv.connect_t, _status: integer) calls = calls + 1 end))
   test.assert(connected:handle() ~= nil)
@@ -45,12 +45,12 @@ function test_loop_abandon_retires_streams_and_connect_write_requests(_: test.Co
 end
 
 function test_loop_abandon_retires_udp_receive_and_send(_: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local calls = 0
   local received = 0
   local receiver, address = bound(loop, 0)
-  local sender = uv.udp_t()
+  const sender = uv.udp_t()
   success(uv.udp_init(loop, sender))
   success(uv.udp_recv_start(receiver,
     function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
@@ -62,13 +62,13 @@ function test_loop_abandon_retires_udp_receive_and_send(_: test.Context)
       calls = calls + 1
       if peer ~= nil then received = received + 1 end
     end))
-  local sent = uv.udp_send_t()
+  const sent = uv.udp_send_t()
   success(uv.udp_send(sent, sender, {uv.buf_t.from_string("abandon\0")}, address,
     function (_request: uv.udp_send_t, _status: integer) calls = calls + 1 end))
   coverage_mc_deadline(loop)
   while received == 0 do uv.run(loop, uv.RUN_ONCE) end
   test.assert(received == 1, "the UDP handle never delivered before abandonment")
-  local before = calls
+  const before = calls
   uv.close(receiver:as_handle_t(), function (_: uv.handle_t) calls = calls + 1 end)
   success(uv.udp_send(uv.udp_send_t(), sender, {uv.buf_t.from_string("retire")}, address,
     function (_request: uv.udp_send_t, _status: integer) calls = calls + 1 end))
@@ -80,10 +80,10 @@ end
 
 function test_loop_abandon_retires_signal_watcher(_: test.Context)
   if uv.SIGINT == nil then test.skip("capability: SIGINT is unavailable") end
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local calls = 0
-  local signal = uv.signal_t()
+  const signal = uv.signal_t()
   success(uv.signal_init(loop, signal))
   success(uv.signal_start(signal,
     function (_handle: uv.signal_t, _signum: integer) calls = calls + 1 end, uv.SIGINT))
@@ -95,17 +95,17 @@ function test_loop_abandon_retires_signal_watcher(_: test.Context)
 end
 
 function test_loop_abandon_retires_process_without_exit_delivery(_: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local calls = 0
-  local output = fresh_pipe(loop)
-  local process = uv.process_t()
-  local options = exit_options(output, nil)
+  const output = fresh_pipe(loop)
+  const process = uv.process_t()
+  const options = exit_options(output, nil)
   options.exit_cb = function (_owner: uv.process_t, _status: integer, _signal: integer)
     calls = calls + 1
   end
   success(uv.spawn(loop, process, options))
-  local pid = uv.process_get_pid(process)
+  const pid = uv.process_get_pid(process)
   -- Native watcher close does not kill or reap an application-owned child.
   defer do
     success(uv.loop_abandon(loop))
@@ -118,14 +118,14 @@ function test_loop_abandon_retires_process_without_exit_delivery(_: test.Context
 end
 
 function test_loop_abandon_retires_filesystem_event_watcher(_: test.Context)
-  local directory = coverage_fs_directory()
+  const directory = coverage_fs_directory()
   defer coverage_fs_remove(directory, true)
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local calls = 0
-  local watcher = uv.fs_event_t()
+  const watcher = uv.fs_event_t()
   success(uv.fs_event_init(loop, watcher))
-  local status = uv.fs_event_start(watcher,
+  const status = uv.fs_event_start(watcher,
     function (_owner: uv.fs_event_t, _path: string?, _events: integer, _status: integer)
       calls = calls + 1
     end, directory, 0)
@@ -140,12 +140,12 @@ function test_loop_abandon_retires_filesystem_event_watcher(_: test.Context)
 end
 
 function test_loop_abandon_retires_filesystem_poll_and_pending_stat(_: test.Context)
-  local path = fixture_file()
+  const path = fixture_file()
   defer remove_file(path)
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local calls = 0
-  local watcher = uv.fs_poll_t()
+  const watcher = uv.fs_poll_t()
   success(uv.fs_poll_init(loop, watcher))
   success(uv.fs_poll_start(watcher,
     function (_owner: uv.fs_poll_t, _status: integer, _previous: uv.stat_t?, _current: uv.stat_t?)
@@ -158,7 +158,7 @@ function test_loop_abandon_retires_filesystem_poll_and_pending_stat(_: test.Cont
 end
 
 function test_loop_abandon_retires_socket_poll(_: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local status, left?, right? = uv.socketpair(uv.SOCK_STREAM, 0,
     uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
@@ -168,7 +168,7 @@ function test_loop_abandon_retires_socket_poll(_: test.Context)
   success(uv.tcp_init(loop, reader))
   success(uv.tcp_open(writer, left))
   success(uv.tcp_open(reader, right))
-  local poll = uv.poll_t()
+  const poll = uv.poll_t()
   success(uv.poll_init_socket(loop, poll, right))
   local calls = 0
   success(uv.poll_start(poll,
@@ -183,18 +183,18 @@ function test_loop_abandon_retires_socket_poll(_: test.Context)
 end
 
 function test_loop_abandon_retires_reverse_dns_random_and_shutdown(_: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local calls = 0
   local status, address? = uv.ip4_addr("127.0.0.1", 1234)
   success(status)
-  local reverse = uv.getnameinfo_t()
+  const reverse = uv.getnameinfo_t()
   success(uv.getnameinfo(loop, reverse,
     function (_request: uv.getnameinfo_t, _status: integer, _host: string?, _service: string?)
       calls = calls + 1
     end, address, uv.NI_NUMERICHOST | uv.NI_NUMERICSERV))
-  local random = uv.random_t()
-  local buffer = uv.buf_t.allocate(32)
+  const random = uv.random_t()
+  const buffer = uv.buf_t.allocate(32)
   success(uv.random(loop, random, buffer, 32, 0,
     function (_request: uv.random_t, _status: integer, _buffer: uv.buf_t, _length: integer)
       calls = calls + 1
@@ -206,16 +206,16 @@ function test_loop_abandon_retires_reverse_dns_random_and_shutdown(_: test.Conte
   assert_abandoned(loop, calls)
   test.assert(not reader:as_handle_t():is_initialized() and
     not writer:as_handle_t():is_initialized())
-  local reverse_status = reverse:result()
+  const reverse_status = reverse:result()
   test.assert(reverse_status ~= uv.EBUSY, "abandonment left reverse DNS pending")
 end
 
 function test_loop_abandon_rejects_non_main_lua_thread_without_mutation(_: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer success(uv.loop_abandon(loop))
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
-  local run_on_thread = lua.load([[
+  const run_on_thread = lua.load([[
     local check = ...
     local thread = coroutine.create(check)
     assert(coroutine.resume(thread))

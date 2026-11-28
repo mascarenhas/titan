@@ -17,8 +17,8 @@ record Request
   url: url.Url
   version: string
   headers: Headers
-  local parser: Parser
-  local exchange: ExchangeState
+  local const parser: Parser
+  local const exchange: ExchangeState
   local ended: boolean
 end
 
@@ -28,10 +28,10 @@ local const COALESCE_BODY_BYTES = 64 * 1024
 --- The current exchange's response writer with validated status and framing.
 -- @usage standard-library-http.md#servers-and-handlers
 record Response
-  local connection: io.ReaderWriterCloser
-  local exchange: ExchangeState
-  local request_method: string
-  local request_keep_alive: boolean
+  local const connection: io.ReaderWriterCloser
+  local const exchange: ExchangeState
+  local const request_method: string
+  local const request_keep_alive: boolean
   local response_headers: Headers
   local status_number: integer
   local reason_text: string
@@ -47,10 +47,10 @@ end
 --- A listener running independent connection Tasks with serial keep-alive exchanges.
 -- @usage standard-library-http.md#servers-and-handlers
 record Server
-  local plain: net.Server?
-  local secure: ssl.Server?
-  local encrypted: boolean
-  local handler: Handler
+  local const plain: net.Server?
+  local const secure: ssl.Server?
+  local const encrypted: boolean
+  local const handler: Handler
   local idle_timeout_ms: integer
   local header_limit_bytes: integer
   local read_ahead_enabled: boolean
@@ -60,7 +60,7 @@ end
 
 local function request_url(parser: Parser,
                            encrypted: boolean): url.Url
-  local hosts = parser.parsed_headers:values("Host")
+  const hosts = parser.parsed_headers:values("Host")
   if #hosts ~= 1 then
     raise "HTTP/1.1 request must contain exactly one Host header"
   end
@@ -94,12 +94,12 @@ local function read_request(parser: Parser,
   catch
     if not parser.input_seen then
       if error is ssl.Error then
-        local failure: ssl.Error = error
+        const failure: ssl.Error = error
         if failure.name == "TLS_TRUNCATED_EOF" and failure.operation == "ssl.read" then
           return nil
         end
       elseif error is async.OperationError then
-        local failure: async.OperationError = error
+        const failure: async.OperationError = error
         if failure.code == uv.ECONNRESET and failure.name == "ECONNRESET" and
             failure.operation == "net.read" then
           return nil
@@ -112,11 +112,11 @@ local function read_request(parser: Parser,
   -- llhttp also marks CONNECT as an upgrade; only an explicit header offer
   -- enters the upgrade prefilter. Ordinary request-target rejection stays
   -- with the HTTP request URL contract.
-  local upgrade_offer = #parser.parsed_headers:values("Upgrade") > 0 or
+  const upgrade_offer = #parser.parsed_headers:values("Upgrade") > 0 or
     header_has_token(parser.parsed_headers, "Connection", "upgrade")
   local parsed_url: url.Url? = nil
   if upgrade_offer then
-    local hosts = parser.parsed_headers:values("Host")
+    const hosts = parser.parsed_headers:values("Host")
     if parser.major == 1 and parser.minor == 1 and #hosts == 1 then
       local scheme = "http"
       if encrypted then scheme = "https" end
@@ -155,7 +155,7 @@ function Request:read(): string?
   if not self.exchange.active then raise "HTTP request exchange has ended" end
   if self.parser.upgrade then raise "HTTP upgrade request has no readable body" end
   if self.ended then return nil end
-  local chunk? = parser_read(self.parser)
+  const chunk? = parser_read(self.parser)
   if not chunk then self.ended = true end
   return chunk
 end
@@ -172,7 +172,7 @@ function Request:read_until(delimiter: string,
   if not self.exchange.active then raise "HTTP request exchange has ended" end
   if self.parser.upgrade then raise "HTTP upgrade request has no readable body" end
   if self.ended then return nil end
-  local result? = parser_read_until(self.parser, delimiter, chop)
+  const result? = parser_read_until(self.parser, delimiter, chop)
   if not result then self.ended = true end
   return result
 end
@@ -182,7 +182,7 @@ end
 -- @usage standard-library-http.md#servers-and-handlers
 function Request:local_address(): net.Address
   if not self.exchange.active then raise "HTTP request exchange has ended" end
-  local connection = self.exchange.transport.connection
+  const connection = self.exchange.transport.connection
   if connection is net.Connection then
     return (connection as net.Connection):local_address()
   elseif connection is ssl.Connection then
@@ -196,7 +196,7 @@ end
 -- @usage standard-library-http.md#servers-and-handlers
 function Request:peer_address(): net.Address
   if not self.exchange.active then raise "HTTP request exchange has ended" end
-  local connection = self.exchange.transport.connection
+  const connection = self.exchange.transport.connection
   if connection is net.Connection then
     return (connection as net.Connection):peer_address()
   elseif connection is ssl.Connection then
@@ -329,8 +329,8 @@ end
 local function prepare_response_headers(response: Response)
   response.body_allowed =
     status_allows_body(response.request_method, response.status_number)
-  local lengths = response.response_headers:values("Content-Length")
-  local encodings =
+  const lengths = response.response_headers:values("Content-Length")
+  const encodings =
     response.response_headers:values("Transfer-Encoding")
   if #lengths > 1 then
     raise "HTTP response has more than one Content-Length header"
@@ -388,7 +388,7 @@ end
 local function Response:prepare_header_writer(): string.StringWriter
   if self.exchange.transferred then raise "HTTP response was upgraded" end
   prepare_response_headers(self)
-  local builder = string.writer()
+  const builder = string.writer()
   builder:write("HTTP/1.1 " .. string.tostring(self.status_number) ..
                 " " .. self.reason_text .. "\r\n")
   builder:write(render_headers(self.response_headers))
@@ -399,7 +399,7 @@ end
 -- Commitment is reserved before the transport write and never rolled back,
 -- even when that write fails or is cancelled.
 local function Response:commit_writer(builder: string.StringWriter)
-  local payload = builder:drain()
+  const payload = builder:drain()
   self.exchange.output_started = true
   self.headers_sent = true
   self.connection:write(payload)
@@ -425,7 +425,7 @@ function Response:write(data: string)
   if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.closed then raise "HTTP response is closed" end
   if not self.headers_sent then
-    local builder = self:prepare_header_writer()
+    const builder = self:prepare_header_writer()
     -- A small valid first body write travels with the headers.
     if self.body_allowed and #data > 0 and #data <= COALESCE_BODY_BYTES and
        (self.content_length == nil or #data <= self.content_length) then
@@ -467,7 +467,7 @@ function Response:close()
   defer self.exchange.pending = self.exchange.pending - 1
   if self.closed then return end
   if not self.headers_sent then
-    local builder = self:prepare_header_writer()
+    const builder = self:prepare_header_writer()
     -- An empty chunked body ends together with its headers.
     if self.chunked and self.body_allowed then
       builder:write("0\r\n\r\n")
@@ -506,7 +506,7 @@ end
 local function accept_request_expectation(
     connection: io.ReaderWriterCloser, request_value: Request,
     response: Response): boolean
-  local expectations = request_value.headers:values("Expect")
+  const expectations = request_value.headers:values("Expect")
   if #expectations == 0 then return true end
   if #expectations == 1 and
      lower_header_name(trim_header_value(expectations[1])) ==
@@ -526,26 +526,27 @@ end
 -- Shared parser/transport state cannot be released until its owning child has
 -- finished, including when the parent is already cancelled or shutting down.
 local record TerminalCleanup<|A, B|>
-  task: async.Task<|A, B|>
+  const task: async.Task<|A, B|>
   remove: (function (): ())?
 end
 
 local function start_terminal_cleanup<|A, B|>(
     completion: async.Completion<|TerminalCleanup<|A, B|>, nil, nil|>,
     number: integer): uv.req_t?
-  local context = completion:context(number)
+  const context = completion:context(number)
   context.remove = context.task:add_terminal_listener(function (_: async.TaskStatus<|A, B|>)
-    do completion:resolve(number, nil)
-    catch completion:fatal(number, error, traceback); raise end
+    completion:resolve(number, nil)
+  catch
+    completion:fatal(number, error, traceback); raise
   end)
   return nil
 end
 
 local function await_terminal_cleanup<|A, B|>(task: async.Task<|A, B|>)
   if task:status():has_finished() then return end
-  local context = TerminalCleanup<|A, B|>(task, nil)
+  const context = TerminalCleanup<|A, B|>(task, nil)
   defer do
-    local remove? = context.remove
+    const remove? = context.remove
     context.remove = nil
     if remove ~= nil then remove() end
   end
@@ -559,9 +560,9 @@ local function read_request_with_idle_timeout(
     timeout: integer): Request?
   if timeout == 0 then return read_request(parser, encrypted, transport) end
 
-  local cleanup_reason = async.CancellationReason<|value|>.simple(
+  const cleanup_reason = async.CancellationReason<|value|>.simple(
     "HTTP request header wait stopped")
-  local reader = async.run<|Request?, value|>(function (): Request?
+  const reader = async.run<|Request?, value|>(function (): Request?
     return read_request(parser, encrypted, transport)
   end)
   defer do
@@ -573,13 +574,13 @@ local function read_request_with_idle_timeout(
       reader:cancel(cleanup_reason)
     end
   end
-  local deadline = async.run(function (): nil
+  const deadline = async.run(function (): nil
     timer.sleep(timeout)
   end)
   -- The timer-only loser owns no parser or transport state. Cancel it on
   -- every exit without adding a scheduling turn before buffered requests.
   defer deadline:cancel(cleanup_reason)
-  local raced = async.race_two(reader, deadline)
+  const raced = async.race_two(reader, deadline)
   case raced
   when first(status) then
     deadline:cancel(async.CancellationReason.simple(
@@ -599,25 +600,25 @@ end
 
 local function serve_connection(transport: Transport,
                                 server: Server, started: function (): ())
-  local connection = transport.connection
+  const connection = transport.connection
   local exchange: ExchangeState? = nil
   defer do
     if exchange == nil or not exchange.transferred then connection:close() end
   end
   started()
-  local parser = new_request_parser(connection)
+  const parser = new_request_parser(connection)
   defer close_parser(parser)
   while true do
     -- Snapshot the current setting for this request-header acquisition.
     -- Setter calls affect the next loop iteration, never an in-flight read.
     parser.header_limit = server.header_limit_bytes
-    local request? = read_request_with_idle_timeout(
+    const request? = read_request_with_idle_timeout(
       parser, server.encrypted, transport, server.idle_timeout_ms)
     if not request then return end
-    local request_value = request as Request
+    const request_value = request as Request
     exchange = request_value.exchange
     exchange.serving = true
-    local response = new_response(connection, request_value)
+    const response = new_response(connection, request_value)
     if not accept_request_expectation(
         connection, request_value, response) then
       return
@@ -644,14 +645,14 @@ end
 
 local function accept_connection(server: Server): Transport
   if server.encrypted then
-    local connection = (server.secure as ssl.Server):accept()
+    const connection = (server.secure as ssl.Server):accept()
     connection:read_ahead(server.read_ahead_enabled)
-    local channel: io.ReaderWriterCloser = connection
+    const channel: io.ReaderWriterCloser = connection
     return Transport(channel, connection:abort)
   end
-  local connection = (server.plain as net.Server):accept()
+  const connection = (server.plain as net.Server):accept()
   connection:read_ahead(server.read_ahead_enabled)
-  local channel: io.ReaderWriterCloser = connection
+  const channel: io.ReaderWriterCloser = connection
   return Transport(channel, connection:close)
 end
 
@@ -728,7 +729,7 @@ end
 -- @return Previous policy; true enables persistent read-ahead by default.
 -- @usage standard-library-http.md#servers-and-handlers
 function Server:read_ahead(enabled: boolean?): boolean
-  local previous = self.read_ahead_enabled
+  const previous = self.read_ahead_enabled
   if enabled ~= nil then
     if self.closed then raise "HTTP Server is closed" end
     self.read_ahead_enabled = enabled
@@ -750,7 +751,7 @@ end
 -- @return Previous header deadline in milliseconds.
 -- @usage standard-library-http.md#servers-and-handlers
 function Server:idle_timeout(timeout: integer?): integer
-  local previous = self.idle_timeout_ms
+  const previous = self.idle_timeout_ms
   if timeout then
     if timeout < 0 then
       raise "HTTP idle timeout must be non-negative"
@@ -765,7 +766,7 @@ end
 -- @return Previous raw incoming header-byte limit.
 -- @usage standard-library-http.md#strictness-and-limits
 function Server:header_limit(limit: integer?): integer
-  local previous = self.header_limit_bytes
+  const previous = self.header_limit_bytes
   if limit ~= nil then
     if limit < 1 then raise "HTTP header limit must be positive" end
     self.header_limit_bytes = limit
@@ -774,8 +775,8 @@ function Server:header_limit(limit: integer?): integer
 end
 
 local record ConnectionHandoff
-  transport: Transport
-  server: Server
+  const transport: Transport
+  const server: Server
   transferred: boolean
   child: async.Task<|nil, value|>?
   remove: (function (): ())?
@@ -785,13 +786,13 @@ end
 local function start_connection_handoff(
     completion: async.Completion<|ConnectionHandoff, nil, nil|>,
     number: integer): uv.req_t?
-  local context = completion:context(number)
-  local notify = function ()
+  const context = completion:context(number)
+  const notify = function ()
     if context.notified then return end
     completion:resolve(number, nil)
     context.notified = true
   end
-  local started = function ()
+  const started = function ()
     context.transferred = true
     notify()
   end
@@ -800,8 +801,9 @@ local function start_connection_handoff(
     return nil
   end)
   context.remove = context.child:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
-    do notify()
-    catch completion:fatal(number, error, traceback); raise end
+    notify()
+  catch
+    completion:fatal(number, error, traceback); raise
   end)
   return nil
 end
@@ -818,8 +820,8 @@ function Server:serve()
       if self.closed then return end
       raise
     end
-    local transport = accepted as Transport
-    local connection = transport.connection
+    const transport = accepted as Transport
+    const connection = transport.connection
     -- run only accepts a deferred start. Keep this connection owned until the
     -- child has armed its close defer, or has terminated without entering it.
     local handoff: ConnectionHandoff? = nil
@@ -827,10 +829,10 @@ function Server:serve()
       defer do
         if handoff == nil or not handoff.transferred then connection:close() end
       end
-      local context = ConnectionHandoff(transport, self, false, nil, nil, false)
+      const context = ConnectionHandoff(transport, self, false, nil, nil, false)
       handoff = context
       defer do
-        local child? = context.child
+        const child? = context.child
         context.child = nil
         if child ~= nil and not context.transferred then
           defer await_terminal_cleanup(child)
@@ -839,7 +841,7 @@ function Server:serve()
         end
       end
       defer do
-        local remove? = context.remove
+        const remove? = context.remove
         context.remove = nil
         if remove ~= nil then remove() end
       end

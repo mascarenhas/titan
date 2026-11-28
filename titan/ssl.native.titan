@@ -50,7 +50,7 @@ local default_client_context: foreign *SSL_CTX = nil
 
 local function finalize_default_client_context(
     owner: DefaultClientContextOwner)
-  local context = owner.context
+  const context = owner.context
   if not context then return end
 
   -- Clear both views before releasing the native object. Besides making the
@@ -63,7 +63,7 @@ end
 
 local function allocate_default_client_context_owner():
     DefaultClientContextOwner
-  local owner = DefaultClientContextOwner(nil)
+  const owner = DefaultClientContextOwner(nil)
   default_client_context_owner = owner
   gc.finalizable<|DefaultClientContextOwner|>(
       owner, finalize_default_client_context)
@@ -89,26 +89,26 @@ local union OperationResult
 end
 
 local record ProgressWait
-  task: async.Task<|value, value|>
-  token: async.ResumeToken
+  const task: async.Task<|value, value|>
+  const token: async.ResumeToken
 end
 
 -- Admission belongs to the public parent until its epilogue. Engine access
 -- belongs to the internal child and retires before shared cleanup can settle.
 local record Operation
-  kind: string
+  const kind: string
   engine_live: boolean
   child: async.Task<|OperationResult, value|>?
   progress: ProgressWait?
 end
 
 local record CleanupWait
-  done: async.Completion<|Connection, value, value|>
-  number: integer
+  const done: async.Completion<|Connection, value, value|>
+  const number: integer
 end
 
 local record ChildDrain
-  child: async.Task<|OperationResult, value|>
+  const child: async.Task<|OperationResult, value|>
   remove: (function (): ())?
 end
 
@@ -119,7 +119,7 @@ record Connection
   local handle: foreign *SSL
   local input: foreign *BIO
   local output: foreign *BIO
-  local client: boolean
+  local const client: boolean
   local state: string
   local reader: Operation?
   local writer: Operation?
@@ -138,29 +138,29 @@ end
 --- An owned TLS listener whose accepted connections have independent lifetimes.
 -- @usage standard-library-ssl.md#server-connections-and-handshakes
 record Server
-  local listener: net.Server
+  local const listener: net.Server
   local context: foreign *SSL_CTX
   local closed: boolean
   local listener_closed: boolean
 end
 
 local record PemBlock
-  local name_buffer: foreign *void
-  local header_buffer: foreign *void
-  local data_buffer: foreign *void
-  local name: string
-  local header: string
-  local length: integer
+  local const name_buffer: foreign *void
+  local const header_buffer: foreign *void
+  local const data_buffer: foreign *void
+  local const name: string
+  local const header: string
+  local const length: integer
 end
 
 local record CertificateResult
-  local pointer: foreign *X509
-  local found: boolean
+  local const pointer: foreign *X509
+  local const found: boolean
 end
 
 local record PrivateKeyResult
-  local pointer: foreign *EVP_PKEY
-  local found: boolean
+  local const pointer: foreign *EVP_PKEY
+  local const found: boolean
 end
 
 local function checked_text(text: string, operation: string): string
@@ -181,8 +181,8 @@ end
 -- original address for net.connect.
 local function verification_host(host: string): string
   -- Implementation notes: doc/implementation/ssl-library.md#contexts-and-trust
-  local colon? = string.find(host, ":")
-  local scope? = string.find(host, "%")
+  const colon? = string.find(host, ":")
+  const scope? = string.find(host, "%")
   if colon and scope and (colon as integer) < (scope as integer) then
     return string.sub(host, 1, (scope as integer) - 1)
   end
@@ -190,9 +190,9 @@ local function verification_host(host: string): string
 end
 
 local function error_reason(fallback: string): string
-  local packed = ffi.ERR_get_error()
+  const packed = ffi.ERR_get_error()
   if packed ~= 0 then
-    local reason = ffi.ERR_reason_error_string(packed)
+    const reason = ffi.ERR_reason_error_string(packed)
     if reason then return reason as string end
   end
   return fallback
@@ -200,9 +200,9 @@ end
 
 local function openssl_error(operation: string,
                              fallback: string): Error
-  local packed = ffi.ERR_get_error()
+  const packed = ffi.ERR_get_error()
   if packed ~= 0 then
-    local reason = ffi.ERR_reason_error_string(packed)
+    const reason = ffi.ERR_reason_error_string(packed)
     if reason then
       return Error {
         code = packed as integer,
@@ -280,7 +280,7 @@ end
 
 local function operation_error(connection: Connection, code: integer,
                                operation: string): Error
-  local failure = ssl_error(code, operation)
+  const failure = ssl_error(code, operation)
   if connection.transport_eof and
      (code == ffi.SSL_ERROR_SSL or
       code == ffi.SSL_ERROR_SYSCALL) then
@@ -291,7 +291,7 @@ end
 
 local function verify_error(code: integer): Error
   local message = "certificate verification failed"
-  local reason = ffi.X509_verify_cert_error_string(
+  const reason = ffi.X509_verify_cert_error_string(
       code as foreign long)
   if reason then message = reason as string end
   return Error {
@@ -305,7 +305,7 @@ end
 local function bytes_string(bytes: foreign const *char,
                             length: integer): string
   if length == 0 then return "" end
-  local storage: owned char[] =
+  const storage: owned char[] =
     foreign char.new_array(length)
   ffi.memcpy(storage, bytes, length as foreign size_t)
   return storage as string
@@ -338,7 +338,7 @@ end
 
 local function wake_operation(operation: Operation?)
   if operation == nil then return end
-  local waiter? = operation.progress
+  const waiter? = operation.progress
   operation.progress = nil
   if waiter ~= nil then waiter.task:resume(waiter.token) end
 end
@@ -351,9 +351,9 @@ end
 
 local function wait_progress(connection: Connection, operation: Operation)
   require_engine(connection, "ssl." .. operation.kind)
-  local waiter = ProgressWait(async.running(), async.ResumeToken.new("ssl.progress"))
+  const waiter = ProgressWait(async.running(), async.ResumeToken("ssl.progress"))
   operation.progress = waiter
-  local detach = function ()
+  const detach = function ()
     if operation.progress == waiter then operation.progress = nil end
   end
   defer detach()
@@ -369,7 +369,7 @@ end
 
 local function settle_cleanup(waiters: {CleanupWait})
   for index = 1, #waiters do
-    local waiter = waiters[index]
+    const waiter = waiters[index]
     waiter.done:resolve(waiter.number, nil)
   end
 end
@@ -382,7 +382,7 @@ local function retire_scope(connection: Connection, operation: Operation)
   if connection.retry == operation then connection.retry = nil end
   wake_progress(connection)
   if scopes_retired(connection) and #connection.scope_waiters > 0 then
-    local waiters = connection.scope_waiters
+    const waiters = connection.scope_waiters
     connection.scope_waiters = {}
     settle_cleanup(waiters)
   end
@@ -390,7 +390,7 @@ end
 
 local function start_cleanup(done: async.Completion<|Connection, value, value|>,
                              number: integer): uv.req_t?
-  local connection = done:context(number)
+  const connection = done:context(number)
   if connection.state == STATE_CLOSED or connection.state == STATE_FAILED then done:resolve(number, nil)
   else
     connection.cleanup_waiters[#connection.cleanup_waiters + 1] = CleanupWait(done, number)
@@ -400,7 +400,7 @@ end
 
 local function start_scopes(done: async.Completion<|Connection, value, value|>,
                             number: integer): uv.req_t?
-  local connection = done:context(number)
+  const connection = done:context(number)
   if scopes_retired(connection) then done:resolve(number, nil)
   else connection.scope_waiters[#connection.scope_waiters + 1] = CleanupWait(done, number) end
   return nil
@@ -443,7 +443,7 @@ local function terminate(connection: Connection, graceful: boolean)
   free_engine(connection)
   if graceful then connection.state = STATE_CLOSED
   else connection.state = STATE_FAILED end
-  local waiters = connection.cleanup_waiters
+  const waiters = connection.cleanup_waiters
   connection.cleanup_waiters = {}
   settle_cleanup(waiters)
 end
@@ -451,19 +451,19 @@ end
 local function start_child_drain(
     done: async.Completion<|ChildDrain, async.TaskStatus<|OperationResult, value|>, value|>,
     number: integer): uv.req_t?
-  local drain = done:context(number)
+  const drain = done:context(number)
   drain.remove = drain.child:add_terminal_listener(function (
       status: async.TaskStatus<|OperationResult, value|>)
     done:resolve(number, status)
   end)
-  local status = drain.child:status()
+  const status = drain.child:status()
   if status:has_finished() then done:resolve(number, status) end
   return nil
 end
 
 local function drain_child(child: async.Task<|OperationResult, value|>)
   if child:status():has_finished() then return end
-  local drain = ChildDrain(child, nil)
+  const drain = ChildDrain(child, nil)
   defer (function () if drain.remove ~= nil then drain.remove() end end)()
   async.await_cleanup_with(drain, start_child_drain)
 end
@@ -485,7 +485,7 @@ local function begin_operation(connection: Connection, kind: string): Operation?
       connection.state == STATE_PEER_CLOSED or connection.state == STATE_SHUTDOWN) then
     raise "ssl.write: SSL Connection is shutting down"
   end
-  local operation = Operation(kind, false, nil, nil)
+  const operation = Operation(kind, false, nil, nil)
   if kind == "read" then connection.reader = operation
   elseif kind == "write" then connection.writer = operation
   else connection.control = operation end
@@ -502,28 +502,26 @@ end
 local function supervise(connection: Connection, operation: Operation,
                           body: function (): (string?)): string?
   defer release_operation(connection, operation)
-  local child = async.run<|OperationResult, value|>(function (): OperationResult
-    do
-      if connection.state == STATE_TERMINATING or connection.state == STATE_CLOSED or
-         connection.state == STATE_FAILED then
-        raise interrupted("ssl." .. operation.kind)
-      end
-      operation.engine_live = true
-      local result? = body()
-      retire_scope(connection, operation)
-      return OperationResult.success(result)
-    catch
-      local failure = async.Error(error, traceback)
-      retire_scope(connection, operation)
-      terminate(connection, false)
-      return OperationResult.failure(failure)
+  const child = async.run<|OperationResult, value|>(function (): OperationResult
+    if connection.state == STATE_TERMINATING or connection.state == STATE_CLOSED or
+       connection.state == STATE_FAILED then
+      raise interrupted("ssl." .. operation.kind)
     end
+    operation.engine_live = true
+    const result? = body()
+    retire_scope(connection, operation)
+    return OperationResult.success(result)
+  catch
+    const failure = async.Error(error, traceback)
+    retire_scope(connection, operation)
+    terminate(connection, false)
+    return OperationResult.failure(failure)
   end)
   operation.child = child
-  local parent = async.running()
-  local token = async.ResumeToken.new("ssl.operation")
+  const parent = async.running()
+  const token = async.ResumeToken("ssl.operation")
   local waiting = false
-  local remove = child:add_terminal_listener(function (_: async.TaskStatus<|OperationResult, value|>)
+  const remove = child:add_terminal_listener(function (_: async.TaskStatus<|OperationResult, value|>)
     if waiting then
       waiting = false
       parent:resume(token)
@@ -533,11 +531,11 @@ local function supervise(connection: Connection, operation: Operation,
   do
     if not child:status():has_finished() then
       waiting = true
-      local detach = function () waiting = false end
+      const detach = function () waiting = false end
       async.suspend(token, detach)
     end
   catch
-    local failure = async.Error(error, traceback)
+    const failure = async.Error(error, traceback)
     waiting = false
     child:cancel(async.CancellationReason.simple("TLS operation cancelled"))
     terminate(connection, false)
@@ -578,18 +576,18 @@ end
 -- engine-step submission order across independently progressing directions.
 local function drain_output(connection: Connection): integer
   require_engine(connection, "ssl.output")
-  local pending = ffi.BIO_ctrl_pending(connection.output) as integer
+  const pending = ffi.BIO_ctrl_pending(connection.output) as integer
   if pending == 0 then return 0 end
-  local buffer: owned char[] = foreign char.new_array(pending)
+  const buffer: owned char[] = foreign char.new_array(pending)
   local lengths = foreign size_t.new_array(1)
   lengths[0] = 0 as foreign size_t
   ffi.ERR_clear_error()
-  local ok = ffi.BIO_read_ex(connection.output, buffer,
+  const ok = ffi.BIO_read_ex(connection.output, buffer,
                             pending as foreign size_t, lengths)
   if ok ~= 1 or (lengths[0] as integer) ~= pending then
     raise openssl_error("ssl.output.read", "failed to detach the TLS output BIO")
   end
-  local batch = buffer as string
+  const batch = buffer as string
   connection.transport:write(batch)
   require_engine(connection, "ssl.output")
   return pending
@@ -631,12 +629,12 @@ local function feed_input(connection: Connection, owner: Operation, operation: s
     wake_progress(connection)
   end)()
   if connection.transport_eof then return end
-  local encrypted: string? = (function (
+  const encrypted: string? = (function (
       connection: Connection, operation: string): string?
     return connection.transport:read()
   catch
     if error is async.OperationError then
-      local failure = error as async.OperationError
+      const failure = error as async.OperationError
       if failure.name == "ECONNRESET" and
          failure.operation == "net.read" then
         -- FIN and RST are different TCP presentations of the same TLS
@@ -655,14 +653,14 @@ local function feed_input(connection: Connection, owner: Operation, operation: s
     return
   end
 
-  local input = encrypted as string
-  local bytes = input as foreign const *char
+  const input = encrypted as string
+  const bytes = input as foreign const *char
   local offset = 0
   while offset < #input do
     local lengths = foreign size_t.new_array(1)
     lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
-    local ok = ffi.BIO_write_ex(
+    const ok = ffi.BIO_write_ex(
         connection.input, bytes + offset,
         (#input - offset) as foreign size_t, lengths)
     if ok ~= 1 or lengths[0] == 0 then
@@ -710,14 +708,14 @@ local function handshake_locked(connection: Connection, owner: Operation)
   while true do
     engine_gate(connection, owner)
     ffi.ERR_clear_error()
-    local result = ffi.SSL_do_handshake(connection.handle)
+    const result = ffi.SSL_do_handshake(connection.handle)
     if result == 1 then
       retry_owner(connection, owner, ffi.SSL_ERROR_NONE)
       if connection.client then
-        local verification =
+        const verification =
           ffi.SSL_get_verify_result(connection.handle) as integer
         if verification ~= ffi.X509_V_OK then
-          local failure = verify_error(verification)
+          const failure = verify_error(verification)
           drain_step(connection, ffi.SSL_ERROR_SSL, failure)
           raise failure
         end
@@ -730,17 +728,17 @@ local function handshake_locked(connection: Connection, owner: Operation)
     end
 
     -- SSL_get_error must be the first OpenSSL call after the failed operation.
-    local code = ffi.SSL_get_error(connection.handle, result) as integer
+    const code = ffi.SSL_get_error(connection.handle, result) as integer
     retry_owner(connection, owner, code)
     local failure = operation_error(connection, code, "ssl.handshake")
     if connection.client then
-      local verification =
+      const verification =
         ffi.SSL_get_verify_result(connection.handle) as integer
       if verification ~= ffi.X509_V_OK then
         failure = verify_error(verification)
       end
     end
-    local drained = drain_step(connection, code, failure)
+    const drained = drain_step(connection, code, failure)
     if not want_retry(connection, owner, code, "ssl.handshake", drained) then
       raise failure
     end
@@ -758,7 +756,7 @@ local function send_shutdown_locked(connection: Connection, owner: Operation)
   while true do
     engine_gate(connection, owner)
     ffi.ERR_clear_error()
-    local result = ffi.SSL_shutdown(connection.handle)
+    const result = ffi.SSL_shutdown(connection.handle)
     if result >= 0 then
       retry_owner(connection, owner, ffi.SSL_ERROR_NONE)
       drain_output(connection)
@@ -770,12 +768,12 @@ local function send_shutdown_locked(connection: Connection, owner: Operation)
       break
     end
 
-    local code = ffi.SSL_get_error(connection.handle, result) as integer
+    const code = ffi.SSL_get_error(connection.handle, result) as integer
     retry_owner(connection, owner, code)
-    local failure = operation_error(connection, code, "ssl.shutdown")
-    local drained = drain_step(connection, code, failure)
+    const failure = operation_error(connection, code, "ssl.shutdown")
+    const drained = drain_step(connection, code, failure)
     if code == ffi.SSL_ERROR_WANT_READ then
-      local flags = ffi.SSL_get_shutdown(connection.handle)
+      const flags = ffi.SSL_get_shutdown(connection.handle)
       if (flags & ffi.SSL_SENT_SHUTDOWN) ~= 0 then
         connection.state = STATE_WRITE_SHUTDOWN
         break
@@ -795,7 +793,7 @@ end
 local function read_locked(connection: Connection, owner: Operation): string?
   require_engine(connection, "ssl.read")
   if #connection.excess > 0 then
-    local result = connection.excess
+    const result = connection.excess
     connection.excess = ""
     return result
   end
@@ -803,23 +801,23 @@ local function read_locked(connection: Connection, owner: Operation): string?
      connection.state == STATE_SHUTDOWN then return nil end
   handshake_locked(connection, owner)
 
-  local buffer = foreign char.new_array(TLS_RECORD_BYTES)
+  const buffer = foreign char.new_array(TLS_RECORD_BYTES)
   while true do
     engine_gate(connection, owner)
     local lengths = foreign size_t.new_array(1)
     lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
-    local result = ffi.SSL_read_ex(
+    const result = ffi.SSL_read_ex(
         connection.handle, buffer,
         TLS_RECORD_BYTES as foreign size_t, lengths)
     if result == 1 then
       retry_owner(connection, owner, ffi.SSL_ERROR_NONE)
       drain_output(connection)
-      local length = lengths[0] as integer
+      const length = lengths[0] as integer
       if length > 0 then return bytes_string(buffer, length) end
     else
-      local code = ffi.SSL_get_error(connection.handle, result) as integer
-      local failure = operation_error(connection, code, "ssl.read")
+      const code = ffi.SSL_get_error(connection.handle, result) as integer
+      const failure = operation_error(connection, code, "ssl.read")
       retry_owner(connection, owner, code)
       -- Peer EOF stops write admission before any output network wait.
       if code == ffi.SSL_ERROR_ZERO_RETURN then
@@ -830,7 +828,7 @@ local function read_locked(connection: Connection, owner: Operation): string?
         end
         wake_progress(connection)
       end
-      local drained = drain_step(connection, code, failure)
+      const drained = drain_step(connection, code, failure)
       if code == ffi.SSL_ERROR_ZERO_RETURN then
         while connection.writer ~= nil and connection.writer.engine_live do
           wait_progress(connection, owner)
@@ -838,7 +836,7 @@ local function read_locked(connection: Connection, owner: Operation): string?
         do
           send_shutdown_locked(connection, owner)
         catch
-          local shutdown_failure = error
+          const shutdown_failure = error
           -- Receipt of close_notify is authenticated EOF. If our reciprocal
           -- alert was written and only the TCP half-close failed because the
           -- peer had already closed, preserve that clean EOF result. Do not
@@ -863,13 +861,13 @@ end
 
 local function write_piece_locked(connection: Connection, owner: Operation, piece: string)
   -- Implementation notes: doc/implementation/ssl-library.md#driving-the-state-machine
-  local bytes = piece as foreign const *char
+  const bytes = piece as foreign const *char
   while true do
     engine_gate(connection, owner)
     local lengths = foreign size_t.new_array(1)
     lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
-    local result = ffi.SSL_write_ex(
+    const result = ffi.SSL_write_ex(
         connection.handle, bytes,
         #piece as foreign size_t, lengths)
     if result == 1 then
@@ -887,10 +885,10 @@ local function write_piece_locked(connection: Connection, owner: Operation, piec
     end
 
     -- Keep `piece`, its pointer, and its exact length unchanged across retry.
-    local code = ffi.SSL_get_error(connection.handle, result) as integer
+    const code = ffi.SSL_get_error(connection.handle, result) as integer
     retry_owner(connection, owner, code)
-    local failure = operation_error(connection, code, "ssl.write")
-    local drained = drain_step(connection, code, failure)
+    const failure = operation_error(connection, code, "ssl.write")
+    const drained = drain_step(connection, code, failure)
     if not want_retry(connection, owner, code, "ssl.write", drained) then
       raise failure
     end
@@ -910,7 +908,7 @@ local function write_locked(connection: Connection, owner: Operation, data: stri
   while offset <= #data do
     local last = offset + TLS_RECORD_BYTES - 1
     if last > #data then last = #data end
-    local piece = string.sub(data, offset, last)
+    const piece = string.sub(data, offset, last)
     write_piece_locked(connection, owner, piece)
     offset = last + 1
   end
@@ -921,7 +919,7 @@ end
 -- collection leaves the Connection to its owner.
 local function finalize_connection(candidate: value)
   if ffi.titan_state_closing(L) == 0 then return end
-  local connection: Connection = candidate
+  const connection: Connection = candidate
   connection:close()
 end
 
@@ -929,7 +927,7 @@ local function new_connection(transport: net.Connection,
                               context: foreign *SSL_CTX,
                               client: boolean): Connection
   -- Register the owner's state-close finalizer before allocating its engine.
-  local connection = Connection {
+  const connection = Connection {
     transport = transport,
     handle = nil,
     input = nil,
@@ -946,21 +944,21 @@ local function new_connection(transport: net.Connection,
   }
   gc.finalizable<|value|>(connection, finalize_connection)
   ffi.ERR_clear_error()
-  local handle = ffi.SSL_new(context)
+  const handle = ffi.SSL_new(context)
   if not handle then
     raise openssl_error("ssl.connection.new",
                         "failed to allocate an SSL object")
   end
 
   ffi.ERR_clear_error()
-  local input = ffi.BIO_new(ffi.BIO_s_mem())
+  const input = ffi.BIO_new(ffi.BIO_s_mem())
   if not input then
     ffi.SSL_free(handle)
     raise openssl_error("ssl.input.new",
                         "failed to allocate the TLS input BIO")
   end
   ffi.ERR_clear_error()
-  local output = ffi.BIO_new(ffi.BIO_s_mem())
+  const output = ffi.BIO_new(ffi.BIO_s_mem())
   if not output then
     ffi.BIO_free(input)
     ffi.SSL_free(handle)
@@ -998,7 +996,7 @@ end
 
 local function new_client_context(): foreign *SSL_CTX
   ffi.ERR_clear_error()
-  local context = ffi.SSL_CTX_new(ffi.TLS_client_method())
+  const context = ffi.SSL_CTX_new(ffi.TLS_client_method())
   if not context then
     raise openssl_error("ssl.client.context",
                         "failed to allocate a client SSL context")
@@ -1007,7 +1005,7 @@ local function new_client_context(): foreign *SSL_CTX
     configure_context(context, "ssl.client.minimum-version")
     ffi.SSL_CTX_set_verify(context, ffi.SSL_VERIFY_PEER, nil)
   catch
-    local failure = error
+    const failure = error
     ffi.SSL_CTX_free(context)
     raise failure
   end
@@ -1025,9 +1023,9 @@ local function pem_memory_bio(data: string,
     }
   end
 
-  local source = data as foreign const *char
+  const source = data as foreign const *char
   ffi.ERR_clear_error()
-  local bio = ffi.BIO_new_mem_buf(
+  const bio = ffi.BIO_new_mem_buf(
       source as foreign const *void,
       #data as foreign int)
   if not bio then
@@ -1063,10 +1061,10 @@ end
 -- symbols. This is their public non-system error bit extraction; PEM parser
 -- EOF is never a system error.
 local function pem_no_start_line(packed: integer): boolean
-  local library =
+  const library =
     (packed >> (ffi.ERR_LIB_OFFSET as integer)) &
     (ffi.ERR_LIB_MASK as integer)
-  local reason = packed & (ffi.ERR_REASON_MASK as integer)
+  const reason = packed & (ffi.ERR_REASON_MASK as integer)
   return library == (ffi.ERR_LIB_PEM as integer) and
          reason == (ffi.PEM_R_NO_START_LINE as integer)
 end
@@ -1084,14 +1082,14 @@ local function read_pem_block(bio: foreign *BIO,
   lengths[0] = 0 as foreign long
 
   ffi.ERR_clear_error()
-  local result = ffi.PEM_read_bio(
+  const result = ffi.PEM_read_bio(
       bio,
       names as foreign *(*char),
       headers as foreign *(*char),
       data as foreign *(*unsigned char),
       lengths)
   if result ~= 1 then
-    local packed = ffi.ERR_peek_last_error() as integer
+    const packed = ffi.ERR_peek_last_error() as integer
     free_pem_buffers(names[0], headers[0], data[0])
     if packed ~= 0 and pem_no_start_line(packed) then
       ffi.ERR_clear_error()
@@ -1110,8 +1108,8 @@ local function read_pem_block(bio: foreign *BIO,
     }
   end
   do
-    local name = (names[0] as foreign *char) as string
-    local header = (headers[0] as foreign *char) as string
+    const name = (names[0] as foreign *char) as string
+    const header = (headers[0] as foreign *char) as string
     return PemBlock {
       name_buffer = names[0],
       header_buffer = headers[0],
@@ -1121,7 +1119,7 @@ local function read_pem_block(bio: foreign *BIO,
       length = lengths[0] as integer,
     }
   catch
-    local failure = error
+    const failure = error
     free_pem_buffers(names[0], headers[0], data[0])
     raise failure
   end
@@ -1155,7 +1153,7 @@ local function decode_certificate(block: PemBlock,
   if not certificate then
     raise openssl_error(operation, "failed to decode a PEM certificate")
   end
-  local expected =
+  const expected =
     (block.data_buffer as foreign const *unsigned char) + block.length
   if (cursors[0] as foreign const *unsigned char) ~= expected then
     ffi.X509_free(certificate)
@@ -1181,14 +1179,14 @@ local function decode_private_key(block: PemBlock): foreign *EVP_PKEY
   local cursors = foreign VoidPointer.new_array(1)
   cursors[0] = block.data_buffer
   ffi.ERR_clear_error()
-  local private_key = ffi.d2i_AutoPrivateKey(
+  const private_key = ffi.d2i_AutoPrivateKey(
       nil, cursors as foreign *(const *unsigned char),
       block.length as foreign long)
   if not private_key then
     raise openssl_error("ssl.server.private-key",
                         "failed to decode a PEM private key")
   end
-  local expected =
+  const expected =
     (block.data_buffer as foreign const *unsigned char) + block.length
   if (cursors[0] as foreign const *unsigned char) ~= expected then
     ffi.EVP_PKEY_free(private_key)
@@ -1217,9 +1215,9 @@ end
 local function next_certificate(bio: foreign *BIO,
                                 operation: string): CertificateResult
   while true do
-    local block? = read_pem_block(bio, operation)
+    const block? = read_pem_block(bio, operation)
     if not block then return CertificateResult { pointer = nil, found = false } end
-    local exact = block as PemBlock
+    const exact = block as PemBlock
     if certificate_pem_name(exact.name) then
       return CertificateResult {
         pointer = decode_certificate_block(exact, operation),
@@ -1234,9 +1232,9 @@ end
 local function next_private_key(
     bio: foreign *BIO): PrivateKeyResult
   while true do
-    local block? = read_pem_block(bio, "ssl.server.private-key")
+    const block? = read_pem_block(bio, "ssl.server.private-key")
     if not block then return PrivateKeyResult { pointer = nil, found = false } end
-    local exact = block as PemBlock
+    const exact = block as PemBlock
     if exact.name == "ENCRYPTED PRIVATE KEY" then
       free_pem_block(exact)
       raise Error {
@@ -1255,9 +1253,9 @@ end
 
 local function load_ca_certificates(context: foreign *SSL_CTX,
                                     data: string)
-  local bio = pem_memory_bio(data, "ssl.client.trust")
+  const bio = pem_memory_bio(data, "ssl.client.trust")
   defer ffi.BIO_free(bio)
-  local store = ffi.SSL_CTX_get_cert_store(context)
+  const store = ffi.SSL_CTX_get_cert_store(context)
   if not store then
     raise openssl_error("ssl.client.trust",
                         "failed to access the certificate store")
@@ -1265,9 +1263,9 @@ local function load_ca_certificates(context: foreign *SSL_CTX,
 
   local certificates = 0
   while true do
-    local next_result = next_certificate(bio, "ssl.client.trust")
+    const next_result = next_certificate(bio, "ssl.client.trust")
     if not next_result.found then break end
-    local certificate = next_result.pointer
+    const certificate = next_result.pointer
     do
       ffi.ERR_clear_error()
       if ffi.X509_STORE_add_cert(
@@ -1276,7 +1274,7 @@ local function load_ca_certificates(context: foreign *SSL_CTX,
                             "failed to add a CA certificate")
       end
     catch
-      local failure = error
+      const failure = error
       ffi.X509_free(certificate)
       raise failure
     end
@@ -1295,11 +1293,11 @@ local function load_ca_certificates(context: foreign *SSL_CTX,
 end
 
 local function explicit_client_context(data: string): foreign *SSL_CTX
-  local context = new_client_context()
+  const context = new_client_context()
   do
     load_ca_certificates(context, data)
   catch
-    local failure = async.Error(error, traceback)
+    const failure = async.Error(error, traceback)
     ffi.SSL_CTX_free(context)
     failure:raise()
     raise "saved TLS trust failure unexpectedly returned"
@@ -1308,7 +1306,7 @@ local function explicit_client_context(data: string): foreign *SSL_CTX
 end
 
 local function acquire_default_client_context(): foreign *SSL_CTX
-  local context = default_client_context
+  const context = default_client_context
   if not context then
     raise Error {
       code = 0,
@@ -1330,13 +1328,13 @@ end
 -- is its documented expansion and makes the context retain each chain cert.
 local function load_certificate_chain(context: foreign *SSL_CTX,
                                       data: string)
-  local bio = pem_memory_bio(data, "ssl.server.certificate")
+  const bio = pem_memory_bio(data, "ssl.server.certificate")
   defer ffi.BIO_free(bio)
   local certificates = 0
   while true do
-    local next_result = next_certificate(bio, "ssl.server.certificate")
+    const next_result = next_certificate(bio, "ssl.server.certificate")
     if not next_result.found then break end
-    local certificate = next_result.pointer
+    const certificate = next_result.pointer
     do
       ffi.ERR_clear_error()
       if certificates == 0 then
@@ -1351,7 +1349,7 @@ local function load_certificate_chain(context: foreign *SSL_CTX,
                             "failed to load the certificate chain")
       end
     catch
-      local failure = error
+      const failure = error
       ffi.X509_free(certificate)
       raise failure
     end
@@ -1371,9 +1369,9 @@ local function load_certificate_chain(context: foreign *SSL_CTX,
 end
 
 local function load_private_key(context: foreign *SSL_CTX, data: string)
-  local bio = pem_memory_bio(data, "ssl.server.private-key")
+  const bio = pem_memory_bio(data, "ssl.server.private-key")
   defer ffi.BIO_free(bio)
-  local next_result = next_private_key(bio)
+  const next_result = next_private_key(bio)
   if not next_result.found then
     raise Error {
       code = 0,
@@ -1382,12 +1380,12 @@ local function load_private_key(context: foreign *SSL_CTX, data: string)
       operation = "ssl.server.private-key",
     }
   end
-  local private_key = next_result.pointer
+  const private_key = next_result.pointer
   do
     -- Continue through the file before retaining the selected key so a valid
     -- first block cannot hide malformed trailing PEM input.
     while true do
-      local trailing = next_private_key(bio)
+      const trailing = next_private_key(bio)
       if not trailing.found then break end
       ffi.EVP_PKEY_free(trailing.pointer)
     end
@@ -1398,7 +1396,7 @@ local function load_private_key(context: foreign *SSL_CTX, data: string)
                           "failed to load the private key")
     end
   catch
-    local failure = error
+    const failure = error
     ffi.EVP_PKEY_free(private_key)
     raise failure
   end
@@ -1409,7 +1407,7 @@ end
 local function server_context(certificate_data: string,
                               private_key_data: string): foreign *SSL_CTX
   ffi.ERR_clear_error()
-  local context = ffi.SSL_CTX_new(ffi.TLS_server_method())
+  const context = ffi.SSL_CTX_new(ffi.TLS_server_method())
   if not context then
     raise openssl_error("ssl.server.context",
                         "failed to allocate a server SSL context")
@@ -1424,7 +1422,7 @@ local function server_context(certificate_data: string,
                           "private key does not match the certificate")
     end
   catch
-    local failure = error
+    const failure = error
     ffi.SSL_CTX_free(context)
     raise failure
   end
@@ -1435,7 +1433,7 @@ end
 -- FFI. SSL_ctrl with SSL_CTRL_SET_TLSEXT_HOSTNAME is its documented primitive
 -- expansion. OpenSSL consumes the mutable NUL-terminated copy during the call.
 local function configure_server_name(handle: foreign *SSL, host: string)
-  local server_name = foreign char.new_array(#host + 1)
+  const server_name = foreign char.new_array(#host + 1)
   ffi.memcpy(server_name,
                  host as foreign const *char,
                  #host as foreign size_t)
@@ -1457,14 +1455,14 @@ end
 
 local function configure_client(connection: Connection, host: string)
     ffi.ERR_clear_error()
-    local parameters = ffi.SSL_get0_param(connection.handle)
+    const parameters = ffi.SSL_get0_param(connection.handle)
     if not parameters then
       raise openssl_error("ssl.connect.verify-host",
                           "failed to access peer verification parameters")
     end
     ffi.ERR_clear_error()
-    local identity = verification_host(host)
-    local ip_identity = ffi.X509_VERIFY_PARAM_set1_ip_asc(
+    const identity = verification_host(host)
+    const ip_identity = ffi.X509_VERIFY_PARAM_set1_ip_asc(
         parameters, identity) == 1
     if not ip_identity then
       -- A failed IP parse is the ordinary DNS-name branch, not the error
@@ -1492,7 +1490,7 @@ local function adopt_client(transport: net.Connection, context: foreign *SSL_CTX
     configure_client(connection, host)
     return connection
   catch
-    local failure = async.Error(error, traceback)
+    const failure = async.Error(error, traceback)
     if connection ~= nil then free_engine(connection) end
     do transport:close() catch end
     failure:raise()
@@ -1514,11 +1512,11 @@ function client(transport: net.Connection, host: string,
   -- Ownership transfers only after argument validation. Trust loading may
   -- suspend; the opening supervisor may retain TCP solely as abort authority.
   do
-    local context = client_context(ca_file)
+    const context = client_context(ca_file)
     defer ffi.SSL_CTX_free(context)
     return adopt_client(transport, context, host)
   catch
-    local failure = async.Error(error, traceback)
+    const failure = async.Error(error, traceback)
     do transport:close() catch end
     failure:raise()
     raise "saved TLS trust failure unexpectedly returned"
@@ -1536,14 +1534,14 @@ function connect(host: string, port: integer,
   checked_text(host, "ssl.connect.host")
   if ca_file ~= nil then checked_text(ca_file, "ssl.connect.ca-file") end
   -- Preserve existing validation/trust-before-dial order.
-  local context = client_context(ca_file)
+  const context = client_context(ca_file)
   defer ffi.SSL_CTX_free(context)
-  local connection = adopt_client(net.connect(host, port), context, host)
+  const connection = adopt_client(net.connect(host, port), context, host)
   do
     connection:handshake()
     return connection
   catch
-    local failure = async.Error(error, traceback)
+    const failure = async.Error(error, traceback)
     connection:abort()
     failure:raise()
     raise "saved TLS connection failure unexpectedly returned"
@@ -1576,15 +1574,15 @@ function listen(host: string, port: integer, certificate_file: string,
     raise "ssl.listen: private key file must not be empty"
   end
 
-  local certificate_data = fs.read_file(certificate_file)
+  const certificate_data = fs.read_file(certificate_file)
   local private_key_data = certificate_data
   if actual_private_key_file ~= certificate_file then
     private_key_data = fs.read_file(actual_private_key_file)
   end
-  local context = server_context(certificate_data, private_key_data)
+  const context = server_context(certificate_data, private_key_data)
   do
-    local listener = net.listen(host, port, backlog, reuse_port)
-    local server = Server {
+    const listener = net.listen(host, port, backlog, reuse_port)
+    const server = Server {
       listener = listener,
       context = nil,
       closed = false,
@@ -1594,7 +1592,7 @@ function listen(host: string, port: integer, certificate_file: string,
     server.context = context
     return server
   catch
-    local failure = error
+    const failure = error
     ffi.SSL_CTX_free(context)
     raise failure
   end
@@ -1603,7 +1601,7 @@ end
 --- Complete the lazy TLS handshake before application I/O.
 -- @usage standard-library-ssl.md#server-connections-and-handshakes
 function Connection:handshake()
-  local operation? = begin_operation(self, "handshake")
+  const operation? = begin_operation(self, "handshake")
   if operation == nil then return end
   supervise(self, operation, function (): string?
     handshake_locked(self, operation)
@@ -1652,14 +1650,14 @@ function Connection:to_transfer_payload(): string
       #self.cleanup_waiters ~= 0 or #self.scope_waiters ~= 0 then
     raise "cannot transfer a TLS Connection with a pending operation"
   end
-  local handle = self.handle
-  local client = self.client
-  local state = self.state
-  local transport_eof = self.transport_eof
-  local transport_shutdown = self.transport_shutdown
-  local excess = self.excess
+  const handle = self.handle
+  const client = self.client
+  const state = self.state
+  const transport_eof = self.transport_eof
+  const transport_shutdown = self.transport_shutdown
+  const excess = self.excess
   -- The engine remains source-owned until the child handoff succeeds.
-  local transport_payload = self.transport:to_transfer_payload()
+  const transport_payload = self.transport:to_transfer_payload()
   self.handle = nil
   self.input = nil
   self.output = nil
@@ -1672,7 +1670,7 @@ function Connection:to_transfer_payload(): string
     defer ffi.SSL_free(handle)
     net.Connection.discard_transfer_payload(transport_payload)
   end
-  local payload = protobuf.serialize_fields(connection_transfer_fields,
+  const payload = protobuf.serialize_fields(connection_transfer_fields,
     transport_payload, handle, client, state, transport_eof, transport_shutdown, excess)
   exported = true
   return payload
@@ -1686,7 +1684,7 @@ function Connection.from_transfer_payload(payload: string): Connection
   local transport_payload: string, raw_handle: value, client: boolean,
     state: string, transport_eof: boolean, transport_shutdown: boolean, excess: string =
     protobuf.deserialize_fields(payload, connection_transfer_fields)
-  local handle = raw_handle as foreign *SSL
+  const handle = raw_handle as foreign *SSL
   if not handle then raise "invalid TLS Connection engine payload" end
   if state ~= STATE_HANDSHAKING and state ~= STATE_OPEN and
       state ~= STATE_WRITE_SHUTDOWN and state ~= STATE_PEER_CLOSED and
@@ -1695,7 +1693,7 @@ function Connection.from_transfer_payload(payload: string): Connection
   end
   -- Allocate the complete destination GC owner before adopting either native
   -- resource. No source-state strings, callbacks, or Operation owners survive.
-  local connection: Connection = {
+  const connection: Connection = {
     transport = nil, handle = nil, input = nil, output = nil,
     client = client, state = state,
     reader = nil, writer = nil, control = nil,
@@ -1718,7 +1716,7 @@ end
 function Connection.discard_transfer_payload(payload: string): integer
   local transport_payload: string, raw_handle: value =
     protobuf.deserialize_fields(payload, connection_transfer_fields)
-  local handle = raw_handle as foreign *SSL
+  const handle = raw_handle as foreign *SSL
   if not handle then raise "invalid TLS Connection engine payload" end
   defer ffi.SSL_free(handle)
   return net.Connection.discard_transfer_payload(transport_payload)
@@ -1728,7 +1726,7 @@ end
 -- @return Copied bytes or text, or nil at EOF or when absent.
 -- @usage standard-library-ssl.md#reading-and-writing
 function Connection:read(): string?
-  local operation? = begin_operation(self, "read")
+  const operation? = begin_operation(self, "read")
   if operation == nil then return nil end
   return supervise(self, operation, function (): string?
     return read_locked(self, operation)
@@ -1742,26 +1740,26 @@ end
 -- @usage standard-library-ssl.md#reading-and-writing
 function Connection:read_until(delimiter: string, chop: boolean?): string?
   if #delimiter == 0 then raise "read delimiter must not be empty" end
-  local operation? = begin_operation(self, "read")
+  const operation? = begin_operation(self, "read")
   if operation == nil then return nil end
   return supervise(self, operation, function (): string?
-    local builder = string.writer()
+    const builder = string.writer()
     local tail = ""
     while true do
-      local chunk? = read_locked(self, operation)
+      const chunk? = read_locked(self, operation)
       if not chunk then
         if #tail > 0 then builder:write(tail) end
-        local result = builder:drain()
+        const result = builder:drain()
         if #result == 0 then return nil end
         return result
       end
-      local bytes = chunk as string
+      const bytes = chunk as string
       local boundary = bytes
       if #tail > 0 then boundary = tail .. bytes end
-      local match: integer? = string.find(boundary, delimiter)
+      const match: integer? = string.find(boundary, delimiter)
       if match then
-        local match_first = match as integer
-        local match_end = match_first + #delimiter - 1
+        const match_first = match as integer
+        const match_end = match_first + #delimiter - 1
         local result_end = match_end
         if chop then result_end = match_first - 1 end
         if result_end > 0 then
@@ -1772,7 +1770,7 @@ function Connection:read_until(delimiter: string, chop: boolean?): string?
       end
       local keep = #delimiter - 1
       if keep > #boundary then keep = #boundary end
-      local committed = #boundary - keep
+      const committed = #boundary - keep
       if committed > 0 then
         if committed == #boundary then
           builder:write(boundary)
@@ -1790,7 +1788,7 @@ end
 -- @param data Immutable binary bytes to write or decode.
 -- @usage standard-library-ssl.md#reading-and-writing
 function Connection:write(data: string)
-  local operation? = begin_operation(self, "write")
+  const operation? = begin_operation(self, "write")
   if operation == nil then raise "ssl.write: SSL Connection is closed" end
   supervise(self, operation, function (): string?
     write_locked(self, operation, data)
@@ -1801,7 +1799,7 @@ end
 --- Send close_notify and half-close TCP output while retaining the read side.
 -- @usage standard-library-ssl.md#tls-shutdown-and-eof
 function Connection:shutdown()
-  local operation? = begin_operation(self, "shutdown")
+  const operation? = begin_operation(self, "shutdown")
   if operation == nil then return end
   supervise(self, operation, function (): string?
     send_shutdown_locked(self, operation)
@@ -1851,9 +1849,9 @@ function Connection:abort()
     terminate(self, false)
     return
   end
-  local reader? = self.reader
-  local writer? = self.writer
-  local control? = self.control
+  const reader? = self.reader
+  const writer? = self.writer
+  const control? = self.control
   terminate(self, false)
   if reader ~= nil and reader.child ~= nil then drain_child(reader.child) end
   if writer ~= nil and writer.child ~= nil then drain_child(writer.child) end
@@ -1869,18 +1867,16 @@ function Connection:close()
     terminate(self, false)
     return
   end
-  local operation? = begin_operation(self, "close")
+  const operation? = begin_operation(self, "close")
   if operation == nil then return end
   supervise(self, operation, function (): string?
     if self.state ~= STATE_HANDSHAKING then
-      do
-        send_shutdown_locked(self, operation)
-      catch
-        if not (error is async.OperationError and
-                (error as async.OperationError).name == "ENOTCONN" and
-                (error as async.OperationError).operation == "net.shutdown") then
-          raise
-        end
+      send_shutdown_locked(self, operation)
+    catch
+      if not (error is async.OperationError and
+              (error as async.OperationError).name == "ENOTCONN" and
+              (error as async.OperationError).operation == "net.shutdown") then
+        raise
       end
     end
     retire_scope(self, operation)
@@ -1896,20 +1892,20 @@ function Server:accept(): Connection
   if self.closed or not self.context then
     raise "ssl.accept: Server is closed"
   end
-  local context = self.context
+  const context = self.context
   ffi.ERR_clear_error()
   if ffi.SSL_CTX_up_ref(context) ~= 1 then
     raise openssl_error("ssl.accept.context",
                         "failed to retain the server SSL context")
   end
   defer ffi.SSL_CTX_free(context)
-  local transport = self.listener:accept()
+  const transport = self.listener:accept()
   do
     -- The TLS handshake is deliberately lazy so a slow ClientHello cannot
     -- serialize the Server's accept loop. First I/O or handshake() drives it.
     return new_connection(transport, context, false)
   catch
-    local failure = error
+    const failure = error
     do
       transport:close()
     catch
@@ -1949,7 +1945,7 @@ end
 -- Lua state close releases the SSL_CTX of a Server that was never closed.
 local function finalize_server(candidate: value)
   if ffi.titan_state_closing(L) == 0 then return end
-  local server: Server = candidate
+  const server: Server = candidate
   server:close()
 end
 
@@ -1964,8 +1960,8 @@ do
   -- Root the nil owner field before any OpenSSL allocation. The native context
   -- is transferred into it only after default trust succeeds, so every failure
   -- path retains one unambiguous cleanup owner.
-  local owner = allocate_default_client_context_owner()
-  local context = new_client_context()
+  const owner = allocate_default_client_context_owner()
+  const context = new_client_context()
   do
     ffi.ERR_clear_error()
     if ffi.SSL_CTX_set_default_verify_paths(context) ~= 1 then
@@ -1975,7 +1971,7 @@ do
     owner.context = context
     default_client_context = context
   catch
-    local failure = error
+    const failure = error
     ffi.SSL_CTX_free(context)
     raise failure
   end

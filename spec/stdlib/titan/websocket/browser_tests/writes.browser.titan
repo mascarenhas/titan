@@ -1,6 +1,6 @@
 local function assert_write_failure(observed: value, expected_kind: string?)
   if not (observed is websocket.Error) then raise "blocked write did not raise a WebSocket error" end
-  local failure: websocket.Error = observed
+  const failure: websocket.Error = observed
   test.assert(failure.operation == "websocket.write" and failure.close_code == nil,
     "blocked write changed its error operation or Close metadata")
   if expected_kind ~= nil then
@@ -12,21 +12,21 @@ end
 
 local function blocked_write_case(id: string, action: string)
   runtime_test.run(function ()
-    local source = raw(id, "paused")
-    local connection = websocket.connect(source)
+    const source = raw(id, "paused")
+    const connection = websocket.connect(source)
     defer connection:close()
     local high, drains = metric("high"), metric("drains")
     local completed = false
     local attempted, returned = 0, 0
     local failure: value = nil
-    local payload = string.rep("w", 8 * 1024 * 1024)
-    local remote = action ~= "resume" and action ~= "local"
+    const payload = string.rep("w", 8 * 1024 * 1024)
+    const remote = action ~= "resume" and action ~= "local"
     if remote then
-      local target = browser.binding("ws_arm")
+      const target = browser.binding("ws_arm")
       defer target:close()
       target:call(Value.is_string(source), Value.is_string(id), Value.is_string(action))
     end
-    local writer = async.run<|nil, value|>(function (): nil
+    const writer = async.run<|nil, value|>(function (): nil
       for index = 1, 8 do
         attempted = index
         do connection:write(websocket.BINARY, payload) catch failure = error; return nil end
@@ -53,7 +53,7 @@ local function blocked_write_case(id: string, action: string)
         "state", "websocket.write", nil)
       if action == "resume" then control(id, "resume")
       else
-        local before = metric("clock")
+        const before = metric("clock")
         connection:close()
         test.assert(metric("clock") - before < 1000, "local close waited for stalled output")
       end
@@ -65,11 +65,11 @@ local function blocked_write_case(id: string, action: string)
         "writer did not complete after draining through low water")
     else
       -- Late host loss may follow every write in the bounded loop.
-      local exact = action ~= "fin" and (not remote or metric("exactWrite") == 1)
+      const exact = action ~= "fin" and (not remote or metric("exactWrite") == 1)
       if not exact and completed then
         wait_for(function (): boolean return metric("ready", source) ~= 1 end,
           "timed out waiting for host transport loss after the bounded writes")
-        local before = metric("send", source)
+        const before = metric("send", source)
         failure = websocket_error(function () connection:write(websocket.TEXT, "must not send") end,
           nil, "websocket.write", nil)
         test.assert(metric("send", source) == before, "write sent after the host reported transport loss")
@@ -86,10 +86,10 @@ end
 
 function test_live_one_hundred_writes_allow_concurrent_timer_progress(_context: test.Context)
   runtime_test.run(function ()
-    local connection = websocket.connect(live("echo"))
+    const connection = websocket.connect(live("echo"))
     defer connection:close()
     local ticks, completed = 0, false
-    local ticker = async.run<|nil, value|>(function (): nil
+    const ticker = async.run<|nil, value|>(function (): nil
       while not completed do timer.sleep(1); ticks = ticks + 1 end
       return nil
     end)
@@ -107,13 +107,13 @@ end
 
 function test_live_local_close_during_write_fairness_yield_never_sends(_context: test.Context)
   runtime_test.run(function ()
-    local source = live("echo")
-    local connection = websocket.connect(source)
+    const source = live("echo")
+    const connection = websocket.connect(source)
     defer connection:close()
-    local before = metric("send", source)
+    const before = metric("send", source)
     local started = false
     local failure: value = nil
-    local writer = async.run<|nil, value|>(function (): nil
+    const writer = async.run<|nil, value|>(function (): nil
       started = true
       do connection:write(websocket.TEXT, "must not send") catch failure = error end
       return nil
@@ -129,12 +129,12 @@ end
 
 function test_live_peer_close_before_write_never_sends(_context: test.Context)
   runtime_test.run(function ()
-    local source = raw("before-write", "idle")
-    local connection = websocket.connect(source)
+    const source = raw("before-write", "idle")
+    const connection = websocket.connect(source)
     defer connection:close()
     control("before-write", "close")
     wait_for(function (): boolean return metric("ready", source) ~= 1 end, "peer Close did not change host state")
-    local before = metric("send", source)
+    const before = metric("send", source)
     websocket_error(function () connection:write(websocket.TEXT, "must not send") end,
       "state", "websocket.write", nil)
     test.assert(metric("send", source) == before, "write called send on a non-open host socket")

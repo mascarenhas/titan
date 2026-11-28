@@ -1,7 +1,7 @@
 local transfer_lua = import "lua"
 
 local function process_transfer_state(): transfer_lua.Lua
-  local state = transfer_lua.new()
+  const state = transfer_lua.new()
   -- Argument policies are decoded before the chunk runs. Establish the
   -- destination's state-local Runtime before handing it any native owners.
   state:run("local a = require('titan.async'); a.run(function () end)")
@@ -11,13 +11,13 @@ end
 function test_process_stream_handoff_keeps_process_reaping_in_origin(
     _context: test.Context)
   runtime_test.run(function ()
-    local state = process_transfer_state()
+    const state = process_transfer_state()
     defer state:close()
-    local process = system.spawn(process_support.child_path(), {"echo"})
+    const process = system.spawn(process_support.child_path(), {"echo"})
     defer cleanup_process(process)
-    local input = process_support.required_output(process.stdin, "transfer stdin")
-    local output = process_support.required_input(process.stdout, "transfer stdout")
-    local payload = "header\npipe\0handoff\255\r\n"
+    const input = process_support.required_output(process.stdin, "transfer stdin")
+    const output = process_support.required_input(process.stdout, "transfer stdout")
+    const payload = "header\npipe\0handoff\255\r\n"
     local input_packet: async.TransferValue? = nil
     async.await<|nil, nil|>(function (resolve, _reject, _fatal)
       -- Registration runs without a current Task. Serialization only needs
@@ -29,7 +29,7 @@ function test_process_stream_handoff_keeps_process_reaping_in_origin(
     test.assert(process:is_running(), "pipe handoff retired the child watcher")
     common.assert_raises(function () input:write("detached") end)
     input:close()
-    local written: async.TransferValue = state:run_async([[
+    const written: async.TransferValue = state:run_async([[
       local output, bytes = ...
       local a = require('titan.async')
       local work = a.run(function ()
@@ -64,7 +64,7 @@ function test_process_stream_handoff_keeps_process_reaping_in_origin(
     test.assert(output:read() == nil, "detached stdout remained readable")
     gc.collect()
     state:run("local a = require('titan.async'); a.run(function () end)")
-    local received: async.TransferValue = state:run_async([[
+    const received: async.TransferValue = state:run_async([[
       local input = ...
       local a = require('titan.async')
       local bytes = ''
@@ -91,12 +91,12 @@ end
 function test_process_stream_handoff_rejects_pending_reader_without_detach(
     _context: test.Context)
   runtime_test.run(function ()
-    local process = system.spawn(process_support.child_path(), {"echo-count", "1"})
+    const process = system.spawn(process_support.child_path(), {"echo-count", "1"})
     defer cleanup_process(process)
-    local input = process_support.required_output(process.stdin, "pending stdin")
-    local output = process_support.required_input(process.stdout, "pending stdout")
+    const input = process_support.required_output(process.stdin, "pending stdin")
+    const output = process_support.required_input(process.stdout, "pending stdout")
     local received: string? = nil
-    local reader = async.run<|nil, value|>(function (): nil
+    const reader = async.run<|nil, value|>(function (): nil
       received = output:read()
       return nil
     end)

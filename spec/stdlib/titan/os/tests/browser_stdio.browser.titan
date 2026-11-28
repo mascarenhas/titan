@@ -22,7 +22,7 @@ local function browser_expect_operation(action: BrowserAction,
     action()
   catch
     if not (error is async.OperationError) then raise end
-    local failure: async.OperationError = error
+    const failure: async.OperationError = error
     caught = true
     test.assert(failure.code == expected.code and failure.name == expected.name and
       failure.message == expected.message and failure.operation == expected.operation,
@@ -39,10 +39,10 @@ local function browser_expect_unavailable(action: BrowserAction, member: string)
 end
 
 local function browser_task_case(context: test.Context, name: string, action: BrowserAction)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     browser_expect_text(action, "async Runtime is not active")
     runtime_test.run(function ()
-      local outcome = async.await<|nil, nil|>(function (resolve, reject, fatal)
+      const outcome = async.await<|nil, nil|>(function (resolve, reject, fatal)
         browser_expect_text(action, "asynchronous operation must be called from an async Task")
         resolve(nil)
       end)
@@ -72,7 +72,7 @@ end
 
 local function browser_output_case(context: test.Context, name: string,
                                     output: system.OutputStream)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     output:close()
     output:close()
     runtime_test.run(function ()
@@ -82,15 +82,15 @@ local function browser_output_case(context: test.Context, name: string,
         async.OperationError { code = -ffi.ENOTSUP, name = "ENOTSUP",
           message = "operation not supported on socket", operation = "stdio.shutdown" })
       output:write("browser " .. name .. " remains open\n")
-      local tty = output:is_tty()
+      const tty = output:is_tty()
       do
-        local kind = output:kind()
+        const kind = output:kind()
         test.assert(kind == "tty" or kind == "pipe" or kind == "file" or kind == "tcp",
           "declared output kind is not one of the four backings")
         test.assert(tty == (kind == "tty"), "declared output kind disagrees with is_tty")
       catch
         if not (error is async.OperationError) then raise end
-        local failure: async.OperationError = error
+        const failure: async.OperationError = error
         test.assert(failure.name == "ENOSYS" and failure.operation == "os.OutputStream.kind",
           "undeclared output kind raised a different error")
         test.assert(not tty, "undeclared output kind reported a TTY")
@@ -134,23 +134,23 @@ local function browser_output_payload(stream: system.OutputStream): string
 end
 
 function test_browser_parent_output_adoption_names_its_descriptor(_context: test.Context)
-  local original_stdout = system.stdout
-  local original_stderr = system.stderr
-  local stdout_bytes = browser_output_payload(original_stdout)
-  local stdout_payload = async.TransferValue.from_value(original_stdout)
-  local stderr_payload = async.TransferValue.from_value(original_stderr)
+  const original_stdout = system.stdout
+  const original_stderr = system.stderr
+  const stdout_bytes = browser_output_payload(original_stdout)
+  const stdout_payload = async.TransferValue.from_value(original_stdout)
+  const stderr_payload = async.TransferValue.from_value(original_stderr)
   defer do
     system.stdout = original_stdout
     system.stderr = original_stderr
   end
   system.stdout = original_stderr
   system.stderr = original_stdout
-  local restored_stdout: system.OutputStream = stdout_payload:to_value()
-  local restored_stderr: system.OutputStream = stderr_payload:to_value()
+  const restored_stdout: system.OutputStream = stdout_payload:to_value()
+  const restored_stderr: system.OutputStream = stderr_payload:to_value()
   test.assert(restored_stdout == original_stdout and restored_stderr == original_stderr,
     "parent output adoption followed a reassigned module variable")
   system.stderr = original_stderr
-  local unbound: system.OutputStream =
+  const unbound: system.OutputStream =
     async.TransferValue.from_value(original_stdout):to_value()
   test.assert(unbound ~= original_stderr and browser_output_payload(unbound) == stdout_bytes,
     "adoption without a bound stdout facade changed its descriptor")
@@ -170,17 +170,17 @@ function test_browser_environment_starts_empty_and_reports_invalid_names(_contex
 end
 
 function test_browser_calendar_uses_utc_and_the_host_wall_clock(_context: test.Context)
-  local epoch: system.Date = system.date("!*t", 0)
+  const epoch: system.Date = system.date("!*t", 0)
   test.assert(epoch.year == 1970 and epoch.month == 1 and epoch.day == 1 and
     epoch.hour == 0 and epoch.min == 0 and epoch.sec == 0 and epoch.wday == 5,
     "UTC epoch decomposition changed")
-  local normalized = system.time(2020, 2, 30, 4, 5, 6)
+  const normalized = system.time(2020, 2, 30, 4, 5, 6)
   test.assert(normalized == system.time(2020, 3, 1, 4, 5, 6), "calendar normalization changed")
-  local calendar: system.Date = system.date("*t", normalized)
+  const calendar: system.Date = system.date("*t", normalized)
   test.assert(calendar.year == 2020 and calendar.month == 3 and calendar.day == 1 and
     calendar.hour == 4 and calendar.min == 5 and calendar.sec == 6,
     "local decomposition of a normalized time changed")
-  local now = system.time()
+  const now = system.time()
   local delta = now - support.host_time()
   if delta < 0 then delta = -delta end
   test.assert(delta <= 1, "browser time is not the host wall clock")
@@ -188,12 +188,12 @@ function test_browser_calendar_uses_utc_and_the_host_wall_clock(_context: test.C
 end
 
 function test_browser_locale_retains_unknown_names_with_c_formatting(_context: test.Context)
-  local previous: string = system.setlocale(nil, "time")
+  const previous: string = system.setlocale(nil, "time")
   defer do
     test.assert(system.setlocale(previous, "time") ~= nil, "could not restore LC_TIME")
   end
   test.assert(system.setlocale("C", "time") == "C", "could not select the C LC_TIME")
-  local c_format = support.as_string(system.date("!%c", 0), "C-locale calendar format")
+  const c_format = support.as_string(system.date("!%c", 0), "C-locale calendar format")
   local const selected = "titan-test"
   test.assert(system.setlocale(selected, "time") == selected,
     "an unknown valid locale name was not selected")

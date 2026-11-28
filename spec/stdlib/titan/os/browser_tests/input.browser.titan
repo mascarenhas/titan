@@ -8,7 +8,7 @@ local function read_chunks(...: Value): Value
 end
 
 local function lines(...: Value): Value
-  local expected = {"first", "", "second", "tail"}
+  const expected = {"first", "", "second", "tail"}
   local count = 0
   for line in stream.lines(system.stdin) do
     count = count + 1
@@ -21,7 +21,7 @@ end
 -- Instrument close delegation, not input: every byte still comes from the
 -- actual browser parent stream, whose own close is deliberately a no-op.
 local record TrackedInput
-  local parent: system.InputStream
+  local const parent: system.InputStream
   local closes: integer
   local closed: boolean
 end
@@ -48,8 +48,8 @@ local function return_from_lines(reader: TrackedInput): string
 end
 
 local function tracked_lines(...: Value): Value
-  local mode = text_of(...[1])
-  local reader = TrackedInput.new(system.stdin, 0, false)
+  const mode = text_of(...[1])
+  const reader = TrackedInput(system.stdin, 0, false)
   local count = 0
   local caught = false
   do
@@ -69,7 +69,7 @@ local function tracked_lines(...: Value): Value
       test.assert(error == "line body failure", "io.lines replaced a body error")
     elseif mode == "read-error" then
       test.assert(error is async.OperationError, "io.lines replaced a read error")
-      local failure: async.OperationError = error
+      const failure: async.OperationError = error
       test.assert(failure.operation == "stdio.read" and failure.name == "EIO",
         "io.lines changed the read error's fields")
     else
@@ -93,14 +93,14 @@ local function read_delimiter(...: Value): Value
 end
 
 local function sticky_read_error(...: Value): Value
-  local first = expect_operation(function () system.stdin:read() end, "stdio.read", "EIO")
-  local second = expect_operation(function () system.stdin:read() end, "stdio.read", "EIO")
+  const first = expect_operation(function () system.stdin:read() end, "stdio.read", "EIO")
+  const second = expect_operation(function () system.stdin:read() end, "stdio.read", "EIO")
   test.assert(first == second, "stdin did not retain its failure")
   return Value.is_string(first)
 end
 
 local function cancelled_reader_handoff(...: Value): Value
-  local first = async.run<|string?, value|>(function (): string?
+  const first = async.run<|string?, value|>(function (): string?
     return system.stdin:read()
   end)
   defer retire(first)
@@ -118,7 +118,7 @@ local function cancelled_reader_handoff(...: Value): Value
 end
 
 local function contending_readers(...: Value): Value
-  local first = async.run<|string?, value|>(function (): string?
+  const first = async.run<|string?, value|>(function (): string?
     return system.stdin:read()
   end)
   defer retire(first)
@@ -143,9 +143,9 @@ local function read_again(...: Value): Value
 end
 
 local function missing_input(...: Value): Value
-  local read_message = expect_operation(function () system.stdin:read() end,
+  const read_message = expect_operation(function () system.stdin:read() end,
     "os.InputStream.read", "ENOSYS")
-  local until_message = expect_operation(function () system.stdin:read_until("\n", true) end,
+  const until_message = expect_operation(function () system.stdin:read_until("\n", true) end,
     "os.InputStream.read_until", "ENOSYS")
   test.assert(read_message == "os.InputStream.read is unavailable on the browser target" and
     until_message == "os.InputStream.read_until is unavailable on the browser target",
@@ -156,7 +156,7 @@ end
 local function c_read_error(...: Value): Value
   local storage = foreign char.new_array(1)
   ffi.clearerr(ffi.stdin)
-  local count = ffi.fread(storage as foreign *char, 1, 1, ffi.stdin)
+  const count = ffi.fread(storage as foreign *char, 1, 1, ffi.stdin)
   test.assert(count == 0 and ffi.ferror(ffi.stdin) ~= 0 and ffi.feof(ffi.stdin) == 0,
     "C stdin reported EOF instead of an input error")
   ffi.clearerr(ffi.stdin)

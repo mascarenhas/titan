@@ -7894,7 +7894,15 @@ do
         for _, modname in ipairs(context.checked_source_modules) do
             local entry = requested_set[modname] and driver.imported[modname]
             if entry and entry.ast then
-                units[#units + 1] = { modname = modname, ast = entry.ast,
+                -- The exact checked bytes of every contributing file carry
+                -- its in-source `-- titan-lint:` exceptions.
+                local sources = {}
+                for index, filename in ipairs(entry.source_files) do
+                    local text, read_error = perf.compiler_file_contents(context, filename)
+                    if not text then return nil, { read_error } end
+                    sources[index] = { filename = filename, text = text }
+                end
+                units[#units + 1] = { modname = modname, ast = entry.ast, sources = sources,
                     provider_kind = provider_kind, module_ast = module_ast }
             end
         end

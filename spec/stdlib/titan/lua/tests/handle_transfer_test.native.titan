@@ -3,12 +3,12 @@ local handle_transfer = import "lua.handle_transfer_fixture"
 function test_lua_record_payload_native_handle_survives_detached_origin_gc(
     _context: test.Context)
   runtime_test.run(function ()
-    local resource = handle_transfer.resource_new()
+    const resource = handle_transfer.resource_new()
     test.assert(resource ~= nil, "cannot create native pipe fixture")
     defer handle_transfer.resource_destroy(resource)
-    local inbox = async.receiver()
+    const inbox = async.receiver()
     defer inbox:close()
-    local source = tlua.new()
+    const source = tlua.new()
     defer source:close()
     source:run_async([[
       require('lua.handle_transfer_fixture').send_detached(...)
@@ -19,7 +19,7 @@ function test_lua_record_payload_native_handle_survives_detached_origin_gc(
       "source wrapper was not collected before destination reconstruction")
     test.assert(handle_transfer.close_calls(resource) == 0,
       "detached source finalizer closed the transferred descriptor")
-    local restored: handle_transfer.Pipe = inbox:wait()
+    const restored: handle_transfer.Pipe = inbox:wait()
     defer restored:close()
     test.assert(restored:read_byte() == 107,
       "destination wrapper could not use the live transferred descriptor")

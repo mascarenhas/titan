@@ -12,23 +12,21 @@ local TRUST_ROOT = "spec/fixtures/ssl/ca.pem"
 local outcome = "not-run"
 
 local function contains(subject: string, needle: string): boolean
-  local first: integer? = string.find(subject, needle)
+  const first: integer? = string.find(subject, needle)
   if first then return true end
   return false
 end
 
 local function absent_temporary_path(_: test.Context): string
-  local path = fs.tmpname()
+  const path = fs.tmpname()
   runtime_test.cleanup(function ()
-    do
-      fs.unlink(path)
-    catch
-      if error is async.OperationError then
-        local failure = error as async.OperationError
-        if failure.name ~= "ENOENT" then raise end
-      else
-        raise
-      end
+    fs.unlink(path)
+  catch
+    if error is async.OperationError then
+      const failure = error as async.OperationError
+      if failure.name ~= "ENOENT" then raise end
+    else
+      raise
     end
   end)
   fs.unlink(path)
@@ -37,12 +35,12 @@ end
 
 local function read_exact(connection: net.Connection,
                           length: integer): string
-  local builder = string.writer()
+  const builder = string.writer()
   local received = 0
   while received < length do
-    local chunk? = connection:read()
+    const chunk? = connection:read()
     if not chunk then raise "HTTP peer saw truncated request body" end
-    local bytes = chunk as string
+    const bytes = chunk as string
     received = received + #bytes
     if received > length then
       raise "HTTP peer received bytes beyond the request body"
@@ -53,7 +51,7 @@ local function read_exact(connection: net.Connection,
 end
 
 local function read_response(response: http.ClientResponse): string
-  local builder = string.writer()
+  const builder = string.writer()
   for chunk in response:read do builder:write(chunk) end
   return builder:drain()
 end
@@ -61,15 +59,13 @@ end
 local function raw_listen(first_port: integer): (net.Server, integer)
   local port = first_port
   for _ = 1, 100 do
-    do
-      return net.listen("127.0.0.1", port, 8), port
-    catch
-      if error is async.OperationError and
-         (error as async.OperationError).name == "EADDRINUSE" then
-        port = port + 1
-      else
-        raise
-      end
+    return net.listen("127.0.0.1", port, 8), port
+  catch
+    if error is async.OperationError and
+       (error as async.OperationError).name == "EADDRINUSE" then
+      port = port + 1
+    else
+      raise
     end
   end
   raise "could not find an available loopback port"
@@ -81,16 +77,14 @@ local function http_listen(first_port: integer,
                            reuse_port: boolean?): (http.Server, integer)
   local port = first_port
   for _ = 1, 100 do
-    do
-      return http.listen("127.0.0.1", handler, port, nil,
-                         idle_timeout, reuse_port), port
-    catch
-      if error is async.OperationError and
-         (error as async.OperationError).name == "EADDRINUSE" then
-        port = port + 1
-      else
-        raise
-      end
+    return http.listen("127.0.0.1", handler, port, nil,
+                       idle_timeout, reuse_port), port
+  catch
+    if error is async.OperationError and
+       (error as async.OperationError).name == "EADDRINUSE" then
+      port = port + 1
+    else
+      raise
     end
   end
   raise "could not find an available HTTP loopback port"
@@ -101,17 +95,15 @@ local function https_listen(first_port: integer, handler: http.Handler,
     (http.Server, integer)
   local port = first_port
   for _ = 1, 100 do
-    do
-      return http.listen_tls("127.0.0.1", CERTIFICATE, handler,
-                             PRIVATE_KEY, port, nil, idle_timeout,
-                             reuse_port), port
-    catch
-      if error is async.OperationError and
-         (error as async.OperationError).name == "EADDRINUSE" then
-        port = port + 1
-      else
-        raise
-      end
+    return http.listen_tls("127.0.0.1", CERTIFICATE, handler,
+                           PRIVATE_KEY, port, nil, idle_timeout,
+                           reuse_port), port
+  catch
+    if error is async.OperationError and
+       (error as async.OperationError).name == "EADDRINUSE" then
+      port = port + 1
+    else
+      raise
     end
   end
   raise "could not find an available HTTPS loopback port"

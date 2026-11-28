@@ -12,21 +12,19 @@ local TRUST_ROOT = "spec/fixtures/ssl/ca.pem"
 
 local function cleanup_path(_: test.Context, path: string)
   runtime_test.cleanup(function ()
-    do
-      fs.unlink(path)
-    catch
-      if error is async.OperationError then
-        local failure = error as async.OperationError
-        if failure.name ~= "ENOENT" then raise end
-      else
-        raise
-      end
+    fs.unlink(path)
+  catch
+    if error is async.OperationError then
+      const failure = error as async.OperationError
+      if failure.name ~= "ENOENT" then raise end
+    else
+      raise
     end
   end)
 end
 
 local function temporary_path(context: test.Context): string
-  local path = fs.tmpname()
+  const path = fs.tmpname()
   cleanup_path(context, path)
   return path
 end
@@ -46,25 +44,23 @@ local function listen_available(first_port: integer,
     (ssl.Server, integer)
   local port = first_port
   for _ = 1, 100 do
-    do
-      if private_key == nil then
-        return ssl.listen("127.0.0.1", port, certificate), port
-      end
-      return ssl.listen("127.0.0.1", port, certificate,
-                        private_key as string), port
-    catch
-      if error is async.OperationError then
-        local failure = error as async.OperationError
-        if failure.name == "EADDRINUSE" then
-          port = port + 1
-          if port > 60999 then port = 20000 end
-        else
-          raise "ssl.listen failed with " .. failure.name .. ": " ..
-                failure.message
-        end
+    if private_key == nil then
+      return ssl.listen("127.0.0.1", port, certificate), port
+    end
+    return ssl.listen("127.0.0.1", port, certificate,
+                      private_key as string), port
+  catch
+    if error is async.OperationError then
+      const failure = error as async.OperationError
+      if failure.name == "EADDRINUSE" then
+        port = port + 1
+        if port > 60999 then port = 20000 end
       else
-        raise
+        raise "ssl.listen failed with " .. failure.name .. ": " ..
+              failure.message
       end
+    else
+      raise
     end
   end
   raise "could not find an available loopback port"

@@ -3,7 +3,7 @@ local coverage_recovery_command = import "support.command.titan"
 
 local function check_coverage_async_recovery(mode: string)
   runtime_test.run(function ()
-    local workspace = coverage_recovery_fs.tmpname()
+    const workspace = coverage_recovery_fs.tmpname()
     coverage_recovery_fs.unlink(workspace)
     coverage_recovery_fs.mkdir(workspace)
     runtime_test.cleanup(function () coverage_recovery_command.remove_tree(workspace) end)

@@ -48,9 +48,9 @@ local function Group:wake_completion_waiters()
   if self.running_count > 0 then
     return
   end
-  local waiters = self.completion_waiters
+  const waiters = self.completion_waiters
   for index = 1, #waiters do
-    local w = waiters[index]
+    const w = waiters[index]
     if w.active then
       w.active = false
       w.task:resume(w.token)
@@ -62,7 +62,7 @@ local function Group:wake_completion_waiters()
 end
 
 local function Group:clear_admissions()
-  local admissions = self.admission_waiters
+  const admissions = self.admission_waiters
   for index = #admissions, 1, -1 do
     admissions[index] = nil
   end
@@ -70,12 +70,12 @@ local function Group:clear_admissions()
 end
 
 local function Group:release_slot()
-  local admissions = self.admission_waiters
+  const admissions = self.admission_waiters
   if self.abort_reason == nil then
     while self.admission_head <= #admissions do
-      local index = self.admission_head
+      const index = self.admission_head
       self.admission_head = index + 1
-      local w = admissions[index]
+      const w = admissions[index]
       if w.active then
         w.active = false
         w.granted = true
@@ -96,9 +96,9 @@ local function Group:trigger_abort(reason: async.CancellationReason<|value|>)
   if self.abort_reason == nil then
     self.abort_reason = reason
   end
-  local admissions = self.admission_waiters
+  const admissions = self.admission_waiters
   for index = self.admission_head, #admissions do
-    local w = admissions[index]
+    const w = admissions[index]
     if w.active then
       w.active = false
       w.task:resume(w.token)
@@ -114,15 +114,15 @@ local function Group:acquire_slot(): boolean
   if self.abort_reason ~= nil then
     return false
   end
-  local lim? = self.limit
+  const lim? = self.limit
   if lim == nil or self.running_count < lim then
     self.running_count = self.running_count + 1
     return true
   end
-  local task = async.running()
+  const task = async.running()
   async.checkpoint()
-  local token = async.ResumeToken("thread.Group.spawn")
-  local waiter = GroupWaiter {
+  const token = async.ResumeToken("thread.Group.spawn")
+  const waiter = GroupWaiter {
     task = task,
     token = token,
     active = true,
@@ -132,7 +132,7 @@ local function Group:acquire_slot(): boolean
   -- suspension's cancel action and also runs on every exit that has not taken
   -- the slot: a cancellation that rejects the suspension runs no cancel
   -- action. Running it twice is harmless.
-  local withdraw = function ()
+  const withdraw = function ()
     if waiter.active then
       waiter.active = false
     elseif waiter.granted then
@@ -174,7 +174,7 @@ local function Group:finish_thread(spawned: Thread<|nil|>,
   -- async and must not strand Group admission/completion accounting.
   self.active_threads[spawned] = nil
   defer self:release_slot()
-  local status = spawned:status()
+  const status = spawned:status()
   local failure: Error? = nil
   case status
   when failed(err) then
@@ -198,10 +198,10 @@ end
 -- true means a listener returned successfully. Only terminal native retirement
 -- removes either state. A public wait makes one explicit retry pass.
 local function Group:observe_thread(spawned: Thread<|nil|>)
-  local observed? = self.active_threads[spawned]
+  const observed? = self.active_threads[spawned]
   if observed == nil then return end
-  local monitor = spawned:task()
-  local status = monitor:status()
+  const monitor = spawned:task()
+  const status = monitor:status()
   if status:has_finished() then
     self:finish_thread(spawned, status)
     return
@@ -229,7 +229,7 @@ local function Group:spawn_raw_entry(entry: function (): (nil))
     self:release_slot()
     raise
   end
-  local spawned = th as Thread<|nil|>
+  const spawned = th as Thread<|nil|>
   self:observe_thread(spawned)
 end
 
@@ -284,7 +284,7 @@ end
 -- @param reason Optional CancellationReason forwarded to running threads.
 -- @usage standard-library-thread.md
 function Group:cancel(reason: async.CancellationReason<|value|>?)
-  local actual = reason or async.CancellationReason.simple("cancelled")
+  const actual = reason or async.CancellationReason.simple("cancelled")
   self:trigger_abort(actual)
 end
 
@@ -292,20 +292,20 @@ end
 -- @return Array of uncaught Error values collected in completion order.
 -- @usage standard-library-thread.md
 function Group:wait(): {Error}
-  local task = async.running()
+  const task = async.running()
   async.checkpoint()
   for spawned, _ in iteration.pairs(self.active_threads) do
     self:observe_thread(spawned)
   end
   while self.running_count > 0 do
-    local token = async.ResumeToken("thread.Group.wait")
-    local waiter = GroupWaiter {
+    const token = async.ResumeToken("thread.Group.wait")
+    const waiter = GroupWaiter {
       task = task,
       token = token,
       active = true,
       granted = false
     }
-    local withdraw = function ()
+    const withdraw = function ()
       waiter.active = false
     end
     self.completion_waiters[#self.completion_waiters + 1] = waiter
@@ -316,7 +316,7 @@ function Group:wait(): {Error}
     if self.running_count == 0 then break end
     async.suspend(token, withdraw)
   end
-  local result: {Error} = {}
+  const result: {Error} = {}
   for index = 1, #self.errors do
     result[index] = self.errors[index]
   end

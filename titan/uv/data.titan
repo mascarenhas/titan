@@ -88,7 +88,7 @@ local function data_nullable_string(pointer: foreign const *char): string?
 end
 
 local function data_copy_bytes(pointer: foreign const *char, length: integer): string
-  local bytes = foreign char.new_array(length)
+  const bytes = foreign char.new_array(length)
   if length > 0 then ffi.memcpy(bytes, pointer, length) end
   return bytes as string
 end
@@ -101,11 +101,11 @@ end
 function cpu_info(): (integer, {cpu_info_t}?, integer)
   local native: foreign *uv_cpu_info_t = nil
   local count: foreign int = 0
-  local status: integer = ffi.uv_cpu_info(native, count)
+  const status: integer = ffi.uv_cpu_info(native, count)
   if status ~= 0 then return status, nil, count end
   defer ffi.uv_free_cpu_info(native, count)
-  local result: {cpu_info_t} = {}
-  local length: integer = count
+  const result: {cpu_info_t} = {}
+  const length: integer = count
   for index = 1, length do
     local entry = native[index - 1]
     result[index] = cpu_info_t {
@@ -127,7 +127,7 @@ local function data_copy_address(entry: foreign *uv_interface_address_t,
                                   netmask: boolean): sockaddr_t?
   local select: foreign int = 0
   if netmask then select = 1 end
-  local native = ffi.titan_uv_data_address(entry, select)
+  const native = ffi.titan_uv_data_address(entry, select)
   if native.sa_family == ffi.AF_UNSPEC then return nil end
   return sockaddr_copy(native)
 end
@@ -140,13 +140,13 @@ end
 function interface_addresses(): (integer, {interface_address_t}?, integer)
   local native: foreign *uv_interface_address_t = nil
   local count: foreign int = 0
-  local status: integer = ffi.uv_interface_addresses(native, count)
+  const status: integer = ffi.uv_interface_addresses(native, count)
   if status ~= 0 then return status, nil, count end
   defer ffi.uv_free_interface_addresses(native, count)
-  local result: {interface_address_t} = {}
-  local length: integer = count
+  const result: {interface_address_t} = {}
+  const length: integer = count
   for index = 1, length do
-    local entry = native + (index - 1)
+    const entry = native + (index - 1)
     result[index] = interface_address_t {
       name = entry.name as string,
       phys_addr = data_copy_bytes(entry.phys_addr, 6),
@@ -166,11 +166,11 @@ end
 function os_environ(): (integer, {env_item_t}?, integer)
   local native: foreign *uv_env_item_t = nil
   local count: foreign int = 0
-  local status: integer = ffi.uv_os_environ(native, count)
+  const status: integer = ffi.uv_os_environ(native, count)
   if status ~= 0 then return status, nil, count end
   defer ffi.uv_os_free_environ(native, count)
-  local result: {env_item_t} = {}
-  local length: integer = count
+  const result: {env_item_t} = {}
+  const length: integer = count
   for index = 1, length do
     local entry = native[index - 1]
     result[index] = env_item_t(entry.name as string, entry.value as string)
@@ -194,7 +194,7 @@ end
 -- @usage uv/functions/misc.md#os_get_passwd
 function os_get_passwd(): (integer, passwd_t?)
   local native = foreign uv_passwd_t.new()
-  local status: integer = ffi.uv_os_get_passwd(native)
+  const status: integer = ffi.uv_os_get_passwd(native)
   if status ~= 0 then return status, nil end
   defer ffi.uv_os_free_passwd(native)
   return status, data_copy_passwd(native)
@@ -207,7 +207,7 @@ end
 -- @usage uv/functions/misc.md#os_get_passwd2
 function os_get_passwd2(uid: integer): (integer, passwd_t?)
   local native = foreign uv_passwd_t.new()
-  local status: integer = ffi.uv_os_get_passwd2(native, uid)
+  const status: integer = ffi.uv_os_get_passwd2(native, uid)
   if status ~= 0 then return status, nil end
   defer ffi.uv_os_free_passwd(native)
   return status, data_copy_passwd(native)
@@ -220,10 +220,10 @@ end
 -- @usage uv/functions/misc.md#os_get_group
 function os_get_group(gid: integer): (integer, group_t?)
   local native = foreign uv_group_t.new()
-  local status: integer = ffi.uv_os_get_group(native, gid)
+  const status: integer = ffi.uv_os_get_group(native, gid)
   if status ~= 0 then return status, nil end
   defer ffi.uv_os_free_group(native)
-  local members: {string} = {}
+  const members: {string} = {}
   local index = 0
   while native.members[index] do
     members[index + 1] = native.members[index] as string
@@ -240,7 +240,7 @@ local function data_utf16_input(units: {integer}, length: integer): owned uint16
   if length < -1 or length > #units then raise "UTF-16 input length is out of range" end
   local count = #units
   if length >= 0 then count = length end
-  local native: owned uint16_t[] = foreign uint16_t.new_array(count + 1)
+  const native: owned uint16_t[] = foreign uint16_t.new_array(count + 1)
   for index = 1, count do
     native[index - 1] = units[index]
     if length == -1 and units[index] == 0 then break end
@@ -255,7 +255,7 @@ end
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/functions/misc.md#utf16_length_as_wtf8
 function utf16_length_as_wtf8(units: {integer}, length: integer): integer
-  local native = data_utf16_input(units, length)
+  const native = data_utf16_input(units, length)
   return ffi.uv_utf16_length_as_wtf8(native, length)
 end
 
@@ -269,20 +269,20 @@ end
 -- @usage uv/functions/misc.md#utf16_to_wtf8
 function utf16_to_wtf8(units: {integer}, length: integer,
                         capacity: integer?): (integer, string?, integer)
-  local native = data_utf16_input(units, length)
+  const native = data_utf16_input(units, length)
   local size: foreign size_t = 0
   if capacity == nil then
-    local status: integer = ffi.uv_utf16_to_wtf8(native, length, nil, size)
+    const status: integer = ffi.uv_utf16_to_wtf8(native, length, nil, size)
     return status, nil, size
   end
-  local count: integer = capacity
+  const count: integer = capacity
   if count < 0 or count == 9223372036854775807 then
     raise "WTF-8 output capacity is out of range"
   end
   size = count
-  local output = foreign char.new_array(count + 1)
+  const output = foreign char.new_array(count + 1)
   local pointer: foreign *char = output
-  local status: integer = ffi.uv_utf16_to_wtf8(native, length, pointer, size)
+  const status: integer = ffi.uv_utf16_to_wtf8(native, length, pointer, size)
   local written: integer = size
   if status == ffi.UV_ENOBUFS then written = count end
   if status ~= 0 and status ~= ffi.UV_ENOBUFS then return status, nil, size end
@@ -303,12 +303,12 @@ end
 -- @return Native {integer} result with the documented lifetime and units.
 -- @usage uv/functions/misc.md#wtf8_to_utf16
 function wtf8_to_utf16(text: string, length: integer): {integer}
-  local required: integer = ffi.uv_wtf8_length_as_utf16(text)
+  const required: integer = ffi.uv_wtf8_length_as_utf16(text)
   if required < 0 then raise "invalid WTF-8 input" end
   if length ~= required then raise "UTF-16 output length must match the native required length" end
-  local native = foreign uint16_t.new_array(length)
+  const native = foreign uint16_t.new_array(length)
   ffi.uv_wtf8_to_utf16(text, native, length)
-  local result: {integer} = {}
+  const result: {integer} = {}
   for index = 1, length do result[index] = native[index - 1] as integer end
   return result
 end

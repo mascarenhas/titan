@@ -1,7 +1,7 @@
 -- Public filesystem results and borrowed polling ownership. Helpers are kept
 -- distinct from the other contributors in this folder module.
 local function coverage_fs_remove(path: string, directory: boolean)
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   local status = 0
   if directory then status = uv.fs_rmdir(nil, request, path)
@@ -12,17 +12,17 @@ end
 -- Scratch belongs below the runner's private TITAN_TEST_ROOT, or the platform
 -- temporary directory when a run supplies none, never the shared checkout CWD.
 local function coverage_fs_scratch_root(): string
-  local status, root?, _size = uv.os_getenv("TITAN_TEST_ROOT", 4096)
+  local status, root?, _ = uv.os_getenv("TITAN_TEST_ROOT", 4096)
   if status == 0 and root ~= nil and root ~= "" then return root end
   test.assert(status == 0 or status == uv.ENOENT,
               "reading TITAN_TEST_ROOT failed: " .. status)
-  local tmp_status, tmpdir?, _tmp_size = uv.os_tmpdir(4096)
+  local tmp_status, tmpdir?, _ = uv.os_tmpdir(4096)
   success(tmp_status)
   return tmpdir
 end
 
 local function coverage_fs_directory(): string
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   success(uv.fs_mkdtemp(nil, request,
                         coverage_fs_scratch_root() .. "/uv-public-fs-XXXXXX"))
@@ -34,17 +34,17 @@ local function coverage_fs_directory(): string
 end
 
 local function coverage_fs_write(path: string, bytes: string)
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
-  local file = uv.fs_open(nil, request, path,
+  const file = uv.fs_open(nil, request, path,
     uv.FS_O_RDWR | uv.FS_O_CREAT | uv.FS_O_TRUNC, 384)
   test.assert(file >= 0, "creating temporary file failed: " .. file)
   defer close_file(file)
   uv.fs_req_cleanup(request)
-  local buffer = uv.buf_t.from_string(bytes)
+  const buffer = uv.buf_t.from_string(bytes)
   local offset = 0
   while offset < #bytes do
-    local count = uv.fs_write(nil, request, file,
+    const count = uv.fs_write(nil, request, file,
       {buffer:slice(offset + 1, #bytes - offset)}, offset)
     test.assert(count > 0, "temporary file write made no progress")
     offset = offset + count
@@ -53,16 +53,16 @@ local function coverage_fs_write(path: string, bytes: string)
 end
 
 local function coverage_fs_read(path: string): string
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
-  local file = uv.fs_open(nil, request, path, uv.FS_O_RDONLY, 0)
+  const file = uv.fs_open(nil, request, path, uv.FS_O_RDONLY, 0)
   test.assert(file >= 0)
   defer close_file(file)
   uv.fs_req_cleanup(request)
   local bytes = ""
-  local buffer = uv.buf_t.allocate(32)
+  const buffer = uv.buf_t.allocate(32)
   while true do
-    local count = uv.fs_read(nil, request, file, {buffer}, #bytes)
+    const count = uv.fs_read(nil, request, file, {buffer}, #bytes)
     test.assert(count >= 0, "temporary file read failed")
     uv.fs_req_cleanup(request)
     if count == 0 then return bytes end
@@ -71,7 +71,7 @@ local function coverage_fs_read(path: string): string
 end
 
 function test_coverage_fs_copy_links_metadata_and_descriptor_results(_context: test.Context)
-  local directory = coverage_fs_directory()
+  const directory = coverage_fs_directory()
   defer coverage_fs_remove(directory, true)
   local source, copied = directory .. "/source", directory .. "/copied"
   local moved, linked, sent = directory .. "/moved", directory .. "/linked", directory .. "/sent"
@@ -80,9 +80,9 @@ function test_coverage_fs_copy_links_metadata_and_descriptor_results(_context: t
   defer coverage_fs_remove(moved, false)
   defer coverage_fs_remove(linked, false)
   defer coverage_fs_remove(sent, false)
-  local bytes = "file\0bytes\255\n"
+  const bytes = "file\0bytes\255\n"
   coverage_fs_write(source, bytes)
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   success(uv.fs_copyfile(nil, request, source, copied, uv.FS_COPYFILE_EXCL))
   case uv.fs_get_type(request)
@@ -99,7 +99,7 @@ function test_coverage_fs_copy_links_metadata_and_descriptor_results(_context: t
   success(uv.fs_link(nil, request, source, linked))
   uv.fs_req_cleanup(request)
   test.assert(coverage_fs_read(moved) == bytes)
-  local file = uv.fs_open(nil, request, source, uv.FS_O_RDWR, 0)
+  const file = uv.fs_open(nil, request, source, uv.FS_O_RDWR, 0)
   test.assert(file >= 0)
   defer close_file(file)
   uv.fs_req_cleanup(request)
@@ -114,7 +114,7 @@ function test_coverage_fs_copy_links_metadata_and_descriptor_results(_context: t
   success(uv.fs_futime(nil, request, file, 1234567890.0, 1234567892.0))
   uv.fs_req_cleanup(request)
   success(uv.fs_fstat(nil, request, file))
-  local snapshot = uv.fs_get_statbuf(request)
+  const snapshot = uv.fs_get_statbuf(request)
   test.assert(snapshot.st_size == 5 and snapshot.st_mtim.tv_sec == 1234567892)
   case uv.fs_get_ptr(request)
   when stat(metadata) then test.assert(metadata.st_size == snapshot.st_size)
@@ -136,7 +136,7 @@ function test_coverage_fs_copy_links_metadata_and_descriptor_results(_context: t
   uv.fs_req_cleanup(request)
   test.assert(uv.fs_access(nil, request, copied, uv.FS_F_OK) == uv.ENOENT)
   uv.fs_req_cleanup(request)
-  local output = uv.fs_open(nil, request, sent, uv.FS_O_RDWR | uv.FS_O_CREAT, 384)
+  const output = uv.fs_open(nil, request, sent, uv.FS_O_RDWR | uv.FS_O_CREAT, 384)
   test.assert(output >= 0)
   defer close_file(output)
   uv.fs_req_cleanup(request)
@@ -150,7 +150,7 @@ function test_coverage_fs_copy_links_metadata_and_descriptor_results(_context: t
 end
 
 function test_coverage_fs_directory_entries_own_copies_and_cleanup(_context: test.Context)
-  local directory = coverage_fs_directory()
+  const directory = coverage_fs_directory()
   defer coverage_fs_remove(directory, true)
   local path, nested = directory .. "/binary", directory .. "/nested"
   defer coverage_fs_remove(path, false)
@@ -162,7 +162,7 @@ function test_coverage_fs_directory_entries_own_copies_and_cleanup(_context: tes
   success(uv.fs_mkdir(nil, request, nested, 448))
   uv.fs_req_cleanup(request)
   success(uv.fs_opendir(nil, request, directory))
-  local owner = uv.fs_get_dir(request)
+  const owner = uv.fs_get_dir(request)
   local open = true
   defer if open then
     uv.fs_req_cleanup(request)
@@ -179,9 +179,9 @@ function test_coverage_fs_directory_entries_own_copies_and_cleanup(_context: tes
   uv.fs_req_cleanup(request)
   expect_error(function () uv.fs_get_dir(request) end, "FS result is unavailable")
   test.assert(uv.fs_readdir(nil, request, owner, -1) == uv.EINVAL)
-  local count = uv.fs_readdir(nil, request, owner, 8)
+  const count = uv.fs_readdir(nil, request, owner, 8)
   test.assert(count == 2)
-  local entries = uv.fs_get_entries(request)
+  const entries = uv.fs_get_entries(request)
   test.assert(#entries == count)
   case uv.fs_get_ptr(request)
   when entries(result) then test.assert(#result == count)
@@ -200,9 +200,9 @@ function test_coverage_fs_directory_entries_own_copies_and_cleanup(_context: tes
   test.assert(uv.fs_closedir(nil, request, owner) == uv.EINVAL)
   test.assert(uv.fs_readdir(nil, request, owner, 1) == uv.EINVAL)
   collect()
-  local names: {string: boolean} = {}
+  const names: {string: boolean} = {}
   for i = 1, #entries do
-    local entry = entries[i]
+    const entry = entries[i]
     names[entry.name] = true
     case entry.type
     when file() then test.assert(entry.name == "binary")
@@ -217,8 +217,8 @@ function test_coverage_fs_directory_entries_own_copies_and_cleanup(_context: tes
   when scandir(result) then test.assert(result == request)
   else test.assert(false, "scandir has no typed iterator result")
   end
-  local found: {string: boolean} = {}
-  for i = 1, 2 do
+  const found: {string: boolean} = {}
+  for _ = 1, 2 do
     local status, entry? = uv.fs_scandir_next(request)
     success(status)
     found[entry.name] = true
@@ -234,15 +234,15 @@ function test_coverage_fs_directory_entries_own_copies_and_cleanup(_context: tes
 end
 
 function test_coverage_fs_realpath_and_statfs_results(_context: test.Context)
-  local directory = coverage_fs_directory()
+  const directory = coverage_fs_directory()
   defer coverage_fs_remove(directory, true)
-  local path = directory .. "/source"
+  const path = directory .. "/source"
   defer coverage_fs_remove(path, false)
   coverage_fs_write(path, "target")
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   success(uv.fs_realpath(nil, request, path))
-  local resolved = uv.fs_get_string(request)
+  const resolved = uv.fs_get_string(request)
   case uv.fs_get_ptr(request)
   when path(result) then test.assert(result == resolved)
   else test.assert(false, "realpath has no typed path result")
@@ -250,7 +250,7 @@ function test_coverage_fs_realpath_and_statfs_results(_context: test.Context)
   uv.fs_req_cleanup(request)
   test.assert(coverage_fs_read(resolved) == "target")
   success(uv.fs_statfs(nil, request, path))
-  local filesystem = uv.fs_get_statfs(request)
+  const filesystem = uv.fs_get_statfs(request)
   test.assert(filesystem.f_bsize > 0 and filesystem.f_blocks > 0)
   test.assert(filesystem.f_bfree >= filesystem.f_bavail and #filesystem.f_spare == 3)
   case uv.fs_get_ptr(request)
@@ -267,27 +267,27 @@ function test_coverage_fs_realpath_and_statfs_results(_context: test.Context)
 end
 
 function test_coverage_fs_symlink_results_and_nonfollowing_timestamps(_context: test.Context)
-  local directory = coverage_fs_directory()
+  const directory = coverage_fs_directory()
   defer coverage_fs_remove(directory, true)
   local path, link = directory .. "/source", directory .. "/link"
   defer coverage_fs_remove(path, false)
   defer coverage_fs_remove(link, false)
   coverage_fs_write(path, "target")
-  local request = uv.fs_t()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   success(uv.fs_realpath(nil, request, path))
-  local resolved = uv.fs_get_string(request)
+  const resolved = uv.fs_get_string(request)
   uv.fs_req_cleanup(request)
   -- Windows may require the symlink privilege or Developer Mode. A native
   -- permission denial still owns request cleanup, but cannot prove link I/O.
-  local status = uv.fs_symlink(nil, request, resolved, link, 0)
+  const status = uv.fs_symlink(nil, request, resolved, link, 0)
   uv.fs_req_cleanup(request)
   if common.is_windows() and (status == uv.EPERM or status == uv.EACCES) then
     test.skip("capability: Windows symbolic-link creation is not permitted")
   end
   test.assert(status == 0, "symlink creation failed: " .. status)
   test.assert(uv.fs_readlink(nil, request, link) == 0, "reading symbolic link failed")
-  local target = uv.fs_get_string(request)
+  const target = uv.fs_get_string(request)
   case uv.fs_get_ptr(request)
   when path(result) then test.assert(result == target)
   else test.assert(false, "readlink has no typed path result")
@@ -308,14 +308,14 @@ function test_coverage_fs_symlink_results_and_nonfollowing_timestamps(_context: 
 end
 
 local function coverage_fs_deadline(loop: uv.loop_t, message: string): uv.timer_t
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
-  success(uv.timer_start(timer, function (_owner: uv.timer_t) raise message end, 5000, 0))
+  success(uv.timer_start(timer, function (_: uv.timer_t) raise message end, 5000, 0))
   return timer
 end
 
 local function coverage_fs_poll_socket(integer_descriptor: boolean)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   local status, left?, right? = uv.socketpair(uv.SOCK_STREAM, 0,
     uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
@@ -326,11 +326,11 @@ local function coverage_fs_poll_socket(integer_descriptor: boolean)
   -- The TCP owners adopt both socket tokens; the poll owner only borrows one.
   success(uv.tcp_open(writer, left))
   success(uv.tcp_open(reader, right))
-  local poll = uv.poll_t()
+  const poll = uv.poll_t()
   if integer_descriptor then success(uv.poll_init(loop, poll, right:to_integer()))
   else success(uv.poll_init_socket(loop, poll, right)) end
   test.assert(uv.poll_init_socket(loop, poll, right) == uv.EINVAL)
-  local deadline = coverage_fs_deadline(loop, "socket polling deadline")
+  const deadline = coverage_fs_deadline(loop, "socket polling deadline")
   local calls, closed = 0, false
   test.assert(uv.poll_start(poll, function (_owner: uv.poll_t, _status: integer, _events: integer)
     test.assert(false, "rejected poll callback ran")
@@ -355,7 +355,7 @@ local function coverage_fs_poll_socket(integer_descriptor: boolean)
   -- Reading through the original owner after poll close proves the socket was
   -- borrowed. Readiness itself did not consume the queued byte.
   local received = ""
-  success(uv.timer_start(deadline, function (_owner: uv.timer_t)
+  success(uv.timer_start(deadline, function (_: uv.timer_t)
     raise "borrowed socket read deadline"
   end, 5000, 0))
   success(uv.read_start(reader:as_stream_t(),
@@ -375,10 +375,10 @@ local function coverage_fs_poll_socket(integer_descriptor: boolean)
 end
 
 function test_coverage_fs_descriptor_poll_borrows_socket_and_propagates_callback_error(context: test.Context)
-  context:run("native_socket", function (_child: test.Context)
+  context:run("native_socket", function (_: test.Context)
     coverage_fs_poll_socket(false)
   end)
-  context:run("integer_descriptor", function (_child: test.Context)
+  context:run("integer_descriptor", function (_: test.Context)
     if common.is_windows() then
       test.skip("platform: Windows poll uses native socket tokens rather than CRT descriptors")
     end
@@ -387,19 +387,19 @@ function test_coverage_fs_descriptor_poll_borrows_socket_and_propagates_callback
 end
 
 function test_coverage_fs_poll_missing_to_created_copies_metadata_and_path(_context: test.Context)
-  local directory = coverage_fs_directory()
+  const directory = coverage_fs_directory()
   defer coverage_fs_remove(directory, true)
-  local path = directory .. "/watched"
+  const path = directory .. "/watched"
   defer coverage_fs_remove(path, false)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local watcher = uv.fs_poll_t()
+  const watcher = uv.fs_poll_t()
   test.assert(uv.fs_poll_stop(watcher) == uv.EINVAL)
   local invalid, absent?, capacity = uv.fs_poll_getpath(watcher, 1)
   test.assert(invalid == uv.EINVAL and absent == nil and capacity == 1)
   success(uv.fs_poll_init(loop, watcher))
   test.assert(uv.fs_poll_init(loop, watcher) == uv.EINVAL)
-  local deadline = coverage_fs_deadline(loop, "filesystem polling deadline")
+  const deadline = coverage_fs_deadline(loop, "filesystem polling deadline")
   local failed, delivered, closed = 0, 0, false
   local snapshot: uv.stat_t? = nil
   success(uv.fs_poll_start(watcher,

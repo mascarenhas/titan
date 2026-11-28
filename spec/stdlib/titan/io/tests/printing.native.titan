@@ -3,14 +3,14 @@ local print_values = import "io.print_values.titan"
 local process_support = import "os.process_test_support.titan"
 
 local function cleanup_print_process(process: system.Process)
-  local input? = process.stdin
-  if input then do (input as system.OutputStream):close() catch end end
-  local output? = process.stdout
-  if output then do (output as system.InputStream):close() catch end end
-  local diagnostics? = process.stderr
+  const input? = process.stdin
+  if input then (input as system.OutputStream):close() catch end
+  const output? = process.stdout
+  if output then (output as system.InputStream):close() catch end
+  const diagnostics? = process.stderr
   if diagnostics then
-    do (diagnostics as system.InputStream):close() catch end
-  end
+    (diagnostics as system.InputStream):close()
+  catch end
   do
     if process:is_running() then process:kill("term") end
   catch
@@ -70,12 +70,12 @@ function test_io_print_formats_left_to_right_and_is_atomic(
                   "io.print emitted a prefix before conversion completed")
     end
 
-    local process = system.spawn(process_support.child_path(), {"echo"})
+    const process = system.spawn(process_support.child_path(), {"echo"})
     defer cleanup_print_process(process)
-    local input = required_print_output(process.stdin)
-    local output = required_print_input(process.stdout)
-    local diagnostics = required_print_input(process.stderr)
-    local original = system.stdout
+    const input = required_print_output(process.stdin)
+    const output = required_print_input(process.stdout)
+    const diagnostics = required_print_input(process.stderr)
+    const original = system.stdout
     do
       defer system.stdout = original
       system.stdout = input
@@ -86,7 +86,7 @@ function test_io_print_formats_left_to_right_and_is_atomic(
     for chunk in output:read do rendered = rendered .. chunk end
     local diagnostic = ""
     for chunk in diagnostics:read do diagnostic = diagnostic .. chunk end
-    local status = process:wait()
+    const status = process:wait()
     test.assert(status.code == 0 and not status.signal and
                 rendered == "current stdout\n" and diagnostic == "",
                 "io.print did not use the current os.stdout")

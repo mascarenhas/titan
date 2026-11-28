@@ -1,12 +1,12 @@
 local record Work
-  connection: Connection
-  operation: string
+  const connection: Connection
+  const operation: string
   task: (async.Task<|nil, value|>)?
-  parent: async.Task
-  parent_token: async.ResumeToken
+  const parent: async.Task
+  const parent_token: async.ResumeToken
   parent_waiting: boolean
   parent_cancelled: boolean
-  token: async.ResumeToken
+  const token: async.ResumeToken
   waiting: boolean
   deadline: (async.Task<|nil, value|>)?
   expired: boolean
@@ -22,15 +22,15 @@ end
 -- @usage standard-library-websocket.md#public-interface
 record Connection
   local stream: io.ReaderWriterCloser?
-  local client: boolean
+  local const client: boolean
   local protocol: string?
-  local limit: integer
+  local const limit: integer
   local input: string
   local cursor: integer
   local message_kind: MessageType?
   local message_bytes: integer
   local message: string.StringWriter
-  local unicode: Utf8
+  local const unicode: Utf8
   local reader: Work?
   local writer: Work?
   local frame: Work?
@@ -66,23 +66,24 @@ local function new_connection(stream: io.ReaderWriterCloser?, client: boolean,
 end
 
 local record Drain
-  task: async.Task<|nil, value|>
+  const task: async.Task<|nil, value|>
   remove: (function (): ())?
 end
 local function register_drain(done: async.Completion<|Drain, nil, nil|>,
                              number: integer): uv.req_t?
-  local drain = done:context(number)
+  const drain = done:context(number)
   drain.remove = drain.task:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
-    do done:resolve(number, nil)
-    catch done:fatal(number, error, traceback); raise end
+    done:resolve(number, nil)
+  catch
+    done:fatal(number, error, traceback); raise
   end)
   return nil
 end
 local function drain_task(task: async.Task<|nil, value|>)
   if task:status():has_finished() then return end
-  local drain = Drain(task, nil)
+  const drain = Drain(task, nil)
   defer do
-    local remove? = drain.remove
+    const remove? = drain.remove
     drain.remove = nil
     if remove then remove() end
   end
@@ -107,7 +108,7 @@ local function Work:wait()
   async.suspend(self.token, function () self.waiting = false end)
 end
 local function Work:stop_deadline()
-  local deadline? = self.deadline
+  const deadline? = self.deadline
   self.deadline = nil
   if deadline then
     deadline:cancel(async.CancellationReason.simple("WebSocket control completed"))
@@ -138,9 +139,9 @@ local function Connection:release(work: Work)
   if self.pong == work then self.pong = nil end
   if self.ping_work == work then self.ping_work = nil; self.ping_token = nil end
   if self.shutdown_work == work then self.shutdown_work = nil end
-  local retained: {Work} = {}
+  const retained: {Work} = {}
   for index = 1, #self.works do
-    local other = self.works[index]
+    const other = self.works[index]
     if other ~= work then retained[#retained + 1] = other end
   end
   self.works = retained
@@ -152,21 +153,22 @@ local function Connection:retire(cause: value, source_trace: string?)
     if source_trace ~= nil then
       self.failure = async.Error(cause, source_trace)
     else
-      do raise cause
-      catch self.failure = async.Error(error, traceback) end
+      raise cause
+    catch
+      self.failure = async.Error(error, traceback)
     end
   end
   if not self.retirement then
     self.terminal = true; self.closing = true
     self:wake_waiters()
-    local scopes = self.works
+    const scopes = self.works
     self.retirement = async.run<|nil, value|>(function (): nil
       -- Closing the public HTTP stream invokes the captured TCP/TLS abort.
       -- It precedes all native-work drains and never waits for caller Tasks.
       do if self.stream then self.stream:close() end
       catch if self.failure == nil then self.failure = async.Error(error, traceback) end end
       for index = 1, #scopes do
-        local task? = scopes[index].task
+        const task? = scopes[index].task
         if task then drain_task(task) end
       end
       self.input = ""; self.cursor = 1
@@ -188,7 +190,7 @@ local function new_work(connection: Connection, operation: string): Work
 end
 
 local function Work:execute(body: function (): (), timeout: integer?)
-  local connection = self.connection
+  const connection = self.connection
   connection.works[#connection.works + 1] = self
   self.task = async.run<|nil, value|>(function (): nil
     defer connection:release(self)
@@ -200,8 +202,8 @@ local function Work:execute(body: function (): (), timeout: integer?)
     end
     return nil
   end)
-  local task = self.task
-  local remove = task:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
+  const task = self.task
+  const remove = task:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
     self:wake_parent()
   end)
   defer remove()
@@ -215,7 +217,7 @@ local function Work:execute(body: function (): (), timeout: integer?)
   end
   self.parent_waiting = false
   if self.expired then
-    local failure = timeout_error(self.operation)
+    const failure = timeout_error(self.operation)
     task:cancel(async.CancellationReason.simple("WebSocket deadline expired"))
     do raise failure
     catch
@@ -235,14 +237,14 @@ local function Work:execute(body: function (): (), timeout: integer?)
       async.Error(self.failure, self.trace):raise()
     end
     if self.failure is Error then
-      local failure = self.failure as Error
+      const failure = self.failure as Error
       if failure.kind == "state" and connection.closing and not connection.terminal then
         async.Error(self.failure, self.trace):raise()
       end
     end
     -- A read-side wire error may still send its mandated bounded Close.
     if self.failure is Error and not connection.terminal then
-      local failure = self.failure as Error
+      const failure = self.failure as Error
       if failure.close_code then
         connection.closing = true
         if connection.failure == nil then connection.failure = async.Error(failure, self.trace) end
@@ -254,14 +256,14 @@ local function Work:execute(body: function (): (), timeout: integer?)
     async.Error(self.failure, self.trace):raise()
   end
 catch
-  local task? = self.task
+  const task? = self.task
   if not task then self.connection:release(self) end
-  local pending = task ~= nil and not task:status():has_finished()
+  const pending = task ~= nil and not task:status():has_finished()
   if pending then task:cancel(async.CancellationReason.simple("WebSocket operation stopped")) end
   if (self.parent_cancelled or pending or not task) and
       (self.admitted or self.operation == "websocket.shutdown" or self.expired) then
-    do self.connection:retire(error, traceback) catch end
-  end
+    self.connection:retire(error, traceback)
+  catch end
   if task then drain_task(task) end
   raise
 end
@@ -316,7 +318,7 @@ local function Connection:send_frame(work: Work, opcode: integer,
     self:wake_waiters()
   end
   if opcode == 8 and self.close_sent then return end
-  local frame = encode_frame(self.client, opcode, final, bytes)
+  const frame = encode_frame(self.client, opcode, final, bytes)
   work.admitted = true
   self.stream:write(frame)
   if opcode == 8 then self.close_sent = true end
@@ -333,7 +335,7 @@ function Connection:write(kind: MessageType, data: string)
   self:check_open("websocket.write")
   if self.closing then raise state_error("websocket.write", "WebSocket is closing") end
   if self.writer then raise state_error("websocket.write", "another data writer is active") end
-  local work = new_work(self, "websocket.write")
+  const work = new_work(self, "websocket.write")
   self.writer = work
   work:execute(function ()
     local opcode = 1
@@ -365,7 +367,7 @@ function Connection:read(): (MessageType?, string?)
   self:check_open("websocket.read")
   if self.shutdown_work then raise state_error("websocket.read", "WebSocket shutdown owns receive progress") end
   if self.reader then raise state_error("websocket.read", "another reader is active") end
-  local work = new_work(self, "websocket.read")
+  const work = new_work(self, "websocket.read")
   self.reader = work
   work:execute(function ()
     local kind?, data? = self:read_message(work)
@@ -381,12 +383,12 @@ end
 function Connection:ping(timeout_ms: integer?)
   self.pending_operations = self.pending_operations + 1
   defer self.pending_operations = self.pending_operations - 1
-  local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket Ping timeout")
+  const timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket Ping timeout")
   async.checkpoint(); self:check_open("websocket.ping")
   if self.closing then raise state_error("websocket.ping", "WebSocket is closing") end
   if self.ping_work then raise state_error("websocket.ping", "another Ping waiter is active") end
-  local work = new_work(self, "websocket.ping")
-  local token = random_bytes(16)
+  const work = new_work(self, "websocket.ping")
+  const token = random_bytes(16)
   self.ping_work = work; self.ping_token = token; self.ping_received = false
   work:execute(function ()
     self:send_frame(work, 9, true, token)
@@ -420,14 +422,14 @@ end
 function Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
   self.pending_operations = self.pending_operations + 1
   defer self.pending_operations = self.pending_operations - 1
-  local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket shutdown timeout")
-  local payload = close_payload(code or 1000, reason or "", self.client)
+  const timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket shutdown timeout")
+  const payload = close_payload(code or 1000, reason or "", self.client)
   async.checkpoint()
   if self.failure then self.failure:raise() end
   if self.close_received and self.close_sent then self:retire(nil); return end
   self:check_open("websocket.shutdown")
   if self.shutdown_work then raise state_error("websocket.shutdown", "another shutdown is active") end
-  local work = new_work(self, "websocket.shutdown")
+  const work = new_work(self, "websocket.shutdown")
   self.shutdown_work = work; self.closing = true
   self:wake_waiters()
   work:execute(function ()
@@ -452,7 +454,7 @@ end
 
 local function Connection:failure_close(code: integer)
   if self.close_sent or self.terminal then return end
-  local work = new_work(self, "websocket.protocol-close")
+  const work = new_work(self, "websocket.protocol-close")
   work:execute(function ()
     self:send_frame(work, 8, true, close_payload(code, "", self.client))
   end, CONTROL_TIMEOUT)
@@ -479,8 +481,8 @@ function Connection:to_transfer_payload(): string
     if wrapper.wrapped is http.UpgradedStream then stream = wrapper.wrapped end
   end
   if stream == nil then raise "invalid WebSocket upgraded stream owner" end
-  local input = string.sub(self.input, self.cursor)
-  local stream_payload = stream:to_transfer_payload()
+  const input = string.sub(self.input, self.cursor)
+  const stream_payload = stream:to_transfer_payload()
   self.stream = nil
   self.input = ""
   self.cursor = 1
@@ -488,7 +490,7 @@ function Connection:to_transfer_payload(): string
   self.closing = true
   local exported = false
   defer if not exported then http.UpgradedStream.discard_transfer_payload(stream_payload) end
-  local payload = protobuf.serialize_fields(connection_transfer_fields,
+  const payload = protobuf.serialize_fields(connection_transfer_fields,
     stream_payload, self.client, self.protocol, self.limit, input)
   exported = true
   return payload
@@ -502,7 +504,7 @@ function Connection.from_transfer_payload(payload: string): Connection
   local stream_payload: string, client: boolean, protocol: string?, limit: integer, input: string =
     protobuf.deserialize_fields(payload, connection_transfer_fields)
   if limit <= 0 then raise "invalid WebSocket limit transfer payload" end
-  local connection = new_connection(nil, client, protocol, limit)
+  const connection = new_connection(nil, client, protocol, limit)
   connection.input = input
   connection.stream = http.UpgradedStream.from_transfer_payload(stream_payload)
   return connection
@@ -512,6 +514,6 @@ end
 -- @return Native close status; adoption or disposal consumes the payload.
 -- @usage standard-library-websocket.md#transferring-connections
 function Connection.discard_transfer_payload(payload: string): integer
-  local stream_payload: string = protobuf.deserialize_fields(payload, connection_transfer_fields)
+  const stream_payload: string = protobuf.deserialize_fields(payload, connection_transfer_fields)
   return http.UpgradedStream.discard_transfer_payload(stream_payload)
 end

@@ -2,9 +2,9 @@ local command = import "support.command.titan"
 
 local function worker_fixture_case(context: test.Context, workspace: string,
                                    scenario: string)
-  context:run(scenario, function (_context: test.Context)
+  context:run(scenario, function (_: test.Context)
     runtime_test.run(function ()
-      local result = workspace .. "/" .. scenario .. ".result"
+      const result = workspace .. "/" .. scenario .. ".result"
       local output, why, code = command.capture({
         command.program(workspace, "sqlite3_worker_app"), scenario, result,
       }, nil, {["UV_THREADPOOL_SIZE"] = "4"})
@@ -32,7 +32,7 @@ function test_worker_cancellation_retains_native_ownership_and_loop_progress(
         fs.read_file("spec/fixtures/stdlib/native/sqlite3_worker_fixture.h"))
     fs.write_file(workspace .. "/sqlite3_worker_app.titan",
         fs.read_file("spec/fixtures/stdlib/titan/sqlite3_worker_app.titan"))
-    local object = command.fixture_object("sqlite3_worker_fixture")
+    const object = command.fixture_object("sqlite3_worker_fixture")
     local output, why, status = command.compile(workspace, "sqlite3_worker_app",
                                                 {"-X", object}, true)
     test.assert(why == "exit" and status == 0,

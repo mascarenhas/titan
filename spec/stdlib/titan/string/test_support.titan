@@ -51,19 +51,19 @@ local set_gc_mode_function: SetGcMode? = nil
 local collect_gc_function: CollectGc? = nil
 
 local function load_lua_function(source: string): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 2) == 0 then
     raise "cannot reserve Lua stack for string/url test helper"
   end
   local status = ffi.luaL_loadstring(L, source)
   if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
   status = ffi.lua_pcallk(L, 0, 1, 0, 0, nil)
   if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
   return ffi.lua_totvalue(L, -1)
@@ -72,13 +72,13 @@ end
 local function render_error(failure: value): string
   local result = "<error while rendering failure>"
   do
-    local top = ffi.lua_gettop(L)
+    const top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
     -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
     if ffi.lua_checkstack(L, 3) ~= 0 then
       ffi.lua_pushtvalue(L, failure)
       ffi.luaL_tolstring(L, -1, nil)
-      local rendered: value = ffi.lua_totvalue(L, -1)
+      const rendered: value = ffi.lua_totvalue(L, -1)
       if rendered is string then result = rendered as string end
     end
   catch
@@ -88,7 +88,7 @@ local function render_error(failure: value): string
 end
 
 local function contains(subject: string, needle: string): boolean
-  local exact = contains_function
+  const exact = contains_function
   return exact(subject, needle)
 end
 
@@ -132,125 +132,125 @@ local function attempt_string(callback: function (): (string)): (boolean, string
 end
 
 local function lua_len(subject: string): integer
-  local exact = lua_len_function
+  const exact = lua_len_function
   return exact(subject)
 end
 
 local function lua_sub(subject: string, first: integer,
                  last: integer?): string
-  local exact = lua_sub_function
+  const exact = lua_sub_function
   return exact(subject, first, last)
 end
 
 local function lua_reverse(subject: string): string
-  local exact = lua_reverse_function
+  const exact = lua_reverse_function
   return exact(subject)
 end
 
 local function lua_lower(subject: string): string
-  local exact = lua_lower_function
+  const exact = lua_lower_function
   return exact(subject)
 end
 
 local function lua_upper(subject: string): string
-  local exact = lua_upper_function
+  const exact = lua_upper_function
   return exact(subject)
 end
 
 local function lua_byte(subject: string, first: integer?,
                   last: integer?): (...: integer)
-  local exact = lua_byte_function
+  const exact = lua_byte_function
   return exact(subject, first, last)
 end
 
 local function lua_find(subject: string, needle: string,
                   initial: integer?): (integer?, integer?)
-  local exact = lua_find_function
+  const exact = lua_find_function
   return exact(subject, needle, initial)
 end
 
 local function lua_rep(subject: string, count: integer,
                  separator: string?): string
-  local exact = lua_rep_function
+  const exact = lua_rep_function
   return exact(subject, count, separator)
 end
 
 local function lua_char(...: integer): string
-  local exact = lua_char_function
+  const exact = lua_char_function
   return exact(...)
 end
 
 local function lua_tostring(candidate: value): string
-  local exact = lua_tostring_function
+  const exact = lua_tostring_function
   return exact(candidate)
 end
 
 local function lua_format(format_string: string, ...: value): string
-  local exact = lua_format_function
+  const exact = lua_format_function
   return exact(format_string, ...)
 end
 
 local function lua_pack(format_string: string, ...: value): string
-  local exact = lua_pack_function
+  const exact = lua_pack_function
   return exact(format_string, ...)
 end
 
 local function lua_packsize(format_string: string): integer
-  local exact = lua_packsize_function
+  const exact = lua_packsize_function
   return exact(format_string)
 end
 
 local function lua_unpack(format_string: string, data: string,
                     initial: integer?): (value, ...: value)
-  local exact = lua_unpack_function
+  const exact = lua_unpack_function
   return exact(format_string, data, initial)
 end
 
 local function custom_tostring_value(text: string): value
-  local exact = make_custom_tostring_function
+  const exact = make_custom_tostring_function
   return exact(text)
 end
 
 local function failing_tostring_value(message: string): value
-  local exact = make_failing_tostring_function
+  const exact = make_failing_tostring_function
   return exact(message)
 end
 
 local function replace_global_tostring(): value
-  local exact = replace_tostring_function
+  const exact = replace_tostring_function
   return exact()
 end
 
 local function restore_global_tostring(original: value)
-  local exact = restore_tostring_function
+  const exact = restore_tostring_function
   exact(original)
 end
 
 local function set_c_locale(): string?
-  local exact = set_locale_function
+  const exact = set_locale_function
   return exact()
 end
 
 local function restore_locale(previous: string)
-  local exact = restore_locale_function
+  const exact = restore_locale_function
   exact(previous)
 end
 
 local function set_gc_mode(mode: string): string
-  local exact = set_gc_mode_function
+  const exact = set_gc_mode_function
   return exact(mode)
 end
 
 local function collect_gc()
-  local exact = collect_gc_function
+  const exact = collect_gc_function
   exact()
 end
 
 local function values_equal(left: value, right: value): boolean
   if left == right then return true end
   if left is float and right is float then
-    local left_number = left as float
-    local right_number = right as float
+    const left_number = left as float
+    const right_number = right as float
     return left_number ~= left_number and right_number ~= right_number
   end
   return false

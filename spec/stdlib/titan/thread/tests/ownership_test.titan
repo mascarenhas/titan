@@ -68,8 +68,8 @@ function StashingEndpointHook.from_transfer_payload(payload: string): StashingEn
   if #payload ~= 8 then
     raise "invalid StashingEndpointHook payload"
   end
-  local tx = thread.Sender<|integer|>.from_transfer_payload(strings.sub(payload, 1, 4))
-  local rx = thread.Receiver<|integer|>.from_transfer_payload(strings.sub(payload, 5, 8))
+  const tx = thread.Sender<|integer|>.from_transfer_payload(strings.sub(payload, 1, 4))
+  const rx = thread.Receiver<|integer|>.from_transfer_payload(strings.sub(payload, 5, 8))
   stashed_adopted_tx = tx
   stashed_adopted_rx = rx
   return StashingEndpointHook(tx, rx)
@@ -137,8 +137,8 @@ end
 
 function OpaqueEndpointHook:to_transfer_payload(): string
   ownership_encode_calls = ownership_encode_calls + 1
-  local tx_bytes = self.tx:to_transfer_payload()
-  local rx_bytes = self.rx:to_transfer_payload()
+  const tx_bytes = self.tx:to_transfer_payload()
+  const rx_bytes = self.rx:to_transfer_payload()
   return tx_bytes .. rx_bytes .. self.tag
 end
 
@@ -147,11 +147,11 @@ function OpaqueEndpointHook.from_transfer_payload(payload: string): OpaqueEndpoi
   if #payload < 8 then
     raise "invalid OpaqueEndpointHook payload"
   end
-  local tx_bytes = strings.sub(payload, 1, 4)
-  local rx_bytes = strings.sub(payload, 5, 8)
-  local tag = strings.sub(payload, 9)
-  local tx = thread.Sender<|integer|>.from_transfer_payload(tx_bytes)
-  local rx = thread.Receiver<|integer|>.from_transfer_payload(rx_bytes)
+  const tx_bytes = strings.sub(payload, 1, 4)
+  const rx_bytes = strings.sub(payload, 5, 8)
+  const tag = strings.sub(payload, 9)
+  const tx = thread.Sender<|integer|>.from_transfer_payload(tx_bytes)
+  const rx = thread.Receiver<|integer|>.from_transfer_payload(rx_bytes)
   return OpaqueEndpointHook(tag, tx, rx)
 end
 
@@ -179,7 +179,7 @@ record CancelRaceHook
 end
 
 function CancelRaceHook:to_transfer_payload(): string
-  local act? = cancel_race_action
+  const act? = cancel_race_action
   if act ~= nil then
     cancel_race_action = nil
     act()
@@ -217,7 +217,7 @@ record RecursiveLevel1Packet
 end
 
 local function install_preload_probe(name: string, mode: string): function (): integer
-  local setup = lua.load([=[
+  const setup = lua.load([=[
     local target_name, target_mode = ...
     local registry = debug.getregistry()
     local preload = registry._PRELOAD
@@ -250,7 +250,7 @@ local function make_sender_release_once_probe(): (
 )
   local tx, rx = thread.channel<|integer|>(2)
   local held_clone: thread.Sender<|integer|>? = tx:clone()
-  local release_held = function ()
+  const release_held = function ()
     held_clone = nil
   end
   return tx, rx, release_held
@@ -263,7 +263,7 @@ local function make_receiver_release_once_probe(): (
 )
   local tx, rx = thread.channel<|integer|>(2)
   local held_clone: thread.Receiver<|integer|>? = rx:clone()
-  local release_held = function ()
+  const release_held = function ()
     held_clone = nil
   end
   return tx, rx, release_held
@@ -318,7 +318,7 @@ local function make_earlier_sender_hook_raw_probe(): (
 end
 
 function test_raw_decode_address_home_survives_earlier_catch(context: test.Context)
-  context:run("decoder_clear_is_visible_before_guard_recovery", function (_child: test.Context)
+  context:run("decoder_clear_is_visible_before_guard_recovery", function (_: test.Context)
     runtime_test.run(function ()
       reset_ownership_hook_state(true, false)
       defer reset_ownership_hook_state(false, false)
@@ -483,10 +483,10 @@ local function exercise_native_endpoint_cycle_close(mutual: boolean)
 end
 
 function test_native_endpoint_cycles_retire_through_explicit_receiver_close(context: test.Context)
-  context:run("receiver_of_its_own_channel", function (_child: test.Context)
+  context:run("receiver_of_its_own_channel", function (_: test.Context)
     exercise_native_endpoint_cycle_close(false)
   end)
-  context:run("mutually_queued_receivers", function (_child: test.Context)
+  context:run("mutually_queued_receivers", function (_: test.Context)
     exercise_native_endpoint_cycle_close(true)
   end)
 end
@@ -504,7 +504,7 @@ local function exercise_and_drop_stashed_endpoints(
 end
 
 function test_discard_reproducer_inverted_sender_and_receiver(context: test.Context)
-  context:run("sender_hook_orders_on_discard", function (_child: test.Context)
+  context:run("sender_hook_orders_on_discard", function (_: test.Context)
     runtime_test.run(function ()
       -- 1. Successful custom decoder before Sender.
       reset_ownership_hook_state(false, false)
@@ -523,7 +523,7 @@ function test_discard_reproducer_inverted_sender_and_receiver(context: test.Cont
       local tx2, rx2 = thread.channel<|EarlierSenderHook|>(1)
       defer tx2:close()
       defer rx2:close()
-      local sole_rx2 = enqueue_sole_earlier_sender(tx2)
+      const sole_rx2 = enqueue_sole_earlier_sender(tx2)
       defer sole_rx2:close()
       gc.collect()
       gc.collect()
@@ -556,7 +556,7 @@ function test_discard_reproducer_inverted_sender_and_receiver(context: test.Cont
     end)
   end)
 
-  context:run("receiver_hook_orders_on_discard", function (_child: test.Context)
+  context:run("receiver_hook_orders_on_discard", function (_: test.Context)
     runtime_test.run(function ()
       -- 1. Successful custom decoder before Receiver.
       reset_ownership_hook_state(false, false)
@@ -574,7 +574,7 @@ function test_discard_reproducer_inverted_sender_and_receiver(context: test.Cont
       local tx2, rx2 = thread.channel<|EarlierReceiverHook|>(1)
       defer tx2:close()
       defer rx2:close()
-      local sole_tx2 = enqueue_sole_earlier_receiver(tx2)
+      const sole_tx2 = enqueue_sole_earlier_receiver(tx2)
       defer sole_tx2:close()
       gc.collect()
       gc.collect()
@@ -606,7 +606,7 @@ function test_discard_reproducer_inverted_sender_and_receiver(context: test.Cont
     end)
   end)
 
-  context:run("partial_decode_failure_adopted_vs_unclaimed", function (_child: test.Context)
+  context:run("partial_decode_failure_adopted_vs_unclaimed", function (_: test.Context)
     runtime_test.run(function ()
       -- Earlier hook throws during receive(): unclaimed Sender/Receiver released synchronously
       -- by decode_message unwind before any GC cycle.
@@ -614,7 +614,7 @@ function test_discard_reproducer_inverted_sender_and_receiver(context: test.Cont
       local e_tx, e_rx = thread.channel<|EarlierSenderHook|>(2)
       defer e_tx:close()
       defer e_rx:close()
-      local sole_peer_rx = enqueue_sole_earlier_sender(e_tx)
+      const sole_peer_rx = enqueue_sole_earlier_sender(e_tx)
       defer sole_peer_rx:close()
       local probe_peer_rx, release_probe_tx = enqueue_earlier_sender_hook(e_tx)
       defer probe_peer_rx:close()
@@ -640,7 +640,7 @@ function test_discard_reproducer_inverted_sender_and_receiver(context: test.Cont
       local er_tx, er_rx = thread.channel<|EarlierReceiverHook|>(2)
       defer er_tx:close()
       defer er_rx:close()
-      local sole_peer_tx = enqueue_sole_earlier_receiver(er_tx)
+      const sole_peer_tx = enqueue_sole_earlier_receiver(er_tx)
       defer sole_peer_tx:close()
       local probe_peer_tx, release_probe_rx = enqueue_earlier_receiver_hook(er_tx)
       defer probe_peer_tx:close()
@@ -669,7 +669,7 @@ function test_discard_reproducer_inverted_sender_and_receiver(context: test.Cont
       local l_tx, l_rx = thread.channel<|LaterSenderHook|>(2)
       defer l_tx:close()
       defer l_rx:close()
-      local adopted_peer_rx = enqueue_sole_later_sender(l_tx)
+      const adopted_peer_rx = enqueue_sole_later_sender(l_tx)
       defer adopted_peer_rx:close()
       local adopted_probe_rx, release_adopted_tx = enqueue_later_sender_hook(l_tx)
       defer adopted_probe_rx:close()
@@ -699,7 +699,7 @@ function test_discard_reproducer_inverted_sender_and_receiver(context: test.Cont
       local lr_tx, lr_rx = thread.channel<|LaterReceiverHook|>(2)
       defer lr_tx:close()
       defer lr_rx:close()
-      local adopted_peer_tx = enqueue_sole_later_receiver(lr_tx)
+      const adopted_peer_tx = enqueue_sole_later_receiver(lr_tx)
       defer adopted_peer_tx:close()
       local adopted_probe_tx, release_adopted_rx = enqueue_later_receiver_hook(lr_tx)
       defer adopted_probe_tx:close()
@@ -825,7 +825,7 @@ end
 local function decode_duplicate_keepalive(
   incoming: thread.Receiver<|DuplicateEndpointCarrier|>
 ): DuplicateEndpointKeepalive
-  local decoded = incoming:receive()
+  const decoded = incoming:receive()
   test.assert(
     decoded.tx1 ~= decoded.tx2 and
     decoded.tx1 ~= decoded.tx_list[1] and
@@ -873,8 +873,8 @@ local function reject_top_level_endpoint_arrays(): (
   defer any_rx:close()
   local tx, sender_peer, release_sender = make_sender_release_once_probe()
   local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
-  local sender_array: {thread.Sender<|integer|>} = {tx}
-  local receiver_array: {thread.Receiver<|integer|>} = {rx}
+  const sender_array: {thread.Sender<|integer|>} = {tx}
+  const receiver_array: {thread.Receiver<|integer|>} = {rx}
   expect_error(function ()
     any_tx:send(sender_array)
   end, "transfer: unsupported value")
@@ -882,7 +882,7 @@ local function reject_top_level_endpoint_arrays(): (
     any_tx:try_send(receiver_array)
   end, "transfer: unsupported value")
   expect_error(function ()
-    thread.spawn_one(function (_arr: {thread.Sender<|integer|>}): integer
+    thread.spawn_one(function (_: {thread.Sender<|integer|>}): integer
       return 1
     end, sender_array)
   end, "transfer: unsupported value")
@@ -890,7 +890,7 @@ local function reject_top_level_endpoint_arrays(): (
 end
 
 function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context: test.Context)
-  context:run("root_sender_and_receiver_transfer_and_discard", function (_child: test.Context)
+  context:run("root_sender_and_receiver_transfer_and_discard", function (_: test.Context)
     runtime_test.run(function ()
       local tx_ch_tx, tx_ch_rx = thread.channel<|thread.Sender<|integer|>|>(2)
       local rx_ch_tx, rx_ch_rx = thread.channel<|thread.Receiver<|integer|>|>(2)
@@ -906,17 +906,17 @@ function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context
       tx_ch_tx:send(data_tx)
       rx_ch_tx:send(data_rx)
 
-      local worker = thread.spawn_two(function (
+      const worker = thread.spawn_two(function (
         in_tx_rx: thread.Receiver<|thread.Sender<|integer|>|>,
         in_rx_rx: thread.Receiver<|thread.Receiver<|integer|>|>
       ): integer
-        local adopted_tx = in_tx_rx:receive()
-        local adopted_rx = in_rx_rx:receive()
+        const adopted_tx = in_tx_rx:receive()
+        const adopted_rx = in_rx_rx:receive()
         adopted_tx:send(515)
         return adopted_rx:receive()
       end, tx_ch_rx, rx_ch_rx)
 
-      local st = worker:join()
+      const st = worker:join()
       local ok, val? = st:has_succeeded()
       test.assert(ok and val == 515)
 
@@ -932,7 +932,7 @@ function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context
     end)
   end)
 
-  context:run("nested_records_unions_arrays_opaque_hooks_and_closures", function (_child: test.Context)
+  context:run("nested_records_unions_arrays_opaque_hooks_and_closures", function (_: test.Context)
     runtime_test.run(function ()
       reset_ownership_hook_state(false, false)
       local union_tx, union_rx = thread.channel<|EndpointUnionCarrier|>(2)
@@ -961,7 +961,7 @@ function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context
       defer o_tx:close()
       defer o_rx:close()
 
-      local carrier = EndpointArrayCarrier(
+      const carrier = EndpointArrayCarrier(
         "array-in-root",
         {a_tx, b_tx},
         {a_rx, b_rx},
@@ -969,18 +969,18 @@ function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context
       union_tx:send(EndpointUnionCarrier.nested_bundle(carrier, d_tx, d_rx))
       opaque_tx:send(OpaqueEndpointHook("custom-opaque", o_tx, o_rx))
 
-      local cap_opaque = OpaqueEndpointHook("captured-opaque", o_tx, o_rx)
+      const cap_opaque = OpaqueEndpointHook("captured-opaque", o_tx, o_rx)
       fn_tx:send(function (): integer
         cap_opaque.tx:send(91)
         return cap_opaque.rx:receive()
       end)
 
-      local worker = thread.spawn_three(function (
+      const worker = thread.spawn_three(function (
         u_rx: thread.Receiver<|EndpointUnionCarrier|>,
         op_rx: thread.Receiver<|OpaqueEndpointHook|>,
         f_rx: thread.Receiver<|function (): integer|>
       ): integer
-        local u = u_rx:receive()
+        const u = u_rx:receive()
         local total = 0
         case u
         when nested_bundle(b, ex_tx, ex_rx) then
@@ -994,25 +994,25 @@ function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context
         else
           raise "expected nested_bundle"
         end
-        local op = op_rx:receive()
+        const op = op_rx:receive()
         test.assert(op.tag == "custom-opaque")
         op.tx:send(50)
         total = total + op.rx:receive()
-        local fn = f_rx:receive()
+        const fn = f_rx:receive()
         total = total + fn()
         test.assert(ownership_decode_calls == 2,
           "child did not decode both the direct and closure-captured opaque hooks")
         return total
       end, union_rx, opaque_rx, fn_rx)
 
-      local st = worker:join()
+      const st = worker:join()
       local ok, sum? = st:has_succeeded()
       test.assert(ok and sum == 10 + 20 + 30 + 40 + 50 + 91)
       test.assert(ownership_encode_calls == 2, "parent did not encode both opaque hook paths")
     end)
   end)
 
-  context:run("duplicate_endpoint_occurrences_retain_and_claim_independently", function (_child: test.Context)
+  context:run("duplicate_endpoint_occurrences_retain_and_claim_independently", function (_: test.Context)
     runtime_test.run(function ()
       local out_tx, out_rx = thread.channel<|DuplicateEndpointCarrier|>(2)
       defer out_tx:close()
@@ -1029,7 +1029,7 @@ function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context
       gc.collect()
       test.assert(not peer_rx:is_closed() and not peer_tx:is_closed())
 
-      local keep = decode_duplicate_keepalive(out_rx)
+      const keep = decode_duplicate_keepalive(out_rx)
       gc.collect()
       gc.collect()
       -- Three of the four decoded wrappers were collected; the 4th keeps the channel open.
@@ -1082,7 +1082,7 @@ function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context
     end)
   end)
 
-  context:run("top_level_arrays_rejected_even_with_endpoints", function (_child: test.Context)
+  context:run("top_level_arrays_rejected_even_with_endpoints", function (_: test.Context)
     runtime_test.run(function ()
       local peer_rx, release_tx, peer_tx, release_rx = reject_top_level_endpoint_arrays()
       defer peer_rx:close()
@@ -1127,7 +1127,7 @@ local function start_parked_pair_send(
   local tx, peer_rx, release_tx = make_sender_release_once_probe()
   local peer_tx, rx, release_rx = make_receiver_release_once_probe()
   local pair: EndpointPair? = EndpointPair(tx, rx)
-  local task = spawn_task(function (): boolean
+  const task = spawn_task(function (): boolean
     defer pair = nil
     full_tx:send(pair as EndpointPair)
     return true
@@ -1144,7 +1144,7 @@ local function build_last_receiver_probe(): (
   function (): ()
 )
   local tx, rx = thread.channel<|EndpointPair|>(2)
-  local clone = rx:clone()
+  const clone = rx:clone()
   local _, sender_peer, release_sender, receiver_peer, release_receiver =
     enqueue_pair_on_channel(tx, false)
   return tx, {clone}, sender_peer, release_sender, receiver_peer, release_receiver
@@ -1156,7 +1156,7 @@ local function reject_thread_capture_probe(): (
 )
   local tx, sender_peer, release_sender = make_sender_release_once_probe()
   local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
-  local non_transferable = PrivateNonTransferable(11)
+  const non_transferable = PrivateNonTransferable(11)
   expect_error(function ()
     thread.spawn(function (): integer
       tx:try_send(1)
@@ -1174,9 +1174,9 @@ local function spawn_missing_bootstrap_probe(): (
 )
   local tx, sender_peer, release_sender = make_sender_release_once_probe()
   local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
-  local restore_thread_preload = install_preload_probe("titan.thread", "missing")
+  const restore_thread_preload = install_preload_probe("titan.thread", "missing")
   defer restore_thread_preload()
-  local worker = thread.spawn_two(function (
+  const worker = thread.spawn_two(function (
     sender: thread.Sender<|integer|>, receiver: thread.Receiver<|integer|>
   ): integer
     sender:send(1)
@@ -1196,8 +1196,8 @@ local function spawn_decode_failure_probe(): (
   local a_receiver_peer, a_rx, release_a_receiver = make_receiver_release_once_probe()
   local u_tx, u_sender_peer, release_u_sender = make_sender_release_once_probe()
   local u_receiver_peer, u_rx, release_u_receiver = make_receiver_release_once_probe()
-  local fail_hook = ChildBootstrapFailureHook("child-entry-decode-fail")
-  local worker = thread.spawn(function (): integer
+  const fail_hook = ChildBootstrapFailureHook("child-entry-decode-fail")
+  const worker = thread.spawn(function (): integer
     a_tx:send(1)
     a_rx:try_receive()
     if #fail_hook.label == 0 then return 0 end
@@ -1260,14 +1260,14 @@ local function build_abandoned_thread_probe(mode: string): AbandonedThreadProbe
       started:send(true)
       if mode == "running" then gate:receive_result() end
       if retired:is_closed() then raise "unreachable retired result owner" end
-      local result = RetiringEndpointPair(sender, receiver, retired)
+      const result = RetiringEndpointPair(sender, receiver, retired)
       if mode == "failed" then raise result end
       return result
     end, tx, rx, started_tx, gate_rx, retired_tx)
   end
   test.assert(started_rx:receive())
   if mode == "finished" then
-    local deadline = poll_deadline()
+    const deadline = poll_deadline()
     while not worker:status():has_finished() do
       check_poll_deadline(deadline, "the probed worker finishing")
       async.yield()
@@ -1276,7 +1276,7 @@ local function build_abandoned_thread_probe(mode: string): AbandonedThreadProbe
     worker:cancel(async.CancellationReason.complex(
       RetiringEndpointPair(tx, rx, retired_tx) as value))
   end
-  local probe = AbandonedThreadProbe(sender_peer, release_sender,
+  const probe = AbandonedThreadProbe(sender_peer, release_sender,
     receiver_peer, release_receiver, retired_rx, function () gate_tx:close() end)
   prepared = true
   -- Return no Thread, source endpoint, decoded outcome, or cancellation value.
@@ -1343,7 +1343,7 @@ local function cancel_with_endpoint_race_probe(
 end
 
 function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context)
-  context:run("try_send_full_and_closed_release_once", function (_child: test.Context)
+  context:run("try_send_full_and_closed_release_once", function (_: test.Context)
     runtime_test.run(function ()
       local full_tx, full_rx = thread.channel<|EndpointPair|>(1)
       defer full_tx:close()
@@ -1440,7 +1440,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
     child:log("END expected channel-closed async Task diagnostics")
   end)
 
-  context:run("unread_queue_close_and_last_receiver_gc_release_once", function (_child: test.Context)
+  context:run("unread_queue_close_and_last_receiver_gc_release_once", function (_: test.Context)
     runtime_test.run(function ()
       -- 1. Unread queue close.
       local q1_tx, q1_rx = thread.channel<|EndpointPair|>(2)
@@ -1477,7 +1477,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
     end)
   end)
 
-  context:run("spawn_encode_and_bootstrap_failures_release_once", function (_child: test.Context)
+  context:run("spawn_encode_and_bootstrap_failures_release_once", function (_: test.Context)
     runtime_test.run(function ()
       -- 1. Synchronous spawn encode failure after attaching Sender and Receiver.
       local peer_rx1, rel_tx1, peer_tx1, rel_rx1 = reject_thread_capture_probe()
@@ -1493,7 +1493,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
         spawn_missing_bootstrap_probe()
       defer peer_rx2:close()
       defer peer_tx2:close()
-      local st_boot = boot_fail_worker:join()
+      const st_boot = boot_fail_worker:join()
       test.assert(st_boot:has_failed(), "expected child thread bootstrap failure")
       -- Note: boot_fail_worker is still held alive here, proving entry_msg was discarded on completion.
       assert_sender_released_exactly_once(
@@ -1510,7 +1510,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
       defer a_peer_tx:close()
       defer u_peer_rx:close()
       defer u_peer_tx:close()
-      local st_dec = decode_fail_worker:join()
+      const st_dec = decode_fail_worker:join()
       test.assert(st_dec:has_failed(), "expected child entry capture decode failure")
       assert_sender_released_exactly_once(
         a_peer_rx, rel_a_tx, "child entry decode adopted Sender (reclaimed by child lua_close)")
@@ -1523,7 +1523,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
     end)
   end)
 
-  context:run("rejected_cancel_reason_races_and_unconsumed_cancel_release_once", function (_child: test.Context)
+  context:run("rejected_cancel_reason_races_and_unconsumed_cancel_release_once", function (_: test.Context)
     runtime_test.run(function ()
       -- 1. Cancel reason race against a winning concurrent cancel during Thread:cancel encode.
       local ready1_tx, ready1_rx = thread.channel<|boolean|>(1)
@@ -1532,7 +1532,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
       defer ready1_rx:close()
       defer hold1_tx:close()
       defer hold1_rx:close()
-      local worker1 = thread.spawn(function (): integer
+      const worker1 = thread.spawn(function (): integer
         ready1_tx:send(true)
         return hold1_rx:receive()
       end)
@@ -1547,7 +1547,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
       defer c_peer_rx1:close()
       defer c_peer_tx1:close()
 
-      local st1 = worker1:join()
+      const st1 = worker1:join()
       local is_c1, reason1? = st1:has_cancelled()
       test.assert(is_c1 and reason1 ~= nil)
       test.assert(
@@ -1580,7 +1580,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
         cancel_with_endpoint_race_probe(worker2, function ()
           test.assert(gate2_tx:try_send(42))
           -- Hooks are synchronous: poll the independent worker's actual finish.
-          local deadline = poll_deadline()
+          const deadline = poll_deadline()
           while not worker2:status():has_finished() do
             check_poll_deadline(deadline, "the gated worker finishing")
           end
@@ -1588,7 +1588,7 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
       defer c_peer_rx2:close()
       defer c_peer_tx2:close()
 
-      local st2 = worker2:join()
+      const st2 = worker2:join()
       local ok2, val2? = st2:has_succeeded()
       test.assert(ok2 and val2 == 42)
       test.assert(ownership_decode_calls == 0)
@@ -1601,17 +1601,17 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
 
   context:run("abandoned_thread_results_and_child_lua_close_release_once", function (child: test.Context)
     runtime_test.run(function ()
-      local completed = build_abandoned_thread_probe("finished")
+      const completed = build_abandoned_thread_probe("finished")
       completed:assert_released("abandoned finished Thread result")
 
-      local running = build_abandoned_thread_probe("running")
+      const running = build_abandoned_thread_probe("running")
       running:assert_released("abandoned running Thread result")
 
-      local cancelled = build_abandoned_thread_probe("cancelled")
+      const cancelled = build_abandoned_thread_probe("cancelled")
       cancelled:assert_released("abandoned cancelled Thread reason")
 
       child:log("BEGIN expected uncaught thread error diagnostics")
-      local failed = build_abandoned_thread_probe("failed")
+      const failed = build_abandoned_thread_probe("failed")
       failed:assert_released("abandoned failed Thread error payload")
       child:log("END expected uncaught thread error diagnostics")
     end)
@@ -1677,11 +1677,11 @@ local function spawn_recursive_close_probe(): (
     leaf_rx, release_leaf_tx, leaf_tx, release_leaf_rx,
     extra_rx, release_extra_tx, extra_tx, release_extra_rx = build_recursive_receiver_tree()
   local alert_tx, alert_rx = thread.channel<|boolean|>(1)
-  local worker = thread.spawn_two(function (
+  const worker = thread.spawn_two(function (
     adopted_tree_rx: thread.Receiver<|RecursiveLevel1Packet|>,
     alert_tx: thread.Sender<|boolean|>
   ): integer
-    local arm_child_close = lua.load([=[
+    const arm_child_close = lua.load([=[
       local rx_to_keep, tx_alert = ...
       local registry = debug.getregistry()
       local preload = registry._PRELOAD
@@ -1709,7 +1709,7 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
 )
   -- Phase 1: Before any Runtime is created in this test (no active Runtime).
   reset_ownership_hook_state(true, false)
-  local preload_restore_pre = install_preload_probe("thread.tests", "spy_fail")
+  const preload_restore_pre = install_preload_probe("thread.tests", "spy_fail")
   local rx_pre_close,
     l_peer_rx1, rel_l_tx1,
     l_peer_tx1, rel_l_rx1,
@@ -1723,7 +1723,7 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
   gc.collect()
   gc.collect()
   rx_pre_close:close()
-  local preload_calls_pre1 = preload_restore_pre()
+  const preload_calls_pre1 = preload_restore_pre()
   test.assert(preload_calls_pre1 == 0, "discard without Runtime invoked module preload")
   test.assert(ownership_decode_calls == 0, "discard without Runtime invoked user decoder")
   assert_sender_released_exactly_once(l_peer_rx1, rel_l_tx1, "no-Runtime close leaf Sender")
@@ -1733,7 +1733,7 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
 
   -- Last-Receiver GC finalizer before any Runtime is created.
   reset_ownership_hook_state(true, false)
-  local preload_restore_pre_gc = install_preload_probe("thread.tests", "spy_fail")
+  const preload_restore_pre_gc = install_preload_probe("thread.tests", "spy_fail")
   local pre_gc_receivers,
     l_peer_rx2, rel_l_tx2,
     l_peer_tx2, rel_l_rx2,
@@ -1746,7 +1746,7 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
   pre_gc_receivers[1] = nil
   gc.collect()
   gc.collect()
-  local preload_calls_pre2 = preload_restore_pre_gc()
+  const preload_calls_pre2 = preload_restore_pre_gc()
   test.assert(preload_calls_pre2 == 0, "GC discard without Runtime invoked module preload")
   test.assert(ownership_decode_calls == 0, "GC discard without Runtime invoked user decoder")
   assert_sender_released_exactly_once(l_peer_rx2, rel_l_tx2, "no-Runtime GC leaf Sender")
@@ -1802,7 +1802,7 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
 
   -- Runtime has now shut down.
   reset_ownership_hook_state(true, false)
-  local preload_restore_post = install_preload_probe("thread.tests", "spy_fail")
+  const preload_restore_post = install_preload_probe("thread.tests", "spy_fail")
   gc.collect()
   gc.collect()
   rx_post_close:close()
@@ -1810,7 +1810,7 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
   rx_post_gc = nil
   gc.collect()
   gc.collect()
-  local preload_calls_post = preload_restore_post()
+  const preload_calls_post = preload_restore_post()
   test.assert(preload_calls_post == 0, "post-Runtime discard invoked module preload")
   test.assert(ownership_decode_calls == 0, "post-Runtime discard invoked user decoder")
 
@@ -1848,12 +1848,12 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
     rel_e_rx4 as function (): (),
     "post-shutdown GC level1 Receiver")
 
-  context:run("discard_during_lua_close_and_with_uninitialized_nominal_module", function (_child: test.Context)
+  context:run("discard_during_lua_close_and_with_uninitialized_nominal_module", function (_: test.Context)
     -- 1. Independent lua.new() state where "thread.tests" is NEVER initialized and its
     -- _PRELOAD entry is a spy that errors if called, plus an unavailable nominal module.
-    local indep = lua.new()
+    const indep = lua.new()
     defer indep:close()
-    local res: {async.TransferValue} = { indep:run([=[
+    const res: {async.TransferValue} = { indep:run([=[
       local registry = debug.getregistry()
       assert(registry["Titan module thread.tests"] == nil,
         "thread.tests was unexpectedly pre-initialized in fresh state")
@@ -1931,7 +1931,7 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
       defer w_e_peer_rx:close()
       defer w_e_peer_tx:close()
       defer loader_alert_rx:close()
-      local st = worker:join()
+      const st = worker:join()
       local ok, code? = st:has_succeeded()
       test.assert(ok and code == 7, "worker did not exit cleanly before child lua_close")
 
@@ -1989,7 +1989,7 @@ function DirectRouteClaimProbe:to_transfer_payload(): string
       "titan.thread", "titan.thread.Receiver", "\x00\x00\x00\x00"):to_value()
   end, "transfer: resource claim requires a decode scope")
 
-  local use_policy = strings.sub(self.mode, 1, 7) == "policy-"
+  const use_policy = strings.sub(self.mode, 1, 7) == "policy-"
   if self.tx ~= nil then
     if use_policy then
       case async.TransferValue.from_value(self.tx)
@@ -2001,7 +2001,7 @@ function DirectRouteClaimProbe:to_transfer_payload(): string
       else raise "expected is_record_payload from TransferValue.from_value(Sender)"
       end
     else
-      local idx_bytes = self.tx:to_transfer_payload()
+      const idx_bytes = self.tx:to_transfer_payload()
       test.assert(idx_bytes == "\x00\x00\x00\x00",
         "first attached Sender index was not little-endian zero")
     end
@@ -2019,7 +2019,7 @@ function DirectRouteClaimProbe:to_transfer_payload(): string
       else raise "expected is_record_payload from TransferValue.from_value(Receiver)"
       end
     else
-      local idx_bytes = self.rx:to_transfer_payload()
+      const idx_bytes = self.rx:to_transfer_payload()
       test.assert(idx_bytes == expected_idx,
         "attached Receiver index did not match expected little-endian slot")
     end
@@ -2041,17 +2041,17 @@ function DirectRouteClaimProbe.from_transfer_payload(
     async.TransferValue.from_value(tmp_rx)
   end, "transfer: resource attachment requires an encode scope")
 
-  local sep? = strings.find(payload, ":")
+  const sep? = strings.find(payload, ":")
   if sep == nil then
     raise "invalid DirectRouteClaimProbe payload"
   end
-  local mode = strings.sub(payload, 1, sep - 1)
-  local wire = strings.sub(payload, sep + 1)
+  const mode = strings.sub(payload, 1, sep - 1)
+  const wire = strings.sub(payload, sep + 1)
   if mode == "kind-mismatch-receiver" then
     protobuf.deserialize_nominal(
       wire, "thread.tests.DirectSingleReceiverCarrier", false)
   elseif mode == "duplicate-direct" then
-    local first = protobuf.deserialize_nominal(
+    const first = protobuf.deserialize_nominal(
       wire, "thread.tests.DirectSingleSenderCarrier", false) as DirectSingleSenderCarrier
     stashed_adopted_tx = first.tx
     protobuf.deserialize_nominal(
@@ -2063,7 +2063,7 @@ function DirectRouteClaimProbe.from_transfer_payload(
     async.TransferValue.is_record_payload(
       "titan.thread", "titan.thread.Receiver", wire):to_value()
   elseif mode == "policy-duplicate-sender" then
-    local first = async.TransferValue.is_record_payload(
+    const first = async.TransferValue.is_record_payload(
       "titan.thread", "titan.thread.Sender", wire):to_value() as thread.Sender<|integer|>
     stashed_adopted_tx = first
     async.TransferValue.is_record_payload(
@@ -2076,14 +2076,14 @@ function DirectRouteClaimProbe.from_transfer_payload(
 end
 
 local function join_worker_created_pair_and_exchange_73(): thread.Receiver<|integer|>
-  local worker = thread.spawn(function (): EndpointPair
+  const worker = thread.spawn(function (): EndpointPair
     local tx, rx = thread.channel<|integer|>(1)
     return EndpointPair(tx, rx)
   end)
-  local st = worker:join()
+  const st = worker:join()
   local ok, pair? = st:has_succeeded()
   test.assert(ok and pair ~= nil, "worker returning fresh channel pair did not succeed")
-  local adopted = pair as EndpointPair
+  const adopted = pair as EndpointPair
   test.assert(
     not adopted.tx:is_closed() and not adopted.rx:is_closed(),
     "worker lua_close prematurely closed in-flight channel pair")
@@ -2105,7 +2105,7 @@ local function receive_root_sender_send_41_and_drop(
   carrier_rx: thread.Receiver<|thread.Sender<|integer|>|>,
   src_rx: thread.Receiver<|integer|>
 )
-  local adopted_tx = carrier_rx:receive()
+  const adopted_tx = carrier_rx:receive()
   test.assert(adopted_tx:try_send(41))
   test.assert(src_rx:receive() == 41,
     "queued root Sender did not deliver 41 after source GC")
@@ -2181,16 +2181,16 @@ local function exercise_standalone_refusals_and_drop_endpoints(): (
     protobuf.serialize(EndpointPair(tx as thread.Sender<|integer|>, rx as thread.Receiver<|integer|>))
   end, "transfer: resource attachment requires an encode scope")
 
-  local sender_nom? = reflect.find_nominal("titan.thread.Sender")
-  local single_sender_nom? = reflect.find_nominal("thread.tests.DirectSingleSenderCarrier")
+  const sender_nom? = reflect.find_nominal("titan.thread.Sender")
+  const single_sender_nom? = reflect.find_nominal("thread.tests.DirectSingleSenderCarrier")
   test.assert(sender_nom ~= nil and single_sender_nom ~= nil)
   local sender_rec_desc: reflect.RecordType? = nil
   case sender_nom as reflect.NominalType
   when is_record(rec) then sender_rec_desc = rec
   else raise "expected Sender RecordType"
   end
-  local sender_type = reflect.Type.is_record(sender_rec_desc as reflect.RecordType)
-  local single_sender_type: reflect.Type = reflect.Type.is_named(
+  const sender_type = reflect.Type.is_record(sender_rec_desc as reflect.RecordType)
+  const single_sender_type: reflect.Type = reflect.Type.is_named(
     reflect.NamedType("thread.tests.DirectSingleSenderCarrier"))
 
   expect_error(function ()
@@ -2224,7 +2224,7 @@ local function exercise_standalone_refusals_and_drop_endpoints(): (
     async.TransferValue.from_value(rx as value)
   end, "transfer: resource attachment requires an encode scope")
   expect_error(function ()
-    local cap_tx = tx as thread.Sender<|integer|>
+    const cap_tx = tx as thread.Sender<|integer|>
     async.TransferValue.from_value(function (): boolean
       return cap_tx:try_send(1)
     end)
@@ -2298,7 +2298,7 @@ local function exercise_direct_captures_and_drop_sources(): (
   local c_tx2: thread.Sender<|integer|>? = source_tx
   local c_rx1: thread.Receiver<|integer|>? = source_rx
   local c_rx2: thread.Receiver<|integer|>? = source_rx
-  local c_str_tx = str_tx
+  const c_str_tx = str_tx
   fn_in:send(function (
     orig_tx: thread.Sender<|integer|>?,
     orig_rx: thread.Receiver<|integer|>?,
@@ -2316,19 +2316,19 @@ local function exercise_direct_captures_and_drop_sources(): (
       c_tx1:send(41)
       c_tx2:send(43)
       c_str_tx:send("captured-erased-ok")
-      local v1 = c_rx1:receive()
-      local v2 = c_rx2:receive()
+      const v1 = c_rx1:receive()
+      const v2 = c_rx2:receive()
       c_tx1 = nil
       c_rx1 = nil
       return v1 + v2
     end
     c_tx2:send(59)
-    local v3 = c_rx2:receive()
+    const v3 = c_rx2:receive()
     c_tx2 = nil
     c_rx2 = nil
     return v3
   end)
-  local decoded_fn = fn_out:receive()
+  const decoded_fn = fn_out:receive()
   receiver_peer:send(41)
   receiver_peer:send(43)
   test.assert(decoded_fn(source_tx, source_rx, 1) == 84)
@@ -2347,7 +2347,7 @@ local function add_policy_route_claim_case(
   wire: string,
   expected: string
 )
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     runtime_test.run(function ()
       local probe_tx, probe_rx = thread.channel<|DirectRouteClaimProbe|>(1)
       defer probe_tx:close()
@@ -2369,9 +2369,9 @@ end
 function test_worker_created_channel_pair_survives_worker_lua_close_on_join(
   context: test.Context
 )
-  context:run("worker_created_pair_delivers_73_after_worker_lua_close", function (_child: test.Context)
+  context:run("worker_created_pair_delivers_73_after_worker_lua_close", function (_: test.Context)
     runtime_test.run(function ()
-      local adopted_rx = join_worker_created_pair_and_exchange_73()
+      const adopted_rx = join_worker_created_pair_and_exchange_73()
       defer adopted_rx:close()
       gc.collect()
       gc.collect()
@@ -2381,12 +2381,12 @@ function test_worker_created_channel_pair_survives_worker_lua_close_on_join(
     end)
   end)
 
-  context:run("queued_root_sender_survives_source_gc_and_delivers_41", function (_child: test.Context)
+  context:run("queued_root_sender_survives_source_gc_and_delivers_41", function (_: test.Context)
     runtime_test.run(function ()
       local carrier_tx, carrier_rx = thread.channel<|thread.Sender<|integer|>|>(1)
       defer carrier_tx:close()
       defer carrier_rx:close()
-      local src_rx = enqueue_sole_root_sender_and_drop(carrier_tx)
+      const src_rx = enqueue_sole_root_sender_and_drop(carrier_tx)
       defer src_rx:close()
       gc.collect()
       gc.collect()
@@ -2406,7 +2406,7 @@ end
 function test_direct_endpoint_resource_codec_routes_and_validation(
   context: test.Context
 )
-  context:run("root_and_nested_fresh_identity_erasure_and_mixed_hook_interoperability", function (_child: test.Context)
+  context:run("root_and_nested_fresh_identity_erasure_and_mixed_hook_interoperability", function (_: test.Context)
     runtime_test.run(function ()
       reset_ownership_hook_state(false, false)
 
@@ -2424,8 +2424,8 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
 
       root_tx_in:send(base_tx)
       root_rx_in:send(base_rx)
-      local adopted_root_tx = root_tx_out:receive()
-      local adopted_root_rx = root_rx_out:receive()
+      const adopted_root_tx = root_tx_out:receive()
+      const adopted_root_rx = root_rx_out:receive()
       defer adopted_root_tx:close()
       defer adopted_root_rx:close()
       test.assert(adopted_root_tx ~= base_tx, "root Sender decode reused source wrapper identity")
@@ -2447,14 +2447,14 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
       defer v_tx:close(); defer v_rx:close()
 
       spec_in:send(DirectTypedEndpointsCarrier(i_tx, s_tx, p_rx, v_rx))
-      local spec_decoded = spec_out:receive()
+      const spec_decoded = spec_out:receive()
       spec_decoded.int_tx:send(19)
       spec_decoded.str_tx:send("erased-ok")
       p_tx:send(EndpointPair(i_tx, i_rx))
       v_tx:send("dynamic-slot")
       test.assert(i_rx:receive() == 19)
       test.assert(s_rx:receive() == "erased-ok")
-      local inner_pair = spec_decoded.pair_rx:receive()
+      const inner_pair = spec_decoded.pair_rx:receive()
       inner_pair.tx:send(23)
       test.assert(inner_pair.rx:receive() == 23)
       test.assert(spec_decoded.val_rx:receive() == "dynamic-slot")
@@ -2474,7 +2474,7 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
         d_rx))
       test.assert(ownership_encode_calls == 1,
         "mixed carrier did not invoke OpaqueEndpointHook encoder exactly once")
-      local mix_decoded = mix_out:receive()
+      const mix_decoded = mix_out:receive()
       test.assert(ownership_decode_calls == 1,
         "mixed carrier did not invoke OpaqueEndpointHook decoder exactly once")
       test.assert(mix_decoded.hooked.tag == "mixed-scope")
@@ -2485,7 +2485,7 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
     end)
   end)
 
-  context:run("captured_endpoint_occurrences_finalize_independently", function (_child: test.Context)
+  context:run("captured_endpoint_occurrences_finalize_independently", function (_: test.Context)
     runtime_test.run(function ()
       local decoded_fn, sender_peer, receiver_peer =
         exercise_direct_captures_and_drop_sources()
@@ -2510,14 +2510,14 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
     end)
   end)
 
-  context:run("direct_route_claim_validation_order_and_unwind", function (_child: test.Context)
+  context:run("direct_route_claim_validation_order_and_unwind", function (_: test.Context)
     runtime_test.run(function ()
       local probe_tx, probe_rx = thread.channel<|DirectRouteClaimProbe|>(2)
       defer probe_tx:close()
       defer probe_rx:close()
 
       -- 1. Wire type check precedes codec.decode, and width -> bounds -> kind -> duplicate order holds on direct route.
-      local sender_error_cases: {{string}} = {
+      const sender_error_cases: {{string}} = {
         {"wire-mismatch", "\x08\x00", "protobuf: unexpected wire type"},
         {"width-empty", "\x0a\x00", "transfer: invalid resource attachment index width"},
         {"width-short", "\x0a\x03abc", "transfer: invalid resource attachment index width"},
@@ -2527,7 +2527,7 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
         {"kind-mismatch-receiver", "\x0a\x04\x00\x00\x00\x00", "transfer: resource attachment kind mismatch"},
       }
       for i = 1, #sender_error_cases do
-        local row = sender_error_cases[i]
+        const row = sender_error_cases[i]
         local peer_rx?, rel_tx?, _?, _? =
           enqueue_direct_route_claim_probe(probe_tx, row[1], row[2], "sender")
         defer if peer_rx ~= nil then (peer_rx as thread.Receiver<|integer|>):close() end
@@ -2561,7 +2561,7 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
       -- 3. Duplicate direct-route claim of slot 0 raises on second claim while preserving first adopted wrapper.
       stashed_adopted_tx = nil
       defer stashed_adopted_tx = nil
-      local dup_peer_rx = enqueue_duplicate_direct_claim_probe(probe_tx)
+      const dup_peer_rx = enqueue_duplicate_direct_claim_probe(probe_tx)
       defer dup_peer_rx:close()
       gc.collect()
       gc.collect()
@@ -2592,7 +2592,7 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
 
       stashed_adopted_tx = nil
       defer stashed_adopted_tx = nil
-      local pol_dup_peer_rx = (function (): thread.Receiver<|integer|>
+      const pol_dup_peer_rx = (function (): thread.Receiver<|integer|>
         local tx, peer_rx = thread.channel<|integer|>(1)
         probe_tx:send(DirectRouteClaimProbe(
           "policy-duplicate-sender", "\x00\x00\x00\x00", tx, nil))
@@ -2631,7 +2631,7 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
     "policy-claim-receiver", "\x00\x00\x00\x00",
     "transfer: resource attachment kind mismatch")
 
-  context:run("standalone_protobuf_and_policy_refusals_and_registration_guards", function (_child: test.Context)
+  context:run("standalone_protobuf_and_policy_refusals_and_registration_guards", function (_: test.Context)
     local peer_rx, rel_tx, peer_tx, rel_rx =
       exercise_standalone_refusals_and_drop_endpoints()
     defer peer_rx:close()
@@ -2646,18 +2646,18 @@ end
 -- closure as the shared metatable's `__gc`; none reinstalls a fresh
 -- per-construction callable-adjustment wrapper around it.
 function test_endpoint_constructions_share_one_exact_finalizer(_context: test.Context)
-  local finalizer_of = thread_fault_common.lua_helper([[
+  const finalizer_of = thread_fault_common.lua_helper([[
 return function(candidate) return rawget(debug.getmetatable(candidate), "__gc") end
 ]]) as function (value): (value)
   local tx, rx = thread.channel<|integer|>(1)
   defer rx:close()
-  local sender_gc = finalizer_of(tx)
-  local receiver_gc = finalizer_of(rx)
+  const sender_gc = finalizer_of(tx)
+  const receiver_gc = finalizer_of(rx)
   test.assert(sender_gc ~= nil and receiver_gc ~= nil and sender_gc ~= receiver_gc,
               "channel endpoints did not install their own finalizers")
 
-  local tx_clone = tx:clone()
-  local rx_clone = rx:clone()
+  const tx_clone = tx:clone()
+  const rx_clone = rx:clone()
   test.assert(finalizer_of(tx) == sender_gc and finalizer_of(tx_clone) == sender_gc,
               "Sender:clone installed a fresh finalizer callable")
   test.assert(finalizer_of(rx) == receiver_gc and finalizer_of(rx_clone) == receiver_gc,

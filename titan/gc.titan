@@ -16,7 +16,7 @@ end
 
 -- Implementation notes: doc/implementation/gc-library.md#weak-mode-stack-ledger
 local function set_weak_mode(map: {value: value}, mode: string)
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 4) == 0 then
     raise "cannot reserve Lua stack for weak-map configuration"
@@ -24,7 +24,7 @@ local function set_weak_mode(map: {value: value}, mode: string)
 
   ffi.lua_pushtvalue(L, map)
   if ffi.lua_getmetatable(L, -1) == 0 then
-    local metatable: {string: value} = {
+    const metatable: {string: value} = {
       ["__mode"] = mode,
     }
     ffi.lua_pushtvalue(L, metatable)
@@ -58,21 +58,21 @@ end
 -- @usage standard-library-gc.md
 function finalizable<|T|>(v: T, f: function (T): ()): ()
   -- Implementation notes: doc/implementation/gc-library.md#finalizer-stack-ledger
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 4) == 0 then
     raise "cannot reserve Lua stack for finalizer configuration"
   end
 
   ffi.lua_pushtvalue(L, v)
-  local value_type = ffi.lua_type(L, -1)
+  const value_type = ffi.lua_type(L, -1)
   if value_type ~= ffi.LUA_TTABLE and
      value_type ~= ffi.LUA_TUSERDATA then
     raise "gc.finalizable expects a table or full userdata"
   end
 
   if ffi.lua_getmetatable(L, -1) == 0 then
-    local metatable: {string: value} = {
+    const metatable: {string: value} = {
       ["__gc"] = f,
     }
     ffi.lua_pushtvalue(L, metatable)
@@ -85,6 +85,13 @@ function finalizable<|T|>(v: T, f: function (T): ()): ()
     ffi.lua_rawset(L, -3)
   end
   ffi.lua_setmetatable(L, -2)
+end
+
+--- Keep a value reachable for the garbage collector through this call point.
+-- @param v Value kept live at least until the call; direct calls emit no C call.
+-- @usage standard-library-gc.md
+function keep_alive<|T|>(v: T)
+  -- Implementation notes: doc/implementation/gc-library.md#keep-alive-intrinsic
 end
 
 --- Stop automatic garbage collection for the complete Lua state.
@@ -147,9 +154,9 @@ end
 -- @return Integer byte count for the complete Lua state.
 -- @usage standard-library-gc.md
 function count(): integer
-  local kilobytes = require_gc_result(
+  const kilobytes = require_gc_result(
     ffi.lua_gc(L, ffi.LUA_GCCOUNT))
-  local remaining_bytes = require_gc_result(
+  const remaining_bytes = require_gc_result(
     ffi.lua_gc(L, ffi.LUA_GCCOUNTB))
   return kilobytes * 1024 + remaining_bytes
 end
@@ -158,7 +165,7 @@ local function parameter(which: foreign int,
                          setting: integer?): integer
   local configured = -1 as foreign int
   if setting then
-    local supplied = setting as integer
+    const supplied = setting as integer
     if supplied < 0 or supplied > 100000 then
       raise "garbage collector parameter must be between 0 and 100000"
     end

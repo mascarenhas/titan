@@ -2,12 +2,12 @@ local fs = import "fs"
 
 local function replace_literal(subject: string, needle: string,
                                replacement: string): string
-  local builder = string.writer()
+  const builder = string.writer()
   local position = 1
   while position <= #subject do
-    local found: integer? = string.find(subject, needle, position)
+    const found: integer? = string.find(subject, needle, position)
     if not found then break end
-    local first = found as integer
+    const first = found as integer
     if first > position then
       builder:write(string.sub(subject, position, first - 1))
     end
@@ -35,16 +35,16 @@ end
 
 local function source_search(modname: string, path: string):
     (value, value, string)
-  local module_path = replace_literal(modname, ".", "/")
-  local messages = string.writer()
+  const module_path = replace_literal(modname, ".", "/")
+  const messages = string.writer()
   local position = 1
   local finished = false
 
   while not finished do
-    local separator: integer? = string.find(path, ";", position)
+    const separator: integer? = string.find(path, ";", position)
     local template = ""
     if separator then
-      local separator_position = separator as integer
+      const separator_position = separator as integer
       template = string.sub(path, position, separator_position - 1)
       position = separator_position + 1
     else
@@ -52,12 +52,12 @@ local function source_search(modname: string, path: string):
       finished = true
     end
 
-    local filename = replace_literal(template, "?", module_path)
-    local maybe_file: fs.File? = open_source_candidate(filename)
+    const filename = replace_literal(template, "?", module_path)
+    const maybe_file: fs.File? = open_source_candidate(filename)
     if maybe_file then
-      local file = maybe_file as fs.File
+      const file = maybe_file as fs.File
       defer file:close()
-      local loaded = (function (file: fs.File, modname: string,
+      const loaded = (function (file: fs.File, modname: string,
                                 filename: string): LuaChunk
         return load_from_reader(file, "@" .. filename, nil)
       catch
@@ -80,9 +80,9 @@ end
 -- @return Every result returned by the chunk, including nil slots.
 -- @usage standard-library-lua.md
 function dofile(filename: string, ...: value): (...: value)
-  local file = fs.open(filename, "r")
+  const file = fs.open(filename, "r")
   defer file:close()
-  local chunk: LuaChunk =
+  const chunk: LuaChunk =
     load_from_reader(file, "@" .. filename, nil)
   return chunk(...)
 end

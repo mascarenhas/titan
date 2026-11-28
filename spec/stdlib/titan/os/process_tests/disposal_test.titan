@@ -12,9 +12,9 @@ local const input_disposal_fields: const {reflect.Type} = {
 }
 
 function test_stream_disposal_parent_identities_need_no_runtime(_context: test.Context)
-  local state = transfer_lua.new()
+  const state = transfer_lua.new()
   defer state:close()
-  local result = state:run([[
+  const result = state:run([[
     local os = require('titan.os')
     local async = require('titan.async')
     assert(not pcall(async.current_loop))
@@ -32,17 +32,17 @@ end
 
 function test_stream_disposal_captured_pipes_without_task_or_adoptable_runtime(
     context: test.Context)
-  context:run("fresh_state", function (_child: test.Context)
+  context:run("fresh_state", function (_: test.Context)
     dispose_captured_streams(false)
   end)
-  context:run("retired_runtime", function (_child: test.Context)
+  context:run("retired_runtime", function (_: test.Context)
     dispose_captured_streams(true)
   end)
 end
 
 local function dispose_captured_streams(retired: boolean)
   runtime_test.run(function ()
-    local state = transfer_lua.new()
+    const state = transfer_lua.new()
     defer state:close()
     if retired then
       state:run([[
@@ -51,15 +51,15 @@ local function dispose_captured_streams(retired: boolean)
         async.loop()
       ]], "=retire-disposal-runtime")
     end
-    local process = system.spawn(process_support.child_path(), {"echo"})
+    const process = system.spawn(process_support.child_path(), {"echo"})
     defer cleanup_process(process)
-    local input = process_support.required_output(process.stdin, "disposal stdin")
-    local output = process_support.required_input(process.stdout, "disposal stdout")
+    const input = process_support.required_output(process.stdin, "disposal stdin")
+    const output = process_support.required_input(process.stdout, "disposal stdout")
     local output_packet: string? = nil
     -- POSIX permits a stopped idle captured reader. Windows keeps its native
     -- overlapped read pending, so only its terminal/inert payload can move.
     if not common.is_windows() then output_packet = output:to_transfer_payload() end
-    local input_packet = input:to_transfer_payload()
+    const input_packet = input:to_transfer_payload()
     local discarded = state:run([[
       local payload = ...
       local os = require('titan.os')
@@ -91,49 +91,49 @@ local function dispose_captured_streams(retired: boolean)
 end
 
 function test_stream_disposal_inert_captured_payloads(_context: test.Context)
-  local initial: {string} = {"buffered\0bytes"}
-  local output = protobuf.serialize_fields(output_disposal_fields, -1, nil)
-  local input = protobuf.serialize_fields(input_disposal_fields, -1, "excess", 1,
+  const initial: {string} = {"buffered\0bytes"}
+  const output = protobuf.serialize_fields(output_disposal_fields, -1, nil)
+  const input = protobuf.serialize_fields(input_disposal_fields, -1, "excess", 1,
                                            nil, nil, initial)
   test.assert(system.OutputStream.discard_transfer_payload(output) == 0)
   test.assert(system.InputStream.discard_transfer_payload(input) == 0)
 end
 
 function test_stream_disposal_rejects_malformed_discriminators(context: test.Context)
-  context:run("output", function (_child: test.Context)
+  context:run("output", function (_: test.Context)
     common.assert_raises(function () system.OutputStream.discard_transfer_payload("\255") end)
-    local invalid = protobuf.serialize_fields(output_disposal_fields, 0, nil)
+    const invalid = protobuf.serialize_fields(output_disposal_fields, 0, nil)
     common.assert_raises_contains(function ()
       system.OutputStream.discard_transfer_payload(invalid)
     end, "output stream descriptor")
-    local parent_native = protobuf.serialize_fields(output_disposal_fields, 1, "invalid native")
+    const parent_native = protobuf.serialize_fields(output_disposal_fields, 1, "invalid native")
     common.assert_raises_contains(function ()
       system.OutputStream.discard_transfer_payload(parent_native)
     end, "invalid standard output transfer payload")
   end)
-  context:run("input", function (_child: test.Context)
-    local initial: {string} = {}
+  context:run("input", function (_: test.Context)
+    const initial: {string} = {}
     common.assert_raises(function () system.InputStream.discard_transfer_payload("\255") end)
-    local invalid = protobuf.serialize_fields(input_disposal_fields, 1, "", 3, nil, nil, initial)
+    const invalid = protobuf.serialize_fields(input_disposal_fields, 1, "", 3, nil, nil, initial)
     common.assert_raises_contains(function ()
       system.InputStream.discard_transfer_payload(invalid)
     end, "input stream descriptor")
-    local terminal = protobuf.serialize_fields(input_disposal_fields, -1, "", 4, nil, nil, initial)
+    const terminal = protobuf.serialize_fields(input_disposal_fields, -1, "", 4, nil, nil, initial)
     common.assert_raises_contains(function ()
       system.InputStream.discard_transfer_payload(terminal)
     end, "invalid input stream terminal payload")
-    local missing_failure = protobuf.serialize_fields(input_disposal_fields, -1, "", 2, nil, nil, initial)
+    const missing_failure = protobuf.serialize_fields(input_disposal_fields, -1, "", 2, nil, nil, initial)
     common.assert_raises_contains(function ()
       system.InputStream.discard_transfer_payload(missing_failure)
     end, "invalid input stream terminal payload")
-    local parent_buffered = protobuf.serialize_fields(input_disposal_fields, 0, "unread", 3, nil, nil, initial)
+    const parent_buffered = protobuf.serialize_fields(input_disposal_fields, 0, "unread", 3, nil, nil, initial)
     common.assert_raises_contains(function ()
       system.InputStream.discard_transfer_payload(parent_buffered)
     end, "invalid standard input transfer payload")
   end)
-  context:run("live_input_without_pipe", function (_child: test.Context)
-    local initial: {string} = {}
-    local live_without_pipe = protobuf.serialize_fields(
+  context:run("live_input_without_pipe", function (_: test.Context)
+    const initial: {string} = {}
+    const live_without_pipe = protobuf.serialize_fields(
       input_disposal_fields, -1, "", 0, nil, nil, initial)
     common.assert_raises_contains(function ()
       system.InputStream.discard_transfer_payload(live_without_pipe)
@@ -154,20 +154,20 @@ local function disposal_descriptor_count(): integer?
 end
 
 local function transfer_terminal_input(adopt: boolean)
-  local before? = disposal_descriptor_count()
+  const before? = disposal_descriptor_count()
   runtime_test.run(function ()
-    local process = system.spawn(process_support.child_path(), {"echo"})
+    const process = system.spawn(process_support.child_path(), {"echo"})
     defer cleanup_process(process)
-    local input = process_support.required_output(process.stdin, "terminal transfer stdin")
-    local output = process_support.required_input(process.stdout, "terminal transfer stdout")
-    local bytes = "terminal\0transfer\255"
+    const input = process_support.required_output(process.stdin, "terminal transfer stdin")
+    const output = process_support.required_input(process.stdout, "terminal transfer stdout")
+    const bytes = "terminal\0transfer\255"
     input:write(bytes)
     input:close()
     test.assert(process_support.read_all(output) == bytes,
                 "terminal transfer lost child output before EOF")
-    local payload = output:to_transfer_payload()
+    const payload = output:to_transfer_payload()
     if adopt then
-      local restored = system.InputStream.from_transfer_payload(payload)
+      const restored = system.InputStream.from_transfer_payload(payload)
       defer restored:close()
       test.assert(restored:read() == nil and restored:read() == nil,
                   "adopted terminal input did not retain EOF")
@@ -187,10 +187,10 @@ end
 
 function test_transfer_terminal_input_preserves_eof_and_process_status(
     context: test.Context)
-  context:run("dispose", function (_child: test.Context)
+  context:run("dispose", function (_: test.Context)
     transfer_terminal_input(false)
   end)
-  context:run("adopt", function (_child: test.Context)
+  context:run("adopt", function (_: test.Context)
     transfer_terminal_input(true)
   end)
 end

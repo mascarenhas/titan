@@ -25,7 +25,7 @@ local const CONNECTION_CONNECTED = 2
 local const CONNECTION_FAILED = 3
 
 local record InputRegistration
-  local listener: function (): ()
+  local const listener: function (): ()
   local live: boolean
 end
 
@@ -45,10 +45,10 @@ end
 --- An owned TCP byte stream with one waiting reader and ordered native writes.
 -- @usage standard-library-net.md#connecting-and-listening
 record Connection
-  local handle: uv.tcp_t
-  local handle_view: uv.handle_t
-  local stream: uv.stream_t
-  local loop: uv.loop_t
+  local const handle: uv.tcp_t
+  local const handle_view: uv.handle_t
+  local const stream: uv.stream_t
+  local const loop: uv.loop_t
   local excess: string
   local input: async.BufferedSubscription<|string, value|>?
   local start_read: (function (): integer)?
@@ -66,10 +66,10 @@ end
 --- An owned TCP listener with one waiting acceptor.
 -- @usage standard-library-net.md#connecting-and-listening
 record Server
-  local handle: uv.tcp_t
-  local handle_view: uv.handle_t
-  local stream: uv.stream_t
-  local loop: uv.loop_t
+  local const handle: uv.tcp_t
+  local const handle_view: uv.handle_t
+  local const stream: uv.stream_t
+  local const loop: uv.loop_t
   local clients: async.BufferedSubscription<|Connection, value|>?
   local failure: value
   local start_listen: (function (integer): integer)?
@@ -77,41 +77,41 @@ record Server
 end
 
 local record CloseOperation
-  handle: uv.handle_t
+  const handle: uv.handle_t
   completion: async.Completion<|CloseOperation, nil, nil|>?
   number: integer
 end
 
 local record ResolveOperation
-  loop: uv.loop_t
-  request: uv.getaddrinfo_t
-  host: string
-  port: integer
-  hints: uv.addrinfo_hints_t
+  const loop: uv.loop_t
+  const request: uv.getaddrinfo_t
+  const host: string
+  const port: integer
+  const hints: uv.addrinfo_hints_t
   completion: async.Completion<|ResolveOperation, {uv.sockaddr_t}, integer|>?
   number: integer
-  request_view: uv.req_t
+  const request_view: uv.req_t
 end
 
 local record ConnectOperation
-  request: uv.connect_t
-  tcp: uv.tcp_t
-  address: uv.sockaddr_t
+  const request: uv.connect_t
+  const tcp: uv.tcp_t
+  const address: uv.sockaddr_t
   completion: async.Completion<|ConnectOperation, nil, integer|>?
   number: integer
 end
 
 local record WriteOperation
-  request: uv.write_t
-  stream: uv.stream_t
-  data: string
+  const request: uv.write_t
+  const stream: uv.stream_t
+  const data: string
   completion: async.Completion<|WriteOperation, nil, integer|>?
   number: integer
 end
 
 local record ShutdownOperation
-  request: uv.shutdown_t
-  stream: uv.stream_t
+  const request: uv.shutdown_t
+  const stream: uv.stream_t
   completion: async.Completion<|ShutdownOperation, nil, integer|>?
   number: integer
 end
@@ -143,7 +143,7 @@ local function sockaddr_to_address(raw: uv.sockaddr_t?, operation: string): Addr
   if raw == nil or not raw:is_complete() then
     raise operation_error(uv.EINVAL, operation)
   end
-  local family = raw:family()
+  const family = raw:family()
   if family ~= uv.AF_INET and family ~= uv.AF_INET6 then
     raise operation_error(uv.EAFNOSUPPORT, operation)
   end
@@ -154,9 +154,9 @@ local function sockaddr_to_address(raw: uv.sockaddr_t?, operation: string): Addr
 end
 
 local function closed(handle: uv.handle_t)
-  local context = uv.handle_get_data(handle) as CloseOperation
-  local completion = context.completion as async.Completion<|CloseOperation, nil, nil|>
-  local number = context.number
+  const context = uv.handle_get_data(handle) as CloseOperation
+  const completion = context.completion as async.Completion<|CloseOperation, nil, nil|>
+  const number = context.number
   uv.handle_set_data(handle, nil)
   context.completion = nil
   do completion:resolve(number, nil)
@@ -165,7 +165,7 @@ end
 
 local function start_close(completion: async.Completion<|CloseOperation, nil, nil|>,
                            number: integer): uv.req_t?
-  local context = completion:context(number)
+  const context = completion:context(number)
   context.completion = completion
   context.number = number
   uv.handle_set_data(context.handle, context)
@@ -182,20 +182,19 @@ end
 -- Unpublished sockets have no reader. Native close retains their owner; failed
 -- connection candidates and queued accepts need not await each close callback.
 local function abandon(connection: Connection)
-  local handle = connection.handle_view
+  const handle = connection.handle_view
   if not is_closed(handle) then uv.close(handle) end
 end
 
 local function notify_input(connection: Connection)
-  local listeners = connection.input_listeners
+  const listeners = connection.input_listeners
   local failure: async.Error? = nil
   for index = 1, #listeners do
-    local registration = listeners[index]
+    const registration = listeners[index]
     if registration.live then
-      do registration.listener()
-      catch
-        if failure == nil then failure = async.Error(error, traceback) end
-      end
+      registration.listener()
+    catch
+      if failure == nil then failure = async.Error(error, traceback) end
     end
   end
   if failure ~= nil then failure:raise() end
@@ -204,9 +203,9 @@ end
 -- Implementation notes: doc/implementation/libuv-networking.md#persistent-reads
 local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
                                 terminal: integer, failure: value): Connection
-  local stream = tcp:as_stream_t()
-  local handle = tcp:as_handle_t()
-  local connection: Connection = {
+  const stream = tcp:as_stream_t()
+  const handle = tcp:as_handle_t()
+  const connection: Connection = {
     handle = tcp, handle_view = handle, stream = stream, loop = loop,
     excess = "", input = nil, start_read = nil, started = false,
     read_ahead_enabled = true, read_started = false,
@@ -214,18 +213,18 @@ local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
     pending_outputs = 0, local_addr = nil, peer_addr = nil,
   }
   connection.input = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
-    local stop = function ()
+    const stop = function ()
       if connection.started then uv.read_stop(stream) end
       connection.started = false
       -- Public UV independently retains any outstanding allocation/read pair.
       connection.read_buffer = nil
     end
-    local close = function (drain: function (): async.SubscriptionBatch<|string|>)
+    const close = function (drain: function (): async.SubscriptionBatch<|string|>)
       drain()
       close_handle(handle)
     end
-    local actions = async.SubscriptionActions<|string|>(stop, close)
-    local allocate = function (_: uv.handle_t, suggested: integer): uv.buf_t
+    const actions = async.SubscriptionActions<|string|>(stop, close)
+    const allocate = function (_: uv.handle_t, suggested: integer): uv.buf_t
       local capacity = suggested
       if capacity < 1 or capacity > READ_BUFFER_IDLE_CAPACITY then
         capacity = READ_BUFFER_IDLE_CAPACITY
@@ -237,7 +236,7 @@ local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
       end
       return buffer
     end
-    local receive = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
+    const receive = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
       if count == 0 then return end
       if count > 0 then
         if not connection.read_ahead_enabled then
@@ -267,11 +266,11 @@ end
 -- Dialed owners record TCP_NODELAY before their socket exists; libuv applies
 -- it when connect creates the socket. Accepted owners set it after accept.
 local function new_connection(loop: uv.loop_t, enable_no_delay: boolean): Connection
-  local tcp = uv.tcp_t.new()
-  local connection = wrap_connection(loop, tcp, 0, nil)
+  const tcp = uv.tcp_t()
+  const connection = wrap_connection(loop, tcp, 0, nil)
   check_status(uv.tcp_init(loop, tcp), "net.tcp.init")
   if enable_no_delay then
-    local status = uv.tcp_nodelay(tcp, 1)
+    const status = uv.tcp_nodelay(tcp, 1)
     if status < 0 then
       abandon(connection)
       raise operation_error(status, "net.set_no_delay")
@@ -282,19 +281,19 @@ end
 
 local function resolved(request: uv.getaddrinfo_t, status: integer,
                         native: uv.addrinfo_result_t?)
-  local context = request:get_data() as ResolveOperation
-  local completion = context.completion as async.Completion<|ResolveOperation, {uv.sockaddr_t}, integer|>
-  local number = context.number
+  const context = request:get_data() as ResolveOperation
+  const completion = context.completion as async.Completion<|ResolveOperation, {uv.sockaddr_t}, integer|>
+  const number = context.number
   request:set_data(nil)
   context.completion = nil
   do
-    local addresses: {uv.sockaddr_t} = {}
+    const addresses: {uv.sockaddr_t} = {}
     do
       defer uv.freeaddrinfo(native)
       if status >= 0 then
-        local entries = native:entries()
+        const entries = native:entries()
         for index = 1, #entries do
-          local entry = entries[index]
+          const entry = entries[index]
           if entry.ai_addr ~= nil and
              (entry.ai_family == uv.AF_INET or entry.ai_family == uv.AF_INET6) then
             addresses[#addresses + 1] = entry.ai_addr
@@ -311,11 +310,11 @@ end
 local function start_resolve(
     completion: async.Completion<|ResolveOperation, {uv.sockaddr_t}, integer|>,
     number: integer): uv.req_t?
-  local context = completion:context(number)
+  const context = completion:context(number)
   context.completion = completion
   context.number = number
   context.request:set_data(context)
-  local status = uv.getaddrinfo(context.loop, context.request, resolved,
+  const status = uv.getaddrinfo(context.loop, context.request, resolved,
     context.host, "" .. context.port, context.hints)
   if status < 0 then
     context.request:set_data(nil)
@@ -329,17 +328,17 @@ end
 -- Implementation notes: doc/implementation/libuv-networking.md#one-shot-requests
 local function resolve_addresses(host: string, port: integer): {uv.sockaddr_t}
   if string.find(host, "\0") ~= nil then raise operation_error(uv.EINVAL, "net.resolve") end
-  local loop = async.current_loop()
-  local request = uv.getaddrinfo_t.new()
-  local hints = uv.addrinfo_hints_t(uv.AI_NUMERICSERV, uv.AF_UNSPEC, uv.SOCK_STREAM, uv.IPPROTO_TCP)
+  const loop = async.current_loop()
+  const request = uv.getaddrinfo_t()
+  const hints = uv.addrinfo_hints_t(uv.AI_NUMERICSERV, uv.AF_UNSPEC, uv.SOCK_STREAM, uv.IPPROTO_TCP)
   -- The request retains an allocated result even if the binding's result copy
   -- fails before our callback. Retire it from the Task's lexical cleanup too.
   defer do
     local _, retained = request:addrinfo()
     uv.freeaddrinfo(retained)
   end
-  local request_view = request:as_req_t()
-  local result = async.await_cancellable_with<|ResolveOperation, {uv.sockaddr_t}, integer|>(
+  const request_view = request:as_req_t()
+  const result = async.await_cancellable_with<|ResolveOperation, {uv.sockaddr_t}, integer|>(
     ResolveOperation(loop, request, host, port, hints, nil, 0, request_view), start_resolve)
   case result
   when success(addresses) then return addresses
@@ -349,9 +348,9 @@ local function resolve_addresses(host: string, port: integer): {uv.sockaddr_t}
 end
 
 local function connected(request: uv.connect_t, status: integer)
-  local context = request:get_data() as ConnectOperation
-  local completion = context.completion as async.Completion<|ConnectOperation, nil, integer|>
-  local number = context.number
+  const context = request:get_data() as ConnectOperation
+  const completion = context.completion as async.Completion<|ConnectOperation, nil, integer|>
+  const number = context.number
   request:set_data(nil)
   context.completion = nil
   do
@@ -362,11 +361,11 @@ end
 
 local function start_connect(completion: async.Completion<|ConnectOperation, nil, integer|>,
                              number: integer): uv.req_t?
-  local context = completion:context(number)
+  const context = completion:context(number)
   context.completion = completion
   context.number = number
   context.request:set_data(context)
-  local status = uv.tcp_connect(context.request, context.tcp, context.address, connected)
+  const status = uv.tcp_connect(context.request, context.tcp, context.address, connected)
   if status < 0 then
     context.request:set_data(nil)
     context.completion = nil
@@ -376,9 +375,9 @@ local function start_connect(completion: async.Completion<|ConnectOperation, nil
 end
 
 local function written(request: uv.write_t, status: integer)
-  local context = request:get_data() as WriteOperation
-  local completion = context.completion as async.Completion<|WriteOperation, nil, integer|>
-  local number = context.number
+  const context = request:get_data() as WriteOperation
+  const completion = context.completion as async.Completion<|WriteOperation, nil, integer|>
+  const number = context.number
   request:set_data(nil)
   context.completion = nil
   do
@@ -389,11 +388,11 @@ end
 
 local function start_write(completion: async.Completion<|WriteOperation, nil, integer|>,
                            number: integer): uv.req_t?
-  local context = completion:context(number)
+  const context = completion:context(number)
   context.completion = completion
   context.number = number
   context.request:set_data(context)
-  local status = uv.write_string(context.request, context.stream, context.data, written)
+  const status = uv.write_string(context.request, context.stream, context.data, written)
   if status < 0 then
     context.request:set_data(nil)
     context.completion = nil
@@ -403,9 +402,9 @@ local function start_write(completion: async.Completion<|WriteOperation, nil, in
 end
 
 local function shut_down(request: uv.shutdown_t, status: integer)
-  local context = request:get_data() as ShutdownOperation
-  local completion = context.completion as async.Completion<|ShutdownOperation, nil, integer|>
-  local number = context.number
+  const context = request:get_data() as ShutdownOperation
+  const completion = context.completion as async.Completion<|ShutdownOperation, nil, integer|>
+  const number = context.number
   request:set_data(nil)
   context.completion = nil
   do
@@ -416,11 +415,11 @@ end
 
 local function start_shutdown(completion: async.Completion<|ShutdownOperation, nil, integer|>,
                               number: integer): uv.req_t?
-  local context = completion:context(number)
+  const context = completion:context(number)
   context.completion = completion
   context.number = number
   context.request:set_data(context)
-  local status = uv.shutdown(context.request, context.stream, shut_down)
+  const status = uv.shutdown(context.request, context.stream, shut_down)
   if status < 0 then
     context.request:set_data(nil)
     context.completion = nil
@@ -431,31 +430,31 @@ end
 
 local function fail_server(server: Server, failure: value)
   server.failure = failure
-  local pending = server.clients:drain_pending()
+  const pending = server.clients:drain_pending()
   for index = 1, pending.count do abandon(pending:get(index)) end
-  local handle = server.handle_view
+  const handle = server.handle_view
   if not is_closed(handle) then uv.close(handle) end
   server.clients:stop()
 end
 
 local function new_server(loop: uv.loop_t): Server
-  local tcp = uv.tcp_t.new()
-  local handle = tcp:as_handle_t()
-  local stream = tcp:as_stream_t()
-  local server = Server(tcp, handle, stream, loop, nil, nil, nil, nil)
+  const tcp = uv.tcp_t()
+  const handle = tcp:as_handle_t()
+  const stream = tcp:as_stream_t()
+  const server = Server(tcp, handle, stream, loop, nil, nil, nil, nil)
   server.clients = async.BufferedSubscription<|Connection, value|>(function (publish, _fail, _finish)
-    local actions = async.SubscriptionActions<|Connection|>(function () end,
+    const actions = async.SubscriptionActions<|Connection|>(function () end,
       function (drain: function (): async.SubscriptionBatch<|Connection|>)
-        local pending = drain()
+        const pending = drain()
         for index = 1, pending.count do abandon(pending:get(index)) end
         close_handle(handle)
       end)
-    local callback = function (_: uv.stream_t, status: integer)
+    const callback = function (_: uv.stream_t, status: integer)
       local client: Connection? = nil
       defer if client ~= nil then abandon(client) end
       if status < 0 then fail_server(server, operation_error(status, "net.accept")); return end
       client = new_connection(loop, false)
-      local accepted = uv.accept(stream, client.handle_view)
+      const accepted = uv.accept(stream, client.handle_view)
       if accepted < 0 then fail_server(server, operation_error(accepted, "net.accept")); return end
       -- An unconfigurable child is retired by the deferred abandon; the
       -- listener survives and every published Connection has TCP_NODELAY.
@@ -501,7 +500,7 @@ local function read(connection: Connection): string?
     raise "cannot read from an unconnected TCP Connection"
   end
   if #connection.excess > 0 then
-    local result = connection.excess
+    const result = connection.excess
     connection.excess = ""
     return result
   end
@@ -558,7 +557,7 @@ function Connection:connect_address(address: uv.sockaddr_t)
     raise "TCP connect requires a complete IPv4 or IPv6 address"
   end
   check_connect_port(address:port())
-  local request = uv.connect_t.new()
+  const request = uv.connect_t()
   self.phase = CONNECTION_CONNECTING
   do
     case async.await_with<|ConnectOperation, nil, integer|>(
@@ -582,15 +581,15 @@ end
 -- @return New connected TCP stream; the caller owns closing it.
 -- @usage standard-library-net.md#connecting-and-listening
 function connect(host: string, port: integer): Connection
-  local addresses = resolve(host, port)
-  local loop = async.current_loop()
+  const addresses = resolve(host, port)
+  const loop = async.current_loop()
   local last_failure: value = nil
   for index = 1, #addresses do
-    local connection = new_connection(loop, true)
+    const connection = new_connection(loop, true)
     local transferred = false
     do
       defer if not transferred then abandon(connection) end
-      local address = addresses[index]
+      const address = addresses[index]
       connection:connect_address(address)
       transferred = true
       return connection
@@ -621,16 +620,16 @@ function listen(host: string, port: integer,
     raise "TCP listen backlog is not representable by libuv"
   end
   async.running()
-  local loop = async.current_loop()
-  local addresses = resolve_addresses(host, port)
+  const loop = async.current_loop()
+  const addresses = resolve_addresses(host, port)
   local flags = 0
   if reuse_port then flags = uv.TCP_REUSEPORT end
   local last_status = uv.EADDRNOTAVAIL
   for index = 1, #addresses do
-    local server = new_server(loop)
+    const server = new_server(loop)
     local transferred = false
     defer if not transferred then
-      local handle = server.handle_view
+      const handle = server.handle_view
       if not is_closed(handle) then uv.close(handle) end
     end
     local status = uv.tcp_bind(server.handle, addresses[index], flags)
@@ -646,7 +645,7 @@ end
 -- @return Previous policy; true is the default persistent read-ahead mode.
 -- @usage standard-library-net.md#reading
 function Connection:read_ahead(enabled: boolean?): boolean
-  local previous = self.read_ahead_enabled
+  const previous = self.read_ahead_enabled
   if enabled ~= nil then
     validate(self.handle_view, self.loop, "configure read-ahead on")
     if self.read_started then raise "cannot configure TCP read-ahead after reading has started" end
@@ -687,23 +686,23 @@ function Connection:read_until(delimiter: string,
   end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  local builder = string.writer()
+  const builder = string.writer()
   local tail = ""
   while true do
-    local chunk? = read(self)
+    const chunk? = read(self)
     if not chunk then
       if #tail > 0 then builder:write(tail) end
-      local result = builder:drain()
+      const result = builder:drain()
       if #result == 0 then return nil end
       return result
     end
-    local bytes = chunk as string
+    const bytes = chunk as string
     local boundary = bytes
     if #tail > 0 then boundary = tail .. bytes end
-    local match: integer? = string.find(boundary, delimiter)
+    const match: integer? = string.find(boundary, delimiter)
     if match then
-      local match_first = match as integer
-      local match_end = match_first + #delimiter - 1
+      const match_first = match as integer
+      const match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
@@ -714,7 +713,7 @@ function Connection:read_until(delimiter: string,
     end
     local keep = #delimiter - 1
     if keep > #boundary then keep = #boundary end
-    local committed = #boundary - keep
+    const committed = #boundary - keep
     if committed > 0 then
       if committed == #boundary then
         builder:write(boundary)
@@ -735,10 +734,10 @@ function Connection:write(data: string)
   if self.phase ~= CONNECTION_CONNECTED then
     raise "cannot write to an unconnected TCP Connection"
   end
-  local stream = self.stream
+  const stream = self.stream
   if not uv.is_writable(stream) then raise "cannot write after Connection shutdown" end
   if #data == 0 then return end
-  local request = uv.write_t.new()
+  const request = uv.write_t()
   uv.buf_check_length(data, #data)
   self.pending_outputs = self.pending_outputs + 1
   defer self.pending_outputs = self.pending_outputs - 1
@@ -756,9 +755,9 @@ function Connection:shutdown()
   if self.phase ~= CONNECTION_CONNECTED then
     raise "cannot shut down an unconnected TCP Connection"
   end
-  local stream = self.stream
+  const stream = self.stream
   if not uv.is_writable(stream) then return end
-  local request = uv.shutdown_t.new()
+  const request = uv.shutdown_t()
   self.pending_outputs = self.pending_outputs + 1
   defer self.pending_outputs = self.pending_outputs - 1
   case async.await_with<|ShutdownOperation, nil, integer|>(
@@ -841,7 +840,7 @@ function Connection:to_transfer_payload(): string
   -- Check it before touching the persistent producer or its queued bytes.
   check_status(uv.stream_transfer_status(self.stream, true), "net.transfer")
   local pending, terminal? = self.input:snapshot_pending()
-  local bytes = string.writer()
+  const bytes = string.writer()
   bytes:write(self.excess)
   for index = 1, pending.count do bytes:write(pending:get(index)) end
   local terminal_kind = 0
@@ -856,9 +855,9 @@ function Connection:to_transfer_payload(): string
     when item() then raise "invalid TCP subscription snapshot"
     end
   end
-  local input_bytes = bytes:drain()
-  local started = self.started
-  local reading = uv.is_active(self.handle_view)
+  const input_bytes = bytes:drain()
+  const started = self.started
+  const reading = uv.is_active(self.handle_view)
   if reading then check_status(uv.read_stop(self.stream), "net.transfer.stop") end
   local native_payload = ""
   do
@@ -878,7 +877,7 @@ function Connection:to_transfer_payload(): string
   self.peer_addr = nil
   local exported = false
   defer if not exported then uv.tcp_t.discard_transfer_payload(native_payload) end
-  local payload = protobuf.serialize_fields(connection_transfer_fields,
+  const payload = protobuf.serialize_fields(connection_transfer_fields,
     native_payload, input_bytes, terminal_kind, failure, started,
     self.read_ahead_enabled, self.read_started)
   exported = true
@@ -897,13 +896,13 @@ function Connection.from_transfer_payload(payload: string): Connection
   if (terminal == 2) ~= (failure ~= nil) then
     raise "invalid TCP Connection receive error"
   end
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   if async.is_closing() then raise "cannot transfer into a closing async Runtime" end
-  local tcp = uv.tcp_t.from_transfer_payload(native_payload)
-  local handle = tcp:as_handle_t()
+  const tcp = uv.tcp_t.from_transfer_payload(native_payload)
+  const handle = tcp:as_handle_t()
   local adopted = false
   defer if not adopted then uv.close(handle) end
-  local connection = wrap_connection(loop, tcp, terminal, failure)
+  const connection = wrap_connection(loop, tcp, terminal, failure)
   connection.phase = CONNECTION_CONNECTED
   connection.excess = bytes
   connection.read_ahead_enabled = read_ahead
@@ -920,7 +919,7 @@ end
 -- @return Native socket close status; adoption or disposal consumes the payload.
 -- @usage standard-library-net.md#transferring-connections
 function Connection.discard_transfer_payload(payload: string): integer
-  local native_payload: string = protobuf.deserialize_fields(payload, connection_transfer_fields)
+  const native_payload: string = protobuf.deserialize_fields(payload, connection_transfer_fields)
   return uv.tcp_t.discard_transfer_payload(native_payload)
 end
 
@@ -933,16 +932,16 @@ function Connection:add_input_listener(listener: function (): ()): function (): 
   if self.phase ~= CONNECTION_CONNECTED then
     raise "cannot observe input on an unconnected TCP Connection"
   end
-  local registration = InputRegistration(listener, true)
+  const registration = InputRegistration(listener, true)
   self.input_listeners[#self.input_listeners + 1] = registration
-  local connection = self
+  const connection = self
   return function ()
     if not registration.live then return end
     registration.live = false
     -- Replace the Array so an in-progress notification retains stable order.
-    local retained: {InputRegistration} = {}
+    const retained: {InputRegistration} = {}
     for index = 1, #connection.input_listeners do
-      local current = connection.input_listeners[index]
+      const current = connection.input_listeners[index]
       if current ~= registration then retained[#retained + 1] = current end
     end
     connection.input_listeners = retained
@@ -973,7 +972,7 @@ function Server:accept(): Connection
   validate(self.handle_view, self.loop, "accept on")
   async.checkpoint()
   if self.clients:has_waiter() then raise "Server already has a waiting accept Task" end
-  local result = self.clients:next()
+  const result = self.clients:next()
   if self.failure ~= nil then raise self.failure end
   case result
   when item(connection) then return connection

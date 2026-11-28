@@ -1,6 +1,6 @@
 local record ChannelPayload
-  ordinal: integer
-  text: string
+  const ordinal: integer
+  const text: string
 end
 
 local type FinalizablePayload = {string: value}
@@ -8,7 +8,7 @@ local type FinalizablePayload = {string: value}
 local function close_buffered_finalizable(
     send: function (FinalizablePayload): (), close: function (): (),
     callback: function (value): ())
-  local payload: FinalizablePayload = {}
+  const payload: FinalizablePayload = {}
   support.mark_finalizable(payload, callback)
   send(payload)
   close()
@@ -17,16 +17,16 @@ end
 function test_channel_capacity_and_fifo(_context: test.Context)
   runtime_test.run(function ()
     local send, receive = async.channel<|ChannelPayload|>(3)
-    send(ChannelPayload.new(1, "first"))
-    send(ChannelPayload.new(2, "second"))
-    send(ChannelPayload.new(3, "third"))
-    local first = receive()
-    local second = receive()
+    send(ChannelPayload(1, "first"))
+    send(ChannelPayload(2, "second"))
+    send(ChannelPayload(3, "third"))
+    const first = receive()
+    const second = receive()
     test.assert(first.ordinal == 1 and first.text == "first",
           "channel lost its first nominal item")
     test.assert(second.ordinal == 2 and second.text == "second",
           "channel lost its second nominal item")
-    send(ChannelPayload.new(4, "fourth"))
+    send(ChannelPayload(4, "fourth"))
     test.assert(receive().ordinal == 3, "channel FIFO order changed")
     test.assert(receive().ordinal == 4, "channel circular wrap changed")
 
@@ -75,7 +75,7 @@ function test_channel_blocking_handoffs_and_coalesced_wakes(
     -- until this Task receives the buffered first item.
     local send, receive = async.channel<|string|>()
     local producer_trace = ""
-    local producer = async.run(function (): nil
+    const producer = async.run(function (): nil
       producer_trace = producer_trace .. "send-first>"
       send("first")
       producer_trace = producer_trace .. "send-second>"
@@ -97,7 +97,7 @@ function test_channel_blocking_handoffs_and_coalesced_wakes(
     -- Task:resume must coalesce them while the receiver drains both items.
     local send_two, receive_two = async.channel<|string|>(2)
     local received = ""
-    local consumer = async.run(function (): nil
+    const consumer = async.run(function (): nil
       received = receive_two() .. ">" .. receive_two()
     end)
     task_support.cleanup_task(consumer, "channel consumer cleanup")
@@ -112,16 +112,14 @@ end
 function test_channel_allows_one_blocked_task_per_side(context: test.Context)
   runtime_test.run(function ()
     local send, receive = async.channel<|string|>()
-    local first_receiver = async.run(receive)
+    const first_receiver = async.run(receive)
     task_support.cleanup_task(first_receiver, "first receiver cleanup")
     support.wait_until_waiting(first_receiver)
     local receiver_rejected = false
-    local second_receiver = async.run(function (): nil
-      do
-        receive()
-      catch
-        receiver_rejected = error is string
-      end
+    const second_receiver = async.run(function (): nil
+      receive()
+    catch
+      receiver_rejected = error is string
     end)
     task_support.cleanup_task(second_receiver, "second receiver cleanup")
     test.assert(async.join(second_receiver):has_succeeded() and receiver_rejected,
@@ -135,7 +133,7 @@ function test_channel_allows_one_blocked_task_per_side(context: test.Context)
     end
     test.assert(receiver_rejected,
           "channel let a receiver barge ahead of its blocked receiver")
-    local receiver_status = async.join(first_receiver)
+    const receiver_status = async.join(first_receiver)
     local receiver_succeeded, receiver_value =
       receiver_status:has_succeeded()
     test.assert(receiver_succeeded and receiver_value == "received",
@@ -143,18 +141,16 @@ function test_channel_allows_one_blocked_task_per_side(context: test.Context)
 
     local send_full, receive_full = async.channel<|string|>()
     send_full("stored")
-    local first_sender = async.run(function (): nil
+    const first_sender = async.run(function (): nil
       send_full("released")
     end)
     task_support.cleanup_task(first_sender, "first sender cleanup")
     support.wait_until_waiting(first_sender)
     local sender_rejected = false
-    local second_sender = async.run(function (): nil
-      do
-        send_full("rejected")
-      catch
-        sender_rejected = error is string
-      end
+    const second_sender = async.run(function (): nil
+      send_full("rejected")
+    catch
+      sender_rejected = error is string
     end)
     task_support.cleanup_task(second_sender, "second sender cleanup")
     test.assert(async.join(second_sender):has_succeeded() and sender_rejected,
@@ -177,7 +173,7 @@ end
 function test_channel_cancellation_clears_waiters(context: test.Context)
   runtime_test.run(function ()
     local send, receive = async.channel<|string|>()
-    local cancelled_receiver = async.run(receive)
+    const cancelled_receiver = async.run(receive)
     task_support.cleanup_task(cancelled_receiver, "cancelled receiver cleanup")
     support.wait_until_waiting(cancelled_receiver)
     cancelled_receiver:cancel(
@@ -188,11 +184,11 @@ function test_channel_cancellation_clears_waiters(context: test.Context)
 
     -- Cancellation must have removed the sole receive waiter, allowing a new
     -- Task to occupy that side of the channel.
-    local replacement_receiver = async.run(receive)
+    const replacement_receiver = async.run(receive)
     task_support.cleanup_task(replacement_receiver, "replacement receiver cleanup")
     support.wait_until_waiting(replacement_receiver)
     send("replacement")
-    local replacement_status = async.join(replacement_receiver)
+    const replacement_status = async.join(replacement_receiver)
     local replacement_succeeded, replacement =
       replacement_status:has_succeeded()
     test.assert(replacement_succeeded and replacement == "replacement",
@@ -200,7 +196,7 @@ function test_channel_cancellation_clears_waiters(context: test.Context)
 
     local send_full, receive_full = async.channel<|string|>()
     send_full("stored")
-    local cancelled_sender = async.run(function (): nil
+    const cancelled_sender = async.run(function (): nil
       send_full("cancelled")
     end)
     task_support.cleanup_task(cancelled_sender, "cancelled sender cleanup")
@@ -210,7 +206,7 @@ function test_channel_cancellation_clears_waiters(context: test.Context)
     test.assert(support.cancelled_with(async.join(cancelled_sender), "sender cancelled"),
           "blocked sender cancellation changed")
 
-    local replacement_sender = async.run(function (): nil
+    const replacement_sender = async.run(function (): nil
       send_full("replacement")
     end)
     task_support.cleanup_task(replacement_sender, "replacement sender cleanup")
@@ -225,10 +221,10 @@ end
 
 function test_channel_rejects_foreign_resume_tokens(context: test.Context)
   runtime_test.run(function ()
-    local wrong_token = async.ResumeToken.new("channel test outsider")
+    const wrong_token = async.ResumeToken("channel test outsider")
     local send, receive = async.channel<|string|>()
     send("stored")
-    local sender = async.run(function (): nil
+    const sender = async.run(function (): nil
       send("released")
     end)
     task_support.cleanup_task(sender, "token-guarded sender cleanup")
@@ -249,7 +245,7 @@ function test_channel_rejects_foreign_resume_tokens(context: test.Context)
           "token-guarded sender did not finish")
 
     local send_empty, receive_empty = async.channel<|string|>()
-    local receiver = async.run(receive_empty)
+    const receiver = async.run(receive_empty)
     task_support.cleanup_task(receiver, "token-guarded receiver cleanup")
     support.wait_until_waiting(receiver)
     local receiver_error = ""
@@ -263,7 +259,7 @@ function test_channel_rejects_foreign_resume_tokens(context: test.Context)
           receiver:status():as_string() == "waiting",
           "foreign token did not fail in the blocked receiver's caller")
     send_empty("delivered")
-    local receiver_status = async.join(receiver)
+    const receiver_status = async.join(receiver)
     local receiver_succeeded, received = receiver_status:has_succeeded()
     test.assert(receiver_succeeded and received == "delivered",
           "channel progress did not wake receiver")
@@ -305,7 +301,7 @@ function test_channel_close_is_idempotent_and_wakes_waiters(
           "close retained a buffered channel value")
 
     local _, blocked_receive, close_receive = async.channel<|string|>()
-    local receiver = async.run<|value, value|>(function (): value
+    const receiver = async.run<|value, value|>(function (): value
       do
         blocked_receive()
       catch
@@ -317,7 +313,7 @@ function test_channel_close_is_idempotent_and_wakes_waiters(
     support.wait_until_waiting(receiver)
     close_receive()
     close_receive()
-    local receiver_status = async.join(receiver)
+    const receiver_status = async.join(receiver)
     local receiver_succeeded, receiver_result =
       receiver_status:has_succeeded()
     test.assert(receiver_succeeded and receiver_result == "channel is closed",
@@ -325,7 +321,7 @@ function test_channel_close_is_idempotent_and_wakes_waiters(
 
     local blocked_send, drain, close_send = async.channel<|string|>()
     blocked_send("stored")
-    local sender = async.run<|value, value|>(function (): value
+    const sender = async.run<|value, value|>(function (): value
       do
         blocked_send("blocked")
       catch
@@ -337,7 +333,7 @@ function test_channel_close_is_idempotent_and_wakes_waiters(
     support.wait_until_waiting(sender)
     close_send()
     close_send()
-    local sender_status = async.join(sender)
+    const sender_status = async.join(sender)
     local sender_succeeded, sender_result = sender_status:has_succeeded()
     test.assert(sender_succeeded and sender_result == "channel is closed",
           "close did not wake its blocked sender with an error")
@@ -351,7 +347,7 @@ function test_channel_close_is_idempotent_and_wakes_waiters(
     -- Cancellation remains authoritative if it races with the scheduled wake
     -- requested by close.
     local _, race_receive, race_close = async.channel<|string|>()
-    local racing = async.run(race_receive)
+    const racing = async.run(race_receive)
     task_support.cleanup_task(racing, "racing receiver cleanup")
     support.wait_until_waiting(racing)
     race_close()
@@ -392,18 +388,18 @@ function test_reader_writer_channel_adapters(context: test.Context)
 
     local concrete_reader, concrete_writer =
       async.reader_writer_channel()
-    local reader: ReaderCloserShape = concrete_reader
-    local writer: WriterCloserShape = concrete_writer
-    local producer = async.run(function (): nil
+    const reader: ReaderCloserShape = concrete_reader
+    const writer: WriterCloserShape = concrete_writer
+    const producer = async.run(function (): nil
       writer:write("alpha<")
       writer:write(">beta")
       writer:write("::tail")
     end)
     task_support.cleanup_task(producer, "adapter producer cleanup")
 
-    local first? = reader:read_until("<>", true)
-    local second? = reader:read_until("::", false)
-    local third? = reader:read()
+    const first? = reader:read_until("<>", true)
+    const second? = reader:read_until("::", false)
+    const third? = reader:read()
     test.assert(async.join(producer):has_succeeded(),
           "channel writer did not finish")
     test.assert(first == "alpha" and second == "beta::" and third == "tail",
@@ -416,12 +412,10 @@ function test_reader_writer_channel_adapters(context: test.Context)
     local waiting_reader, closing_writer =
       async.reader_writer_channel()
     local close_result = "did not raise"
-    local blocked = async.run(function (): nil
-      do
-        waiting_reader:read()
-      catch
-        close_result = error as string
-      end
+    const blocked = async.run(function (): nil
+      waiting_reader:read()
+    catch
+      close_result = error as string
     end)
     task_support.cleanup_task(blocked, "adapter blocked reader cleanup")
     support.wait_until_waiting(blocked)
@@ -456,12 +450,10 @@ function test_reader_writer_channel_adapters(context: test.Context)
       async.reader_writer_channel()
     blocked_writer:write("stored")
     local blocked_writer_error = "did not raise"
-    local blocked_writer_task = async.run(function (): nil
-      do
-        blocked_writer:write("blocked")
-      catch
-        blocked_writer_error = error as string
-      end
+    const blocked_writer_task = async.run(function (): nil
+      blocked_writer:write("blocked")
+    catch
+      blocked_writer_error = error as string
     end)
     task_support.cleanup_task(blocked_writer_task, "adapter blocked writer cleanup")
     support.wait_until_waiting(blocked_writer_task)
@@ -472,7 +464,7 @@ function test_reader_writer_channel_adapters(context: test.Context)
 
     local cancelled_reader, cancellation_writer =
       async.reader_writer_channel()
-    local cancelled = async.run<|value, value|>(function (): value
+    const cancelled = async.run<|value, value|>(function (): value
       return cancelled_reader:read()
     end)
     task_support.cleanup_task(cancelled, "adapter cancelled reader cleanup")
@@ -481,13 +473,13 @@ function test_reader_writer_channel_adapters(context: test.Context)
       async.CancellationReason.simple("adapter cancellation"))
     test.assert(support.cancelled_with(async.join(cancelled), "adapter cancellation"),
           "ChannelReader changed blocked Task cancellation")
-    local replacement = async.run<|value, value|>(function (): value
+    const replacement = async.run<|value, value|>(function (): value
       return cancelled_reader:read()
     end)
     task_support.cleanup_task(replacement, "adapter replacement reader cleanup")
     support.wait_until_waiting(replacement)
     cancellation_writer:write("replacement")
-    local replacement_status = async.join(replacement)
+    const replacement_status = async.join(replacement)
     local replacement_succeeded, replacement_value =
       replacement_status:has_succeeded()
     test.assert(replacement_succeeded and replacement_value == "replacement",
@@ -500,9 +492,9 @@ end
 -- suspension window (task_support.each_wake_offset). The waiter receives from
 -- an empty channel, or sends to a full one holding 1.
 local record ChannelWindow
-  send: function (integer): ()
-  receive: function (): (integer)
-  close: function (): ()
+  const send: function (integer): ()
+  const receive: function (): (integer)
+  const close: function (): ()
   received: value
 end
 
@@ -511,7 +503,7 @@ local function channel_wake_window(blocked_send: boolean, driver: boolean,
   runtime_test.run(function ()
     task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
       local send, receive, close = async.channel<|integer|>(1)
-      local channel = ChannelWindow(send, receive, close, nil)
+      const channel = ChannelWindow(send, receive, close, nil)
       local body: function (): (value) = function (): value
         return receive()
       catch
@@ -586,14 +578,14 @@ function test_channel_tolerates_stale_latched_wake(_: test.Context)
     task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
       local send, receive, close = async.channel<|integer|>(2)
       local stage = 0
-      local body = function (): value
-        local first = receive()
-        local second = receive()
+      const body = function (): value
+        const first = receive()
+        const second = receive()
         stage = 3
-        local third = receive()
+        const third = receive()
         return first .. "," .. second .. "," .. third
       end
-      local drive = function (window: task_support.WakeWindow, receiver: async.Task)
+      const drive = function (window: task_support.WakeWindow, receiver: async.Task)
         window.open = false
         async.yield()
         window.open = true

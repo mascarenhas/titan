@@ -8,8 +8,8 @@ record process_t
   local loop: loop_t?
   local exit_callback: (function (process_t, integer, integer): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (process_t, loop_t, integer, integer): ()
-  local close_handler: function (process_t, loop_t): ()
+  local const handler: function (process_t, loop_t, integer, integer): ()
+  local const close_handler: function (process_t, loop_t): ()
   local userdata: value
 end
 
@@ -66,7 +66,7 @@ end
 
 local function process_deliver(owner: process_t, loop: loop_t,
                               exit_status: integer, term_signal: integer)
-  local callback? = owner.exit_callback
+  const callback? = owner.exit_callback
   owner.exit_callback = nil
   if callback ~= nil then callback(owner, exit_status, term_signal) end
 catch
@@ -81,7 +81,7 @@ end
 local function process_closed(owner: process_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.exit_callback = nil
   owner.close_callback = nil
   if callback ~= nil then callback(handle_t.process(owner)) end
@@ -139,7 +139,7 @@ function process_t:as_handle_t(): handle_t
 end
 
 local function process_strings(strings: {string}): owned (*char)[]
-  local output = foreign (*char).new_array(#strings + 1)
+  const output = foreign (*char).new_array(#strings + 1)
   for index = 1, #strings do output[index - 1] = strings[index] as foreign *char end
   return output
 end
@@ -165,7 +165,7 @@ end
 -- @usage uv/functions/process.md#spawn
 function spawn(loop: loop_t, process: process_t, options: process_options_t): integer
   if not loop.initialized or process.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
-  local allowed = (ffi.UV_PROCESS_DETACHED as integer) | (ffi.UV_PROCESS_SETUID as integer) |
+  const allowed = (ffi.UV_PROCESS_DETACHED as integer) | (ffi.UV_PROCESS_SETUID as integer) |
     (ffi.UV_PROCESS_SETGID as integer) | (ffi.UV_PROCESS_WINDOWS_FILE_PATH_EXACT_NAME as integer) |
     (ffi.UV_PROCESS_WINDOWS_HIDE as integer) | (ffi.UV_PROCESS_WINDOWS_HIDE_CONSOLE as integer) |
     (ffi.UV_PROCESS_WINDOWS_HIDE_GUI as integer) | (ffi.UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS as integer)
@@ -175,7 +175,7 @@ function spawn(loop: loop_t, process: process_t, options: process_options_t): in
   native.uid = options.uid as foreign uv_uid_t
   native.gid = options.gid as foreign uv_gid_t
   native.file = options.file
-  local args = process_strings(options.args)
+  const args = process_strings(options.args)
   native.args = args
   local env: (owned (*char)[])? = nil
   if options.env ~= nil then
@@ -183,18 +183,18 @@ function spawn(loop: loop_t, process: process_t, options: process_options_t): in
     native.env = env as owned (*char)[]
   end
   if options.cwd ~= nil then native.cwd = options.cwd as string end
-  local stdio = foreign uv_stdio_container_t.new_array(#options.stdio)
+  const stdio = foreign uv_stdio_container_t.new_array(#options.stdio)
   native.stdio_count = #options.stdio as foreign int
   native.stdio = stdio
   native.exit_cb = process_callback
-  local stdio_allowed = (ffi.UV_CREATE_PIPE as integer) | (ffi.UV_INHERIT_FD as integer) |
+  const stdio_allowed = (ffi.UV_CREATE_PIPE as integer) | (ffi.UV_INHERIT_FD as integer) |
     (ffi.UV_INHERIT_STREAM as integer) | (ffi.UV_READABLE_PIPE as integer) |
     (ffi.UV_WRITABLE_PIPE as integer) | (ffi.UV_NONBLOCK_PIPE as integer)
-  local created_pipes: {value: boolean} = {}
+  const created_pipes: {value: boolean} = {}
   for index = 1, #options.stdio do
-    local item = options.stdio[index]
+    const item = options.stdio[index]
     if (item.flags & ~stdio_allowed) ~= 0 then return ffi.UV_EINVAL end
-    local kind = item.flags & ((ffi.UV_CREATE_PIPE as integer) |
+    const kind = item.flags & ((ffi.UV_CREATE_PIPE as integer) |
       (ffi.UV_INHERIT_FD as integer) | (ffi.UV_INHERIT_STREAM as integer))
     stdio[index - 1].flags = item.flags as foreign uv_stdio_flags
     if kind == ffi.UV_IGNORE as integer then
@@ -208,7 +208,7 @@ function spawn(loop: loop_t, process: process_t, options: process_options_t): in
       case item.data
       when fd() then return ffi.UV_EINVAL
       when stream(handle) then
-        local pointer = handle:pointer()
+        const pointer = handle:pointer()
         if pointer == nil or ffi.uv_is_closing(pointer as foreign *uv_handle_t) ~= 0 then
           return ffi.UV_EINVAL
         end
@@ -240,7 +240,7 @@ function spawn(loop: loop_t, process: process_t, options: process_options_t): in
   -- Validation, snapshots and fallible setup are complete. Native attempts can
   -- consume a pipe even on failure; never restore eligibility from status.
   consume_spawn_pipes(native)
-  local status = ffi.uv_spawn(loop.native, process.native, native) as integer
+  const status = ffi.uv_spawn(loop.native, process.native, native) as integer
   process.phase = HANDLE_LIVE
   return status
 end
@@ -260,7 +260,7 @@ end
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/functions/process.md#process_kill
 function process_kill(process: process_t, signum: integer): integer
-  local signal = signum as foreign int
+  const signal = signum as foreign int
   if process.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(process.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   if ffi.uv_process_get_pid(process.native) <= 0 then return ffi.UV_EINVAL end

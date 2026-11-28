@@ -40,7 +40,7 @@ end
 
 record PrivateField
   public_field: integer
-  local private_field: integer
+  local const private_field: integer
 end
 
 local foreign function transfer_echo(state: *lua_State): int
@@ -100,11 +100,11 @@ end
 
 function closure_shared_boxes(): function (): integer
   local count = 5
-  local first = function (): integer
+  const first = function (): integer
     count = count + 1
     return count
   end
-  local second = function (): integer
+  const second = function (): integer
     count = count + 10
     return count
   end
@@ -132,11 +132,11 @@ end
 
 function closure_adjusted(): function (integer, value): value
   local count = 3
-  local source = function (amount: integer): integer
+  const source = function (amount: integer): integer
     count = count + amount
     return count
   end
-  local adjusted: function (integer, value): value = source
+  const adjusted: function (integer, value): value = source
   return adjusted
 end
 
@@ -145,7 +145,7 @@ function DefaultRecord:read_number(): integer
 end
 
 function closure_bound_method(): function (): integer
-  local item = DefaultRecord(61)
+  const item = DefaultRecord(61)
   return item:read_number
 end
 
@@ -154,12 +154,12 @@ function closure_policy(): async.TransferValue
 end
 
 function closure_array(): function (): integer
-  local values = {1, 2, 3}
+  const values = {1, 2, 3}
   return function (): integer return values[1] end
 end
 
 function closure_private_nominal(): function (): integer
-  local item = private_value()
+  const item = private_value()
   return function (): integer return item.public_field end
 end
 
@@ -175,7 +175,7 @@ function closure_native_numbers(): function (): boolean
   local precise: foreign long double = (1 as foreign long double) + ffi.LDBL_EPSILON
   local maximum: foreign long double = ffi.LDBL_MAX
   return function (): boolean
-    local exact = wide == ffi.ULLONG_MAX and optional ~= nil
+    const exact = wide == ffi.ULLONG_MAX and optional ~= nil
       and (optional as foreign unsigned long long) == ffi.ULLONG_MAX
       and precise == (1 as foreign long double) + ffi.LDBL_EPSILON
       and maximum == ffi.LDBL_MAX
@@ -199,21 +199,21 @@ function closure_global(): integer
 end
 
 function closure_managed_pointer(): function (): boolean
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
-  local item: value = DefaultRecord(83)
+  const item: value = DefaultRecord(83)
   if ffi.lua_checkstack(L, 1) == 0 then raise "managed capture fixture stack" end
   ffi.lua_pushtvalue(L, item)
-  local pointer = ffi.lua_togco(L, -1) as foreign *Udata
+  const pointer = ffi.lua_togco(L, -1) as foreign *Udata
   return function (): boolean return pointer ~= nil end
 end
 
 function closure_optional_managed_pointer(present: boolean): function (): boolean
   local pointer: (foreign *Udata)? = nil
   if present then
-    local top = ffi.lua_gettop(L)
+    const top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
-    local item: value = DefaultRecord(89)
+    const item: value = DefaultRecord(89)
     if ffi.lua_checkstack(L, 1) == 0 then raise "managed capture fixture stack" end
     ffi.lua_pushtvalue(L, item)
     pointer = ffi.lua_togco(L, -1) as foreign *Udata
@@ -229,8 +229,8 @@ function payload_hook_counts(): (integer, integer)
 end
 
 record PayloadRecord
-  local number: integer
-  local text: string
+  local const number: integer
+  local const text: string
 end
 
 local function payload_fields(): const {reflect.Type}
@@ -266,7 +266,7 @@ function payload_record_value(number: integer): PayloadRecord
 end
 
 record NestedPayload
-  local item: PayloadRecord
+  local const item: PayloadRecord
 end
 
 function NestedPayload:to_transfer_payload(): string
@@ -288,7 +288,7 @@ function nested_payload_value(number: integer): NestedPayload
 end
 
 record FailingPayload
-  local phase: string
+  local const phase: string
 end
 
 function FailingPayload:to_transfer_payload(): string
@@ -306,11 +306,11 @@ function failing_payload_value(phase: string): FailingPayload
 end
 
 record CyclicPayload
-  local number: integer
+  local const number: integer
 end
 
 function CyclicPayload:to_transfer_payload(): string
-  local packet = async.TransferValue.from_value(function (): integer
+  local _ = async.TransferValue.from_value(function (): integer
     return self.number
   end)
   return ""
@@ -325,16 +325,16 @@ function cyclic_payload_value(): CyclicPayload
 end
 
 function closure_custom_record(): function (): integer
-  local item = payload_record_value(83)
+  const item = payload_record_value(83)
   return function (): integer return item:number_value() end
 end
 
 function closure_custom_policy(): function (): integer
-  local item = async.TransferValue.from_value(payload_record_value(89))
+  const item = async.TransferValue.from_value(payload_record_value(89))
   return function (): integer
     case item
     when is_record_payload(_module, _name, _data) then
-      local restored: PayloadRecord = item:to_value()
+      const restored: PayloadRecord = item:to_value()
       return restored:number_value()
     else raise "captured custom TransferValue policy was unwrapped" end
   end

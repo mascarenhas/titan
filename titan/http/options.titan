@@ -36,13 +36,13 @@ end
 --- Validated copied request options, reusable without redirect mutations.
 -- @usage standard-library-http.md#client-requests
 record RequestOptions
-  local headers: Headers
-  local body: string?
-  local ca_file: string?
-  local cache: CacheMode?
-  local credentials: CredentialsMode?
-  local mode: RequestMode?
-  local redirect: RedirectMode?
+  local const headers: Headers
+  local const body: string?
+  local const ca_file: string?
+  local const cache: CacheMode?
+  local const credentials: CredentialsMode?
+  local const mode: RequestMode?
+  local const redirect: RedirectMode?
 end
 
 local function cache_mode_string(mode: CacheMode?): string
@@ -109,7 +109,7 @@ local function is_redirect_status(status: integer): boolean
 end
 
 local function validate_no_cors_method(method: string)
-  local normalized = lower_header_name(method)
+  const normalized = lower_header_name(method)
   if normalized ~= "get" and normalized ~= "head" and normalized ~= "post" then
     raise "HTTP request mode 'no-cors' allows only GET, HEAD, or POST"
   end

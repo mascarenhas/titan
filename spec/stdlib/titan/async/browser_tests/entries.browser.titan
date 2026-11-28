@@ -45,14 +45,14 @@ end
 
 -- Starting host work after dispose() raises the host's closing error.
 local function try_new_work(): string
-  local source = browser.binding("delay")
+  const source = browser.binding("delay")
   defer source:close()
-  local request = source:start(ignore, ignore, Value.is_integer(1), Value.is_integer(0))
+  const request = source:start(ignore, ignore, Value.is_integer(1), Value.is_integer(0))
   request:close()
   return "started"
 catch
   if error is browser.BrowserError then
-    local failure: browser.BrowserError = error
+    const failure: browser.BrowserError = error
     defer failure:close()
     return failure.message
   end
@@ -75,11 +75,11 @@ end
 local function parked_runtime(prefix: string, ms: integer, drive: boolean)
   local settled: integer? = nil
   local resolve_settled: (function (integer): ())? = nil
-  local slow = browser.binding("delay")
+  const slow = browser.binding("delay")
   defer slow:close()
-  local slow_request = slow:start(function (...: Value): Value
-    local item = integer_of(...[1])
-    local resolve? = resolve_settled
+  const slow_request = slow:start(function (...: Value): Value
+    const item = integer_of(...[1])
+    const resolve? = resolve_settled
     if resolve ~= nil then resolve(item) else settled = item end
     return Value.is_nil()
   end, ignore, Value.is_integer(ms), Value.is_integer(ms))
@@ -92,8 +92,8 @@ local function parked_runtime(prefix: string, ms: integer, drive: boolean)
     note(prefix .. " cleanup " .. reason_text(reason))
     note(prefix .. " new work: " .. try_new_work())
     note(prefix .. " sleep: " .. try_sleep(reason))
-    local result = async.await_cleanup<|integer, string|>(function (resolve, _reject, _fatal)
-      local item? = settled
+    const result = async.await_cleanup<|integer, string|>(function (resolve, _reject, _fatal)
+      const item? = settled
       if item ~= nil then resolve(item) else resolve_settled = resolve end
     end)
     note(prefix .. " cleanup got " .. delay_value(result))
@@ -150,7 +150,7 @@ end
 -- Thousands of Tasks parked on host requests until disposal cancels them.
 -- The last Task to park and the last cleanup each leave one note.
 local function crowd(...: Value): Value
-  local count = integer_of(...[1])
+  const count = integer_of(...[1])
   local parked = 0
   local cleaned = 0
   for _ = 1, count do
@@ -160,7 +160,7 @@ local function crowd(...: Value): Value
       suspend_on("never")
       return nil
     end, function (reason: async.CancellationReason<|value|>?)
-      local text = reason_text(reason)
+      const text = reason_text(reason)
       if text ~= "instance disposed" then note("crowd cleanup " .. text) end
       cleaned = cleaned + 1
       if cleaned == count then note("crowd cleaned " .. count) end
@@ -191,7 +191,7 @@ local function retire(...: Value): Value
 end
 
 local function exit_drive(...: Value): Value
-  local code = integer_of(...[1])
+  const code = integer_of(...[1])
   async.run_with_cleanup<|nil, value|>(function (): nil
     note("exit peer parked")
     suspend_on("never")
@@ -204,7 +204,7 @@ local function exit_drive(...: Value): Value
     async.request_exit(code)
     return nil
   end)
-  local witness: {string} = {}
+  const witness: {string} = {}
   gc.finalizable(witness, function (_: {string})
     ffi.fputs("exit finalizer\n", ffi.stdout)
   end)
@@ -215,7 +215,7 @@ end
 
 -- One drive both requests exit and fails through a fatal host callback.
 local function exit_and_fail(...: Value): Value
-  local source = browser.binding("delay")
+  const source = browser.binding("delay")
   defer source:close()
   local request: browser.BrowserRequest? = nil
   async.run<|nil, value|>(function (): nil
@@ -256,8 +256,8 @@ end
 
 local function public_child_probe(...: Value): Value
   call_binding("queue_owner_notification")
-  local before = owner_notifications
-  local child = ownership_lua.new()
+  const before = owner_notifications
+  const child = ownership_lua.new()
   defer child:close()
   check_public_child_state(child)
   test.assert(owner_notifications == before,
@@ -271,7 +271,7 @@ local function publish(target: browser.BrowserHandle, name: string,
 end
 
 local function publish_entries()
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
   publish(target, "echo", echo)
   publish(target, "fail", fail)

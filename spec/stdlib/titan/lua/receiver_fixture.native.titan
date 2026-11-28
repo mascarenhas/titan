@@ -7,7 +7,7 @@ local record ExternalWakeFixture
   loop: uv.loop_t?
   wake: uv.external_wake_t?
   -- Host-owned int[4]: detach, run, loop-close statuses, then callback count.
-  results: foreign *int
+  const results: foreign *int
 end
 
 local receiver: async.Receiver? = nil
@@ -26,11 +26,11 @@ end
 function bootstrap(reply: value, quiescence: value): foreign *void
   -- Lua supplies the lightuserdata transferred from the host. Only this narrow
   -- fixture boundary converts it back to the statically typed borrowed handle.
-  local destination = reply as foreign *void
-  local gate = quiescence as foreign *void
-  local wait: foreign function(*void): void = uv.native_sem_wait
+  const destination = reply as foreign *void
+  const gate = quiescence as foreign *void
+  const wait: foreign function(*void): void = uv.native_sem_wait
   receiver = async.receiver()
-  local owner = receiver as async.Receiver
+  const owner = receiver as async.Receiver
   worker = async.run<|nil, value|>(function (): nil
     local response: async.TransferValue? = nil
     defer do
@@ -43,11 +43,11 @@ function bootstrap(reply: value, quiescence: value): foreign *void
     end
     async.send(destination, async.TransferValue.is_string("ready"))
     while true do
-      local item = owner:wait()
+      const item = owner:wait()
       gc.collect()
       gc.collect()
       if item is string then
-        local bytes: string = item
+        const bytes: string = item
         if bytes == "close" then
           response = async.TransferValue.is_string("closed")
           return nil
@@ -87,7 +87,7 @@ local function require_wake_status(status: integer)
 end
 
 local function finalize_wake_fixture(fixture: ExternalWakeFixture)
-  local loop? = fixture.loop
+  const loop? = fixture.loop
   fixture.loop = nil
   if loop == nil then return end
 
@@ -95,7 +95,7 @@ local function finalize_wake_fixture(fixture: ExternalWakeFixture)
   -- Observe its detached core BEFORE closing/driving the underlying handle:
   -- otherwise the handle's close_handler could mask a missing GC detach.
   if fixture.wake ~= nil then
-    local status = fixture.wake:reserve(705)
+    const status = fixture.wake:reserve(705)
     fixture.results[0] = status
   end
   uv.walk(loop, function (handle: uv.handle_t, _argument: value)
@@ -112,16 +112,16 @@ end
 -- are Lua warnings, so it checks the recorded statuses after lua_close returns.
 function external_wake_targets(results: value):
     (foreign *void, foreign *void, foreign *void, foreign *void)
-  local fixture = ExternalWakeFixture(nil, nil, results as foreign *int)
+  const fixture = ExternalWakeFixture(nil, nil, results as foreign *int)
   wake_fixture = fixture
   -- Register cleanup before native acquisition and before constructing wake.
   -- Reverse finalization detaches wake without driving, then retires its loop.
   gc.finalizable(fixture, finalize_wake_fixture)
-  local loop = uv.loop_t()
-  local status = uv.loop_init(loop)
+  const loop = uv.loop_t()
+  const status = uv.loop_init(loop)
   if status == 0 then fixture.loop = loop end
   require_wake_status(status)
-  local wake = uv.external_wake_t()
+  const wake = uv.external_wake_t()
   fixture.wake = wake
   require_wake_status(uv.external_wake_init(loop, wake,
     function (_: uv.external_wake_t)

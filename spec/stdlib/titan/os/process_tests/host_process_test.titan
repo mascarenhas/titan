@@ -8,9 +8,9 @@ end
 
 local function expect_cancelled_process_operation(action: function (): (),
                                                   label: string)
-  local reason = async.CancellationReason.simple(label)
+  const reason = async.CancellationReason.simple(label)
   local observed: value = nil
-  local competitor = async.run<|value, value|>(function (): value
+  const competitor = async.run<|value, value|>(function (): value
     async.running():cancel(reason)
     do action() catch observed = error end
     return nil
@@ -25,12 +25,12 @@ end
 function test_process_cancelled_waiter_allows_immediate_replacement(
     _context: test.Context)
   with_process_child(function (child: string)
-    local process = system.spawn(child, {"echo"})
+    const process = system.spawn(child, {"echo"})
     defer cleanup_process(process)
-    local input = process_support.required_output(process.stdin, "gated stdin")
-    local reason = async.CancellationReason.simple("replace Process waiter")
+    const input = process_support.required_output(process.stdin, "gated stdin")
+    const reason = async.CancellationReason.simple("replace Process waiter")
     local observed: value = nil
-    local old = async.run<|value, value|>(function (): value
+    const old = async.run<|value, value|>(function (): value
       do process:wait() catch observed = error end
       return nil
     end)
@@ -41,7 +41,7 @@ function test_process_cancelled_waiter_allows_immediate_replacement(
     test.assert(old:status():as_string() == "waiting" and process:is_running(),
                 "cancelled competitor disturbed the Process waiter")
 
-    local release = async.run<|value, value|>(function (): value
+    const release = async.run<|value, value|>(function (): value
       async.join(old)
       input:close()
       return nil
@@ -80,13 +80,13 @@ function test_process_validates_inputs_and_preserves_argv_env_cwd(
       system.spawn(child, {"echo\0suffix"})
     end, "spawn accepted an embedded NUL argument")
 
-    local envname = "TITAN_PROCESS_DIRECT_ENV"
-    local original: string? = system.getenv(envname)
-    local environment = "direct-continuation-process ação=東京"
+    const envname = "TITAN_PROCESS_DIRECT_ENV"
+    const original: string? = system.getenv(envname)
+    const environment = "direct-continuation-process ação=東京"
     do
       defer restore_process_environment(envname, original)
       system.setenv(envname, environment)
-      local previous_directory = system.cwd()
+      const previous_directory = system.cwd()
       local directory = fs.tmpname()
       fs.unlink(directory)
       directory = directory .. "-process cwd ação 東京"
@@ -94,19 +94,19 @@ function test_process_validates_inputs_and_preserves_argv_env_cwd(
       defer fs.rmdir(directory)
       system.chdir(directory)
       defer system.chdir(previous_directory)
-      local cwd = system.cwd()
-      local arguments = {"alpha", "", "beta", "space argument", "quote\"value",
+      const cwd = system.cwd()
+      const arguments = {"alpha", "", "beta", "space argument", "quote\"value",
                          "trailing\\", "space trailing\\", "slash\\\"quote", "ação東京😀"}
-      local command_line = {"argv-env-cwd", envname}
+      const command_line = {"argv-env-cwd", envname}
       for index = 1, #arguments do
         command_line[#command_line + 1] = arguments[index]
       end
-      local process = system.spawn(child, command_line)
+      const process = system.spawn(child, command_line)
       defer cleanup_process(process)
       process_support.required_output(process.stdin, "metadata stdin"):close()
-      local output = process_support.read_all(
+      const output = process_support.read_all(
         process_support.required_input(process.stdout, "metadata stdout"))
-      local diagnostics = process_support.read_all(
+      const diagnostics = process_support.read_all(
         process_support.required_input(process.stderr, "metadata stderr"))
       process_support.assert_normal(process:wait(), "metadata child")
       local expected =
@@ -114,7 +114,7 @@ function test_process_validates_inputs_and_preserves_argv_env_cwd(
         "env:" .. #environment .. ":" .. environment .. "\n" ..
         "argv0:" .. #child .. ":" .. child .. "\n"
       for index = 1, #arguments do
-        local argument = arguments[index]
+        const argument = arguments[index]
         expected = expected .. "arg:" .. #argument .. ":" .. argument .. "\n"
       end
       test.assert(output == expected,
@@ -127,14 +127,14 @@ end
 function test_process_preserves_binary_streams_status_and_signals(
     _context: test.Context)
   with_process_child(function (child: string)
-    local payload = "head\0middle\r\n\26trail"
-    local echoed = system.spawn(child, {"echo"})
+    const payload = "head\0middle\r\n\26trail"
+    const echoed = system.spawn(child, {"echo"})
     defer cleanup_process(echoed)
-    local echo_input = process_support.required_output(
+    const echo_input = process_support.required_output(
       echoed.stdin, "echo stdin")
-    local echo_output = process_support.required_input(
+    const echo_output = process_support.required_input(
       echoed.stdout, "echo stdout")
-    local echo_error = process_support.required_input(
+    const echo_error = process_support.required_input(
       echoed.stderr, "echo stderr")
     echo_input:write(payload)
     echo_input:close()
@@ -148,23 +148,23 @@ function test_process_preserves_binary_streams_status_and_signals(
     test.assert(not echoed:is_running(), "reaped child remained running")
     test.assert(not echo_output:read(), "echo pipe did not retain terminal EOF")
 
-    local split = system.spawn(child, {"dual", "64"})
+    const split = system.spawn(child, {"dual", "64"})
     defer cleanup_process(split)
     process_support.required_output(split.stdin, "dual stdin"):close()
-    local split_stdout = process_support.read_all(
+    const split_stdout = process_support.read_all(
       process_support.required_input(split.stdout, "dual stdout"))
-    local split_stderr = process_support.read_all(
+    const split_stderr = process_support.read_all(
       process_support.required_input(split.stderr, "dual stderr"))
     process_support.assert_normal(split:wait(), "dual-output child")
     test.assert(split_stdout == strings.rep("O", 64) and
                 split_stderr == strings.rep("E", 64),
                 "separate process captures changed")
 
-    local exited = system.spawn(child, {"exit", "37"})
+    const exited = system.spawn(child, {"exit", "37"})
     defer cleanup_process(exited)
     process_support.required_output(exited.stdin, "exit stdin"):close()
-    local first = exited:wait()
-    local second = exited:wait()
+    const first = exited:wait()
+    const second = exited:wait()
     test.assert(first.code == 37 and not first.signal and
                 first.signal_number == 0,
                 "normal process exit status changed")
@@ -175,10 +175,10 @@ function test_process_preserves_binary_streams_status_and_signals(
       exited:kill("term")
     end, "kill targeted an exited Process")
 
-    local killed = system.spawn(child, {"ready-wait"})
+    const killed = system.spawn(child, {"ready-wait"})
     defer cleanup_process(killed)
     process_support.required_output(killed.stdin, "kill stdin"):close()
-    local killed_stdout = process_support.required_input(
+    const killed_stdout = process_support.required_input(
       killed.stdout, "kill stdout")
     test.assert(killed_stdout:read_until("\n", true) == "READY",
                 "kill child did not become ready")
@@ -192,7 +192,7 @@ function test_process_preserves_binary_streams_status_and_signals(
     test.assert(killed:is_running(),
                 "invalid signal validation changed Process state")
     killed:kill("kill")
-    local killed_status = killed:wait()
+    const killed_status = killed:wait()
     test.assert(killed_status.signal == "kill" and
                 killed_status.signal_number > 0,
                 "signal termination was not preserved")
@@ -203,20 +203,20 @@ end
 function test_process_cancellation_waits_for_accepted_callbacks(
     _context: test.Context)
   with_process_child(function (child: string)
-    local process = system.spawn(child, {"ready-wait"})
+    const process = system.spawn(child, {"ready-wait"})
     defer cleanup_process(process)
     process_support.required_output(process.stdin, "detached stdin"):close()
-    local output = process_support.required_input(
+    const output = process_support.required_input(
       process.stdout, "detached stdout")
     test.assert(output:read_until("\n", true) == "READY",
                 "detached-wait child did not become ready")
 
-    local waiter = async.run<|value, value|>(function (): value
+    const waiter = async.run<|value, value|>(function (): value
       process:wait()
       return nil
     end)
     task_support.cleanup_task(waiter, "detached process waiter cleanup")
-    local reader = async.run<|value, value|>(function (): value
+    const reader = async.run<|value, value|>(function (): value
       output:read()
       return nil
     end)
@@ -236,7 +236,7 @@ function test_process_cancellation_waits_for_accepted_callbacks(
     test.assert(process:is_running(),
                 "detaching waiters unexpectedly terminated the child")
     process:kill("kill")
-    local status = process:wait()
+    const status = process:wait()
     test.assert(status.signal == "kill" and status.signal_number > 0,
                 "replacement wait lost process termination")
   end)
@@ -244,18 +244,18 @@ end
 
 local function child_environment(child: string, names: {string},
                                   ...: system.SpawnOption): string
-  local arguments: {string} = {"environment"}
+  const arguments: {string} = {"environment"}
   local index = 1
   while index <= #names do
     arguments[#arguments + 1] = names[index]
     index = index + 1
   end
-  local process = system.spawn(child, arguments, ...)
+  const process = system.spawn(child, arguments, ...)
   defer cleanup_process(process)
   process_support.required_output(process.stdin, "environment stdin"):close()
-  local output = process_support.read_all(
+  const output = process_support.read_all(
       process_support.required_input(process.stdout, "environment stdout"))
-  local diagnostics = process_support.read_all(
+  const diagnostics = process_support.read_all(
       process_support.required_input(process.stderr, "environment stderr"))
   process_support.assert_normal(process:wait(), "environment child")
   test.assert(diagnostics == "", "environment child wrote stderr")
@@ -265,14 +265,14 @@ end
 function test_process_environment_overrides_inherit_without_mutating_parent(
     _context: test.Context)
   with_process_child(function (child: string)
-    local name = "TITAN_PROCESS_CHILD_ENV"
-    local unrelated = "TITAN_PROCESS_CHILD_INHERIT"
-    local added = "TITAN_PROCESS_CHILD_NEW"
-    local missing = "TITAN_PROCESS_CHILD_ABSENT"
-    local original? = system.getenv(name)
-    local original_unrelated? = system.getenv(unrelated)
-    local original_added? = system.getenv(added)
-    local original_missing? = system.getenv(missing)
+    const name = "TITAN_PROCESS_CHILD_ENV"
+    const unrelated = "TITAN_PROCESS_CHILD_INHERIT"
+    const added = "TITAN_PROCESS_CHILD_NEW"
+    const missing = "TITAN_PROCESS_CHILD_ABSENT"
+    const original? = system.getenv(name)
+    const original_unrelated? = system.getenv(unrelated)
+    const original_added? = system.getenv(added)
+    const original_missing? = system.getenv(missing)
     defer restore_process_environment(name, original)
     defer restore_process_environment(unrelated, original_unrelated)
     defer restore_process_environment(added, original_added)
@@ -281,8 +281,8 @@ function test_process_environment_overrides_inherit_without_mutating_parent(
     system.setenv(unrelated, "inherited")
     system.unsetenv(added)
     system.unsetenv(missing)
-    local option = system.with_env(name, "child=first")
-    local first = child_environment(child, {name, unrelated, added, missing},
+    const option = system.with_env(name, "child=first")
+    const first = child_environment(child, {name, unrelated, added, missing},
         option, system.with_env(added, ""))
     test.assert(first == "env:11:child=first\nenv:9:inherited\nenv:0:\nabsent\n",
                 "child environment did not inherit, override, or retain empty")
@@ -290,11 +290,11 @@ function test_process_environment_overrides_inherit_without_mutating_parent(
                 system.getenv(unrelated) == "inherited" and
                 not system.getenv(added) and not system.getenv(missing),
                 "spawn changed the parent's environment")
-    local unicode = "ação=東京"
+    const unicode = "ação=東京"
     test.assert(child_environment(child, {name}, system.with_env(name, unicode)) ==
                 "env:" .. #unicode .. ":" .. unicode .. "\n",
                 "child environment changed Unicode bytes")
-    local second = child_environment(child, {name}, option,
+    const second = child_environment(child, {name}, option,
         system.with_env(name, "last"))
     test.assert(second == "env:4:last\n", "later environment option did not win")
     test.assert(child_environment(child, {name, added}) ==
@@ -309,15 +309,15 @@ end
 function test_process_environment_children_are_isolated(
     _context: test.Context)
   with_process_child(function (child: string)
-    local name = "TITAN_PROCESS_CHILD_PARALLEL"
-    local original? = system.getenv(name)
+    const name = "TITAN_PROCESS_CHILD_PARALLEL"
+    const original? = system.getenv(name)
     defer restore_process_environment(name, original)
     system.setenv(name, "parent")
-    local first = async.run<|string, value|>(function (): string
+    const first = async.run<|string, value|>(function (): string
       return child_environment(child, {name}, system.with_env(name, "first"))
     end)
     task_support.cleanup_task(first, "first environment child cleanup")
-    local second = async.run<|string, value|>(function (): string
+    const second = async.run<|string, value|>(function (): string
       return child_environment(child, {name}, system.with_env(name, "second"))
     end)
     task_support.cleanup_task(second, "second environment child cleanup")
@@ -333,14 +333,14 @@ end
 function test_process_environment_rejects_invalid_options_and_preserves_failure(
     _context: test.Context)
   with_process_child(function (child: string)
-    local names: {string} = {"", "BAD=NAME", "BAD\0NAME"}
+    const names: {string} = {"", "BAD=NAME", "BAD\0NAME"}
     local index = 1
     while index <= #names do
-      local name = names[index]
+      const name = names[index]
       local later_called = false
       process_support.expect_failure(function ()
         system.spawn(child, {"exit", "0"}, system.with_env(name, "value"),
-            function (_config: system.SpawnConfig): integer
+            function (_: system.SpawnConfig): integer
               later_called = true
               return 0
             end)
@@ -351,19 +351,19 @@ function test_process_environment_rejects_invalid_options_and_preserves_failure(
     process_support.expect_failure(function ()
       system.spawn(child, {"exit", "0"}, system.with_env("VALID", "BAD\0VALUE"))
     end, "spawn accepted embedded NUL in environment value")
-    local name = "TITAN_PROCESS_CHILD_FAILURE"
-    local original? = system.getenv(name)
+    const name = "TITAN_PROCESS_CHILD_FAILURE"
+    const original? = system.getenv(name)
     defer restore_process_environment(name, original)
     system.setenv(name, "parent")
     local rejected = false
     do
-      local unexpected = system.spawn(child .. ".missing", {},
+      const unexpected = system.spawn(child .. ".missing", {},
                                       system.with_env(name, "child"))
       cleanup_process(unexpected)
     catch
       test.assert(error is async.OperationError,
                   "missing executable raised a non-operation error")
-      local failure = error as async.OperationError
+      const failure = error as async.OperationError
       test.assert(failure.operation == "process.spawn" and failure.name == "ENOENT",
                   "missing executable lost its native spawn diagnostic")
       rejected = true
@@ -379,14 +379,14 @@ end
 function test_process_environment_names_follow_native_case_rules(
     _context: test.Context)
   with_process_child(function (child: string)
-    local upper = "TITAN_PROCESS_CHILD_CASE"
-    local lower = "titan_process_child_case"
-    local empty = "TITAN_PROCESS_CHILD_CASE_EMPTY"
-    local absent = "TITAN_PROCESS_CHILD_CASE_ABSENT"
-    local original_upper? = system.getenv(upper)
-    local original_lower? = system.getenv(lower)
-    local original_empty? = system.getenv(empty)
-    local original_absent? = system.getenv(absent)
+    const upper = "TITAN_PROCESS_CHILD_CASE"
+    const lower = "titan_process_child_case"
+    const empty = "TITAN_PROCESS_CHILD_CASE_EMPTY"
+    const absent = "TITAN_PROCESS_CHILD_CASE_ABSENT"
+    const original_upper? = system.getenv(upper)
+    const original_lower? = system.getenv(lower)
+    const original_empty? = system.getenv(empty)
+    const original_absent? = system.getenv(absent)
     defer restore_process_environment(lower, original_lower)
     defer restore_process_environment(upper, original_upper)
     defer restore_process_environment(empty, original_empty)
@@ -395,12 +395,12 @@ function test_process_environment_names_follow_native_case_rules(
     system.unsetenv(empty)
     system.unsetenv(absent)
     system.setenv(upper, "parent")
-    local case_insensitive = system.getenv(lower) == "parent"
-    local value = "last ação=東京"
-    local actual = child_environment(child, {upper, lower, empty, absent},
+    const case_insensitive = system.getenv(lower) == "parent"
+    const value = "last ação=東京"
+    const actual = child_environment(child, {upper, lower, empty, absent},
         system.with_env(upper, "first"), system.with_env(lower, value),
         system.with_env(empty, ""))
-    local field = "env:" .. #value .. ":" .. value .. "\n"
+    const field = "env:" .. #value .. ":" .. value .. "\n"
     local expected = "env:5:first\n" .. field .. "env:0:\nabsent\n"
     if case_insensitive then expected = field .. field .. "env:0:\nabsent\n" end
     test.assert(actual == expected, "child environment used wrong name equality")
@@ -410,19 +410,19 @@ function test_process_environment_names_follow_native_case_rules(
 end
 
 local function native_exit_case(context: test.Context, name: string, expected: integer)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     if expected > 255 and not common.is_windows() then
       test.skip("platform: POSIX process exit status contains only eight bits")
     end
     with_process_child(function (child: string)
-      local process = system.spawn(child, {"exit", "" .. expected})
+      const process = system.spawn(child, {"exit", "" .. expected})
       defer cleanup_process(process)
       process_support.required_output(process.stdin, "exit stdin"):close()
-      local output = process_support.read_all(
+      const output = process_support.read_all(
           process_support.required_input(process.stdout, "exit stdout"))
-      local diagnostic = process_support.read_all(
+      const diagnostic = process_support.read_all(
           process_support.required_input(process.stderr, "exit stderr"))
-      local status = process:wait()
+      const status = process:wait()
       test.assert(status.code == expected and status.signal == nil and
                   status.signal_number == 0,
                   "native child exit was confused with shell failure or a signal")
@@ -444,13 +444,11 @@ function test_spawn_option_false_failure_preserves_original_trace(
     _context: test.Context)
   runtime_test.run(function ()
     local original_trace = ""
-    local rejected = function (_config: system.SpawnConfig): integer
-      do
-        raise false
-      catch
-        original_trace = traceback
-        raise
-      end
+    const rejected = function (_: system.SpawnConfig): integer
+      raise false
+    catch
+      original_trace = traceback
+      raise
     end
     local caught = false
     do
@@ -465,7 +463,7 @@ function test_spawn_option_false_failure_preserves_original_trace(
 
     -- A fresh ordinary spawn remains usable in that same Runtime after the
     -- failed Config has unwound. This is a control, not an injected rollback.
-    local process = system.spawn(process_support.child_path(), {"exit", "0"})
+    const process = system.spawn(process_support.child_path(), {"exit", "0"})
     defer cleanup_process(process)
     process_support.close_process_streams(process)
     process_support.assert_normal(process:wait(), "post-option-failure child")

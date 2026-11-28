@@ -4,7 +4,7 @@ local function takeover_case(secure: boolean, coalesced: boolean)
   local retained_caller = false
   local release_caller = false
   with_server(function (connection: websocket.Connection)
-    local reader = async.run<|value, value|>(function (): value
+    const reader = async.run<|value, value|>(function (): value
       local kind?, bytes? = connection:read()
       assert_text(kind, bytes, "deliver-once")
       delivered = bytes
@@ -25,12 +25,12 @@ local function takeover_case(secure: boolean, coalesced: boolean)
     assert_succeeded(reader, "retained reader caller")
   end, function (wire: Wire)
     wire.stream:write(frame(9, "reader-proof", true))
-    local pong = wire:frame()
+    const pong = wire:frame()
     test.assert(pong.opcode == 10 and pong.payload == "reader-proof", "receive admission was not acknowledged")
     receive_ready = true
     assert_close(wire, 1000, false)
-    local data = frame(1, "deliver-once", true)
-    local closing = frame(8, close_bytes(1001, "peer"), true)
+    const data = frame(1, "deliver-once", true)
+    const closing = frame(8, close_bytes(1001, "peer"), true)
     if coalesced then
       wire.stream:write(data .. closing)
     else
@@ -42,16 +42,16 @@ local function takeover_case(secure: boolean, coalesced: boolean)
 end
 
 function test_shutdown_takes_receive_progress_after_reader_returns_data(context: test.Context)
-  context:run("ws_coalesced", function (_child: test.Context)
+  context:run("ws_coalesced", function (_: test.Context)
     runtime_test.run(function () takeover_case(false, true) end)
   end)
-  context:run("ws_later_close", function (_child: test.Context)
+  context:run("ws_later_close", function (_: test.Context)
     runtime_test.run(function () takeover_case(false, false) end)
   end)
-  context:run("wss_coalesced", function (_child: test.Context)
+  context:run("wss_coalesced", function (_: test.Context)
     runtime_test.run(function () takeover_case(true, true) end)
   end)
-  context:run("wss_later_close", function (_child: test.Context)
+  context:run("wss_later_close", function (_: test.Context)
     runtime_test.run(function () takeover_case(true, false) end)
   end)
 end
@@ -59,9 +59,9 @@ end
 local function admitted_read_cancel_case(secure: boolean)
   local ready = false
   with_server(function (connection: websocket.Connection)
-    local reason = async.CancellationReason.simple("native WebSocket admitted read cancellation")
+    const reason = async.CancellationReason.simple("native WebSocket admitted read cancellation")
     local observed: value = nil
-    local reader = async.run<|value, value|>(function (): value
+    const reader = async.run<|value, value|>(function (): value
       do connection:read() catch observed = error end
       return nil
     end)
@@ -77,7 +77,7 @@ local function admitted_read_cancel_case(secure: boolean)
     connection:close(); connection:close()
   end, function (wire: Wire)
     wire.stream:write(frame(9, "admission-proof", true))
-    local pong = wire:frame()
+    const pong = wire:frame()
     test.assert(pong.opcode == 10 and pong.payload == "admission-proof", "admitted reader did not answer Ping")
     ready = true
     assert_transport_retired(wire.stream, secure)
@@ -85,10 +85,10 @@ local function admitted_read_cancel_case(secure: boolean)
 end
 
 function test_admitted_idle_read_cancellation_terminalizes_ws_and_wss(context: test.Context)
-  context:run("ws", function (_child: test.Context)
+  context:run("ws", function (_: test.Context)
     runtime_test.run(function () admitted_read_cancel_case(false) end)
   end)
-  context:run("wss", function (_child: test.Context)
+  context:run("wss", function (_: test.Context)
     runtime_test.run(function () admitted_read_cancel_case(true) end)
   end)
 end
@@ -98,7 +98,7 @@ function test_precancelled_competing_read_preserves_healthy_owner(_context: test
     local ready = false
     with_server(function (connection: websocket.Connection)
       local message: string? = nil
-      local reader = async.run<|value, value|>(function (): value
+      const reader = async.run<|value, value|>(function (): value
         local kind?, bytes? = connection:read()
         assert_text(kind, bytes, "still-healthy")
         message = bytes
@@ -106,9 +106,9 @@ function test_precancelled_competing_read_preserves_healthy_owner(_context: test
       end)
       cleanup_operation(connection, reader, "healthy read owner cleanup")
       while not ready do timer.yield() end
-      local reason = async.CancellationReason.simple("precancelled competing read")
+      const reason = async.CancellationReason.simple("precancelled competing read")
       local observed: value = nil
-      local competitor = async.run<|value, value|>(function (): value
+      const competitor = async.run<|value, value|>(function (): value
         async.running():cancel(reason)
         do connection:read() catch observed = error end
         return nil
@@ -139,7 +139,7 @@ function test_ping_matches_payload_and_rejects_a_second_waiter(_context: test.Co
     local ping_seen = false
     local reply = false
     with_server(function (connection: websocket.Connection)
-      local ping = async.run<|value, value|>(function (): value connection:ping(1000); return nil end)
+      const ping = async.run<|value, value|>(function (): value connection:ping(1000); return nil end)
       cleanup_operation(connection, ping, "Ping owner cleanup")
       while not ping_seen do timer.yield() end
       assert_ws_error(expect_error(function () connection:ping(1000) end), "state", "websocket.ping", nil)
@@ -150,7 +150,7 @@ function test_ping_matches_payload_and_rejects_a_second_waiter(_context: test.Co
       connection:read()
       assert_succeeded(ping, "matched Ping")
     end, function (wire: Wire)
-      local ping = wire:frame()
+      const ping = wire:frame()
       test.assert(ping.opcode == 9 and #ping.payload > 0 and #ping.payload <= 125,
                   "Ping omitted its fresh bounded token")
       ping_seen = true
@@ -177,7 +177,7 @@ function test_ping_without_application_reader_times_out_without_sticky_cancel(_c
       assert_terminal_trace(connection, failure, failure_trace)
       connection:close(); connection:close()
     end, function (wire: Wire)
-      local ping = wire:frame()
+      const ping = wire:frame()
       test.assert(ping.opcode == 9, "Ping was not sent before waiting for reader duty")
       wire.stream:write(frame(10, ping.payload, true))
       test.assert(wire.stream:read() == nil, "Ping timeout failed to retire queued input")
@@ -208,7 +208,7 @@ function test_close_interrupts_active_read_without_joining_its_caller(_context: 
     local caught = false
     local release = false
     with_server(function (connection: websocket.Connection)
-      local reader = async.run<|value, value|>(function (): value
+      const reader = async.run<|value, value|>(function (): value
         do connection:read() catch caught = true end
         while not release do timer.yield() end
         return nil
@@ -220,7 +220,7 @@ function test_close_interrupts_active_read_without_joining_its_caller(_context: 
       test.assert(not reader:status():has_finished(), "close joined an application caller after its I/O scope ended")
       release = true
       assert_succeeded(reader, "close caller")
-      local failure = expect_error(function () connection:write(websocket.TEXT, "late") end)
+      const failure = expect_error(function () connection:write(websocket.TEXT, "late") end)
       test.assert(failure is websocket.Error and (failure as websocket.Error).kind == "state",
                   "closed connection accepted a later write or lost its terminal state error")
     end, function (wire: Wire)
@@ -233,7 +233,7 @@ function test_close_interrupts_active_read_without_joining_its_caller(_context: 
 end
 
 function test_shutdown_validates_outgoing_code_reason_and_timeout_before_output(context: test.Context)
-  local cases: {InvalidOption} = {
+  const cases: {InvalidOption} = {
     InvalidOption("server_1010", function () end),
     InvalidOption("reserved_1006", function () end),
     InvalidOption("long_reason", function () end),
@@ -241,8 +241,8 @@ function test_shutdown_validates_outgoing_code_reason_and_timeout_before_output(
     InvalidOption("zero_timeout", function () end),
   }
   for index = 1, #cases do
-    local label = cases[index].name
-    context:run(label, function (_child: test.Context)
+    const label = cases[index].name
+    context:run(label, function (_: test.Context)
       runtime_test.run(function ()
         with_server(function (connection: websocket.Connection)
           local failure: value = nil
@@ -256,7 +256,7 @@ function test_shutdown_validates_outgoing_code_reason_and_timeout_before_output(
           connection:write(websocket.TEXT, "validation-left-open")
           connection:read()
         end, function (wire: Wire)
-          local response = wire:frame()
+          const response = wire:frame()
           test.assert(response.opcode == 1 and response.payload == "validation-left-open",
                       "invalid shutdown emitted bytes or changed connection state")
           wire.stream:write(frame(8, "", true)); assert_close(wire, nil, false)
@@ -270,8 +270,8 @@ local function shutdown_buffered_fairness_case(secure: boolean, cancel: boolean)
   local prefix_ack = false
   local progressed = false
   local watchdog_fired = false
-  local reason = async.CancellationReason.simple("cancel shutdown while discarding buffered messages")
-  local builder = string.writer()
+  const reason = async.CancellationReason.simple("cancel shutdown while discarding buffered messages")
+  const builder = string.writer()
   builder:write(frame(9, "preload-start", true))
   for index = 1, 8192 do
     local payload = ""
@@ -279,14 +279,14 @@ local function shutdown_buffered_fairness_case(secure: boolean, cancel: boolean)
     builder:write(frame(1, payload, true))
   end
   builder:write(frame(9, "preload-end", true))
-  local preload = builder:drain()
+  const preload = builder:drain()
   with_server(function (connection: websocket.Connection)
     -- Acknowledge completion of the whole raw peer write after101, before
     -- admitting discard. TLS record splitting must not start this operation
     -- while the peer is still writing and cannot read the prefix Pong.
     while not preloaded do async.yield() end
-    local loop = async.current_loop()
-    local peers = on_main(function (): integer
+    const loop = async.current_loop()
+    const peers = on_main(function (): integer
       local count = 0
       uv.walk(loop, function (handle: uv.handle_t, _argument: value)
         case handle
@@ -304,20 +304,20 @@ local function shutdown_buffered_fairness_case(secure: boolean, cancel: boolean)
     test.assert(peers >= 3, "fairness runtime did not own both TCP peers and listener")
     local failure: value = nil
     local failure_trace = ""
-    local shutdown = async.run<|value, value|>(function (): value
+    const shutdown = async.run<|value, value|>(function (): value
       do connection:shutdown(1000, "discard", 1000)
       catch failure = error; failure_trace = traceback end
       return nil
     end)
     cleanup_operation(connection, shutdown, "buffered shutdown cleanup")
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       watchdog_fired = true
       connection:close()
       return nil
     end)
     task_support.cleanup_task(watchdog, "buffered shutdown watchdog cleanup")
-    local observer = async.run<|value, value|>(function (): value
+    const observer = async.run<|value, value|>(function (): value
       while not prefix_ack and not watchdog_fired do async.yield() end
       test.assert(prefix_ack, "shutdown never acknowledged prefetched message input")
       -- An actual timer completion, after the prefix Pong acknowledges receive
@@ -346,7 +346,7 @@ local function shutdown_buffered_fairness_case(secure: boolean, cancel: boolean)
     wire.stream:write(preload)
     preloaded = true
     assert_close(wire, 1000, false)
-    local start = wire:frame()
+    const start = wire:frame()
     test.assert(start.opcode == 10 and start.payload == "preload-start",
                 "shutdown did not acknowledge the beginning of preloaded input")
     prefix_ack = true
@@ -354,7 +354,7 @@ local function shutdown_buffered_fairness_case(secure: boolean, cancel: boolean)
       test.assert(wire.input == "", "shutdown discarded all buffered messages before cancellation could run")
       assert_transport_retired(wire.stream, secure)
     else
-      local finish = wire:frame()
+      const finish = wire:frame()
       test.assert(finish.opcode == 10 and finish.payload == "preload-end" and progressed,
                   "shutdown consumed the complete preloaded burst before timer progress")
       assert_transport_retired(wire.stream, secure)
@@ -363,16 +363,16 @@ local function shutdown_buffered_fairness_case(secure: boolean, cancel: boolean)
 end
 
 function test_shutdown_discarding_prefetched_messages_allows_timer_and_cancel(context: test.Context)
-  context:run("ws_timeout", function (_child: test.Context)
+  context:run("ws_timeout", function (_: test.Context)
     runtime_test.run(function () shutdown_buffered_fairness_case(false, false) end)
   end)
-  context:run("wss_timeout", function (_child: test.Context)
+  context:run("wss_timeout", function (_: test.Context)
     runtime_test.run(function () shutdown_buffered_fairness_case(true, false) end)
   end)
-  context:run("ws_cancel", function (_child: test.Context)
+  context:run("ws_cancel", function (_: test.Context)
     runtime_test.run(function () shutdown_buffered_fairness_case(false, true) end)
   end)
-  context:run("wss_cancel", function (_child: test.Context)
+  context:run("wss_cancel", function (_: test.Context)
     runtime_test.run(function () shutdown_buffered_fairness_case(true, true) end)
   end)
 end

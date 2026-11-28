@@ -6,7 +6,7 @@ function test_caught_skip_exposes_structured_reason(_context: test.Context)
     test.skip("caught skip reason")
   catch
     test.assert(error is test.Skip, "skip omitted its nominal error type")
-    local skip: test.Skip = error
+    const skip: test.Skip = error
     test.assert(skip.reason == "caught skip reason",
                 "skip omitted its reason")
     caught = true

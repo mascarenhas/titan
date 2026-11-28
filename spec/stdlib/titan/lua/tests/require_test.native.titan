@@ -1,33 +1,33 @@
 function test_lua_require_accumulates_source_and_custom_searcher_misses(
     context: test.Context)
   runtime_test.run(function ()
-    local unique_root = lua_support.temporary_file(context)
-    local modname = "lua.tests.definitely_missing"
-    local module_path = "lua/tests/definitely_missing"
-    local first = unique_root .. "/first/" .. module_path ..
+    const unique_root = lua_support.temporary_file(context)
+    const modname = "lua.tests.definitely_missing"
+    const module_path = "lua/tests/definitely_missing"
+    const first = unique_root .. "/first/" .. module_path ..
                   "/again/" .. module_path .. ".lua"
-    local second = unique_root .. "/second/" .. module_path ..
+    const second = unique_root .. "/second/" .. module_path ..
                    "/init.lua"
-    local configured_path =
+    const configured_path =
       unique_root .. "/first/?/again/?.lua;" ..
       unique_root .. "/second/?/init.lua"
-    local custom_diagnostic = "custom diagnostic last"
-    local package_state = lua_support.install_miss_search(
+    const custom_diagnostic = "custom diagnostic last"
+    const package_state = lua_support.install_miss_search(
       configured_path, custom_diagnostic)
     defer package_state:restore()
 
-    local message? = lua_support.caught_string(function ()
+    const message? = lua_support.caught_string(function ()
       tlua.require(modname)
     end)
     test.assert(message ~= nil,
                 "missing titan.lua module did not raise a string error")
-    local actual: string = message
-    local heading? = lua_support.find_literal(
+    const actual: string = message
+    const heading? = lua_support.find_literal(
       actual, "module '" .. modname .. "' not found")
-    local first_position? = lua_support.find_literal(actual, "no file '" .. first .. "'")
-    local second_position? = lua_support.find_literal(
+    const first_position? = lua_support.find_literal(actual, "no file '" .. first .. "'")
+    const second_position? = lua_support.find_literal(
       actual, "no file '" .. second .. "'")
-    local custom_position? = lua_support.find_literal(actual, custom_diagnostic)
+    const custom_position? = lua_support.find_literal(actual, custom_diagnostic)
     test.assert(heading ~= nil, actual)
     test.assert(first_position ~= nil and second_position ~= nil and
                 custom_position ~= nil, actual)
@@ -40,20 +40,20 @@ end
 function test_lua_require_uses_appended_custom_searcher(
     context: test.Context)
   runtime_test.run(function ()
-    local package_table = lua_support.lua_package_table()
-    local raw_searchers: value = package_table["searchers"]
+    const package_table = lua_support.lua_package_table()
+    const raw_searchers: value = package_table["searchers"]
     test.assert(raw_searchers is {integer: value},
                 "'package.searchers' is not a table")
-    local searchers = raw_searchers as {integer: value}
-    local loaded = lua_support.package_loaded_table(package_table)
-    local modname = "lua.tests.custom"
+    const searchers = raw_searchers as {integer: value}
+    const loaded = lua_support.package_loaded_table(package_table)
+    const modname = "lua.tests.custom"
     local index = 1
     while searchers[index] ~= nil do index = index + 1 end
 
-    local searcher: lua_support.PackageSearcher =
+    const searcher: lua_support.PackageSearcher =
       function (actual: string): (value, value)
         if actual ~= modname then return "custom miss", nil end
-        local loader: function (string, value): (value) =
+        const loader: function (string, value): (value) =
           function (loaded_name: string, data: value): value
             test.assert(loaded_name == modname and data == "custom-data",
                         "custom searcher loader arguments changed")
@@ -74,14 +74,14 @@ end
 
 function test_lua_require_loads_stock_c_modules(_context: test.Context)
   runtime_test.run(function ()
-    local package_table = lua_support.lua_package_table()
-    local loaded = lua_support.package_loaded_table(package_table)
-    local saved: value = loaded["lfs"]
+    const package_table = lua_support.lua_package_table()
+    const loaded = lua_support.package_loaded_table(package_table)
+    const saved: value = loaded["lfs"]
     defer loaded["lfs"] = saved
     loaded["lfs"] = nil
 
-    local lfs_module = tlua.require("lfs")
-    local has_attributes = common.lua_helper([==[
+    const lfs_module = tlua.require("lfs")
+    const has_attributes = common.lua_helper([==[
       return function(module)
         return type(module) == "table" and
                type(module.attributes) == "function"

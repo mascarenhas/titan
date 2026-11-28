@@ -12,7 +12,7 @@ local function printing(...: Value): Value
   test.assert(conversions() == "first|second|before|failure",
     "print converted past a failure")
   stream.print("survivor\0\255")
-  local original = system.stdout
+  const original = system.stdout
   do
     defer system.stdout = original
     system.stdout = system.stderr
@@ -23,7 +23,7 @@ local function printing(...: Value): Value
 end
 
 local function write_three(...: Value): Value
-  local target = output(text_of(...[1]))
+  const target = output(text_of(...[1]))
   for index = 1, 3 do
     note("before-" .. index)
     target:write("W" .. index)
@@ -33,8 +33,8 @@ local function write_three(...: Value): Value
 end
 
 local function write_recovery(...: Value): Value
-  local target = output(text_of(...[1]))
-  local message = expect_operation(function () target:write("rejected") end,
+  const target = output(text_of(...[1]))
+  const message = expect_operation(function () target:write("rejected") end,
     "stdio.write", "EIO")
   note("write-error")
   target:write("survivor")
@@ -59,7 +59,7 @@ local function expect_disposed(action: Action): string
   catch
     test.assert(error is async.CancellationReason<|value|>,
       "disposed Task did not retain its nominal cancellation")
-    local reason: async.CancellationReason<|value|> = error
+    const reason: async.CancellationReason<|value|> = error
     case reason
     when simple(message) then
       test.assert(message == "instance disposed", "disposal changed the cancellation reason")
@@ -71,7 +71,7 @@ local function expect_disposed(action: Action): string
 end
 
 local function queued_writers(disposal: boolean): {async.Task<|nil, value|>}
-  local tasks: {async.Task<|nil, value|>} = {}
+  const tasks: {async.Task<|nil, value|>} = {}
   local transferred = false
   defer do
     if not transferred then
@@ -79,11 +79,11 @@ local function queued_writers(disposal: boolean): {async.Task<|nil, value|>}
     end
   end
   for index = 1, 3 do
-    local task = async.run<|nil, value|>(function (): nil
+    const task = async.run<|nil, value|>(function (): nil
       defer do
         note("queued-cleanup-" .. index)
         if disposal then
-          local message = expect_disposed(function ()
+          const message = expect_disposed(function ()
             system.stdout:write("writer-cleanup-" .. index)
           end)
           note("disposed-writer-cleanup-" .. index .. ":" .. message)
@@ -91,7 +91,7 @@ local function queued_writers(disposal: boolean): {async.Task<|nil, value|>}
       end
       note("queued-before-" .. index)
       if disposal then
-        local message = expect_disposed(function ()
+        const message = expect_disposed(function ()
           system.stdout:write("Q" .. index)
         end)
         note("disposed-write-" .. index .. ":" .. message)
@@ -107,11 +107,11 @@ local function queued_writers(disposal: boolean): {async.Task<|nil, value|>}
 end
 
 local function queued_exit(...: Value): Value
-  local tasks = queued_writers(false)
+  const tasks = queued_writers(false)
   defer do
     for index = 1, #tasks do retire(tasks[index]) end
   end
-  local exiting = async.run<|nil, value|>(function (): nil
+  const exiting = async.run<|nil, value|>(function (): nil
     suspend_on("held")
     system.exit(9)
     return nil
@@ -124,10 +124,10 @@ end
 
 local function queued_disposal(...: Value): Value
   defer do
-    local message = expect_disposed(function () system.stdout:write("cleanup-write") end)
+    const message = expect_disposed(function () system.stdout:write("cleanup-write") end)
     note("disposed-cleanup:" .. message)
   end
-  local tasks = queued_writers(true)
+  const tasks = queued_writers(true)
   defer do
     for index = 1, #tasks do retire(tasks[index]) end
   end
@@ -138,7 +138,7 @@ end
 local function c_interleave(...: Value): Value
   system.stdout:write("T\0\255")
   ffi.fputs("C-prefix", ffi.stdout)
-  local bytes = "\0\128\255tail"
+  const bytes = "\0\128\255tail"
   ffi.fwrite(bytes, 1, #bytes, ffi.stdout)
   test.assert(ffi.fflush(ffi.stdout) == 0, "C stdout flush failed")
   system.stdout:write("Z\0\128")
@@ -147,7 +147,7 @@ local function c_interleave(...: Value): Value
 end
 
 local function c_return(...: Value): Value
-  local bytes = "task\0\128\255tail"
+  const bytes = "task\0\128\255tail"
   ffi.fwrite(bytes, 1, #bytes, ffi.stdout)
   return Value.is_boolean(true)
 end
@@ -155,7 +155,7 @@ end
 local function c_latch(...: Value): Value
   ffi.fputs("C-failure", ffi.stdout)
   ffi.fflush(ffi.stdout)
-  local message = expect_operation(function () system.stdout:write("latched") end,
+  const message = expect_operation(function () system.stdout:write("latched") end,
     "stdio.write", "EIO")
   note("c-latch:" .. message)
   system.stdout:write("after-latch")
@@ -165,7 +165,7 @@ end
 
 local function c_no_yield(...: Value): Value
   local counter = 0
-  local peer = async.run<|nil, value|>(function (): nil
+  const peer = async.run<|nil, value|>(function (): nil
     counter = counter + 1
     async.yield()
     counter = counter + 1
@@ -174,7 +174,7 @@ local function c_no_yield(...: Value): Value
   defer retire(peer)
   async.yield()
   test.assert(counter == 1, "counter peer was not parked between turns")
-  local before = counter
+  const before = counter
   ffi.fputs("no-yield", ffi.stdout)
   ffi.fflush(ffi.stdout)
   test.assert(counter == before, "C stdio suspended the current Task")
@@ -183,7 +183,7 @@ local function c_no_yield(...: Value): Value
 end
 
 local function declared_kinds(...: Value): Value
-  local expected = text_of(...[1])
+  const expected = text_of(...[1])
   test.assert(system.stdin:kind() == expected and
     system.stdin:is_tty() == (expected == "tty"), "input kind or TTY changed")
   for index = 1, 2 do
@@ -209,7 +209,7 @@ local function undeclared_kinds(...: Value): Value
 end
 
 local function invalid_kind(...: Value): Value
-  local name = text_of(...[1])
+  const name = text_of(...[1])
   do
     if name == "stdinKind" then
       system.stdin:kind()
@@ -227,26 +227,26 @@ local function invalid_kind(...: Value): Value
 end
 
 local function unsupported_shutdown(...: Value): Value
-  local target = output(text_of(...[1]))
+  const target = output(text_of(...[1]))
   expect_operation(function () target:shutdown() end, "stdio.shutdown", "ENOTSUP")
   target:write("still-open")
   return Value.is_boolean(true)
 end
 
 local function tcp_shutdown(...: Value): Value
-  local target = output(text_of(...[1]))
-  local first = async.run<|nil, value|>(function (): nil
+  const target = output(text_of(...[1]))
+  const first = async.run<|nil, value|>(function (): nil
     target:write("tcp-first")
     return nil
   end)
   defer retire(first)
-  local second = async.run<|nil, value|>(function (): nil
+  const second = async.run<|nil, value|>(function (): nil
     target:write("tcp-second")
     return nil
   end)
   defer retire(second)
   async.yield()
-  local repeated = async.run<|nil, value|>(function (): nil
+  const repeated = async.run<|nil, value|>(function (): nil
     target:shutdown()
     expect_operation(function () target:write("late") end, "stdio.write", "EPIPE")
     expect_operation(function () target:write("") end, "stdio.write", "EPIPE")
@@ -269,8 +269,8 @@ catch
 end
 
 local function failed_shutdown(...: Value): Value
-  local target = output(text_of(...[1]))
-  local message = expect_operation(function () target:shutdown() end,
+  const target = output(text_of(...[1]))
+  const message = expect_operation(function () target:shutdown() end,
     "stdio.shutdown", "EIO")
   target:shutdown()
   expect_operation(function () target:write("late") end, "stdio.write", "EPIPE")

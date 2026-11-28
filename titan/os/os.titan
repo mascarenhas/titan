@@ -47,7 +47,7 @@ end
 -- @usage standard-library-os.md
 record InputStream
   local handle: Stdio?
-  local parent_descriptor: integer
+  local const parent_descriptor: integer
   local excess: string
 end
 
@@ -55,7 +55,7 @@ end
 -- @usage standard-library-os.md
 record OutputStream
   local handle: Stdio?
-  local parent_descriptor: integer
+  local const parent_descriptor: integer
 end
 
 --- Stable readable standard-input stream of the Titan process.
@@ -69,7 +69,7 @@ stdout: OutputStream = OutputStream { handle = nil, parent_descriptor = 1 }
 stderr: OutputStream = OutputStream { handle = nil, parent_descriptor = 2 }
 
 local function byte_at(text: string, index: integer): integer
-  local bytes = text as foreign const *unsigned char
+  const bytes = text as foreign const *unsigned char
   return bytes[index - 1] as integer
 end
 
@@ -97,9 +97,9 @@ local function validate_date_format(format: string)
   -- This is Lua 5.5's C99 conversion set. Keeping the validation here avoids
   -- silently accepting host extensions that the corresponding Lua build
   -- rejects before calling strftime.
-  local ordinary = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%"
-  local after_e = "cCxXyY"
-  local after_o = "deHImMSuUVwWy"
+  const ordinary = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%"
+  const after_e = "cCxXyY"
+  const after_o = "deHImMSuUVwWy"
   local index = 1
   while index <= #format do
     if byte_at(format, index) == 37 then
@@ -109,7 +109,7 @@ local function validate_date_format(format: string)
       end
       local conversion = byte_at(format, index)
       if conversion == 69 or conversion == 79 then
-        local modifier = conversion
+        const modifier = conversion
         index = index + 1
         if index > #format then
           raise "invalid conversion specifier '%" ..
@@ -148,12 +148,12 @@ local function formatted_date(format: string,
   if maximum < capacity then maximum = capacity end
 
   while true do
-    local buffer = foreign char.new_array(capacity)
-    local written = ffi.strftime(
+    const buffer = foreign char.new_array(capacity)
+    const written = ffi.strftime(
       buffer, capacity as foreign size_t, format, calendar)
     if written ~= 0 then
-      local length = written as integer
-      local result = foreign char.new_array(length)
+      const length = written as integer
+      const result = foreign char.new_array(length)
       ffi.memcpy(
         result as foreign *char,
         buffer as foreign const *char,
@@ -201,24 +201,24 @@ local function read_input_until(stream: InputStream, delimiter: string,
   if captured_input_is_closed(stream) then return nil end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  local builder = string.writer()
+  const builder = string.writer()
   local tail = ""
   while true do
-    local chunk? = read_stream(stream)
+    const chunk? = read_stream(stream)
     if not chunk then
       if captured_input_is_closed(stream) then return nil end
       if #tail > 0 then builder:write(tail) end
-      local result = builder:drain()
+      const result = builder:drain()
       if #result == 0 then return nil end
       return result
     end
-    local bytes = chunk as string
+    const bytes = chunk as string
     local boundary = bytes
     if #tail > 0 then boundary = tail .. bytes end
-    local match: integer? = string.find(boundary, delimiter)
+    const match: integer? = string.find(boundary, delimiter)
     if match then
-      local match_first = match as integer
-      local match_end = match_first + #delimiter - 1
+      const match_first = match as integer
+      const match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
       if result_end > 0 then
@@ -229,7 +229,7 @@ local function read_input_until(stream: InputStream, delimiter: string,
     end
     local keep = #delimiter - 1
     if keep > #boundary then keep = #boundary end
-    local committed = #boundary - keep
+    const committed = #boundary - keep
     if committed > 0 then
       if committed == #boundary then
         builder:write(boundary)
@@ -308,11 +308,11 @@ function setlocale(locale: string?, category: string?): string?
   local actual_category = "all"
   if category then actual_category = category as string end
   reject_embedded_nul(actual_category, "locale category")
-  local category_id = locale_category(actual_category)
+  const category_id = locale_category(actual_category)
 
   local selected = ffi.setlocale(category_id, nil)
   if locale then
-    local requested = locale as string
+    const requested = locale as string
     reject_embedded_nul(requested, "locale name")
     selected = ffi.setlocale(category_id, requested)
   end
@@ -373,7 +373,7 @@ function time(year: integer?, month: integer?, day: integer?,
     calendar.tm_isdst = 1 as foreign int
   end
 
-  local instant = ffi.mktime(calendar)
+  const instant = ffi.mktime(calendar)
   if instant == (-1 as foreign time_t) then
     raise "time result cannot be represented in this installation"
   end

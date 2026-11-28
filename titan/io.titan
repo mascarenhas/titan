@@ -116,10 +116,10 @@ end
 -- @param ... Values rendered with string.tostring; the write may suspend.
 -- @usage standard-library-io.md
 function print(...: value)
-  local builder = string.writer()
+  const builder = string.writer()
   local index = 1
   while index <= #... do
-    local rendered = string.tostring(...[index])
+    const rendered = string.tostring(...[index])
     local separator = ""
     if index > 1 then separator = "\t" end
     builder:write(separator .. rendered)
@@ -134,7 +134,7 @@ local function close_reader(reader: ReaderCloser)
 end
 
 local function next_line(reader: ReaderCloser): string?
-  local line: string? = reader:read_until("\n", true)
+  const line: string? = reader:read_until("\n", true)
   if not line then reader:close() end
   return line
 end

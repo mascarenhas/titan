@@ -44,7 +44,7 @@ end
 -- @usage uv/supplemental.md#mutex_tinit
 function mutex_t:init(): integer
     self:require_fresh()
-    local status: integer = ffi.uv_mutex_init(self.storage as foreign *uv_mutex_t)
+    const status: integer = ffi.uv_mutex_init(self.storage as foreign *uv_mutex_t)
     if status == 0 then self.state = SYNC_LIVE end
     return status
 end
@@ -54,7 +54,7 @@ end
 -- @usage uv/supplemental.md#mutex_tinit_recursive
 function mutex_t:init_recursive(): integer
     self:require_fresh()
-    local status: integer = ffi.uv_mutex_init_recursive(self.storage as foreign *uv_mutex_t)
+    const status: integer = ffi.uv_mutex_init_recursive(self.storage as foreign *uv_mutex_t)
     if status == 0 then self.state = SYNC_LIVE end
     return status
 end
@@ -115,7 +115,7 @@ end
 -- @return Native foreign *void result with the documented lifetime and units.
 -- @usage uv/supplemental.md#mutex_tcreate_native
 function mutex_t.create_native(): foreign *void
-    local mutex = ffi.malloc(foreign titan_uv_mutex_storage.sizeof)
+    const mutex = ffi.malloc(foreign titan_uv_mutex_storage.sizeof)
     if mutex == nil then return nil end
     if ffi.uv_mutex_init(mutex as foreign *uv_mutex_t) ~= 0 then
         ffi.free(mutex)
@@ -170,7 +170,7 @@ end
 -- @usage uv/supplemental.md#rwlock_tinit
 function rwlock_t:init(): integer
     self:require_fresh()
-    local status: integer = ffi.uv_rwlock_init(self.storage as foreign *uv_rwlock_t)
+    const status: integer = ffi.uv_rwlock_init(self.storage as foreign *uv_rwlock_t)
     if status == 0 then self.state = SYNC_LIVE end
     return status
 end
@@ -308,7 +308,7 @@ end
 -- @usage uv/supplemental.md#sem_tinit
 function sem_t:init(value: integer): integer
     self:require_fresh()
-    local status: integer = ffi.uv_sem_init(self.storage as foreign *uv_sem_t, value)
+    const status: integer = ffi.uv_sem_init(self.storage as foreign *uv_sem_t, value)
     if status == 0 then self.state = SYNC_LIVE end
     return status
 end
@@ -401,7 +401,7 @@ end
 -- @usage uv/supplemental.md#cond_tinit
 function cond_t:init(): integer
     self:require_fresh()
-    local status: integer = ffi.uv_cond_init(self.storage as foreign *uv_cond_t)
+    const status: integer = ffi.uv_cond_init(self.storage as foreign *uv_cond_t)
     if status == 0 then self.state = SYNC_LIVE end
     return status
 end
@@ -479,7 +479,7 @@ end
 -- @usage uv/supplemental.md#barrier_tinit
 function barrier_t:init(count: integer): integer
     self:require_fresh()
-    local status: integer = ffi.uv_barrier_init(self.storage as foreign *uv_barrier_t, count)
+    const status: integer = ffi.uv_barrier_init(self.storage as foreign *uv_barrier_t, count)
     if status == 0 then self.state = SYNC_LIVE end
     return status
 end
@@ -544,7 +544,7 @@ end
 -- @usage uv/supplemental.md#key_tcreate
 function key_t:create(): integer
     self:require_fresh()
-    local status: integer = ffi.uv_key_create(self.storage as foreign *uv_key_t)
+    const status: integer = ffi.uv_key_create(self.storage as foreign *uv_key_t)
     if status == 0 then self.state = SYNC_LIVE end
     return status
 end
@@ -889,7 +889,7 @@ end
 -- @usage uv/supplemental.md#once_tnew
 function once_t.new(): once_t
     local storage = foreign titan_uv_once_storage.new()
-    local owner: once_t = { storage = storage }
+    const owner: once_t = { storage = storage }
     ffi.titan_uv_once_init(owner.storage)
     return owner
 end

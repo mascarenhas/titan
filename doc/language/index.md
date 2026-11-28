@@ -138,7 +138,7 @@ each module by its short name; Lua loads the same module via `titan.<name>`.
 | Module | Titan `import` | Lua `require` | Targets | Purpose |
 | --- | --- | --- | --- | --- |
 | [test](standard-library-test.md) | `"test"` | `"titan.test"` | Native & Browser | Native `test_*` discovery, assertions, subtests, scoped cleanup, skips, and filtering. |
-| [gc](standard-library-gc.md) | `"gc"` | `"titan.gc"` | Native & Browser | Weak Maps, ephemerons, reachability finalizers, collector modes, and Lua 5.5 tuning. |
+| [gc](standard-library-gc.md) | `"gc"` | `"titan.gc"` | Native & Browser | Weak Maps, ephemerons, reachability finalizers, `gc.keep_alive`, collector modes, and Lua 5.5 tuning. |
 | [lua](standard-library-lua.md) | `"lua"` | `"titan.lua"` | Native & Browser (subset) | Loading Lua chunks, `require`, and isolated `lua.Lua` states; native adds `dofile` and `run_async`. |
 | [browser](standard-library-browser.md) | `"browser"` | `"titan.browser"` | Browser only | Typed JavaScript handles, `BrowserValue` marshalling, async requests, and pinned callbacks. |
 | [uv](standard-library-uv.md) | `"uv"` | `"titan.uv"` | Native only | Low-level public libuv binding for event loops, handles, requests, threads, and locks. |
@@ -149,6 +149,6 @@ each module by its short name; Lua loads the same module via `titan.<name>`.
 | --- | --- | --- |
 | A.1 | [Installing Titan on Linux and macOS](installation.md) | Default prefix setup, patch-release compatibility, checkout and browser SDK builds, OpenSSL/Readline options, installed layout, and uninstalling. |
 | A.2 | [Installing and Using Titan on Windows](windows-build.md) | Experimental MSYS2 CLANG64 build, system/bundled OpenSSL DLL discovery and distribution, Lua DLL and C helpers, browser builds, and Windows notes. |
-| B | [The `titanc` Toolchain, Linking, and Coverage](toolchain.md) | CLI flags, [`--lint` style diagnostics](toolchain.md#linting-with---lint), environment variables, `-o` layout and POSIX backslash limits, `TITAN_PATH_0_6`, [shared and static provider composition](toolchain.md#paired-so--a-outputs-and---static), DSO replacement, `--incremental`, build profiles, and `--coverage`. |
+| B | [The `titanc` Toolchain, Linking, and Coverage](toolchain.md) | CLI flags, [`--lint` style diagnostics and in-source exceptions](toolchain.md#linting-with---lint), environment variables, `-o` layout and POSIX backslash limits, `TITAN_PATH_0_6`, [shared and static provider composition](toolchain.md#paired-so--a-outputs-and---static), DSO replacement, `--incremental`, build profiles, and `--coverage`. |
 | C | [Lexical, Conversion, and Grammar Reference](grammar.md) | Reserved and contextual words, member-name rules, operator precedence, conversion boundary matrix, and complete EBNF grammar. |
 | D | [Design Principles and Lineage](philosophy.md) | The Lua performance bargain, Titan's five core design commitments, and the LabLua/Typed Lua/Pallene lineage. |

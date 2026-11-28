@@ -46,7 +46,7 @@ end
 -- never finished, or its driver raised) retires every Task without resuming
 -- one. Close listeners belong to ordinary retirement and do not run here.
 local function runtime_finalize(candidate: value)
-  local runtime: Runtime = candidate
+  const runtime: Runtime = candidate
   if active_runtime ~= runtime then return end
   require_main_thread()
   runtime.closing = true
@@ -62,12 +62,12 @@ end
 -- Disposal cancels every unfinished Task, including those that cleanup
 -- started after the previous disposing relinquish.
 local function cancel_for_disposal(runtime: Runtime)
-  local reason = CancellationReason<|value|>.simple("instance disposed")
+  const reason = CancellationReason<|value|>.simple("instance disposed")
   for index = 1, runtime.next_task - 1 do
-    local task? = runtime.tasks[index]
+    const task? = runtime.tasks[index]
     if task ~= nil then
-      do task:cancel(reason) catch end
-    end
+      task:cancel(reason)
+    catch end
   end
 end
 
@@ -79,7 +79,7 @@ function loop()
   if not browser.is_owner() then
     raise "async.loop must be driven by the browser instance's owner state"
   end
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime == nil then return end
   if runtime.current_task ~= nil then raise "async.loop must be driven from the Lua main thread" end
   if runtime.driving then raise "async.loop is already being driven" end
@@ -93,24 +93,24 @@ function loop()
   while true do
     if runtime.failure ~= nil then
       for index = 1, runtime.next_task - 1 do
-        local task? = runtime.tasks[index]
+        const task? = runtime.tasks[index]
         if task ~= nil then recover_task(runtime, task) end
       end
       cancel_shutdown_tasks(runtime, nil)
     end
     -- Work that delivery makes ready runs in a later turn.
-    local available = runtime.ready_count
+    const available = runtime.ready_count
     do browser.deliver() catch fail_runtime(runtime, error, traceback) end
     do drain_ready(runtime, available) catch fail_runtime(runtime, error, traceback) end
     if not has_tasks(runtime) and runtime.ready_head == nil then
       notify_runtime_closed(runtime)
       active_runtime = nil
-      local failure? = runtime.failure
+      const failure? = runtime.failure
       if failure ~= nil then failure:raise() end
       return
     end
     runtime.backend.relinquished = true
-    local status = browser.relinquish(runtime.ready_head == nil)
+    const status = browser.relinquish(runtime.ready_head == nil)
     runtime.backend.relinquished = false
     if status == browser.RELINQUISH_DISPOSING then
       cancel_for_disposal(runtime)
@@ -164,10 +164,10 @@ end
 -- through the loader's settle handle. An idle instance drives here; during a
 -- drive this is a queued call and the running driver runs the Task.
 local function spawn_call(...: Value): Value
-  local target = callable_argument(...[1])
-  local settle = handle_argument(...[2])
-  local arguments: {Value} = {...[3,]}
-  local task = run<|Value, value|>(function (): Value return target(...arguments) end)
+  const target = callable_argument(...[1])
+  const settle = handle_argument(...[2])
+  const arguments: {Value} = {...[3,]}
+  const task = run<|Value, value|>(function (): Value return target(...arguments) end)
   settle:call(Value.is_string("started"), Value.is_callable(function (...: Value): Value
     case ...[1]
     when is_string(reason) then task:cancel(CancellationReason<|value|>.simple(reason))
@@ -189,7 +189,7 @@ end
 -- dispose() with no drive active: cancel every Task with "instance disposed"
 -- and drive their cleanup to the end.
 local function shutdown_call(...: Value): Value
-  local runtime? = active_runtime
+  const runtime? = active_runtime
   if runtime ~= nil and not runtime.driving then
     cancel_for_disposal(runtime)
     loop()
@@ -210,7 +210,7 @@ end
 -- loader; other states keep their own, unused, module state.
 local function initialize_backend()
   if not browser.is_owner() then return end
-  local driver = browser.binding("titan:driver")
+  const driver = browser.binding("titan:driver")
   defer driver:close()
   driver:call(Value.is_callable(spawn_call), Value.is_callable(shutdown_call))
 end

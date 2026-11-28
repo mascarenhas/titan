@@ -61,7 +61,7 @@ local function wait_for_watcher_event(watcher: fs.Watcher,
                                       forbidden: string?,
                                       alternative_kind: string?)
   while true do
-    local events = watcher:poll()
+    const events = watcher:poll()
     for index = 1, #events do
       if watcher_event_matches(
           events[index], kind, path, forbidden, alternative_kind) then
@@ -87,21 +87,21 @@ end
 
 function test_fs_binary_delimiters_and_close(context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local binary_path = root .. "/binary.dat"
+    const root = support.new_workspace(context)
+    const binary_path = root .. "/binary.dat"
     support.cleanup_path(context, binary_path)
-    local boundary = support.make_boundary_payload()
+    const boundary = support.make_boundary_payload()
 
     fs.write_file(binary_path, boundary)
     test.assert(fs.read_file(binary_path) == boundary,
                 "whole-file helpers changed binary data")
 
-    local file = fs.open(binary_path, "rb")
+    const file = fs.open(binary_path, "rb")
     defer file:close()
     expect_failure(function ()
       file:read_until("")
     end, "File accepted an empty delimiter")
-    local selected: string? = file:read_until("\0Y", true)
+    const selected: string? = file:read_until("\0Y", true)
     test.assert(selected == strings.rep("x", 65535),
                 "delimiter spanning native reads returned the wrong prefix")
     test.assert(file:read() == "tail\r\n\255",
@@ -124,7 +124,7 @@ function test_fs_binary_delimiters_and_close(context: test.Context)
       file:flush()
     end, "closed File accepted a flush")
 
-    local append = fs.open(binary_path, "ab")
+    const append = fs.open(binary_path, "ab")
     defer append:close()
     test.assert(append:write("\0end\r\n") == 6,
                 "binary append returned the wrong byte count")
@@ -140,21 +140,21 @@ end
 function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
     context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local path = root .. "/concurrent-reads.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/concurrent-reads.dat"
     support.cleanup_path(context, path)
-    local expected = support.make_boundary_payload()
+    const expected = support.make_boundary_payload()
     fs.write_file(path, expected)
-    local first = fs.open(path, "rb")
+    const first = fs.open(path, "rb")
     runtime_test.cleanup(function () first:close() end)
-    local second = fs.open(path, "rb")
+    const second = fs.open(path, "rb")
     runtime_test.cleanup(function () second:close() end)
     local start_first: (function (nil): ())? = nil
     local start_second: (function (nil): ())? = nil
     local first_submitted, second_submitted = false, false
     local cancelled_delivered = false
     local received: string? = nil
-    local cancelled = async.run<|value, value|>(function (): value
+    const cancelled = async.run<|value, value|>(function (): value
       async.await<|nil, nil|>(function (resolve, _reject, _fatal)
         start_first = resolve
       end)
@@ -164,14 +164,14 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
       return nil
     end)
     task_support.cleanup_task(cancelled, "cancelled filesystem read cleanup")
-    local survivor = async.run<|value, value|>(function (): value
+    const survivor = async.run<|value, value|>(function (): value
       async.await<|nil, nil|>(function (resolve, _reject, _fatal)
         start_second = resolve
       end)
       second_submitted = true
       local contents = ""
       while true do
-        local chunk? = second:read()
+        const chunk? = second:read()
         if not chunk then break end
         contents = contents .. chunk
         gc.collect()
@@ -184,7 +184,7 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
     -- readers finish. Cancellation prevents cleanup from starting a new read.
     runtime_test.cleanup(function ()
       if start_first ~= nil then
-        local release = start_first
+        const release = start_first
         start_first = nil
         cancelled:cancel(async.CancellationReason.simple("unused filesystem read gate"))
         release(nil)
@@ -192,7 +192,7 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
     end)
     runtime_test.cleanup(function ()
       if start_second ~= nil then
-        local release = start_second
+        const release = start_second
         start_second = nil
         survivor:cancel(async.CancellationReason.simple("unused filesystem read gate"))
         release(nil)
@@ -241,19 +241,19 @@ end
 
 function test_fs_modes_interfaces_and_validation(context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local modes_path = root .. "/modes.dat"
+    const root = support.new_workspace(context)
+    const modes_path = root .. "/modes.dat"
     support.cleanup_path(context, modes_path)
 
     do
-      local file = fs.open(modes_path, "w")
+      const file = fs.open(modes_path, "w")
       defer file:close()
       test.assert(file:write("abc") == 3,
                   "write returned the wrong length")
       file:flush()
     end
     do
-      local file = fs.open(modes_path, "a")
+      const file = fs.open(modes_path, "a")
       defer file:close()
       test.assert(file:write("d") == 1,
                   "append returned the wrong length")
@@ -262,7 +262,7 @@ function test_fs_modes_interfaces_and_validation(context: test.Context)
                 "append changed file data")
 
     do
-      local file = fs.open(modes_path, "r+")
+      const file = fs.open(modes_path, "r+")
       defer file:close()
       test.assert(file:read(2) == "ab",
                   "read/update mode returned wrong bytes")
@@ -273,22 +273,22 @@ function test_fs_modes_interfaces_and_validation(context: test.Context)
     test.assert(fs.read_file(modes_path) == "abXY",
                 "read/update mode used the wrong file position")
 
-    local valid_modes = {
+    const valid_modes = {
       "r", "rb", "r+", "r+b", "rb+", "a", "ab", "a+", "a+b", "ab+"
     }
     for index = 1, #valid_modes do
-      local opened = fs.open(modes_path, valid_modes[index])
+      const opened = fs.open(modes_path, valid_modes[index])
       opened:close()
     end
-    local truncating_modes = {"w", "wb", "w+", "w+b", "wb+"}
+    const truncating_modes = {"w", "wb", "w+", "w+b", "wb+"}
     for index = 1, #truncating_modes do
-      local opened = fs.open(modes_path, truncating_modes[index])
+      const opened = fs.open(modes_path, truncating_modes[index])
       opened:close()
     end
 
-    local invalid_modes = {"", "x", "rr", "br", "r++"}
+    const invalid_modes = {"", "x", "rr", "br", "r++"}
     for index = 1, #invalid_modes do
-      local mode = invalid_modes[index]
+      const mode = invalid_modes[index]
       expect_failure(function ()
         fs.open(modes_path, mode)
       end, "invalid mode was accepted: " .. mode)
@@ -298,20 +298,20 @@ function test_fs_modes_interfaces_and_validation(context: test.Context)
     end, "embedded-NUL path was accepted")
 
     do
-      local file = fs.open(modes_path, "r")
+      const file = fs.open(modes_path, "r")
       defer file:close()
       expect_failure(function ()
         file:read(0)
       end, "zero-sized read was accepted")
     end
 
-    local interface_path = root .. "/interface.dat"
+    const interface_path = root .. "/interface.dat"
     support.cleanup_path(context, interface_path)
     fs.write_file(interface_path, "line\nrest")
     do
-      local file = fs.open(interface_path, "r+")
+      const file = fs.open(interface_path, "r+")
       defer file:close()
-      local concrete: stream.ReaderWriterCloser = file
+      const concrete: stream.ReaderWriterCloser = file
       test.assert(concrete:read_until("\n", true) == "line",
                   "ReaderWriterCloser delimiter dispatch failed")
       concrete:write("X")
@@ -329,7 +329,7 @@ end
 
 function test_fs_paths_metadata_locations_and_errors(context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
+    const root = support.new_workspace(context)
     if common.is_windows() then
       support.set_fixture_environment(context, "USERPROFILE", root)
       support.set_fixture_environment(context, "TMP", root)
@@ -339,14 +339,14 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
       support.set_fixture_environment(context, "TMPDIR", root)
     end
 
-    local canonical_root = fs.realpath(root)
+    const canonical_root = fs.realpath(root)
     test.assert(fs.realpath(root .. "/.") == canonical_root,
                 "realpath did not resolve a dot component")
     local realpath_missing = false
     do
       fs.realpath(root .. "/missing-realpath")
     catch
-      local failure = error as async.OperationError
+      const failure = error as async.OperationError
       test.assert(failure.operation == "fs.realpath",
                   "missing realpath reported the wrong operation")
       realpath_missing = true
@@ -356,16 +356,16 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
       fs.realpath(root .. "/bad\0path")
     end, "realpath accepted an embedded-NUL path")
 
-    local target = root .. "/target.dat"
+    const target = root .. "/target.dat"
     support.cleanup_path(context, target)
     fs.write_file(target, "target")
 
-    local tree = root .. "/tree"
-    local sub = tree .. "/sub"
-    local first = tree .. "/first héllo 世界.dat"
-    local renamed = tree .. "/renamed héllo 世界.dat"
-    local cwd = root .. "/cwd"
-    local marker = cwd .. "/marker"
+    const tree = root .. "/tree"
+    const sub = tree .. "/sub"
+    const first = tree .. "/first héllo 世界.dat"
+    const renamed = tree .. "/renamed héllo 世界.dat"
+    const cwd = root .. "/cwd"
+    const marker = cwd .. "/marker"
     support.cleanup_path(context, tree)
     support.cleanup_path(context, sub)
     support.cleanup_path(context, first)
@@ -379,7 +379,7 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
     fs.write_file(marker, "cwd")
     fs.write_file(first, "abc\0def")
 
-    local info = fs.stat(first)
+    const info = fs.stat(first)
     test.assert(info.kind == "file" and info.size == 7,
                 "stat returned wrong regular-file metadata")
     test.assert(info.mode >= 0 and info.modified_nanoseconds >= 0 and
@@ -388,7 +388,7 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
     test.assert(fs.stat(sub).kind == "directory",
                 "stat did not classify a directory")
 
-    local entries = fs.list(tree)
+    const entries = fs.list(tree)
     test.assert(#entries == 2 and contains_entry(entries, "first héllo 世界.dat") and
                 contains_entry(entries, "sub"),
                 "list returned wrong entries")
@@ -399,8 +399,8 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
     fs.rename(first, renamed)
     test.assert(fs.stat(first) == nil and fs.lstat(first) == nil,
                 "rename left the old path present")
-    local renamed_info = fs.stat(renamed)
-    local renamed_link_info = fs.lstat(renamed)
+    const renamed_info = fs.stat(renamed)
+    const renamed_link_info = fs.lstat(renamed)
     test.assert(renamed_info.device == info.device and
                 renamed_info.inode == info.inode and renamed_info.size == info.size,
                 "rename changed file identity or metadata")
@@ -418,7 +418,7 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
       fs.unlink(sub)
     end, "unlink removed a directory")
 
-    local missing = root .. "/missing"
+    const missing = root .. "/missing"
     test.assert(fs.stat(missing) == nil and fs.lstat(missing) == nil,
                 "missing metadata did not return nil")
     test.assert(fs.stat(missing .. "/child") == nil and
@@ -434,13 +434,13 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
                   "Windows missing metadata component did not return nil")
       metadata_error_path = root .. "/" .. strings.rep("x", 40000)
     end
-    local expect_metadata_error: function (function (): (), string): () =
+    const expect_metadata_error: function (function (): (), string): () =
       function (action: function (): (), operation: string)
         local failed = false
         do
           action()
         catch
-          local failure = error as async.OperationError
+          const failure = error as async.OperationError
           test.assert(failure.operation == operation,
                       "metadata failure reported the wrong operation")
           if common.is_windows() then
@@ -464,17 +464,17 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
     test.assert(fs.realpath(fs.tmpdir()) == canonical_root and
                 fs.realpath(fs.homedir()) == canonical_root,
                 "portable directory helpers returned wrong paths")
-    local temporary = fs.tmpname()
+    const temporary = fs.tmpname()
     support.cleanup_path(context, temporary)
     test.assert(fs.lstat(temporary).kind == "file",
                 "tmpname did not leave a closed regular file")
     fs.unlink(temporary)
 
-    local original = fs.pwd()
+    const original = fs.pwd()
     do
       defer fs.chdir(original)
       fs.chdir(cwd)
-      local changed = fs.pwd()
+      const changed = fs.pwd()
       test.assert(changed ~= original and fs.read_file("marker") == "cwd",
                   "chdir did not select the requested directory")
       test.assert(fs.read_file(changed .. "/marker") == "cwd",
@@ -493,30 +493,30 @@ end
 
 function test_fs_symbolic_links_preserve_metadata_and_identity(context: test.Context)
   runtime_test.run(function ()
-    local actual_root = support.new_workspace(context)
-    local root = actual_root .. "-alias"
+    const actual_root = support.new_workspace(context)
+    const root = actual_root .. "-alias"
     support.make_symlink(context, actual_root, root)
     test.assert(fs.realpath(root .. "/.") == fs.realpath(actual_root),
                 "realpath did not resolve a symlink and dot component")
-    local target = root .. "/target.dat"
-    local link = root .. "/target-link"
+    const target = root .. "/target.dat"
+    const link = root .. "/target-link"
     support.cleanup_path(context, target)
     fs.write_file(target, "target")
     support.make_symlink(context, target, link)
     test.assert(fs.stat(link).kind == "file",
                 "stat did not follow a symbolic link")
-    local target_info = fs.stat(target)
-    local link_info = fs.stat(link)
+    const target_info = fs.stat(target)
+    const link_info = fs.stat(link)
     test.assert(link_info.device == target_info.device and
                 link_info.inode == target_info.inode,
                 "stat did not preserve physical identity through a symlink")
     test.assert(fs.lstat(link).kind == "symlink",
                 "lstat did not classify the symbolic link")
-    local dangling = root .. "/dangling-link"
+    const dangling = root .. "/dangling-link"
     support.make_symlink(context, root .. "/missing", dangling)
     test.assert(fs.stat(dangling) == nil,
                 "stat did not treat a dangling symlink as missing")
-    local dangling_info? = fs.lstat(dangling)
+    const dangling_info? = fs.lstat(dangling)
     test.assert(dangling_info ~= nil and dangling_info.kind == "symlink",
                 "lstat did not preserve a dangling symlink")
   end)
@@ -524,21 +524,21 @@ end
 
 function test_fs_independent_continuations(context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local first_path = root .. "/parallel-first.dat"
-    local second_path = root .. "/parallel-second.dat"
+    const root = support.new_workspace(context)
+    const first_path = root .. "/parallel-first.dat"
+    const second_path = root .. "/parallel-second.dat"
     support.cleanup_path(context, first_path)
     support.cleanup_path(context, second_path)
 
     local first_realpath: string? = nil
     local second_realpath: string? = nil
-    local first = async.run<|value, value|>(function (): value
+    const first = async.run<|value, value|>(function (): value
       fs.write_file(first_path, "first")
       first_realpath = fs.realpath(first_path)
       return nil
     end)
     task_support.cleanup_task(first, "first filesystem Task cleanup")
-    local second = async.run<|value, value|>(function (): value
+    const second = async.run<|value, value|>(function (): value
       fs.write_file(second_path, "second")
       second_realpath = fs.realpath(second_path)
       return nil
@@ -560,8 +560,8 @@ function test_fs_independent_continuations(context: test.Context)
 
     local cancellation_started = false
     local cancelled_realpath: string? = nil
-    local cancelled = async.run<|value, value|>(function (): value
-      local held = fs.open(first_path, "r")
+    const cancelled = async.run<|value, value|>(function (): value
+      const held = fs.open(first_path, "r")
       defer held:close()
       cancellation_started = true
       cancelled_realpath = fs.realpath(first_path)
@@ -573,7 +573,7 @@ function test_fs_independent_continuations(context: test.Context)
 
     local realpath_resume_error = ""
     do
-      cancelled:resume(async.ResumeToken.new("realpath outsider"))
+      cancelled:resume(async.ResumeToken("realpath outsider"))
     catch
       realpath_resume_error = error as string
     end
@@ -604,23 +604,23 @@ end
 function test_fs_condition_waiter_tokens_and_callback_progress(
     context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local watcher_path = root .. "/watcher.dat"
+    const root = support.new_workspace(context)
+    const watcher_path = root .. "/watcher.dat"
     support.cleanup_path(context, watcher_path)
     -- Use a direct-file watch for this suspension protocol oracle. Darwin
     -- routes it through kqueue, avoiding FSEvents startup notifications that
     -- can otherwise wake the poll before the stale-token assertion.
     support.write_file_synchronously(watcher_path, "")
-    local canonical = fs.realpath(watcher_path)
-    local watcher = fs.watcher()
+    const canonical = fs.realpath(watcher_path)
+    const watcher = fs.watcher()
     cleanup_watcher(watcher)
     watcher:watch(watcher_path)
     wait_for_watcher_subscription()
 
     local watcher_phase = 0
     local watcher_events: {fs.WatcherEvent}? = nil
-    local gate_token = async.ResumeToken.new("filesystem test gate")
-    local watcher_task = async.run<|value, value|>(function (): value
+    const gate_token = async.ResumeToken("filesystem test gate")
+    const watcher_task = async.run<|value, value|>(function (): value
       watcher_phase = 1
       async.suspend(gate_token)
       watcher_phase = 2
@@ -655,7 +655,7 @@ function test_fs_condition_waiter_tokens_and_callback_progress(
                 "watcher callback did not complete token-guarded poll")
 
     local found = false
-    local events = watcher_events as {fs.WatcherEvent}
+    const events = watcher_events as {fs.WatcherEvent}
     for index = 1, #events do
       if watcher_event_matches(events[index], "modified", canonical, nil) then
         found = true
@@ -668,13 +668,13 @@ end
 
 function test_fs_watcher_directory_events_and_canonical_paths(context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local modify_path = root .. "/modify héllo 世界.dat"
-    local delete_path = root .. "/delete.dat"
-    local create_path = root .. "/create.dat"
-    local nested_dir = root .. "/nested"
-    local nested_path = nested_dir .. "/nested.dat"
-    local sentinel_path = root .. "/sentinel.dat"
+    const root = support.new_workspace(context)
+    const modify_path = root .. "/modify héllo 世界.dat"
+    const delete_path = root .. "/delete.dat"
+    const create_path = root .. "/create.dat"
+    const nested_dir = root .. "/nested"
+    const nested_path = nested_dir .. "/nested.dat"
+    const sentinel_path = root .. "/sentinel.dat"
     support.cleanup_path(context, modify_path)
     support.cleanup_path(context, delete_path)
     support.cleanup_path(context, create_path)
@@ -686,11 +686,11 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     fs.mkdir(nested_dir)
     fs.write_file(nested_path, "nested-before")
 
-    local canonical_root = fs.realpath(root)
-    local canonical_modify = fs.realpath(modify_path)
-    local canonical_delete = fs.realpath(delete_path)
-    local canonical_nested = fs.realpath(nested_path)
-    local watcher = fs.watcher()
+    const canonical_root = fs.realpath(root)
+    const canonical_modify = fs.realpath(modify_path)
+    const canonical_delete = fs.realpath(delete_path)
+    const canonical_nested = fs.realpath(nested_path)
+    const watcher = fs.watcher()
     cleanup_watcher(watcher)
     test.assert(#watcher:poll() == 0,
                 "empty watcher poll did not return immediately")
@@ -706,7 +706,7 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     -- uv_fs_event_start. Observe a child created after registration to drain
     -- those hints before checking fixtures that existed before the watch.
     fs.write_file(create_path, "created")
-    local canonical_create = fs.realpath(create_path)
+    const canonical_create = fs.realpath(create_path)
     wait_for_watcher_event(
         watcher, "created", canonical_create, canonical_nested, "modified")
 
@@ -726,7 +726,7 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     -- in-scope sentinel event are delivered in separate batches.
     timer.sleep(100)
     fs.write_file(sentinel_path, "sentinel")
-    local canonical_sentinel = fs.realpath(sentinel_path)
+    const canonical_sentinel = fs.realpath(sentinel_path)
     wait_for_watcher_event(
         watcher, "created", canonical_sentinel, canonical_nested, "modified")
 
@@ -745,10 +745,10 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
                 "watcher could not rewatch a stopped path")
     watcher:clear()
 
-    local removed_directory = root .. "/removed-directory"
+    const removed_directory = root .. "/removed-directory"
     support.cleanup_path(context, removed_directory)
     fs.mkdir(removed_directory)
-    local canonical_removed = fs.realpath(removed_directory)
+    const canonical_removed = fs.realpath(removed_directory)
     watcher:watch(removed_directory)
     wait_for_watcher_subscription()
     fs.rmdir(removed_directory)
@@ -768,17 +768,17 @@ end
 
 function test_fs_watcher_file_scope(context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local watched_path = root .. "/watched héllo 世界.dat"
-    local sibling_path = root .. "/watched.dat.other"
+    const root = support.new_workspace(context)
+    const watched_path = root .. "/watched héllo 世界.dat"
+    const sibling_path = root .. "/watched.dat.other"
     support.cleanup_path(context, watched_path)
     support.cleanup_path(context, sibling_path)
     fs.write_file(watched_path, "before")
     fs.write_file(sibling_path, "sibling-before")
 
-    local canonical_watched = fs.realpath(watched_path)
-    local canonical_sibling = fs.realpath(sibling_path)
-    local watcher = fs.watcher()
+    const canonical_watched = fs.realpath(watched_path)
+    const canonical_sibling = fs.realpath(sibling_path)
+    const watcher = fs.watcher()
     cleanup_watcher(watcher)
     watcher:watch(watched_path)
     watcher:watch(root .. "/./watched héllo 世界.dat")
@@ -836,22 +836,22 @@ end
 
 function test_fs_watcher_poll_waiter_protocol(context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local path = root .. "/wake.dat"
-    local clear_path = root .. "/clear.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/wake.dat"
+    const clear_path = root .. "/clear.dat"
     support.cleanup_path(context, path)
     support.cleanup_path(context, clear_path)
     support.write_file_synchronously(path, "")
     support.write_file_synchronously(clear_path, "")
-    local canonical = fs.realpath(path)
-    local watcher = fs.watcher()
+    const canonical = fs.realpath(path)
+    const watcher = fs.watcher()
     cleanup_watcher(watcher)
     watcher:watch(path)
     wait_for_watcher_subscription()
 
     local entered = false
     local first_result: {fs.WatcherEvent}? = nil
-    local first = async.run<|value, value|>(function (): value
+    const first = async.run<|value, value|>(function (): value
       entered = true
       first_result = watcher:poll()
       return nil
@@ -862,7 +862,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
 
     local resume_error = ""
     do
-      first:resume(async.ResumeToken.new("filesystem poll outsider"))
+      first:resume(async.ResumeToken("filesystem poll outsider"))
     catch
       resume_error = error as string
     end
@@ -887,7 +887,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
 
     local stop_poll_entered = false
     local stopped_result: {fs.WatcherEvent}? = nil
-    local stopped = async.run<|value, value|>(function (): value
+    const stopped = async.run<|value, value|>(function (): value
       stop_poll_entered = true
       stopped_result = watcher:poll()
       return nil
@@ -908,7 +908,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     watcher:watch(path)
     local clear_poll_entered = false
     local cleared_result: {fs.WatcherEvent}? = nil
-    local cleared = async.run<|value, value|>(function (): value
+    const cleared = async.run<|value, value|>(function (): value
       clear_poll_entered = true
       cleared_result = watcher:poll()
       return nil
@@ -919,7 +919,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
 
     local repeated_resume_error = ""
     do
-      cleared:resume(async.ResumeToken.new("repeated poll outsider"))
+      cleared:resume(async.ResumeToken("repeated poll outsider"))
     catch
       repeated_resume_error = error as string
     end
@@ -939,7 +939,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     watcher:watch(path)
     watcher:watch(clear_path)
     local clear_entered = false
-    local concurrent_clear = async.run<|value, value|>(function (): value
+    const concurrent_clear = async.run<|value, value|>(function (): value
       clear_entered = true
       watcher:clear()
       return nil
@@ -964,7 +964,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
 end
 
 function test_fs_watcher_runtime_ownership(context: test.Context)
-  local root = support.new_workspace(context)
+  const root = support.new_workspace(context)
   local stale: fs.Watcher? = nil
   runtime_test.run(function ()
     stale = fs.watcher()
@@ -979,8 +979,8 @@ function test_fs_watcher_runtime_ownership(context: test.Context)
 end
 
 function test_fs_close_before_acceptance_restores_ownership(context: test.Context)
-  local root = support.new_workspace(context)
-  local path = root .. "/close-restore.dat"
+  const root = support.new_workspace(context)
+  const path = root .. "/close-restore.dat"
   support.cleanup_path(context, path)
   support.write_file_synchronously(path, "retained")
   local held: fs.File? = nil
@@ -1006,13 +1006,13 @@ end
 function test_fs_accepted_close_error_keeps_file_closed(context: test.Context)
   runtime_test.run(function ()
     support.require_descriptor_inventory()
-    local root = support.new_workspace(context)
-    local path = root .. "/accepted-close.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/accepted-close.dat"
     support.cleanup_path(context, path)
     fs.write_file(path, "terminal")
-    local file = fs.open(path, "r")
+    const file = fs.open(path, "r")
     defer file:close()
-    local descriptor = support.file_descriptor(path)
+    const descriptor = support.file_descriptor(path)
     test.assert(descriptor >= 0, "could not observe the fixture descriptor")
     -- Only the uniquely owned fixture descriptor is invalidated. No Task or
     -- asynchronous operation can open a replacement before File submits close.
@@ -1022,7 +1022,7 @@ function test_fs_accepted_close_error_keeps_file_closed(context: test.Context)
       file:close()
     catch
       if error is async.OperationError then
-        local failure: async.OperationError = error
+        const failure: async.OperationError = error
         rejected = failure.name == "EBADF" and failure.operation == "fs.close"
       end
     end
@@ -1037,16 +1037,16 @@ end
 function test_fs_cancelled_open_retires_unpublished_descriptor(context: test.Context)
   runtime_test.run(function ()
     support.require_descriptor_inventory()
-    local root = support.new_workspace(context)
-    local path = root .. "/cancel-open.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/cancel-open.dat"
     support.cleanup_path(context, path)
     fs.write_file(path, "owned")
     test.assert(support.file_descriptor(path) == -1,
                 "open cancellation fixture already has an open descriptor")
     local submitted, published = false, false
-    local opener = async.run<|value, value|>(function (): value
+    const opener = async.run<|value, value|>(function (): value
       submitted = true
-      local file = fs.open(path, "r")
+      const file = fs.open(path, "r")
       defer file:close()
       published = true
       return nil
@@ -1055,7 +1055,7 @@ function test_fs_cancelled_open_retires_unpublished_descriptor(context: test.Con
     while not submitted do timer.yield() end
     test.assert(opener:status():as_string() == "waiting" and not published,
                 "open did not wait for its accepted request")
-    local reason = async.CancellationReason<|value|>.simple("cancel accepted open")
+    const reason = async.CancellationReason<|value|>.simple("cancel accepted open")
     opener:cancel(reason)
     gc.collect()
     async.join(opener)
@@ -1069,15 +1069,15 @@ end
 
 function test_fs_close_completes_with_pending_cancellation(context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local path = root .. "/cancel-close.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/cancel-close.dat"
     support.cleanup_path(context, path)
     fs.write_file(path, "owned")
-    local file = fs.open(path, "r")
+    const file = fs.open(path, "r")
     defer file:close()
-    local reason = async.CancellationReason<|value|>.simple("cleanup File close")
+    const reason = async.CancellationReason<|value|>.simple("cleanup File close")
     local close_completed = false
-    local closer = async.run<|value, value|>(function (): value
+    const closer = async.run<|value, value|>(function (): value
       async.running():cancel(reason)
       file:close()
       close_completed = true
@@ -1094,19 +1094,19 @@ end
 function test_fs_file_transfer_preserves_buffer_position_and_source_invalidation(
     context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local path = root .. "/transfer.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/transfer.dat"
     support.cleanup_path(context, path)
     fs.write_file(path, "head\0tail\255")
-    local source = fs.open(path, "r+")
+    const source = fs.open(path, "r+")
     defer source:close()
     test.assert(source:read_until("\0", true) == "head")
-    local packet = async.TransferValue.from_value(source)
+    const packet = async.TransferValue.from_value(source)
     test.assert(source:is_closed() and source:read() == nil)
     expect_failure(function () source:write("invalid") end,
                    "transferred File remained writable")
     source:close()
-    local target: fs.File = packet:to_value()
+    const target: fs.File = packet:to_value()
     defer target:close()
     test.assert(target:read(2) == "ta" and target:read() == "il\255",
                 "File transfer lost retained delimiter bytes")
@@ -1136,10 +1136,10 @@ function test_fs_file_transfer_rejects_closed_and_malformed_payloads(
     fs.File.from_transfer_payload(strings.char(8, 0))
   end, "File accepted a missing retained buffer")
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local path = root .. "/closed-transfer.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/closed-transfer.dat"
     support.cleanup_path(context, path)
-    local file = fs.open(path, "w")
+    const file = fs.open(path, "w")
     file:close()
     expect_failure(function () file:to_transfer_payload() end,
                    "closed File transferred a descriptor")
@@ -1154,8 +1154,8 @@ function test_fs_file_transfer_hooks_are_synchronous(context: test.Context)
     if source then source:close() end
   end)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local path = root .. "/synchronous-transfer.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/synchronous-transfer.dat"
     support.cleanup_path(context, path)
     fs.write_file(path, "data")
     source = fs.open(path, "r")
@@ -1167,21 +1167,21 @@ end
 function test_fs_file_transfer_crosses_states_and_survives_source_shutdown(
     context: test.Context)
   runtime_test.run(function ()
-    local root = support.new_workspace(context)
-    local path = root .. "/cross-state-transfer.dat"
+    const root = support.new_workspace(context)
+    const path = root .. "/cross-state-transfer.dat"
     support.cleanup_path(context, path)
     fs.write_file(path, "head|worker|host\0\255")
-    local source = fs.open(path, "r")
+    const source = fs.open(path, "r")
     defer source:close()
     test.assert(source:read_until("|", true) == "head")
-    local state = transfer_lua.new()
+    const state = transfer_lua.new()
     defer state:close()
-    local operation = function (): async.TransferValue
+    const operation = function (): async.TransferValue
       defer source:close()
       test.assert(source:read_until("|", true) == "worker")
       return async.TransferValue.from_value(source)
     end
-    local packet: async.TransferValue = state:run_async([[
+    const packet: async.TransferValue = state:run_async([[
       local operation = ...
       local async = require('titan.async')
       local task = async.run(operation)
@@ -1198,7 +1198,7 @@ function test_fs_file_transfer_crosses_states_and_survives_source_shutdown(
     state:close()
     gc.collect()
     gc.collect()
-    local target: fs.File = packet:to_value()
+    const target: fs.File = packet:to_value()
     defer target:close()
     test.assert(target:read() == "host\0\255" and target:read() == nil,
                 "cross-state File transfer lost its native owner or bytes")
@@ -1217,9 +1217,9 @@ local fs_close_unclosed: fs.File? = nil
 -- Parks a Task whose lexical File close is still pending. Cell codes: 0 the
 -- close never ran, 1 it returned, 2 it raised.
 function fs_close_park_with_open_file(path: string, cells_raw: value)
-  local cells = cells_raw as foreign *void
-  local task = async.run<|nil, value|>(function (): nil
-    local file = fs.open(path, "w")
+  const cells = cells_raw as foreign *void
+  const task = async.run<|nil, value|>(function (): nil
+    const file = fs.open(path, "w")
     defer do
       do
         file:close()
@@ -1239,7 +1239,7 @@ end
 -- Public only so a fresh independent state can call it; test infrastructure.
 -- Leaves a File that no code closes.
 function fs_close_leave_open_file(path: string)
-  local task = async.run<|nil, value|>(function (): nil
+  const task = async.run<|nil, value|>(function (): nil
     fs_close_unclosed = fs.open(path, "w")
     return nil
   end)
@@ -1253,7 +1253,7 @@ local function fs_close_open_descriptors(): integer?
 end
 
 local function fs_close_child(entry: string, ...: async.TransferValue)
-  local state = transfer_lua.new()
+  const state = transfer_lua.new()
   defer state:close()
   state:run([[
     package.path, package.cpath = '', ''
@@ -1268,10 +1268,10 @@ end
 function test_lua_close_closes_open_files(context: test.Context)
   context:run("parked_task", function (_: test.Context)
     runtime_test.run(function ()
-      local path = fs.tmpname()
+      const path = fs.tmpname()
       support.cleanup_path(context, path)
-      local before? = fs_close_open_descriptors()
-      local cells: owned int[] = foreign int.new_array(1)
+      const before? = fs_close_open_descriptors()
+      const cells: owned int[] = foreign int.new_array(1)
       cells[0] = 0
       fs_close_child("fs_close_park_with_open_file", async.TransferValue.is_string(path),
                      async.TransferValue.is_pointer(cells as foreign *void))
@@ -1289,9 +1289,9 @@ function test_lua_close_closes_open_files(context: test.Context)
       test.skip("platform: open descriptor accounting uses /dev/fd")
     end
     runtime_test.run(function ()
-      local path = fs.tmpname()
+      const path = fs.tmpname()
       support.cleanup_path(context, path)
-      local before? = fs_close_open_descriptors()
+      const before? = fs_close_open_descriptors()
       fs_close_child("fs_close_leave_open_file", async.TransferValue.is_string(path))
       test.assert(fs_close_open_descriptors() == before,
                   "Lua state close leaked an unclosed File descriptor")

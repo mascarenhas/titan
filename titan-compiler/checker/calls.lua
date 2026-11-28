@@ -3098,11 +3098,30 @@ function generic_instantiate_owner_applied_static(
     return signature
 end
 
+-- A direct call of `titan.gc.keep_alive` lowers as a compiler intrinsic. Its
+-- type arguments are admitted exactly like the ordinary generic entry's, so
+-- first-class and direct uses accept the same values.
+-- Implementation notes: doc/implementation/gc-library.md#keep-alive-intrinsic
+local function is_keep_alive_callee(node, st)
+    if checker._foreign_function_depth > 0
+       or node.exp._tag ~= "Ast.ExpVar" then
+        return false
+    end
+    local decl = node.exp.var._decl
+    if not decl then return false end
+    if decl._tag == "Type.ModuleMember" then
+        return decl.modname == "titan.gc" and decl.name == "keep_alive"
+    end
+    return decl._tag == "Ast.TopLevelFunc" and decl.name == "keep_alive"
+        and st.modname == "titan.gc"
+end
+
 function generic_instantiate_direct_call(
         node, ftype, st, errors, demand)
     local subject = "call to '" .. expname(node.exp) .. "'"
     if ftype._tag == "Type.FunctionScheme" then
         node._generic_scheme = ftype
+        node._keep_alive_intrinsic = is_keep_alive_callee(node, st) or nil
         if #(node.typeargs or {}) > 0 then
             local closed, arguments =
                 generic_instantiate_function_scheme(

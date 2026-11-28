@@ -8,6 +8,7 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local path = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
+local process = require "titan-compiler.process"
 local installed_prefix = require "spec.support.installed_prefix"
 local toolchain = require "spec.support.browser_toolchain"
 local browser_fixtures = require "spec.support.browser_fixtures"
@@ -483,6 +484,28 @@ describe("playground compiler", function()
         assert.truthy(emitted.files["nested/util.c"]:find('#include "util.ffi.h"', 1, true))
     end)
 
+    -- Issue #450: a project module's private native storage stays out of its
+    -- ordinary importers; only a direct `.titan` importer sees the whole layout.
+    it("emits private record storage only into the owner and its source importers", function()
+        local opened, why = open(); if not opened then pending(why); return end
+        local project = {
+            ["a.titan"] = "record Box\n  const pub: integer\n  local const secret: float\nend\n\n" ..
+                "function make(pub: integer): Box\n  return Box(pub, 0.5)\nend\n",
+            ["peek.titan"] = 'local a = import "a.titan"\nfunction secret(box: a.Box): float\n' ..
+                "  return box.secret\nend\n",
+            ["main.titan"] = 'local a = import "a"\nlocal peek = import "peek"\n' ..
+                "function main(args: {string}): integer\n  local box = a.make(7)\n" ..
+                "  if peek.secret(box) ~= 0.5 then return 1 end\n  return box.pub - 7\nend\n",
+        }
+        local emitted = service:emit_c(project, string.rep("2", 64))
+        assert.same({}, emitted.diagnostics)
+        assert.same({ "a.c", "main.c", "peek.c" }, emitted.units)
+        local main = emitted.files["main.c"]
+        assert.truthy(main:find("} _titan_nominal_a_2eBox_public_payload;", 1, true))
+        assert.is_nil(main:find("_titan_nominal_a_2eBox_payload", 1, true))
+        assert.truthy(emitted.files["peek.c"]:find("} _titan_nominal_a_2eBox_payload;", 1, true))
+    end)
+
     it("links emitted C into an image whose trace names the program's frames", function()
         local opened, why = open(); if not opened then pending(why); return end
         local info
@@ -688,6 +711,42 @@ describe("titanc --no-source-records", function()
             assert.matches("%-%-no%-source%-records cannot be combined", output)
         end
         files.remove(workspace)
+    end)
+end)
+
+-- Issue #450 on the browser target: a co-compiled source module's private
+-- header-typed storage stays out of its ordinary importers' C.
+describe("titanc --target browser -c nominal layouts", function()
+    local ROOT = assert(lfs.currentdir())
+
+    it("emits a source module's private native layout only into its source importers", function()
+        local info, why = toolchain.require({ sdk = true }); if not info then pending(why); return end
+        local workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local header = path.join(workspace, "opaque.h")
+        files.write(header, "typedef struct my_handle my_handle;\ntypedef struct priv_state { int x; } priv_state;\n")
+        files.write(path.join(workspace, "pkg/a.titan"), string.format("foreign import %q\n", header) ..
+            "record Handle\n  const width: integer\n  local const raw: foreign *my_handle\n" ..
+            "  local const state: foreign priv_state\nend\n\nfunction make(width: integer): Handle\n" ..
+            "  return Handle(width, nil, foreign priv_state.new())\nend\n")
+        files.write(path.join(workspace, "pkg/b.titan"), 'local a = import "pkg.a"\n\n' ..
+            "function seven(): integer\n  return a.make(7).width\nend\n")
+        files.write(path.join(workspace, "pkg/c.titan"), 'local a = import "pkg.a.titan"\n\n' ..
+            "function state_of(h: a.Handle): integer\n  return h.state.x as integer\nend\n")
+        local out = path.join(workspace, "out")
+        local result = process.capture({ path.join(PREFIX, "bin/lua" .. (platform.windows and ".exe" or "")),
+            "-E", "-e", "package.path = " .. string.format("%q", ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") ..
+                " .. package.path", ROOT .. "/titanc", "-q", "--target", "browser", "-c", "--tree", workspace,
+            "-o", out, "pkg.b", "pkg.c" }, { stderr_to_stdout = true, env = { TITAN_ROOT = PREFIX,
+            TITAN_TARGET = false, TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" } })
+        local b = result.ok and read(path.join(out, "pkg/b.c"))
+        local c = result.ok and read(path.join(out, "pkg/c.c"))
+        files.remove(workspace)
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.truthy(b:find("} _titan_nominal_pkg_2ea_2eHandle_public_payload;", 1, true))
+        for _, private in ipairs({ "_titan_nominal_pkg_2ea_2eHandle_payload", "my_handle", "priv_state" }) do
+            assert.is_nil(b:find(private, 1, true), private)
+        end
+        assert.truthy(c:find("} _titan_nominal_pkg_2ea_2eHandle_payload;", 1, true))
     end)
 end)
 

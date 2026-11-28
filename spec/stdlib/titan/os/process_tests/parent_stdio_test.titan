@@ -1,24 +1,24 @@
 local function check_parent_stdin(wait_for_close: boolean)
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
       command.remove_tree(workspace)
     end)
 
-    local source = fs.read_file(
+    const source = fs.read_file(
       "spec/fixtures/stdlib/titan/os_parent_stdin_app.titan")
     fs.write_file(workspace .. "/os_parent_stdin_app.titan", source)
     local output, why, compiled = command.compile(workspace, "os_parent_stdin_app")
     test.assert(why == "exit" and compiled == 0,
                 "could not compile parent-stdin fixture: " .. output)
 
-    local result_path = workspace .. "/parent-stdin.result"
-    local arguments = {command.program(workspace, "os_parent_stdin_app"), result_path}
+    const result_path = workspace .. "/parent-stdin.result"
+    const arguments = {command.program(workspace, "os_parent_stdin_app"), result_path}
     if wait_for_close then arguments[#arguments + 1] = "wait-for-close" end
-    local status = command.system(arguments, nil, nil, nil, "first|second")
-    local report = fs.read_file(result_path)
+    const status = command.system(arguments, nil, nil, nil, "first|second")
+    const report = fs.read_file(result_path)
     defer fs.unlink(result_path)
     test.assert(status == 0 and report == "OK:parent-input-ok",
                 "parent-stdin fixture failed: " .. report)
@@ -41,7 +41,7 @@ function test_parent_stdin_duplicate_failure_preserves_original_descriptor(
     test.skip("platform: descriptor soft limits require POSIX RLIMIT_NOFILE")
   end
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function () command.remove_tree(workspace) end)
@@ -53,8 +53,8 @@ function test_parent_stdin_duplicate_failure_preserves_original_descriptor(
       "os_descriptor_limit_app", {"-X", command.fixture_object("os_descriptor_limit")})
     test.assert(why == "exit" and compiled == 0,
                 "could not compile descriptor limit child: " .. output)
-    local result_path = workspace .. "/descriptor-limit.result"
-    local status = command.system({
+    const result_path = workspace .. "/descriptor-limit.result"
+    const status = command.system({
       command.program(workspace, "os_descriptor_limit_app"), result_path,
     }, workspace, nil, nil, "RLIMIT_INPUT_MARKER")
     test.assert(status == 0 and fs.read_file(result_path) == "EMFILE_OK",
@@ -75,15 +75,15 @@ local function compile_file_stdio_fixture(workspace: string): string
 end
 
 local function run_shell_command(shell_command: string)
-  local shell = system.popen(shell_command)
+  const shell = system.popen(shell_command)
   defer shell:close()
   local diagnostic = ""
   while true do
-    local chunk? = shell:read()
+    const chunk? = shell:read()
     if not chunk then break end
     diagnostic = diagnostic .. chunk
   end
-  local status = shell:wait()
+  const status = shell:wait()
   test.assert(status.code == 0 and status.signal_number == 0,
               "shell redirect command failed (" .. status.code .. "): " .. diagnostic)
 end
@@ -100,11 +100,11 @@ function test_parent_file_stdio_shell_redirections_and_binary_streams(
     program = compile_file_stdio_fixture(workspace)
   end)
 
-  context:run("redirect_input_output_and_stderr", function (_child: test.Context)
+  context:run("redirect_input_output_and_stderr", function (_: test.Context)
     runtime_test.run(function ()
-      local in_path = workspace .. "/redir.in"
-      local out_path = workspace .. "/redir.out"
-      local err_path = workspace .. "/redir.err"
+      const in_path = workspace .. "/redir.in"
+      const out_path = workspace .. "/redir.out"
+      const err_path = workspace .. "/redir.err"
       fs.write_file(in_path, "alpha\nbeta\ngamma")
       run_shell_command(
         '"' .. program .. '" shell-redirect echo-lines < "' ..
@@ -118,9 +118,9 @@ function test_parent_file_stdio_shell_redirections_and_binary_streams(
     end)
   end)
 
-  context:run("redirect_append_preserves_existing_bytes", function (_child: test.Context)
+  context:run("redirect_append_preserves_existing_bytes", function (_: test.Context)
     runtime_test.run(function ()
-      local append_path = workspace .. "/append.out"
+      const append_path = workspace .. "/append.out"
       run_shell_command(
         '"' .. program .. '" shell-redirect append FIRST > "' .. append_path .. '"')
       run_shell_command(
@@ -131,11 +131,11 @@ function test_parent_file_stdio_shell_redirections_and_binary_streams(
     end)
   end)
 
-  context:run("redirect_null_device_eof_and_discard", function (_child: test.Context)
+  context:run("redirect_null_device_eof_and_discard", function (_: test.Context)
     runtime_test.run(function ()
       local null_device = "/dev/null"
       if common.is_windows() then null_device = "NUL" end
-      local result_path = workspace .. "/dev-null.result"
+      const result_path = workspace .. "/dev-null.result"
       run_shell_command(
         '"' .. program .. '" shell-redirect dev-null "' ..
         result_path .. '" < ' .. null_device .. ' > ' .. null_device)
@@ -144,11 +144,11 @@ function test_parent_file_stdio_shell_redirections_and_binary_streams(
     end)
   end)
 
-  context:run("redirect_binary_bytes_across_chunk_boundaries", function (_child: test.Context)
+  context:run("redirect_binary_bytes_across_chunk_boundaries", function (_: test.Context)
     runtime_test.run(function ()
-      local bin_in = workspace .. "/binary.in"
-      local bin_out = workspace .. "/binary.out"
-      local payload = strings.rep("B\0\r\n\n\r\255X", 20480)
+      const bin_in = workspace .. "/binary.in"
+      const bin_out = workspace .. "/binary.out"
+      const payload = strings.rep("B\0\r\n\n\r\255X", 20480)
       fs.write_file(bin_in, payload)
       run_shell_command(
         '"' .. program .. '" shell-redirect binary-copy < "' ..
@@ -171,9 +171,9 @@ function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
     program = compile_file_stdio_fixture(workspace)
   end)
 
-  context:run("write_fifo_cancellation_gc_responsiveness_and_multi_mib", function (_child: test.Context)
+  context:run("write_fifo_cancellation_gc_responsiveness_and_multi_mib", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/write-fifo.result"
+      const result_path = workspace .. "/write-fifo.result"
       local output, why, status = command.capture(
         {program, "write-fifo-cancel-gc", workspace, result_path},
         workspace, {["UV_THREADPOOL_SIZE"] = "4"})
@@ -183,9 +183,9 @@ function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("short_writes_and_write_errors", function (_child: test.Context)
+  context:run("short_writes_and_write_errors", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/short-write.result"
+      const result_path = workspace .. "/short-write.result"
       local output, why, status = command.capture(
         {program, "short-write-and-errors", workspace, result_path},
         workspace)
@@ -195,9 +195,9 @@ function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("read_cancellation_retention_sticky_inheritance_and_transfer", function (_child: test.Context)
+  context:run("read_cancellation_retention_sticky_inheritance_and_transfer", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/read-cancel.result"
+      const result_path = workspace .. "/read-cancel.result"
       local output, why, status = command.capture(
         {program, "read-cancel-sticky-inheritance", workspace, result_path, program},
         workspace, {["UV_THREADPOOL_SIZE"] = "4"})
@@ -207,14 +207,14 @@ function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("graceful_exit_drains_queued_file_writes", function (_child: test.Context)
+  context:run("graceful_exit_drains_queued_file_writes", function (_: test.Context)
     runtime_test.run(function ()
-      local exit_out = workspace .. "/exit-drain.out"
-      local shell = system.popen(
+      const exit_out = workspace .. "/exit-drain.out"
+      const shell = system.popen(
         '"' .. program .. '" exit-queued-writes > "' .. exit_out .. '"')
       defer shell:close()
       while shell:read() ~= nil do end
-      local status = shell:wait()
+      const status = shell:wait()
       test.assert(status.code == 17 and status.signal_number == 0,
                   "os.exit did not exit with code 17: " .. status.code)
       test.assert(fs.read_file(exit_out) == "EXIT-1;EXIT-2;EXIT-3;",
@@ -222,9 +222,9 @@ function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("runtime_failure_drains_writes_and_later_runtime_resets_state", function (_child: test.Context)
+  context:run("runtime_failure_drains_writes_and_later_runtime_resets_state", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/runtime-failure.result"
+      const result_path = workspace .. "/runtime-failure.result"
       local output, why, status = command.capture(
         {program, "runtime-failure-and-reuse", workspace, result_path},
         workspace, {["UV_THREADPOOL_SIZE"] = "4"})
@@ -234,9 +234,9 @@ function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("destructive_state_close_abandons_queued_writes_and_keeps_fds_open", function (_child: test.Context)
+  context:run("destructive_state_close_abandons_queued_writes_and_keeps_fds_open", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/destructive-close.result"
+      const result_path = workspace .. "/destructive-close.result"
       local output, why, status = command.capture(
         {program, "destructive-state-close", workspace, result_path},
         workspace, {["UV_THREADPOOL_SIZE"] = "4"})
@@ -262,9 +262,9 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     program = compile_file_stdio_fixture(workspace)
   end)
 
-  context:run("ipv4_inetd_session", function (_child: test.Context)
+  context:run("ipv4_inetd_session", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-ipv4.result"
+      const result_path = workspace .. "/tcp-ipv4.result"
       local output, why, status = command.capture(
         {program, "tcp-ipv4-session", workspace, result_path, program},
         workspace)
@@ -274,16 +274,16 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("ipv6_inetd_session", function (_child: test.Context)
+  context:run("ipv6_inetd_session", function (_: test.Context)
     local skipped = false
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-ipv6.result"
+      const result_path = workspace .. "/tcp-ipv6.result"
       local output, why, status = command.capture(
         {program, "tcp-ipv6-session", workspace, result_path, program},
         workspace)
       test.assert(why == "exit" and status == 0,
                   "TCP IPv6 inetd session failed (" .. why .. "/" .. status .. "): " .. output)
-      local report = fs.read_file(result_path)
+      const report = fs.read_file(result_path)
       if report == "SKIP:capability: IPv6 loopback unavailable" then
         skipped = true
         return
@@ -296,9 +296,9 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     end
   end)
 
-  context:run("launchd_aliased_session", function (_child: test.Context)
+  context:run("launchd_aliased_session", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-launchd-session.result"
+      const result_path = workspace .. "/tcp-launchd-session.result"
       local output, why, status = command.capture(
         {program, "tcp-launchd-session", workspace, result_path, program},
         workspace)
@@ -308,9 +308,9 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("child_inheritance", function (_child: test.Context)
+  context:run("child_inheritance", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-inheritance.result"
+      const result_path = workspace .. "/tcp-inheritance.result"
       local output, why, status = command.capture(
         {program, "tcp-inheritance", workspace, result_path, program},
         workspace)
@@ -320,9 +320,9 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("read_cancellation_and_replacement", function (_child: test.Context)
+  context:run("read_cancellation_and_replacement", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-read-cancel.result"
+      const result_path = workspace .. "/tcp-read-cancel.result"
       local output, why, status = command.capture(
         {program, "tcp-read-cancel-replace", workspace, result_path},
         workspace)
@@ -332,9 +332,9 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("backpressure_and_write_shutdown_cancellation", function (_child: test.Context)
+  context:run("backpressure_and_write_shutdown_cancellation", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-backpressure.result"
+      const result_path = workspace .. "/tcp-backpressure.result"
       local output, why, status = command.capture(
         {program, "tcp-backpressure-shutdown", workspace, result_path},
         workspace)
@@ -344,9 +344,9 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("peer_reset_errors", function (_child: test.Context)
+  context:run("peer_reset_errors", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-peer-reset.result"
+      const result_path = workspace .. "/tcp-peer-reset.result"
       local output, why, status = command.capture(
         {program, "tcp-peer-reset", workspace, result_path},
         workspace)
@@ -356,9 +356,9 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("emfile_and_runtime_reuse", function (_child: test.Context)
+  context:run("emfile_and_runtime_reuse", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-emfile-reuse.result"
+      const result_path = workspace .. "/tcp-emfile-reuse.result"
       local output, why, status = command.capture(
         {program, "tcp-emfile-runtime-reuse", workspace, result_path},
         workspace)
@@ -368,9 +368,9 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     end)
   end)
 
-  context:run("cross_state_transfers", function (_child: test.Context)
+  context:run("cross_state_transfers", function (_: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-transfers.result"
+      const result_path = workspace .. "/tcp-transfers.result"
       local output, why, status = command.capture(
         {program, "tcp-transfers", workspace, result_path},
         workspace)

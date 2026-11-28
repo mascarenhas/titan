@@ -16,19 +16,19 @@ end
 -- only to construct or inspect boundary values which Titan cannot spell
 -- directly; behavior assertions remain in Titan.
 local function lua_helper(source: string): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 2) == 0 then
     raise "cannot reserve Lua stack for native test helper"
   end
   local status = ffi.luaL_loadstring(L, source)
   if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
   status = ffi.lua_pcallk(L, 0, 1, 0, 0, nil)
   if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
   return ffi.lua_totvalue(L, -1)
@@ -36,13 +36,13 @@ end
 
 local function error_text(failure: value): string
   local result = "<unprintable error>"
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
   if ffi.lua_checkstack(L, 3) ~= 0 then
     ffi.lua_pushtvalue(L, failure)
     ffi.luaL_tolstring(L, -1, nil)
-    local rendered: value = ffi.lua_totvalue(L, -1)
+    const rendered: value = ffi.lua_totvalue(L, -1)
     if rendered is string then result = rendered as string end
   end
   return result
@@ -70,7 +70,7 @@ local function assert_raises_contains(action: CheckedAction,
     action()
   catch
     caught = true
-    local message = error_text(error)
+    const message = error_text(error)
     test.assert(contains(message, fragment),
                 "expected error containing '" .. fragment ..
                 "', got '" .. message .. "'")

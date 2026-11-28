@@ -1,9 +1,9 @@
 local function reject_server_opening(request: function (integer): (string), status: integer)
   local completed = false
   local failure: value = nil
-  local handler: http.Handler = function (incoming: http.Request, response: http.Response)
+  const handler: http.Handler = function (incoming: http.Request, response: http.Response)
     do
-      local connection = websocket.accept(incoming, response)
+      const connection = websocket.accept(incoming, response)
       connection:close()
       failure = "invalid server opening was accepted"
     catch failure = error end
@@ -11,16 +11,16 @@ local function reject_server_opening(request: function (integer): (string), stat
   end
   local listener, port = listen_http(handler, false)
   runtime_test.cleanup(function () listener:close() end)
-  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  const serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
   runtime_test.cleanup(function ()
     listener:close()
     task_support.cancel_and_join_task(serving, "opening rejection listener cleanup")
   end)
-  local connection = net.connect("127.0.0.1", port)
+  const connection = net.connect("127.0.0.1", port)
   runtime_test.cleanup(function () connection:close() end)
   connection:write(request(port))
-  local wire = Wire(connection, "", "")
-  local headers = wire:headers()
+  const wire = Wire(connection, "", "")
+  const headers = wire:headers()
   test.assert(string.sub(headers, 1, 12) == "HTTP/1.1 " .. status,
               "server rejection used wrong HTTP status")
   if status == 426 then
@@ -29,7 +29,7 @@ local function reject_server_opening(request: function (integer): (string), stat
   end
   while not completed do timer.yield() end
   test.assert(failure is websocket.HandshakeError, "accept lost nominal handshake rejection")
-  local rejection = failure as websocket.HandshakeError
+  const rejection = failure as websocket.HandshakeError
   test.assert(rejection.status == status and rejection.headers ~= nil and #rejection.message > 0,
               "caught accept rejection did not retain status and headers")
   test.assert(connection:read() == nil, "caught rejection reused the opening connection")
@@ -37,8 +37,8 @@ end
 
 function test_accept_snapshots_allowed_origins_with_default_port_normalization(_context: test.Context)
   runtime_test.run(function ()
-    local origins: {string} = {"https://allowed.example:443"}
-    local options = websocket.AcceptOptions { allowed_origins = origins }
+    const origins: {string} = {"https://allowed.example:443"}
+    const options = websocket.AcceptOptions { allowed_origins = origins }
     origins[1] = "https://mutated.example"
     with_server(function (connection: websocket.Connection)
       connection:read()
@@ -54,13 +54,13 @@ local function reject_client_opening(response: function (string): (string), stat
   local transport: net.Connection? = nil
   local closed = false
   local actual_response = ""
-  local peer = async.run<|value, value|>(function (): value
-    local connection = listener:accept()
+  const peer = async.run<|value, value|>(function (): value
+    const connection = listener:accept()
     transport = connection
     defer connection:close()
-    local wire = Wire(connection, "", "")
-    local headers = wire:headers()
-    local key? = header_value(headers, "Sec-WebSocket-Key")
+    const wire = Wire(connection, "", "")
+    const headers = wire:headers()
+    const key? = header_value(headers, "Sec-WebSocket-Key")
     actual_response = response(accept_value(key))
     connection:write(actual_response)
     closed = connection:read() == nil
@@ -71,12 +71,12 @@ local function reject_client_opening(response: function (string): (string), stat
     if transport then transport:close() end
     task_support.cancel_and_join_task(peer, "client rejection peer cleanup")
   end)
-  local failure = expect_error(function ()
-    local connection = websocket.connect("ws://127.0.0.1:" .. port .. "/reject")
+  const failure = expect_error(function ()
+    const connection = websocket.connect("ws://127.0.0.1:" .. port .. "/reject")
     connection:close()
   end)
   test.assert(failure is websocket.HandshakeError, "connect lost nominal handshake rejection")
-  local rejection = failure as websocket.HandshakeError
+  const rejection = failure as websocket.HandshakeError
   test.assert(rejection.status == status and rejection.headers ~= nil and #rejection.message > 0,
               "client rejection discarded response metadata")
   test.assert(rejection.headers:get("Upgrade") == header_value(actual_response, "Upgrade") and
@@ -87,18 +87,18 @@ local function reject_client_opening(response: function (string): (string), stat
 end
 
 local record BadOpening
-  name: string
-  build: function (integer): (string)
-  status: integer
+  const name: string
+  const build: function (integer): (string)
+  const status: integer
 end
 
 function test_accept_rejects_invalid_opening_and_completes_response(context: test.Context)
-  local cases: {BadOpening} = {
+  const cases: {BadOpening} = {
     BadOpening("wrong_method", function (port: integer): string
       return "POST" .. string.sub(opening_request(port), 4)
     end, 400),
     BadOpening("wrong_version", function (port: integer): string
-      local request = opening_request(port)
+      const request = opening_request(port)
       local first, last = string.find(request, "Sec-WebSocket-Version: 13")
       return string.sub(request, 1, first - 1) .. "Sec-WebSocket-Version: 12" .. string.sub(request, last + 1)
     end, 426),
@@ -109,7 +109,7 @@ function test_accept_rejects_invalid_opening_and_completes_response(context: tes
       return opening_request(port, "Sec-WebSocket-Version: 13\r\n")
     end, 400),
     BadOpening("short_nonce", function (port: integer): string
-      local request = opening_request(port)
+      const request = opening_request(port)
       local first, last = string.find(request, "dGhlIHNhbXBsZSBub25jZQ==")
       return string.sub(request, 1, first - 1) .. "YQ==" .. string.sub(request, last + 1)
     end, 400),
@@ -137,8 +137,8 @@ function test_accept_rejects_invalid_opening_and_completes_response(context: tes
     end, 400),
   }
   for index = 1, #cases do
-    local item = cases[index]
-    context:run(item.name, function (_child: test.Context)
+    const item = cases[index]
+    context:run(item.name, function (_: test.Context)
       runtime_test.run(function () reject_server_opening(item.build, item.status) end)
     end)
   end
@@ -146,14 +146,14 @@ end
 
 local function expect_upgrade_prefilter_case(secure: boolean, variant: string?)
   local entered = false
-  local handler: http.Handler = function (request: http.Request, response: http.Response)
+  const handler: http.Handler = function (request: http.Request, response: http.Response)
     entered = true
-    local connection = websocket.accept(request, response)
+    const connection = websocket.accept(request, response)
     connection:close()
   end
   local listener, port = listen_http(handler, secure)
   runtime_test.cleanup(function () listener:close() end)
-  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  const serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
   runtime_test.cleanup(function ()
     listener:close()
     task_support.cancel_and_join_task(serving, "Expect upgrade listener cleanup")
@@ -161,17 +161,17 @@ local function expect_upgrade_prefilter_case(secure: boolean, variant: string?)
   local stream: io.ReaderWriterCloser? = nil
   local abort: function (): () = function () end
   if secure then
-    local tls = ssl.connect("localhost", port, TRUST_ROOT)
+    const tls = ssl.connect("localhost", port, TRUST_ROOT)
     stream = tls
     abort = function () tls:abort() end
   else
-    local tcp = net.connect("127.0.0.1", port)
+    const tcp = net.connect("127.0.0.1", port)
     stream = tcp
     abort = function () tcp:close() end
   end
   runtime_test.cleanup(abort)
   local watchdog_fired = false
-  local watchdog = async.run<|value, value|>(function (): value
+  const watchdog = async.run<|value, value|>(function (): value
     timer.sleep(2000)
     watchdog_fired = true
     abort()
@@ -184,7 +184,7 @@ local function expect_upgrade_prefilter_case(secure: boolean, variant: string?)
   if variant then
     request = opening_request(port, "Content-Length: 1\r\n")
     if variant == "missing_host" then
-      local host = "Host: 127.0.0.1:" .. port .. "\r\n"
+      const host = "Host: 127.0.0.1:" .. port .. "\r\n"
       local first, last = string.find(request, host)
       request = string.sub(request, 1, first - 1) .. string.sub(request, last + 1)
     elseif variant == "duplicate_host" then
@@ -195,8 +195,8 @@ local function expect_upgrade_prefilter_case(secure: boolean, variant: string?)
     end
   end
   stream:write(request)
-  local wire = Wire(stream, "", "")
-  local headers = wire:headers()
+  const wire = Wire(stream, "", "")
+  const headers = wire:headers()
   test.assert(string.sub(headers, 1, 12) == "HTTP/1.1 400" and
               string.find(headers, "100 Continue") == nil and
               header_value(headers, "Content-Length") == "0" and
@@ -211,29 +211,29 @@ local function expect_upgrade_prefilter_case(secure: boolean, variant: string?)
 end
 
 function test_invalid_http_upgrade_is_rejected_before_websocket_handler(context: test.Context)
-  local variants: {string} = {"missing_host", "duplicate_host", "http10"}
+  const variants: {string} = {"missing_host", "duplicate_host", "http10"}
   for index = 1, #variants do
-    local variant = variants[index]
-    context:run("ws_" .. variant, function (_child: test.Context)
+    const variant = variants[index]
+    context:run("ws_" .. variant, function (_: test.Context)
       runtime_test.run(function () expect_upgrade_prefilter_case(false, variant) end)
     end)
-    context:run("wss_" .. variant, function (_child: test.Context)
+    context:run("wss_" .. variant, function (_: test.Context)
       runtime_test.run(function () expect_upgrade_prefilter_case(true, variant) end)
     end)
   end
 end
 
 function test_upgrade_expect_is_prefiltered_without_handler_or_body_drain(context: test.Context)
-  context:run("ws", function (_child: test.Context)
+  context:run("ws", function (_: test.Context)
     runtime_test.run(function () expect_upgrade_prefilter_case(false) end)
   end)
-  context:run("wss", function (_child: test.Context)
+  context:run("wss", function (_: test.Context)
     runtime_test.run(function () expect_upgrade_prefilter_case(true) end)
   end)
 end
 
 function test_connect_rejects_invalid_response_and_retires_transport(context: test.Context)
-  local cases: {BadFrame} = {
+  const cases: {BadFrame} = {
     BadFrame("wrong_accept", "Sec-WebSocket-Accept: wrong\r\n"),
     BadFrame("duplicate_accept", "Sec-WebSocket-Accept: @ACCEPT@\r\nSec-WebSocket-Accept: @ACCEPT@\r\n"),
     BadFrame("unsolicited_extension", "Sec-WebSocket-Accept: @ACCEPT@\r\nSec-WebSocket-Extensions: permessage-deflate\r\n"),
@@ -244,11 +244,11 @@ function test_connect_rejects_invalid_response_and_retires_transport(context: te
     BadFrame("invalid_connection_grammar", "Sec-WebSocket-Accept: @ACCEPT@\r\n"),
   }
   for index = 1, #cases do
-    local item = cases[index]
-    context:run(item.name, function (_child: test.Context)
+    const item = cases[index]
+    context:run(item.name, function (_: test.Context)
       runtime_test.run(function ()
         reject_client_opening(function (accept: string): string
-          local builder = string.writer()
+          const builder = string.writer()
           local start = 1
           while true do
             local first?, last? = string.find(item.bytes, "@ACCEPT@", start)
@@ -301,7 +301,7 @@ end
 
 function test_connect_retains_non_101_status_and_response_headers(_context: test.Context)
   runtime_test.run(function ()
-    reject_client_opening(function (_accept: string): string
+    reject_client_opening(function (_: string): string
       return "HTTP/1.1 403 Forbidden\r\nX-Rejection: denied\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     end, 403)
   end)
@@ -309,8 +309,8 @@ end
 
 function test_accept_copies_subprotocol_options_and_ignores_valid_extensions(_context: test.Context)
   runtime_test.run(function ()
-    local protocols: {string} = {"chat", "other"}
-    local options = websocket.AcceptOptions { subprotocols = protocols }
+    const protocols: {string} = {"chat", "other"}
+    const options = websocket.AcceptOptions { subprotocols = protocols }
     protocols[1] = "mutated"
     with_server(function (connection: websocket.Connection)
       test.assert(connection:subprotocol() == "chat", "accepted options retained caller protocol array")
@@ -325,10 +325,10 @@ end
 
 function test_connect_copies_headers_and_subprotocol_arrays(_context: test.Context)
   runtime_test.run(function ()
-    local headers = http.headers()
+    const headers = http.headers()
     headers:set("X-Copied", "original")
-    local protocols: {string} = {"chat"}
-    local options = websocket.DialOptions { headers = headers, subprotocols = protocols }
+    const protocols: {string} = {"chat"}
+    const options = websocket.DialOptions { headers = headers, subprotocols = protocols }
     headers:set("X-Copied", "mutated"); protocols[1] = "mutated"
     with_client(function (wire: Wire)
       test.assert(header_value(wire.opening, "X-Copied") == "original" and
@@ -346,12 +346,12 @@ function test_connect_copies_headers_and_subprotocol_arrays(_context: test.Conte
 end
 
 local record InvalidOption
-  name: string
-  action: function (): ()
+  const name: string
+  const action: function (): ()
 end
 
 function test_option_constructors_validate_limits_tokens_origins_and_reserved_headers(context: test.Context)
-  local cases: {InvalidOption} = {
+  const cases: {InvalidOption} = {
     InvalidOption("dial_zero_limit", function () websocket.DialOptions { read_limit = 0 } end),
     InvalidOption("accept_negative_limit", function () websocket.AcceptOptions { read_limit = -1 } end),
     InvalidOption("dial_zero_timeout", function () websocket.DialOptions { handshake_timeout = 0 } end),
@@ -367,7 +367,7 @@ function test_option_constructors_validate_limits_tokens_origins_and_reserved_he
     end),
   }
   for index = 1, #cases do
-    local item = cases[index]
-    context:run(item.name, function (_child: test.Context) expect_error(item.action) end)
+    const item = cases[index]
+    context:run(item.name, function (_: test.Context) expect_error(item.action) end)
   end
 end

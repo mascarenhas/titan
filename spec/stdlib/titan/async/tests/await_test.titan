@@ -12,17 +12,17 @@ function test_checkpoint_is_synchronous_and_requires_a_running_task(context: tes
       "async Runtime is not active")
   runtime_test.run(function ()
     local peer_started = false
-    local peer = async.run<|nil, nil|>(function (): nil
+    const peer = async.run<|nil, nil|>(function (): nil
       peer_started = true
       return nil
     end)
     task_support.cleanup_task(peer, "checkpoint peer cleanup")
-    local current = async.running()
-    local before = current:status()
+    const current = async.running()
+    const before = current:status()
     async.checkpoint()
     test.assert(not peer_started and current:status() == before,
         "checkpoint scheduled another Task or changed the current status")
-    local result = async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+    const result = async.await<|nil, nil|>(function (resolve, _reject, _fatal)
       await_test_expect_error(function () async.checkpoint() end,
           "asynchronous operation must be called from an async Task")
       resolve(nil)
@@ -38,13 +38,13 @@ end
 
 function test_checkpoint_raises_the_first_sticky_cancellation_reason(context: test.Context)
   runtime_test.run(function ()
-    local first = async.CancellationReason<|value|>.complex(false)
+    const first = async.CancellationReason<|value|>.complex(false)
     local observations = 0
-    local target = async.run<|nil, value|>(function (): nil
-      local current = async.running()
+    const target = async.run<|nil, value|>(function (): nil
+      const current = async.running()
       current:cancel(first)
       current:cancel(async.CancellationReason.simple("later checkpoint reason"))
-      for index = 1, 2 do
+      for _ = 1, 2 do
         local caught = false
         do async.checkpoint() catch caught = error == first end
         test.assert(caught, "checkpoint lost the first cancellation identity")
@@ -64,18 +64,18 @@ end
 
 function test_generic_await_inline_continuations_keep_bounded_stack(context: test.Context)
   runtime_test.run(function ()
-    local probe: owned *AsyncStackProbe = foreign AsyncStackProbe.new()
+    const probe: owned *AsyncStackProbe = foreign AsyncStackProbe.new()
     ffi.titan_async_stack_reset(probe)
     local prefix_span = 0
     for index = 1, 10000 do
-      local result = async.await<|integer, string|>(function (resolve, _reject, _fatal)
+      const result = async.await<|integer, string|>(function (resolve, _reject, _fatal)
         resolve(index)
       end)
       case result
       when success(number) then test.assert(number == index, "inline success payload")
       else raise "inline success tag"
       end
-      local rejected = async.await<|integer, integer|>(function (_resolve, reject, _fatal)
+      const rejected = async.await<|integer, integer|>(function (_resolve, reject, _fatal)
         reject(index)
       end)
       case rejected
@@ -87,7 +87,7 @@ function test_generic_await_inline_continuations_keep_bounded_stack(context: tes
     end
     -- Compare sampled stack addresses at one call site after warmup. This is
     -- a growth regression oracle, not a platform-independent peak-stack size.
-    local final_span = ffi.titan_async_stack_span(probe) as integer
+    const final_span = ffi.titan_async_stack_span(probe) as integer
     test.assert(final_span <= prefix_span + 4096,
         "inline continuation stack grew with the number of operations")
   end)
@@ -99,8 +99,8 @@ function test_generic_await_rejects_duplicate_and_stale_resolvers(context: test.
   local entered_new = false
   local finished = 0
   local second_settled = false
-  local target = async.run<|nil, value|>(function (): nil
-    local first = async.await<|integer, string|>(function (resolve, _reject, _fatal)
+  const target = async.run<|nil, value|>(function (): nil
+    const first = async.await<|integer, string|>(function (resolve, _reject, _fatal)
       old_resolve = resolve
       resolve(1)
       await_test_expect_error(function () resolve(99) end, "async operation already settled")
@@ -109,7 +109,7 @@ function test_generic_await_rejects_duplicate_and_stale_resolvers(context: test.
     when success(number) then test.assert(number == 1, "first result overwritten")
     else raise "first result tag"
     end
-    local second = async.await<|integer, string|>(function (resolve, _reject, _fatal)
+    const second = async.await<|integer, string|>(function (resolve, _reject, _fatal)
       new_resolve = resolve
       entered_new = true
     end)
@@ -120,7 +120,7 @@ function test_generic_await_rejects_duplicate_and_stale_resolvers(context: test.
     finished = finished + 1
     return nil
   end)
-  local sender = async.run<|nil, value|>(function (): nil
+  const sender = async.run<|nil, value|>(function (): nil
     defer do
       if new_resolve and not second_settled and not target:status():has_finished() then
         second_settled = true

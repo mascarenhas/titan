@@ -275,15 +275,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         }))
     end
 
-    if options.application_nominal_layouts then
-        local trusted = { [modname] = true }
-        for _, node in ipairs(ast) do
-            if not node._ignore and node._tag == "Ast.TopLevelImport" and node._source_import then
-                trusted[node.modname] = true
-            end
+    -- Only this module and its direct `.titan` source imports may see another
+    -- owner's private nominal storage; every other owner gets its public layout.
+    local trusted = { [modname] = true }
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelImport" and node._source_import then
+            trusted[node.modname] = true
         end
-        tlcontext.private_layout_owners = trusted
     end
+    tlcontext.private_layout_owners = trusted
     local initctx = newcontext(tlcontext)
 
     allocate_upvalues(tlcontext, ast)

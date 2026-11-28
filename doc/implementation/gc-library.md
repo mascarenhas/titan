@@ -3,7 +3,8 @@
 The user-facing contract is in the
 [garbage-collection standard-library chapter](../language/standard-library-gc.md).
 `titan.gc` is a flat Titan module built against the repository's pinned Lua
-5.5 headers. It adds no compiler intrinsic or C shim.
+5.5 headers. Its sole compiler intrinsic is
+[`gc.keep_alive`](#keep-alive-intrinsic); it adds no C shim.
 
 ## Weak-mode stack ledger
 
@@ -124,6 +125,59 @@ under these rules too ([finalizer context](coroutines.md#finalizer-context)).
 During `lua_close`, `GCSTPCLS` is also set: Lua then ignores new finalizer
 registrations, so a `finalizable` call made by cleanup at state close installs a
 `__gc` that never runs.
+
+## Keep-alive intrinsic
+
+`titan/gc.titan` exports `function keep_alive<|T|>(v: T)` with an empty Titan
+body. That compiled entry serves first-class function values (loaded through
+its closure slot) and Lua callers (`require("titan.gc").keep_alive`), returning
+zero values.
+
+Direct calls lower as a compiler intrinsic across three passes without calling
+the exported entry or boxing the argument into `value`:
+
+1. **Checker recognition (`titan-compiler/checker/calls.lua`).** Inside
+   `generic_instantiate_direct_call`, `is_keep_alive_callee` marks
+   `node._keep_alive_intrinsic = true` when the callee is an `Ast.ExpVar`
+   resolving to `Type.ModuleMember` `titan.gc.keep_alive` (or `Ast.TopLevelFunc`
+   `keep_alive` within `titan.gc` itself) outside a `foreign function` body
+   (`_foreign_function_depth == 0`). Type-argument checking and
+   `types.transient_roundtrip` admission still run through the ordinary generic
+   scheme path, so direct and first-class calls accept and reject the exact
+   same types (rejecting borrowed raw C pointers, fixed C arrays, C structs and
+   unions, C function pointers, and `foreign void`; a zero-result call passed
+   as `v` fails ordinary value demand, while surplus positional arguments
+   evaluate for effect and are discarded).
+2. **Generic lowering (`titan-compiler/checker/lowering.lua`).** Because no
+   erased entry is called, `keep_alive_argument_signature` peels generic
+   ingress (`generic_peel_generic_ingress`) on argument 1 and lowers it against
+   `types.erase(ingress._type)` instead of the erased signature's `value`
+   formal. Reading the carrier after ingress avoids `value` boxing while
+   preserving ordinary unconstrained generic transport: passing a raw `value`
+   to `gc.keep_alive<|integer|>` (positional or named) transports without
+   reinstating a strict `integer` guard, whereas a written cast (`raw as
+   integer`) still checks its operand.
+3. **Code generation (`titan-compiler/coder/calls.lua`).** `lower_call` routes
+   marked calls to `code_keep_alive`, which evaluates arguments through the
+   ordinary native-call input helpers (`named_ordered_call_args` or
+   `coder._codeadjustedfixed` with `coder._stabilize_input_code`), preserving
+   positional, named, surplus, and raising-argument order. It then emits
+   `(void)(<name>);` and yields `((void)0)`. Unboxed locals and parameters
+   already root their values in the frame (`has_stable_root`), and referencing
+   them keeps them live through the call point under optimizing C compilers;
+   any other GC-bearing argument (such as a boxed local, module variable, or
+   record field read that reentrant code could overwrite) is stabilized in a
+   borrowed frame slot until the enclosing block exits
+   ([home roots and borrowed copies](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
+
+In the standard library, `titan/uv` (`stream_owners.titan`, `udp.titan`, and
+`uv.native.titan`) pairs `const` bindings with `gc.keep_alive` after callback
+delivery so retired request buffers and strings stay rooted across reentrant
+callbacks. `spec/coder/gc_keep_alive_spec.lua` verifies the generated C (no C
+call or `value` boxing, borrowed-slot field rooting, `-O2` reentrant liveness,
+evaluation order, generic ingress, and type admission and rejections), and
+`spec/stdlib/titan/gc/tests.titan` covers public behavior on native and browser
+targets.
 
 ## Direct collector control
 

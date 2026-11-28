@@ -2,19 +2,19 @@ local function late_write_shutdown_schedule(schedule: integer)
   local server, port = support.listen_available(49100, support.CERTIFICATE,
                                                support.PRIVATE_KEY)
   defer server:close()
-  local payload = "late\0scheduled\255write"
+  const payload = "late\0scheduled\255write"
   local received = ""
   local peer_ready = false
-  local peer_token = async.ResumeToken.new("ssl.late-write.peer")
-  local peer = async.run<|value, value|>(function (): value
-    local accepted = server:accept()
+  const peer_token = async.ResumeToken("ssl.late-write.peer")
+  const peer = async.run<|value, value|>(function (): value
+    const accepted = server:accept()
     defer accepted:abort()
     accepted:handshake()
     peer_ready = true
     async.suspend(peer_token)
     accepted:shutdown()
     while true do
-      local piece? = accepted:read()
+      const piece? = accepted:read()
       if piece == nil then break end
       received = received .. piece
       test.assert(#received <= #payload,
@@ -26,11 +26,11 @@ local function late_write_shutdown_schedule(schedule: integer)
   end)
   task_support.cleanup_task(peer, "late TLS writer peer")
 
-  local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+  const connection = ssl.connect("localhost", port, support.TRUST_ROOT)
   defer connection:abort()
   while not peer_ready do async.yield() end
   local authenticated_eof = false
-  local reader = async.run<|value, value|>(function (): value
+  const reader = async.run<|value, value|>(function (): value
     test.assert(connection:read() == nil,
                 "TLS shutdown peer unexpectedly sent application bytes")
     authenticated_eof = true
@@ -46,7 +46,7 @@ local function late_write_shutdown_schedule(schedule: integer)
   for _ = 1, schedule - 1 do async.yield() end
   local delivered = false
   local rejected = false
-  local writer = async.run<|value, value|>(function (): value
+  const writer = async.run<|value, value|>(function (): value
     do
       connection:write(payload)
       delivered = true

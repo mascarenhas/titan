@@ -43,14 +43,14 @@ end
 
 local function parent_stdio(descriptor: integer): Stdio
   async.running()
-  local stream? = parent_streams[descriptor + 1]
+  const stream? = parent_streams[descriptor + 1]
   if stream ~= nil then return stream end
   local name = "stdin"
   if descriptor == 1 then name = "stdout"
   elseif descriptor == 2 then name = "stderr"
   elseif descriptor ~= 0 then raise "internal parent stdio descriptor is invalid"
   end
-  local created: Stdio = {
+  const created: Stdio = {
     name = name, source = nil, missing_source = false,
     kind_loaded = false, declared_kind = nil, kind_error = nil,
     shut_down = false, pending_writes = 0, request = nil,
@@ -62,13 +62,13 @@ local function parent_stdio(descriptor: integer): Stdio
 end
 
 local function InputStream:stdio(): Stdio
-  local stream = parent_stdio(self.parent_descriptor)
+  const stream = parent_stdio(self.parent_descriptor)
   self.handle = stream
   return stream
 end
 
 local function OutputStream:stdio(): Stdio
-  local stream = parent_stdio(self.parent_descriptor)
+  const stream = parent_stdio(self.parent_descriptor)
   self.handle = stream
   return stream
 end
@@ -81,7 +81,7 @@ local function Stdio:open_source(member: string): browser.BrowserHandle
       source = browser.binding("titan:" .. self.name)
     catch
       if self.name ~= "stdin" or not (error is browser.BrowserError) then raise end
-      local failure: browser.BrowserError = error
+      const failure: browser.BrowserError = error
       failure:close()
       self.missing_source = true
       raise unavailable(member)
@@ -93,9 +93,9 @@ end
 
 local function Stdio:kind(): string?
   if not self.kind_loaded then
-    local metadata = browser.binding("titan:stdio")
+    const metadata = browser.binding("titan:stdio")
     defer metadata:close()
-    local result = metadata:call(Value.is_string(self.name))
+    const result = metadata:call(Value.is_string(self.name))
     local invalid = false
     case result
     when is_nil() then
@@ -114,7 +114,7 @@ local function Stdio:kind(): string?
     end
     self.kind_loaded = true
   end
-  local failure? = self.kind_error
+  const failure? = self.kind_error
   if failure ~= nil then raise failure end
   return self.declared_kind
 end
@@ -124,12 +124,12 @@ end
 local function Stdio:send(data: string?, operation: string)
   local request: browser.BrowserRequest? = nil
   defer if request ~= nil then request:close() end
-  local outcome = async.await<|nil, async.OperationError|>(function (resolve, reject, fatal)
+  const outcome = async.await<|nil, async.OperationError|>(function (resolve, reject, fatal)
     if data ~= nil and self.shut_down then
       reject(make_error(ffi.EPIPE, operation))
       return
     end
-    local completed = function (...: Value): Value
+    const completed = function (...: Value): Value
       self.pending_writes = self.pending_writes - 1
       resolve(nil)
       return Value.is_nil()
@@ -137,16 +137,16 @@ local function Stdio:send(data: string?, operation: string)
       fatal(error, traceback)
       raise
     end
-    local failed = function (...: Value): Value
+    const failed = function (...: Value): Value
       self.pending_writes = self.pending_writes - 1
-      local message? = browser.failure_text(...[1], ...[2])
+      const message? = browser.failure_text(...[1], ...[2])
       reject(make_error(ffi.EIO, operation, message or "host stdio failed"))
       return Value.is_nil()
     catch
       fatal(error, traceback)
       raise
     end
-    local source = self:open_source(operation)
+    const source = self:open_source(operation)
     if data == nil then request = source:start(completed, failed)
     else request = source:start(completed, failed, Value.is_bytes(data))
     end
@@ -154,8 +154,8 @@ local function Stdio:send(data: string?, operation: string)
     if data == nil then self.shut_down = true end
   catch
     if not (error is browser.BrowserError) then raise end
-    local failure: browser.BrowserError = error
-    local message = failure.message
+    const failure: browser.BrowserError = error
+    const message = failure.message
     failure:close()
     reject(make_error(ffi.EIO, operation, message))
   end)
@@ -166,7 +166,7 @@ local function Stdio:send(data: string?, operation: string)
 end
 
 local function Stdio:reset_input(stream: InputStream)
-  local request? = self.request
+  const request? = self.request
   self.request = nil
   if request ~= nil then request:close() end
   self.chunk = nil
@@ -179,10 +179,10 @@ local function Stdio:reset_input(stream: InputStream)
 end
 
 local function Stdio:finish_read()
-  local request? = self.request
+  const request? = self.request
   self.request = nil
   if request ~= nil then request:close() end
-  local reader? = self.reader
+  const reader? = self.reader
   if reader ~= nil then reader:resume(self.token) end
 end
 
@@ -200,26 +200,26 @@ local function Stdio:start_read(source: browser.BrowserHandle)
     self:finish_read()
     return Value.is_nil()
   end, function (...: Value): Value
-    local message? = browser.failure_text(...[1], ...[2])
+    const message? = browser.failure_text(...[1], ...[2])
     self.failure = make_error(ffi.EIO, "stdio.read", message or "host stdin failed")
     self:finish_read()
     return Value.is_nil()
   end)
 catch
   if not (error is browser.BrowserError) then raise end
-  local failure: browser.BrowserError = error
-  local message = failure.message
+  const failure: browser.BrowserError = error
+  const message = failure.message
   failure:close()
   self.failure = make_error(ffi.EIO, "stdio.read", message)
 end
 
 local function Stdio:take_result(): string?
-  local chunk? = self.chunk
+  const chunk? = self.chunk
   if chunk ~= nil then
     self.chunk = nil
     return chunk
   end
-  local failure? = self.failure
+  const failure? = self.failure
   if failure ~= nil then raise failure end
   if self.eof then return nil end
   raise "stdin request completed without a result"
@@ -229,16 +229,16 @@ local function Stdio:read(stream: InputStream): string?
   async.checkpoint()
   if self.reader ~= nil then raise "stream already has a waiting reader" end
   if self.chunk ~= nil or self.failure ~= nil or self.eof then return self:take_result() end
-  local source = self:open_source("os.InputStream.read")
+  const source = self:open_source("os.InputStream.read")
   if not input_runtime_registered then
     async.add_close_listener(function () self:reset_input(stream) end)
     input_runtime_registered = true
   end
   self.reads_started = true
   if self.token == nil then self.token = async.ResumeToken("stdio.read") end
-  local task = async.running()
+  const task = async.running()
   self.reader = task
-  local detach = function ()
+  const detach = function ()
     if self.reader == task then self.reader = nil end
   end
   defer detach()
@@ -252,9 +252,9 @@ local function Stdio:read(stream: InputStream): string?
 end
 
 local function read_stream(stream: InputStream): string?
-  local handle = stream:stdio()
+  const handle = stream:stdio()
   if #stream.excess > 0 then
-    local result = stream.excess
+    const result = stream.excess
     stream.excess = ""
     return result
   end
@@ -267,7 +267,7 @@ end
 function OutputStream:write(data: string)
   if #data == 0 then
     async.checkpoint()
-    local stream? = parent_streams[self.parent_descriptor + 1]
+    const stream? = parent_streams[self.parent_descriptor + 1]
     if stream ~= nil and stream.shut_down then raise make_error(ffi.EPIPE, "stdio.write") end
     return
   end
@@ -277,7 +277,7 @@ end
 --- Finish earlier output and invoke the embedding's TCP end hook.
 -- @usage standard-library-os.md#tcp-backed-parent-streams
 function OutputStream:shutdown()
-  local stream = self:stdio()
+  const stream = self:stdio()
   async.checkpoint()
   if stream:kind() ~= "tcp" then raise make_error(ffi.ENOTSUP, "stdio.shutdown") end
   if stream.shut_down then return end
@@ -300,7 +300,7 @@ end
 -- @return "tty", "pipe", "file", or "tcp".
 -- @usage standard-library-os.md
 function OutputStream:kind(): string
-  local kind? = self:stdio():kind()
+  const kind? = self:stdio():kind()
   if kind == nil then raise unavailable("os.OutputStream.kind") end
   return kind
 end
@@ -321,7 +321,7 @@ function InputStream:read_until(delimiter: string, chop: boolean?): string?
   return read_input_until(self, delimiter, chop)
 catch
   if error is async.OperationError then
-    local failure: async.OperationError = error
+    const failure: async.OperationError = error
     if failure.name == "ENOSYS" and failure.operation == "os.InputStream.read" then
       raise unavailable("os.InputStream.read_until")
     end
@@ -345,7 +345,7 @@ end
 -- @return "tty", "pipe", "file", or "tcp".
 -- @usage standard-library-os.md
 function InputStream:kind(): string
-  local kind? = self:stdio():kind()
+  const kind? = self:stdio():kind()
   if kind == nil then raise unavailable("os.InputStream.kind") end
   return kind
 end
@@ -375,7 +375,7 @@ end
 --- Copy a parent descriptor identity, never an embedding sink or request.
 -- @usage standard-library-os.md#transferring-process-streams
 function OutputStream:to_transfer_payload(): string
-  local stream? = self.handle
+  const stream? = self.handle
   if stream ~= nil and stream.pending_writes ~= 0 then raise "stream has pending output" end
   return protobuf.serialize_fields(output_transfer_fields, self.parent_descriptor, nil)
 end
@@ -383,7 +383,7 @@ end
 --- Return the receiving state's standard-output facade.
 -- @usage standard-library-os.md#transferring-process-streams
 function OutputStream.from_transfer_payload(payload: string): OutputStream
-  local descriptor = output_descriptor(payload)
+  const descriptor = output_descriptor(payload)
   -- Prefer the stable facade still bound to that descriptor. After the
   -- assignable variables change, a new facade shares the same state-owned
   -- Stdio; output facades hold no other state.
@@ -402,7 +402,7 @@ end
 --- Copy untouched parent input by descriptor identity.
 -- @usage standard-library-os.md#transferring-process-streams
 function InputStream:to_transfer_payload(): string
-  local stream? = self.handle
+  const stream? = self.handle
   if #self.excess ~= 0 or stream ~= nil and stream.reads_started then
     raise "standard input has active or buffered read state"
   end

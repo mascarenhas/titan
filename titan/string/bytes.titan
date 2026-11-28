@@ -50,9 +50,9 @@ local function copy_interval(subject: string, first: integer,
                              count: integer): string
   if count == 0 then return "" end
   if count < 0 then raise "resulting string is too large" end
-  local storage = foreign char.new_array(count)
-  local output = storage as foreign *char
-  local source = subject as foreign const *char
+  const storage = foreign char.new_array(count)
+  const output = storage as foreign *char
+  const source = subject as foreign const *char
   ffi.memcpy(output, source + first - 1,
                  count as foreign size_t)
   return storage as string

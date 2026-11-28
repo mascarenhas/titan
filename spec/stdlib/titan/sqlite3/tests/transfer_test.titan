@@ -4,7 +4,7 @@ local transfer_gc = import "gc"
 function test_connection_transfer_preserves_transactions_and_detaches_source(
     _: test.Context)
   runtime_test.run(function ()
-    local source = sqlite3.connect(":memory:")
+    const source = sqlite3.connect(":memory:")
     defer source:close()
     execute_sql(source, "CREATE TABLE item (value INTEGER)")
     execute_sql(source, "INSERT INTO item VALUES (1)")
@@ -13,11 +13,11 @@ function test_connection_transfer_preserves_transactions_and_detaches_source(
     execute_sql(source, "SAVEPOINT handoff")
     execute_sql(source, "INSERT INTO item VALUES (3)")
 
-    local packet = async.TransferValue.from_value(source)
-    local target: sqlite3.Connection = packet:to_value()
+    const packet = async.TransferValue.from_value(source)
+    const target: sqlite3.Connection = packet:to_value()
     defer target:close()
     source:close()
-    local failure = expect_wrapper_error(function () source:get_autocommit() end)
+    const failure = expect_wrapper_error(function () source:get_autocommit() end)
     test.assert(failure.message == "connection is closed")
     expect_wrapper_error(function () source:to_transfer_payload() end)
     test.assert(not target:get_autocommit() and
@@ -34,22 +34,22 @@ end
 function test_connection_transfer_rejects_statements_and_cursors_before_detach(
     _: test.Context)
   runtime_test.run(function ()
-    local source = sqlite3.connect(":memory:")
+    const source = sqlite3.connect(":memory:")
     defer source:close()
-    local statement = source:prepare("SELECT 7 UNION ALL SELECT 9")
+    const statement = source:prepare("SELECT 7 UNION ALL SELECT 9")
     defer statement:close()
-    local idle = expect_wrapper_error(function () source:to_transfer_payload() end)
+    const idle = expect_wrapper_error(function () source:to_transfer_payload() end)
     test.assert(idle.message == "connection owns open statements" and
                 idle.operation == "to_transfer_payload")
-    local cursor = statement:query()
+    const cursor = statement:query()
     defer cursor:close()
-    local active = expect_wrapper_error(function () source:to_transfer_payload() end)
+    const active = expect_wrapper_error(function () source:to_transfer_payload() end)
     test.assert(active.message == "connection has an active cursor")
     test.assert(required_row(cursor):get(1) as integer == 7,
                 "rejected transfer damaged the active cursor")
     cursor:close()
     statement:close()
-    local target = sqlite3.Connection.from_transfer_payload(source:to_transfer_payload())
+    const target = sqlite3.Connection.from_transfer_payload(source:to_transfer_payload())
     defer target:close()
     test.assert(scalar_integer(target, "SELECT 11") == 11)
   end)
@@ -84,12 +84,12 @@ end
 
 function test_connection_transfer_rejected_delivery_can_be_recovered(_: test.Context)
   runtime_test.run(function ()
-    local source = sqlite3.connect(":memory:")
+    const source = sqlite3.connect(":memory:")
     defer source:close()
     execute_sql(source, "CREATE TABLE item (value INTEGER)")
     execute_sql(source, "INSERT INTO item VALUES (17)")
-    local packet = async.TransferValue.from_value(source)
-    local inbox = async.receiver()
+    const packet = async.TransferValue.from_value(source)
+    const inbox = async.receiver()
     defer inbox:close()
     inbox:close()
     local rejected = false
@@ -99,7 +99,7 @@ function test_connection_transfer_rejected_delivery_can_be_recovered(_: test.Con
       test.assert(error == "receiver is closed")
       rejected = true
     end
-    local recovered: sqlite3.Connection = packet:to_value()
+    const recovered: sqlite3.Connection = packet:to_value()
     defer recovered:close()
     test.assert(rejected and scalar_integer(recovered, "SELECT value FROM item") == 17,
                 "failed delivery lost the caller-owned native connection")
@@ -109,22 +109,22 @@ end
 function test_connection_transfer_crosses_states_and_survives_source_shutdown(
     _: test.Context)
   runtime_test.run(function ()
-    local source = sqlite3.connect(":memory:")
+    const source = sqlite3.connect(":memory:")
     defer source:close()
     execute_sql(source, "CREATE TABLE item (value INTEGER)")
     execute_sql(source, "INSERT INTO item VALUES (19)")
     source:set_autocommit(false)
     execute_sql(source, "SAVEPOINT handoff")
-    local state = transfer_lua.new()
+    const state = transfer_lua.new()
     defer state:close()
-    local operation = function (): async.TransferValue
+    const operation = function (): async.TransferValue
       defer source:close()
       test.assert(not source:get_autocommit())
       test.assert(scalar_integer(source, "SELECT value FROM item") == 19)
       execute_sql(source, "INSERT INTO item VALUES (23)")
       return async.TransferValue.from_value(source)
     end
-    local packet: async.TransferValue = state:run_async([[
+    const packet: async.TransferValue = state:run_async([[
       local operation = ...
       local async = require('titan.async')
       local task = async.run(operation)
@@ -141,7 +141,7 @@ function test_connection_transfer_crosses_states_and_survives_source_shutdown(
     state:close()
     transfer_gc.collect()
     transfer_gc.collect()
-    local target: sqlite3.Connection = packet:to_value()
+    const target: sqlite3.Connection = packet:to_value()
     defer target:close()
     test.assert(not target:get_autocommit() and
                 scalar_integer(target, "SELECT count(*) FROM item") == 2)

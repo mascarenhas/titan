@@ -8,7 +8,7 @@ function test_task_operation_routing_status_and_cancellation(
     context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local path = support.temporary_file(context)
+    const path = support.temporary_file(context)
     local chain = ""
     local cancelled_body_started = false
     local cancelled_body_finished = false
@@ -16,13 +16,13 @@ function test_task_operation_routing_status_and_cancellation(
     local waiting_observed = false
     local cancellation_kept_waiting_status = false
 
-    local chain_task = async.run<|value, value|>(function (): value
+    const chain_task = async.run<|value, value|>(function (): value
       chain = "timer"
       timer.sleep(0)
       chain = chain .. ">write"
       fs.write_file(path, "callback-payload")
       chain = chain .. ">read"
-      local contents = fs.read_file(path)
+      const contents = fs.read_file(path)
       chain = chain .. ">" .. contents
       timer.yield()
       chain = chain .. ">turn"
@@ -30,7 +30,7 @@ function test_task_operation_routing_status_and_cancellation(
     end)
     task_support.cleanup_task(chain_task, "chain Task cleanup")
 
-    local cancelled_task = async.run<|value, value|>(function (): value
+    const cancelled_task = async.run<|value, value|>(function (): value
       cancelled_body_started = true
       timer.sleep(60000)
       cancelled_body_finished = true
@@ -38,7 +38,7 @@ function test_task_operation_routing_status_and_cancellation(
     end)
     task_support.cleanup_task(cancelled_task, "cancellation target cleanup")
 
-    local failed_task = async.run<|value, value|>(failed_origin)
+    const failed_task = async.run<|value, value|>(failed_origin)
     task_support.cleanup_task(failed_task, "failed Task cleanup")
 
     local self_cancelled_task: async.Task? = nil
@@ -53,7 +53,7 @@ function test_task_operation_routing_status_and_cancellation(
     task_support.cleanup_task(self_cancelled_task as async.Task,
                  "self-cancelled Task cleanup")
 
-    local canceller = async.run<|value, value|>(function (): value
+    const canceller = async.run<|value, value|>(function (): value
       while cancelled_task:status():as_string() == "ready" do
         timer.yield()
       end
@@ -97,7 +97,7 @@ function test_task_operation_routing_status_and_cancellation(
     local did_fail, failure? = failed_task:status():has_failed()
     test.assert(did_fail and failure ~= nil,
                 "failed Task did not publish its Error payload")
-    local detail = failure as async.Error
+    const detail = failure as async.Error
     test.assert(detail.error == "task-status-boom",
                 "failed Task changed its error value")
     test.assert(#detail.traceback > 0,
@@ -126,8 +126,8 @@ function test_nested_user_coroutine_routes_single_uv_tag(
     context: test.Context)
   runtime_test.run(function ()
     local nested_result = "running"
-    local task = async.run<|value, value|>(function (): value
-      local child = coroutine.create(function (_: value): value
+    const task = async.run<|value, value|>(function (): value
+      const child = coroutine.create(function (_: value): value
         timer.sleep(0)
         return "nested-timer-ok"
       end, "child")
@@ -148,9 +148,9 @@ function test_explicit_resume_runs_after_resumer_returns(
     context: test.Context)
   runtime_test.run(function ()
     local trace = ""
-    local resume_token =
-      async.ResumeToken.new("explicit resume ordering test")
-    local target = async.run<|value, value|>(function (): value
+    const resume_token =
+      async.ResumeToken("explicit resume ordering test")
+    const target = async.run<|value, value|>(function (): value
       trace = trace .. "suspend>"
       async.suspend(resume_token)
       trace = trace .. "target-woke"
@@ -182,23 +182,23 @@ function test_explicit_resume_preserves_io_without_phase_ordering(
     local server, port = support.listen_available(32000)
     defer server:close()
     local accepted: net.Connection? = nil
-    local accepter = async.run<|value, value|>(function (): value
+    const accepter = async.run<|value, value|>(function (): value
       accepted = server:accept()
       return nil
     end)
     task_support.cleanup_task(accepter, "accept Task cleanup")
-    local client = net.connect("127.0.0.1", port)
+    const client = net.connect("127.0.0.1", port)
     defer client:close()
 
     support.wait_finished(accepter)
     test.assert(accepter:status():as_string() == "succeeded" and
                 accepted ~= nil, "loopback accept failed")
-    local peer = accepted as net.Connection
+    const peer = accepted as net.Connection
     defer peer:close()
 
-    local resume_token =
-      async.ResumeToken.new("explicit resume with native I/O test")
-    local target = async.run<|value, value|>(function (): value
+    const resume_token =
+      async.ResumeToken("explicit resume with native I/O test")
+    const target = async.run<|value, value|>(function (): value
       async.suspend(resume_token)
       resumed = resumed + 1
       return nil
@@ -232,7 +232,7 @@ end
 function test_last_live_task_failure_starts_runtime_cleanup(
     context: test.Context)
   context:log("BEGIN expected uncaught async Task diagnostics")
-  local failing = async.run<|value, value|>(function (): value
+  const failing = async.run<|value, value|>(function (): value
     raise "last-task-boom"
   end)
   async.loop()
@@ -241,7 +241,7 @@ function test_last_live_task_failure_starts_runtime_cleanup(
   local failed, failure? = failing:status():has_failed()
   test.assert(failed and failure ~= nil,
               "last live Task did not publish failed status")
-  local task_error = failure as async.Error
+  const task_error = failure as async.Error
   test.assert(task_error.error == "last-task-boom",
               "last live Task changed its error value")
   test.assert(#task_error.traceback > 0,

@@ -1,5 +1,5 @@
 local function recursive_pattern(): pattern.Pattern
-  local rules: {pattern.Rule} = {
+  const rules: {pattern.Rule} = {
     pattern.rule("S", pattern.sequence(
       pattern.literal("a"),
       pattern.optional(pattern.variable("S")))),
@@ -8,7 +8,7 @@ local function recursive_pattern(): pattern.Pattern
 end
 
 local function grammar_with_rule_count(count: integer): pattern.Pattern
-  local rules: {pattern.Rule} = {}
+  const rules: {pattern.Rule} = {}
   local index = 1
   while index <= count do
     local body = pattern.fail()
@@ -86,7 +86,7 @@ function test_core_constructors_and_combinators(context: test.Context)
     "\xed\xa0\x80") == 4)
   test.assert(pattern.utf_range(0x10ffff, 0x10ffff):match(
     "\u{10ffff}") == 5)
-  local all_utf = pattern.utf_range(0, 0x10ffff)
+  const all_utf = pattern.utf_range(0, 0x10ffff)
   test.assert(all_utf:match("\xf8\x80\x80\x80\x80") == nil)
   test.assert(all_utf:match(
     "\xff\x80\x80\x80\x80\x80\x80\x80") == nil)
@@ -101,7 +101,7 @@ function test_core_constructors_and_combinators(context: test.Context)
   end)
 
   test.assert(pattern.sequence():match("x") == 1)
-  local one = pattern.literal("x")
+  const one = pattern.literal("x")
   test.assert(pattern.sequence(one) == one)
   test.assert(pattern.sequence(
     pattern.literal("a"), pattern.literal("b"),
@@ -152,7 +152,7 @@ function test_core_constructors_and_combinators(context: test.Context)
     pattern.at_most(pattern.any(), -1)
   end)
 
-  local committed = pattern.choice(
+  const committed = pattern.choice(
     pattern.throw("committed"), pattern.literal("a"))
   local result, committed_label, committed_position =
     committed:match("a")
@@ -174,7 +174,7 @@ function test_core_construction_limits(context: test.Context)
   support.assert_raises("pattern is too large", function()
     pattern.at_least(pattern.set("a"), 5459)
   end)
-  local snapshot = pattern.locale()
+  const snapshot = pattern.locale()
   pattern.at_least(snapshot.alpha, 5458)
   support.assert_raises("pattern is too large", function()
     pattern.at_least(snapshot.alpha, 5459)
@@ -215,53 +215,53 @@ end
 function test_core_grammars_and_labels(context: test.Context)
   test.assert(recursive_pattern():match("aaaa") == 5)
 
-  local recursive_rules: {pattern.Rule} = {
+  const recursive_rules: {pattern.Rule} = {
     pattern.rule("S", pattern.sequence(
       pattern.literal("a"),
       pattern.optional(pattern.variable("S")))),
   }
-  local recursive = pattern.grammar("S", recursive_rules)
+  const recursive = pattern.grammar("S", recursive_rules)
   test.assert(recursive:match("aaa") == 4)
 
-  local recovery_rules: {pattern.Rule} = {
+  const recovery_rules: {pattern.Rule} = {
     pattern.rule("S", pattern.sequence(
       pattern.throw("1"), pattern.literal("z"))),
     pattern.rule("1", pattern.literal("a")),
   }
-  local recovered = pattern.grammar("S", recovery_rules)
+  const recovered = pattern.grammar("S", recovery_rules)
   local recovered_result, recovered_label, recovered_position =
     recovered:match("az")
   test.assert(recovered_result == 3 and recovered_label == nil and
               recovered_position == nil)
 
-  local distinct_rules: {pattern.Rule} = {
+  const distinct_rules: {pattern.Rule} = {
     pattern.rule("S", pattern.throw("01")),
     pattern.rule("1", pattern.literal("a")),
   }
-  local not_recovered = pattern.grammar("S", distinct_rules)
+  const not_recovered = pattern.grammar("S", distinct_rules)
   local result, label, position = not_recovered:match("a")
   test.assert(result == nil and label == "01" and position == 1)
 
-  local labels: {string} = {
+  const labels: {string} = {
     "", "0", "1", "01", "\0", "\0s\0i",
   }
   local index = 1
   while index <= #labels do
-    local expected = labels[index]
+    const expected = labels[index]
     local ignored, actual = pattern.throw(expected):match("")
     test.assert(ignored == nil and actual == expected)
     index = index + 1
   end
 
   support.assert_raises("duplicate PEG grammar rule name", function()
-    local duplicate_rules: {pattern.Rule} = {
+    const duplicate_rules: {pattern.Rule} = {
       pattern.rule("S", pattern.succeed()),
       pattern.rule("S", pattern.fail()),
     }
     pattern.grammar("S", duplicate_rules)
   end)
   support.assert_raises("has no start rule", function()
-    local missing_rules: {pattern.Rule} = {
+    const missing_rules: {pattern.Rule} = {
       pattern.rule("S", pattern.succeed()),
     }
     pattern.grammar("missing", missing_rules)
@@ -292,12 +292,12 @@ function test_core_reserved_fail_label(context: test.Context)
     pattern.zero_or_more(pattern.throw("fail")),
     pattern.literal("a")):match("a") == 2)
 
-  local rules: {pattern.Rule} = {
+  const rules: {pattern.Rule} = {
     pattern.rule("S", pattern.sequence(
       pattern.throw("fail"), pattern.literal("z"))),
     pattern.rule("fail", pattern.literal("a")),
   }
-  local grammar = pattern.grammar("S", rules)
+  const grammar = pattern.grammar("S", rules)
   local result, label, position = grammar:match("az")
   test.assert(result == nil and label == "fail" and position == 1)
 end
@@ -307,7 +307,7 @@ function test_core_match_positions_and_nil_captures(context: test.Context)
   test.assert(pattern.succeed():match("") == 1)
 
   test.assert(support.result_count(pattern.constant(nil):match("")) == 1)
-  local only_nil: value = pattern.constant(nil):match("")
+  const only_nil: value = pattern.constant(nil):match("")
   test.assert(only_nil == nil)
 
   test.assert(support.result_count(pattern.constant(nil, "last"):match("")) == 2)
@@ -333,10 +333,10 @@ function test_core_match_positions_and_nil_captures(context: test.Context)
   test.assert(capture_nil == nil and capture_fail == "fail" and
               capture_one == 1)
 
-  local match_two = pattern.sequence(
+  const match_two = pattern.sequence(
     pattern.literal("a"), pattern.literal("b"))
-  local starts: {integer} = {1, 2, -1, -99, 0, 99}
-  local expected_positions: {integer} = {2, 3, 5, 2, 5, 5}
+  const starts: {integer} = {1, 2, -1, -99, 0, 99}
+  const expected_positions: {integer} = {2, 3, 5, 2, 5, 5}
   local index = 1
   while index <= #starts do
     local result, label, position =
@@ -365,12 +365,12 @@ function test_core_match_positions_and_nil_captures(context: test.Context)
     index = index + 1
   end
   test.assert(support.result_count(two_hundred:match("")) == 200)
-  local first_capture: value = two_hundred:match("")
-  local captures: {value} = {two_hundred:match("")}
-  local second_capture: value = captures[200]
+  const first_capture: value = two_hundred:match("")
+  const captures: {value} = {two_hundred:match("")}
+  const second_capture: value = captures[200]
   test.assert(first_capture == 1 and second_capture == 200)
 
-  local too_many = pattern.sequence(
+  const too_many = pattern.sequence(
     two_hundred, pattern.constant(201))
   support.assert_raises("too many flexible return values", function()
     too_many:match("")
@@ -391,9 +391,9 @@ function test_core_capture_forms(context: test.Context)
   test.assert(whole == "ab" and nested == "nested")
 
   test.assert(pattern.position():match("abc", 2) == 2)
-  local anonymous = pattern.group(pattern.literal("a"))
+  const anonymous = pattern.group(pattern.literal("a"))
   test.assert(anonymous:match("a") == "a")
-  local named = pattern.sequence(
+  const named = pattern.sequence(
     pattern.group(pattern.literal("a"), "key"),
     pattern.back_capture("key"))
   test.assert(named:match("a") == "a")
@@ -404,18 +404,18 @@ function test_core_capture_forms(context: test.Context)
     pattern.back_capture(nil)
   end)
 
-  local captured_value: value = pattern.table_capture(pattern.sequence(
+  const captured_value: value = pattern.table_capture(pattern.sequence(
     pattern.capture(pattern.literal("a")),
     pattern.group(pattern.capture(pattern.literal("b")), "letter")))
       :match("ab")
-  local captured = captured_value as {value: value}
+  const captured = captured_value as {value: value}
   test.assert(captured[1] == "a" and captured["letter"] == "b")
-  local empty_value: value = pattern.table_capture(
+  const empty_value: value = pattern.table_capture(
     pattern.literal("a")):match("a")
-  local empty = empty_value as {value: value}
+  const empty = empty_value as {value: value}
   test.assert(empty[1] == nil and empty["letter"] == nil)
 
-  local folded = pattern.fold_capture(pattern.sequence(
+  const folded = pattern.fold_capture(pattern.sequence(
     pattern.constant(1), pattern.constant(2),
     pattern.constant(3)), fold_callback)
   test.assert(folded:match("") == 6)
@@ -424,7 +424,7 @@ function test_core_capture_forms(context: test.Context)
       pattern.literal("a"), first_only):match("a")
   end)
 
-  local substituted = pattern.substitution(pattern.sequence(
+  const substituted = pattern.substitution(pattern.sequence(
     pattern.template_capture(
       pattern.capture(pattern.literal("a")), "X"),
     pattern.literal("b")))
@@ -441,18 +441,18 @@ function test_core_capture_forms(context: test.Context)
       pattern.literal("a"), "%1"):match("a")
   end)
 
-  local lookup: {value: value} = {}
+  const lookup: {value: value} = {}
   lookup["a"] = "<a>"
   test.assert(pattern.query_capture(
     pattern.literal("a"), lookup):match("a") == "<a>")
-  local surround: function (value, ...: value): (...: value) =
+  const surround: function (value, ...: value): (...: value) =
     function(found, ...)
       return "<" .. (found as string) .. ">"
     end
   test.assert(pattern.function_capture(
     pattern.literal("a"), surround):match("a") == "<a>")
 
-  local preserve: function (value, ...: value): (...: value) =
+  const preserve: function (value, ...: value): (...: value) =
     function(first, ...)
       test.assert(#... == 1)
       return nil, first, ...[1], nil
@@ -465,7 +465,7 @@ function test_core_capture_forms(context: test.Context)
               out4 == nil)
 
   local callback_count = 0
-  local match_time_callback:
+  const match_time_callback:
       function (string, integer, value, ...: value): (...: value) =
     function(subject, position, first, ...)
       callback_count = #... + 1
@@ -473,14 +473,14 @@ function test_core_capture_forms(context: test.Context)
       test.assert(first == "ab")
       return true, "matched", position
     end
-  local immediate = pattern.match_time(
+  const immediate = pattern.match_time(
     pattern.literal("ab"), match_time_callback)
   test.assert(support.result_count(immediate:match("abx")) == 2)
   local matched, after = immediate:match("abx")
   test.assert(callback_count == 1 and matched == "matched" and after == 3)
 
   local runtime_count = 0
-  local runtime: function (string, integer, string): (...: value) =
+  const runtime: function (string, integer, string): (...: value) =
     function(subject, position, whole)
       runtime_count = 1
       test.assert(subject == "abc" and position == 1 and whole == "")
@@ -491,13 +491,13 @@ function test_core_capture_forms(context: test.Context)
 end
 
 function test_core_callback_timing_and_titan_callables(context: test.Context)
-  local runtime = pattern.runtime(runtime_callback)
+  const runtime = pattern.runtime(runtime_callback)
   test.assert(support.result_count(runtime:match("a")) == 3)
   local runtime_result, runtime_whole, runtime_subject = runtime:match("a")
   test.assert(runtime_result == "titan-runtime" and runtime_whole == "" and
               runtime_subject == "a")
 
-  local delayed = pattern.function_capture(
+  const delayed = pattern.function_capture(
     pattern.capture(pattern.literal("x")), delayed_callback)
   test.assert(support.result_count(delayed:match("x")) == 2)
   local callback_tag, callback_value = delayed:match("x")
@@ -516,44 +516,44 @@ function test_core_callback_timing_and_titan_callables(context: test.Context)
     pattern.constant("first", "ignored"),
     first_only):match("") == "first")
 
-  local events: {string} = {}
-  local delayed_event: function (value, ...: value): (...: value) =
+  const events: {string} = {}
+  const delayed_event: function (value, ...: value): (...: value) =
     function(first, ...)
       events[#events + 1] = "delayed"
       return first
     end
-  local delayed_branch = pattern.function_capture(
+  const delayed_branch = pattern.function_capture(
     pattern.capture(pattern.literal("a")), delayed_event)
-  local runtime_event: function (string, integer, string): (...: value) =
+  const runtime_event: function (string, integer, string): (...: value) =
     function(subject, position, whole)
       events[#events + 1] = "runtime"
       return position
     end
-  local runtime_branch = pattern.runtime(runtime_event)
-  local selected = pattern.choice(
+  const runtime_branch = pattern.runtime(runtime_event)
+  const selected = pattern.choice(
     pattern.sequence(delayed_branch, pattern.literal("x")),
     pattern.sequence(runtime_branch, pattern.literal("a")))
   test.assert(selected:match("a") == 2)
   test.assert(#events == 1 and events[1] == "runtime")
 
-  local fold_arities: {integer} = {}
-  local record_fold: function (value, ...: value): (value) =
+  const fold_arities: {integer} = {}
+  const record_fold: function (value, ...: value): (value) =
     function(accumulator, ...)
       fold_arities[#fold_arities + 1] = #...
       return fold_callback(accumulator, ...)
     end
-  local grouped_fold = pattern.fold_capture(pattern.sequence(
+  const grouped_fold = pattern.fold_capture(pattern.sequence(
     pattern.constant(1),
     pattern.group(pattern.succeed(), "hidden"),
     pattern.constant(2, 3)), record_fold)
   test.assert(grouped_fold:match("") == 6)
   test.assert(fold_arities[1] == 0 and fold_arities[2] == 2)
 
-  local explode: function (value, ...: value): (...: value) =
+  const explode: function (value, ...: value): (...: value) =
     function(_, ...)
       raise "callback exploded"
     end
-  local bad = pattern.function_capture(
+  const bad = pattern.function_capture(
     pattern.literal("a"), explode)
   support.assert_raises("callback exploded", function()
     bad:match("a")
@@ -562,10 +562,10 @@ function test_core_callback_timing_and_titan_callables(context: test.Context)
 end
 
 function test_core_locale_and_stack_controls(context: test.Context)
-  local previous_locale = support.use_c_ctype_locale()
+  const previous_locale = support.use_c_ctype_locale()
   defer support.restore_c_ctype_locale(previous_locale)
 
-  local snapshot = pattern.locale()
+  const snapshot = pattern.locale()
   test.assert(snapshot.alnum:match("A") == 2)
   test.assert(snapshot.alpha:match("z") == 2)
   test.assert(snapshot.cntrl:match("\n") == 2)
@@ -578,14 +578,14 @@ function test_core_locale_and_stack_controls(context: test.Context)
   test.assert(snapshot.upper:match("Z") == 2)
   test.assert(snapshot.xdigit:match("f") == 2)
 
-  local rules: {pattern.Rule} = {
+  const rules: {pattern.Rule} = {
     pattern.rule("S", pattern.choice(
       pattern.sequence(
         pattern.literal("0"), pattern.variable("S")),
       pattern.literal("0"))),
   }
-  local recursive = pattern.grammar("S", rules)
-  local subject = support.repeat_text("0", 500)
+  const recursive = pattern.grammar("S", rules)
+  const subject = support.repeat_text("0", 500)
   pattern.set_max_stack(500)
   defer pattern.set_max_stack(400)
   support.assert_raises("backtrack stack overflow", function()
@@ -610,8 +610,8 @@ end
 -- attempt. Reusing it must never carry results, captures, labels, or
 -- arguments between attempts, nor change what the Pattern composes into.
 function test_core_repeated_matches_reuse_one_pattern(context: test.Context)
-  context:run("outcomes_interleave", function(_child: test.Context)
-    local outcomes = pattern.choice(
+  context:run("outcomes_interleave", function(_: test.Context)
+    const outcomes = pattern.choice(
       pattern.literal("ok"),
       pattern.sequence(pattern.literal("x"), pattern.throw("bad")))
     local round = 1
@@ -628,10 +628,10 @@ function test_core_repeated_matches_reuse_one_pattern(context: test.Context)
     end
   end)
 
-  context:run("captures_and_arguments", function(_child: test.Context)
-    local nils = pattern.constant(nil, "last")
-    local word = pattern.capture(pattern.one_or_more(pattern.ranges("az")))
-    local argument = pattern.argument(1)
+  context:run("captures_and_arguments", function(_: test.Context)
+    const nils = pattern.constant(nil, "last")
+    const word = pattern.capture(pattern.one_or_more(pattern.ranges("az")))
+    const argument = pattern.argument(1)
     local round = 1
     while round <= 3 do
       test.assert(support.result_count(nils:match("")) == 2,
@@ -640,7 +640,7 @@ function test_core_repeated_matches_reuse_one_pattern(context: test.Context)
       test.assert(leading == nil and last == "last")
       test.assert(word:match("alpha!") == "alpha" and word:match("be") == "be",
                   "a capture leaked between attempts")
-      local supplied = "argument " .. support.decimal_text(round)
+      const supplied = "argument " .. support.decimal_text(round)
       test.assert(argument:match("", nil, supplied) == supplied,
                   "an argument capture leaked between attempts")
       round = round + 1
@@ -651,18 +651,18 @@ function test_core_repeated_matches_reuse_one_pattern(context: test.Context)
     test.assert(argument:match("", nil, "after") == "after")
   end)
 
-  context:run("capture_limit", function(_child: test.Context)
+  context:run("capture_limit", function(_: test.Context)
     local two_hundred = pattern.succeed()
     local index = 1
     while index <= 200 do
       two_hundred = pattern.sequence(two_hundred, pattern.constant(index))
       index = index + 1
     end
-    local too_many = pattern.sequence(two_hundred, pattern.constant(201))
+    const too_many = pattern.sequence(two_hundred, pattern.constant(201))
     local round = 1
     while round <= 2 do
       test.assert(support.result_count(two_hundred:match("")) == 200)
-      local captures: {value} = {two_hundred:match("")}
+      const captures: {value} = {two_hundred:match("")}
       test.assert(captures[1] == 1 and captures[200] == 200)
       support.assert_raises("too many flexible return values", function()
         too_many:match("")
@@ -671,46 +671,46 @@ function test_core_repeated_matches_reuse_one_pattern(context: test.Context)
     end
   end)
 
-  context:run("multi_kilobyte_search", function(_child: test.Context)
-    local needle = pattern.capture(pattern.literal("needle"))
-    local haystack = support.repeat_text("x", 8192) .. "needle" ..
+  context:run("multi_kilobyte_search", function(_: test.Context)
+    const needle = pattern.capture(pattern.literal("needle"))
+    const haystack = support.repeat_text("x", 8192) .. "needle" ..
       support.repeat_text("y", 100) .. "needle"
     local round = 1
     while round <= 3 do
-      local first? = pattern.match(haystack, needle)
+      const first? = pattern.match(haystack, needle)
       test.assert(first ~= nil and first.first == 8193 and first.last == 8198,
                   "repeated search moved its first match")
-      local found: value = first:values()
+      const found: value = first:values()
       test.assert(found == "needle")
-      local second? = pattern.match(haystack, needle, 8194)
+      const second? = pattern.match(haystack, needle, 8194)
       test.assert(second ~= nil and second.first == 8299, "search from init moved")
       test.assert(pattern.match(haystack, needle, 8300) == nil,
                   "exhausted search found a stale match")
       round = round + 1
     end
-    local committed = pattern.sequence(pattern.literal("y"), pattern.throw("stop"))
+    const committed = pattern.sequence(pattern.literal("y"), pattern.throw("stop"))
     test.assert(pattern.match(haystack, committed) == nil, "a committed label resumed search")
     test.assert(pattern.match(haystack, committed) == nil)
   end)
 
-  context:run("composition_after_matching", function(_child: test.Context)
-    local prefix = pattern.literal("ab")
+  context:run("composition_after_matching", function(_: test.Context)
+    const prefix = pattern.literal("ab")
     test.assert(prefix:match("ab") == 3)
-    local composed = pattern.sequence(prefix, pattern.capture(pattern.literal("c")))
+    const composed = pattern.sequence(prefix, pattern.capture(pattern.literal("c")))
     test.assert(support.result_count(composed:match("abc")) == 1,
                 "a matched Pattern composed its match wrapper")
     test.assert(composed:match("abc") == "c")
     test.assert(pattern.choice(pattern.literal("z"), prefix):match("ab") == 3)
-    local defined = pattern.compile("%prefix 'c'", {pattern.define("prefix", prefix)})
+    const defined = pattern.compile("%prefix 'c'", {pattern.define("prefix", prefix)})
     test.assert(defined:match("abc") == 4, "a matched Pattern defined its match wrapper")
     test.assert(prefix:match("ab") == 3 and prefix:match("ax") == nil)
   end)
 
-  context:run("reentrant_match", function(_child: test.Context)
+  context:run("reentrant_match", function(_: test.Context)
     local depth = 0
     local inner_result: value = nil
     local reentrant: pattern.Pattern? = nil
-    local callback: function (string, integer, string): (...: value) =
+    const callback: function (string, integer, string): (...: value) =
       function(_subject, position, _whole)
         depth = depth + 1
         if depth == 1 then inner_result = reentrant:match("[x") end

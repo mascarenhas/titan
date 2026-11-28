@@ -22,21 +22,21 @@ local function text_of(item: Value): string
 end
 
 local function note(text: string)
-  local target = browser.binding("noted")
+  const target = browser.binding("noted")
   defer target:close()
   target:call(Value.is_string(text))
 end
 
 local function suspend_on(name: string)
-  local task = async.running()
-  local token = async.ResumeToken(name)
-  local source = browser.binding(name)
+  const task = async.running()
+  const token = async.ResumeToken(name)
+  const source = browser.binding(name)
   defer source:close()
-  local wake = function (...: Value): Value
+  const wake = function (...: Value): Value
     task:resume(token)
     return Value.is_nil()
   end
-  local request = source:start(wake, wake)
+  const request = source:start(wake, wake)
   defer request:close()
   async.suspend(token, function () request:cancel() catch end)
 end
@@ -47,7 +47,7 @@ local function expect_operation(action: Action, operation: string,
     action()
   catch
     if not (error is async.OperationError) then raise end
-    local failure: async.OperationError = error
+    const failure: async.OperationError = error
     test.assert(failure.operation == operation and failure.name == name,
       "stream operation changed its error fields")
     return failure.message
@@ -84,7 +84,7 @@ local function retire(task: async.Task)
     if task:status():has_finished() then
       resolve(nil)
     else
-      remove = task:add_terminal_listener(function (_status: async.TaskStatus)
+      remove = task:add_terminal_listener(function (_: async.TaskStatus)
         resolve(nil)
       end)
     end
@@ -115,6 +115,7 @@ local function outside_task(...: Value): Value
 end
 
 local function registration_context(...: Value): Value
+  -- titan-lint: allow(dso-closed-union-case): this harness image always links the stdlib it was built with
   case async.await<|integer, string|>(function (resolve, _reject, _fatal)
     resolve(context_errors("asynchronous operation must be called from an async Task"))
   end)
@@ -124,7 +125,7 @@ local function registration_context(...: Value): Value
 end
 
 local function publish_entries()
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
   publish(target, "printing", printing)
   publish(target, "write_three", write_three)
@@ -177,12 +178,12 @@ function main(args: {string}): integer
     return 0
   end
   if args[1] == "return-c" then
-    local data = "main\0\128\255tail"
+    const data = "main\0\128\255tail"
     ffi.fwrite(data, 1, #data, ffi.stdout)
     return 0
   end
   test.assert(args[1] == "exit", "unknown stream main mode")
-  local peer = async.run<|nil, value|>(function (): nil
+  const peer = async.run<|nil, value|>(function (): nil
     defer note("exit-peer-cleanup")
     note("exit-peer-ready")
     suspend_on("never")

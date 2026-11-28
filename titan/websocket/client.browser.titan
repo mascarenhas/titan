@@ -5,8 +5,8 @@ local const COMPACT_MIN_PREFIX = 32
 
 -- Only a suspended operation owns a wake; release it before queuing its Task.
 local record Wait
-  task: async.Task
-  token: async.ResumeToken
+  const task: async.Task
+  const token: async.ResumeToken
   waiting: boolean
 end
 
@@ -23,9 +23,9 @@ local function Wait:wait()
 end
 
 local record Message
-  kind: MessageType
-  length: integer
-  holder: browser.BrowserHandle
+  const kind: MessageType
+  const length: integer
+  const holder: browser.BrowserHandle
 end
 
 --- An owned browser session with one application reader and one data writer.
@@ -34,7 +34,7 @@ record Connection
   local request: browser.BrowserRequest?
   local socket: browser.BrowserHandle?
   local protocol: string?
-  local limit: integer
+  local const limit: integer
   local messages: {Message}
   local first: integer
   local opening: Wait?
@@ -64,8 +64,8 @@ local function websocket_call(operation: string, ...: Value): Value
   return websocket_source():call(...)
 catch
   if not (error is browser.BrowserError) then raise end
-  local failure: browser.BrowserError = error
-  local message = failure.message
+  const failure: browser.BrowserError = error
+  const message = failure.message
   failure:close()
   raise Error("abnormal", operation, message, nil)
 end
@@ -78,11 +78,11 @@ end
 
 local function Connection:compact_messages()
   if self.first <= COMPACT_MIN_PREFIX then return end
-  local count = #self.messages - self.first + 1
+  const count = #self.messages - self.first + 1
   -- Copy only after the consumed prefix can pay for all remaining elements.
   -- Keep the entire old FIFO owned until replacement allocation/copy succeeds.
   if self.first <= count then return end
-  local replacement: {Message} = {}
+  const replacement: {Message} = {}
   for index = 1, count do
     replacement[index] = self.messages[self.first + index - 1]
   end
@@ -104,11 +104,11 @@ function Connection:close()
   self.closing = true
   self:wake_waiters()
   self:discard_messages()
-  local request? = self.request
+  const request? = self.request
   self.request = nil
-  local socket? = self.socket
+  const socket? = self.socket
   self.socket = nil
-  local remove? = self.remove_close_listener
+  const remove? = self.remove_close_listener
   self.remove_close_listener = nil
   defer if remove ~= nil then remove() end
   defer if socket ~= nil then socket:close() end
@@ -148,13 +148,13 @@ local function event_integer(item: Value): integer
 end
 
 local function Connection:receive(...: Value): Value
-  local event = event_string(...[1])
+  const event = event_string(...[1])
   if event == "open" then
     case ...[2]
     when is_handle(socket) then self.socket = socket
     end
     self.open_seen = true
-    local protocol = event_string(...[3])
+    const protocol = event_string(...[3])
     if protocol ~= "" then self.protocol = protocol end
   elseif event == "text" or event == "binary" then
     case ...[3]
@@ -169,7 +169,7 @@ local function Connection:receive(...: Value): Value
       end
     end
   elseif event == "close" then
-    local code = event_integer(...[2])
+    const code = event_integer(...[2])
     self.close_seen = true
     self.abnormal = code == 1006 or code == 1015
     -- wasClean describes transport teardown, not whether a wire Close arrived.
@@ -186,7 +186,7 @@ catch
 end
 
 local function Connection:receive_failure(...: Value): Value
-  local message = browser.failure_text(...[1], ...[2]) or "WebSocket listener failed"
+  const message = browser.failure_text(...[1], ...[2]) or "WebSocket listener failed"
   if not self.open_seen then
     raise HandshakeError(message, nil, nil)
   end
@@ -198,7 +198,7 @@ end
 
 local function Connection:wait_control(waiter: Wait, timeout: integer, opening: boolean)
   local expired = false
-  local deadline = async.run<|nil, value|>(function (): nil
+  const deadline = async.run<|nil, value|>(function (): nil
     timer.sleep(timeout)
     expired = true
     waiter:wake()
@@ -234,11 +234,11 @@ function connect(source_url: string, options: DialOptions?): Connection
   if parsed.scheme ~= "ws" and parsed.scheme ~= "wss" then
     raise "WebSocket URL must use ws or wss"
   end
-  local policy = options or DialOptions()
+  const policy = options or DialOptions()
   if #policy.headers:all() > 0 then raise "WebSocket headers are unavailable on the browser target" end
   if policy.ca_file ~= nil then raise "WebSocket ca_file is unavailable on the browser target" end
-  local waiter = Wait(async.running(), async.ResumeToken("websocket.open"), false)
-  local connection: Connection = {
+  const waiter = Wait(async.running(), async.ResumeToken("websocket.open"), false)
+  const connection: Connection = {
     request = nil, socket = nil, protocol = nil, limit = policy.limit,
     messages = {}, first = 1, opening = waiter, reader = nil, shutdown_wait = nil,
     writing = false, open_seen = false, close_seen = false, abnormal = false,
@@ -248,7 +248,7 @@ function connect(source_url: string, options: DialOptions?): Connection
   local adopted = false
   defer if not adopted then connection:close() end
   connection.remove_close_listener = async.add_close_listener(function () connection:close() end)
-  local protocols: {Value} = {}
+  const protocols: {Value} = {}
   for index = 1, #policy.protocols do protocols[index] = Value.is_string(policy.protocols[index]) end
   connection.request = websocket_source():listen(connection:receive, connection:receive_failure,
     Value.is_string("connect"), Value.is_string(source_url), ...protocols)
@@ -268,8 +268,8 @@ function connect(source_url: string, options: DialOptions?): Connection
   return connection
 catch
   if error is browser.BrowserError then
-    local failure: browser.BrowserError = error
-    local message = failure.message
+    const failure: browser.BrowserError = error
+    const message = failure.message
     failure:close()
     raise HandshakeError(message, nil, nil)
   end
@@ -294,7 +294,7 @@ local function Connection:read_message(waiter: Wait): (MessageType?, string?)
     if self.terminal then raise state_error("websocket.read", "WebSocket is closed") end
     if self.first <= #self.messages then
       self:compact_messages()
-      local message = self.messages[self.first]
+      const message = self.messages[self.first]
       defer message.holder:close()
       self.messages[self.first] = nil
       self.first = self.first + 1
@@ -323,7 +323,7 @@ function Connection:read(): (MessageType?, string?)
   if self.terminal then raise state_error("websocket.read", "WebSocket is closed") end
   if self.shutdown_wait ~= nil then raise state_error("websocket.read", "WebSocket shutdown owns receive progress") end
   if self.reader ~= nil then raise state_error("websocket.read", "another reader is active") end
-  local waiter = Wait(async.running(), async.ResumeToken("websocket.read"), false)
+  const waiter = Wait(async.running(), async.ResumeToken("websocket.read"), false)
   self.reader = waiter
   defer do
     self.reader = nil
@@ -346,7 +346,7 @@ end
 
 local function Connection:write_state(): integer
   self:check_open("websocket.write")
-  local amount = self:buffered()
+  const amount = self:buffered()
   if amount < 0 then raise state_error("websocket.write", "WebSocket is closing") end
   return amount
 end
@@ -398,9 +398,9 @@ end
 -- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
 function Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
   async.checkpoint()
-  local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket shutdown timeout")
-  local status = code or 1000
-  local text = reason or ""
+  const timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket shutdown timeout")
+  const status = code or 1000
+  const text = reason or ""
   if status ~= 1000 and (status < 3000 or status > 4999) then
     raise state_error("websocket.shutdown", "invalid outgoing Close status")
   end
@@ -410,7 +410,7 @@ function Connection:shutdown(code: integer?, reason: string?, timeout_ms: intege
   if self.close_seen and not self.abnormal then self:close(); return end
   if self.terminal then raise state_error("websocket.shutdown", "WebSocket is closed") end
   if self.shutdown_wait ~= nil then raise state_error("websocket.shutdown", "another shutdown is active") end
-  local waiter = Wait(async.running(), async.ResumeToken("websocket.shutdown"), false)
+  const waiter = Wait(async.running(), async.ResumeToken("websocket.shutdown"), false)
   self.shutdown_wait = waiter
   self.closing = true
   defer self.shutdown_wait = nil

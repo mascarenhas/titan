@@ -54,9 +54,9 @@ record udp_t
   local recv_callback: (function (udp_t, integer, buf_t?, sockaddr_t?, integer): ())?
   local close_callback: (function (handle_t): ())?
   local recv_buffer: buf_t?
-  local alloc_handler: function (udp_t, loop_t, foreign size_t, foreign *uv_buf_t): ()
-  local recv_handler: function (udp_t, loop_t, foreign ssize_t, foreign const *uv_buf_t, foreign const *sockaddr, foreign unsigned int): ()
-  local close_handler: function (udp_t, loop_t): ()
+  local const alloc_handler: function (udp_t, loop_t, foreign size_t, foreign *uv_buf_t): ()
+  local const recv_handler: function (udp_t, loop_t, foreign ssize_t, foreign const *uv_buf_t, foreign const *sockaddr, foreign unsigned int): ()
+  local const close_handler: function (udp_t, loop_t): ()
   local userdata: value
 end
 
@@ -70,7 +70,7 @@ record udp_send_t
   local buffers: {buf_t}?
   local native_buffers: (owned uv_buf_t[])?
   local callback: (function (udp_send_t, integer): ())?
-  local handler: function (udp_send_t, loop_t, foreign int): ()
+  local const handler: function (udp_send_t, loop_t, foreign int): ()
   local userdata: value
 end
 
@@ -80,8 +80,8 @@ local function udp_allocate(owner: udp_t, loop: loop_t, suggested: foreign size_
   output.base = nil
   output.len = 0
   owner.recv_buffer = nil
-  local callback = owner.alloc_callback
-  local buffer = callback(handle_t.udp(owner), suggested as integer)
+  const callback = owner.alloc_callback
+  const buffer = callback(handle_t.udp(owner), suggested as integer)
   if not buffer.writable then raise "UDP receive buffer must be writable" end
   owner.recv_buffer = buffer
   output[0] = buffer.native[0]
@@ -98,18 +98,18 @@ local function udp_receive(owner: udp_t, loop: loop_t, nread: foreign ssize_t,
                            native: foreign const *uv_buf_t,
                            address: foreign const *sockaddr,
                            flags: foreign unsigned int)
-  local retained? = owner.recv_buffer
+  const retained? = owner.recv_buffer
   -- CHUNK borrows part of the original allocation; the terminal FREE/error
   -- retires that borrow before user delivery. A stopped recvmmsg batch may omit
   -- FREE; recv_stop retains the allocation until the next alloc or close.
   if (flags as integer & UDP_MMSG_CHUNK) == 0 then owner.recv_buffer = nil end
   local buffer: buf_t? = nil
   if native ~= nil and native.base ~= nil and retained ~= nil then
-    local offset = (native.base - retained.native.base) as integer
+    const offset = (native.base - retained.native.base) as integer
     buffer = retained:slice(offset + 1, native.len as integer)
   end
-  local copied? = sockaddr_copy(address)
-  local callback? = owner.recv_callback
+  const copied? = sockaddr_copy(address)
+  const callback? = owner.recv_callback
   if callback ~= nil then callback(owner, nread as integer, buffer, copied, flags as integer) end
 catch
   if loop.failure_count == 0 then
@@ -124,7 +124,7 @@ local function udp_closed(owner: udp_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
   -- Keep the original loop observable through close; init replaces it.
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.alloc_callback = nil
   owner.recv_callback = nil
   owner.close_callback = nil
@@ -145,13 +145,15 @@ local function udp_sent(owner: udp_send_t, loop: loop_t, status: foreign int)
   owner.loop = nil
   -- Keep the old buffer closure through actual callback return, independent
   -- of the new fields installed if user code resubmits this same request.
-  local retained? = owner.buffers
-  local native? = owner.native_buffers
-  local callback? = owner.callback
+  const retained? = owner.buffers
+  const native? = owner.native_buffers
+  const callback? = owner.callback
   owner.buffers = nil
   owner.native_buffers = nil
   owner.callback = nil
   if callback ~= nil then callback(owner, status as integer) end
+  gc.keep_alive(retained)
+  gc.keep_alive(native)
 catch
   if loop.failure_count == 0 then
     loop.failure_error = error
@@ -243,10 +245,10 @@ end
 -- @usage uv/functions/udp.md#udp_init_ex
 function udp_init_ex(loop: loop_t, handle: udp_t, flags: integer): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
-  local native_flags = flags as foreign unsigned int
+  const native_flags = flags as foreign unsigned int
   loop.handles[handle] = true
   handle.loop = loop
-  local status = ffi.uv_udp_init_ex(loop.native, handle.native, native_flags) as integer
+  const status = ffi.uv_udp_init_ex(loop.native, handle.native, native_flags) as integer
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -269,7 +271,7 @@ end
 -- @usage uv/functions/udp.md#udp_open
 function udp_open(handle: udp_t, socket: os_sock_t): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_socket = socket.native
+  const native_socket = socket.native
   return ffi.uv_udp_open(handle.native, native_socket)
 end
 
@@ -281,8 +283,8 @@ end
 -- @usage uv/functions/udp.md#udp_open_ex
 function udp_open_ex(handle: udp_t, socket: os_sock_t, flags: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_socket = socket.native
-  local native_flags = flags as foreign unsigned int
+  const native_socket = socket.native
+  const native_flags = flags as foreign unsigned int
   return ffi.uv_udp_open_ex(handle.native, native_socket, native_flags)
 end
 
@@ -294,8 +296,8 @@ end
 -- @usage uv/functions/udp.md#udp_bind
 function udp_bind(handle: udp_t, address: sockaddr_t, flags: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_flags = flags as foreign unsigned int
-  local native_address = address:pointer()
+  const native_flags = flags as foreign unsigned int
+  const native_address = address:pointer()
   return ffi.uv_udp_bind(handle.native, native_address, native_flags)
 end
 
@@ -322,7 +324,7 @@ function udp_getpeername(handle: udp_t): (integer, sockaddr_t?, integer)
   local native = foreign sockaddr_storage.new()
   local length = foreign int.new_array(1)
   length[0] = foreign sockaddr_storage.sizeof as foreign int
-  local status = ffi.uv_udp_getpeername(handle.native, native as foreign *sockaddr, length) as integer
+  const status = ffi.uv_udp_getpeername(handle.native, native as foreign *sockaddr, length) as integer
   if status < 0 then return status, nil, length[0] as integer end
   return status, sockaddr_copy_sized(native as foreign const *sockaddr, length[0] as integer), length[0] as integer
 end
@@ -338,7 +340,7 @@ function udp_getsockname(handle: udp_t): (integer, sockaddr_t?, integer)
   local native = foreign sockaddr_storage.new()
   local length = foreign int.new_array(1)
   length[0] = foreign sockaddr_storage.sizeof as foreign int
-  local status = ffi.uv_udp_getsockname(handle.native, native as foreign *sockaddr, length) as integer
+  const status = ffi.uv_udp_getsockname(handle.native, native as foreign *sockaddr, length) as integer
   if status < 0 then return status, nil, length[0] as integer end
   return status, sockaddr_copy_sized(native as foreign const *sockaddr, length[0] as integer), length[0] as integer
 end
@@ -353,7 +355,7 @@ end
 function udp_set_membership(handle: udp_t, multicast_addr: string,
                             interface_addr: string?, member: membership): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_member = membership_native(member)
+  const native_member = membership_native(member)
   local native_interface: foreign const *char = nil
   if interface_addr ~= nil then native_interface = interface_addr as foreign const *char end
   return ffi.uv_udp_set_membership(handle.native, multicast_addr, native_interface, native_member)
@@ -371,7 +373,7 @@ function udp_set_source_membership(handle: udp_t, multicast_addr: string,
                                    interface_addr: string?, source_addr: string,
                                    member: membership): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_member = membership_native(member)
+  const native_member = membership_native(member)
   local native_interface: foreign const *char = nil
   if interface_addr ~= nil then native_interface = interface_addr as foreign const *char end
   return ffi.uv_udp_set_source_membership(handle.native, multicast_addr, native_interface, source_addr, native_member)
@@ -396,7 +398,7 @@ end
 -- @usage uv/functions/udp.md#udp_set_multicast_loop
 function udp_set_multicast_loop(handle: udp_t, on: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_value = on as foreign int
+  const native_value = on as foreign int
   return ffi.uv_udp_set_multicast_loop(handle.native, native_value)
 end
 
@@ -407,7 +409,7 @@ end
 -- @usage uv/functions/udp.md#udp_set_multicast_ttl
 function udp_set_multicast_ttl(handle: udp_t, ttl: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_value = ttl as foreign int
+  const native_value = ttl as foreign int
   return ffi.uv_udp_set_multicast_ttl(handle.native, native_value)
 end
 
@@ -418,7 +420,7 @@ end
 -- @usage uv/functions/udp.md#udp_set_broadcast
 function udp_set_broadcast(handle: udp_t, on: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_value = on as foreign int
+  const native_value = on as foreign int
   return ffi.uv_udp_set_broadcast(handle.native, native_value)
 end
 
@@ -429,7 +431,7 @@ end
 -- @usage uv/functions/udp.md#udp_set_ttl
 function udp_set_ttl(handle: udp_t, ttl: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local native_value = ttl as foreign int
+  const native_value = ttl as foreign int
   return ffi.uv_udp_set_ttl(handle.native, native_value)
 end
 
@@ -474,11 +476,11 @@ function udp_send(request: udp_send_t, handle: udp_t, buffers: {buf_t},
   if #buffers == 0 then return ffi.UV_EINVAL end
   local status, native?, retained? = fs_buffer_snapshot(buffers, false)
   if status < 0 then return status end
-  local native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
-  local native_count = #(retained as {buf_t}) as foreign unsigned int
+  const native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  const native_count = #(retained as {buf_t}) as foreign unsigned int
   local native_address: foreign *sockaddr = nil
   if address ~= nil then native_address = address:pointer() end
-  local loop = handle.loop
+  const loop = handle.loop
   loop.requests[request] = true
   request.pending = true
   request.loop = loop
@@ -487,7 +489,7 @@ function udp_send(request: udp_send_t, handle: udp_t, buffers: {buf_t},
   request.native_buffers = native
   request.callback = callback
   ffi.uv_req_set_data(request.native as foreign *uv_req_t, request as foreign *void)
-  local result = ffi.uv_udp_send(request.native, handle.native, native_data,
+  const result = ffi.uv_udp_send(request.native, handle.native, native_data,
       native_count, native_address, udp_send_callback) as integer
   if result < 0 then
     loop.requests[request] = nil
@@ -511,8 +513,8 @@ function udp_try_send(handle: udp_t, buffers: {buf_t}, address: sockaddr_t?): in
   if not handle:usable() then return ffi.UV_EINVAL end
   local status, native?, retained? = fs_buffer_snapshot(buffers, false)
   if status < 0 then return status end
-  local native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
-  local native_count = #(retained as {buf_t}) as foreign unsigned int
+  const native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  const native_count = #(retained as {buf_t}) as foreign unsigned int
   local native_address: foreign *sockaddr = nil
   if address ~= nil then native_address = address:pointer() end
   return ffi.uv_udp_try_send(handle.native, native_data, native_count, native_address)
@@ -527,26 +529,26 @@ end
 -- @usage uv/functions/udp.md#udp_try_send2
 function udp_try_send2(handle: udp_t, buffers: {{buf_t}}, addresses: {sockaddr_t?}, flags: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local count = #buffers
+  const count = #buffers
   if count > ffi.UINT_MAX as integer or #addresses > count then return ffi.UV_EINVAL end
-  local native_count = count as foreign unsigned int
-  local native_flags = flags as foreign unsigned int
-  local vectors = foreign (*uv_buf_t).new_array(count)
-  local lengths = foreign unsigned int.new_array(count)
-  local destinations = foreign (*sockaddr).new_array(count)
-  local native_buffers: {owned uv_buf_t[]} = {}
-  local retained: {{buf_t}} = {}
-  local retained_addresses: {sockaddr_t?} = {}
+  const native_count = count as foreign unsigned int
+  const native_flags = flags as foreign unsigned int
+  const vectors = foreign (*uv_buf_t).new_array(count)
+  const lengths = foreign unsigned int.new_array(count)
+  const destinations = foreign (*sockaddr).new_array(count)
+  const native_buffers: {owned uv_buf_t[]} = {}
+  const retained: {{buf_t}} = {}
+  const retained_addresses: {sockaddr_t?} = {}
   for i = 1, count do
     local status, native?, roots? = fs_buffer_snapshot(buffers[i], false)
     if status < 0 then return status end
-    local exact_native = native as owned uv_buf_t[]
-    local exact_roots = roots as {buf_t}
+    const exact_native = native as owned uv_buf_t[]
+    const exact_roots = roots as {buf_t}
     native_buffers[i] = exact_native
     retained[i] = exact_roots
     vectors[i - 1] = exact_native as foreign *uv_buf_t
     lengths[i - 1] = #exact_roots as foreign unsigned int
-    local address? = addresses[i]
+    const address? = addresses[i]
     retained_addresses[i] = address
     destinations[i - 1] = nil
     if address ~= nil then destinations[i - 1] = address:pointer() end
@@ -563,7 +565,7 @@ end
 function udp_recv_start(handle: udp_t, alloc_callback: function (handle_t, integer): (buf_t),
                         recv_callback: function (udp_t, integer, buf_t?, sockaddr_t?, integer): ()): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local status = ffi.uv_udp_recv_start(handle.native, udp_alloc_callback, udp_recv_callback) as integer
+  const status = ffi.uv_udp_recv_start(handle.native, udp_alloc_callback, udp_recv_callback) as integer
   if status == 0 then
     handle.alloc_callback = alloc_callback
     handle.recv_callback = recv_callback
@@ -577,7 +579,7 @@ end
 -- @usage uv/functions/udp.md#udp_recv_stop
 function udp_recv_stop(handle: udp_t): integer
   if not handle:usable() then return ffi.UV_EINVAL end
-  local status = ffi.uv_udp_recv_stop(handle.native) as integer
+  const status = ffi.uv_udp_recv_stop(handle.native) as integer
   if status == 0 then handle.alloc_callback = nil; handle.recv_callback = nil end
   return status
 end

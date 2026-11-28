@@ -16,9 +16,9 @@ local function PortableNominal.new(descriptor: reflect.Type): PortableNominal
   case descriptor
   when is_record(record_type) then
     if not record_type.all_public then
-      local candidate? = record_type:public_constructor()
+      const candidate? = record_type:public_constructor()
       if candidate ~= nil then
-        local positions: {integer} = {}
+        const positions: {integer} = {}
         for parameter = 1, #candidate.param_descriptors do
           local found = false
           for field = 1, #record_type.fields do
@@ -47,10 +47,10 @@ end
 
 local function portable_quoted(output: string.StringWriter, subject: string)
   output:write('"')
-  local bytes = subject as foreign const *uint8_t
+  const bytes = subject as foreign const *uint8_t
   local first = 1
   for position = 1, #subject do
-    local byte: integer = bytes[position - 1]
+    const byte: integer = bytes[position - 1]
     if byte == 34 or byte == 92 or byte < 32 then
       if position > first then output:write(string.sub(subject, first, position - 1)) end
       if byte == 34 then output:write('\\"')
@@ -71,8 +71,8 @@ end
 local function portable_name_less(left: string, right: string): boolean
   local length = #left
   if #right < length then length = #right end
-  local a = left as foreign const *uint8_t
-  local b = right as foreign const *uint8_t
+  const a = left as foreign const *uint8_t
+  const b = right as foreign const *uint8_t
   for index = 0, length - 1 do
     if a[index] ~= b[index] then return a[index] < b[index] end
   end
@@ -81,7 +81,7 @@ end
 
 local function portable_sort_names(names: {string})
   if #names < 2 then return end
-  local work: {string} = {}
+  const work: {string} = {}
   local width = 1
   while width < #names do
     local first = 1
@@ -112,16 +112,16 @@ end
 -- The canonical registry retains the metatable and its declaring module.
 -- Borrow their native metadata only until the immutable manifest name is copied.
 local function portable_module(name: string): string
-  local identity? = resource_nominals[name]
+  const identity? = resource_nominals[name]
   if identity == nil then raise "protobuf: " .. name .. ": no declaring module" end
   local raw: foreign TValue = identity
-  local module = ffi.titan_codec_module(raw.value_.gc as foreign *Table)
+  const module = ffi.titan_codec_module(raw.value_.gc as foreign *Table)
   if module == nil or module.len < foreign TitanModuleData.sizeof then
     raise "protobuf: " .. name .. ": no declaring module"
   end
-  local data = ffi.lmacro_getudatamem(module) as foreign const *TitanModuleData
+  const data = ffi.lmacro_getudatamem(module) as foreign const *TitanModuleData
   if data.symbols == nil then raise "protobuf: " .. name .. ": no declaring module" end
-  local manifest = data.symbols(ffi.TITAN_TRANSFER_MANIFEST_SYMBOL)
+  const manifest = data.symbols(ffi.TITAN_TRANSFER_MANIFEST_SYMBOL)
     as foreign const *TitanTransferModule
   if manifest == nil or manifest.name == nil then
     raise "protobuf: " .. name .. ": no declaring module"
@@ -190,7 +190,7 @@ end
 
 local function PortableCodec:walk(descriptor: reflect.Type, path: string,
     names: {string})
-  local resolved = portable_resolve(descriptor, path)
+  const resolved = portable_resolve(descriptor, path)
   case resolved
   when is_nil() then
   when is_boolean() then
@@ -209,14 +209,14 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string,
     if not record_type.is_public then
       raise "protobuf: " .. path .. ": " .. record_type.name .. " is not public data"
     end
-    local hooks? = find_transfer_hooks(record_type, "protobuf")
+    const hooks? = find_transfer_hooks(record_type, "protobuf")
     if hooks ~= nil then
       raise "protobuf: " .. path .. ": " .. record_type.name .. " has transfer hooks"
     end
     self.nominals[record_type.name] = PortableNominal(resolved)
     names[#names + 1] = record_type.name
     for index = 1, #record_type.fields do
-      local field = record_type.fields[index]
+      const field = record_type.fields[index]
       self:walk(field.type, path_member(path, field.name), names)
     end
   when is_union(union_type) then
@@ -227,9 +227,9 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string,
     self.nominals[union_type.name] = PortableNominal(resolved)
     names[#names + 1] = union_type.name
     for index = 1, #union_type.variants do
-      local variant = union_type.variants[index]
+      const variant = union_type.variants[index]
       for part = 1, #variant.parts do
-        local member = variant.parts[part]
+        const member = variant.parts[part]
         self:walk(member.type, path_member(path, member.name), names)
       end
     end
@@ -249,7 +249,7 @@ local function PortableCodec:build_description(names: {string},
     positions = {}
     for index = 1, #text do positions[text[index]] = false end
   end
-  local output = string.writer()
+  const output = string.writer()
   defer output:close()
   output:write('{"fields":[')
   for index = 1, #self.fields do
@@ -261,7 +261,7 @@ local function PortableCodec:build_description(names: {string},
   output:write('],"nominals":{')
   for index = 1, #names do
     if index > 1 then output:write(',') end
-    local name = names[index]
+    const name = names[index]
     portable_quoted(output, name)
     output:write(':{"module":')
     portable_quoted(output, portable_module(name))
@@ -270,7 +270,7 @@ local function PortableCodec:build_description(names: {string},
       output:write(',"record":[')
       for field = 1, #record_type.fields do
         if field > 1 then output:write(',') end
-        local member = record_type.fields[field]
+        const member = record_type.fields[field]
         output:write('[')
         portable_quoted(output, member.name)
         output:write(',')
@@ -285,13 +285,13 @@ local function PortableCodec:build_description(names: {string},
       output:write(',"union":[')
       for variant = 1, #union_type.variants do
         if variant > 1 then output:write(',') end
-        local arm = union_type.variants[variant]
+        const arm = union_type.variants[variant]
         output:write('[')
         portable_quoted(output, arm.name)
         output:write(',[')
         for part = 1, #arm.parts do
           if part > 1 then output:write(',') end
-          local member = arm.parts[part]
+          const member = arm.parts[part]
           output:write('[')
           portable_quoted(output, member.name)
           output:write(',')
@@ -326,15 +326,15 @@ end
 -- @usage standard-library-protobuf.md#portable-codecs
 function portable(fields: const {reflect.Type},
     dynamic: const {reflect.Type}?, text: const {string}?): PortableCodec
-  local codec = PortableCodec{fields = fields, nominals = {}, description = ""}
-  local names: {string} = {}
+  const codec = PortableCodec{fields = fields, nominals = {}, description = ""}
+  const names: {string} = {}
   for index = 1, #fields do
     codec:walk(fields[index], path_index("$", index), names)
   end
   if dynamic ~= nil then
     for index = 1, #dynamic do
-      local path = path_index(path_member("$", "dynamic"), index)
-      local descriptor = portable_resolve(dynamic[index], path)
+      const path = path_index(path_member("$", "dynamic"), index)
+      const descriptor = portable_resolve(dynamic[index], path)
       case descriptor
       when is_record() then
       when is_union() then
@@ -355,7 +355,7 @@ function PortableCodec:describe(): string
 end
 
 local function PortableCodec:nominal(name: string): PortableNominal
-  local entry? = self.nominals[name]
+  const entry? = self.nominals[name]
   if entry == nil then raise "protobuf: " .. name .. " is not in this portable codec" end
   return entry
 end
@@ -368,7 +368,7 @@ end
 
 local function PortableCodec:record_constructor(descriptor: reflect.RecordType):
     PortableConstructor
-  local constructor? = self:nominal(descriptor.name).constructor
+  const constructor? = self:nominal(descriptor.name).constructor
   if constructor == nil then
     raise "protobuf: " .. descriptor.name .. " has no public constructor over its public fields"
   end
@@ -377,12 +377,12 @@ end
 
 local function PortableConstructor:decode_record(message: Message,
     descriptor: reflect.RecordType, depth: integer): value
-  local arguments: {value} = {}
+  const arguments: {value} = {}
   for index = 1, #descriptor.fields do
-    local field = descriptor.fields[index]
+    const field = descriptor.fields[index]
     trace_member(field.name)
-    local decoded = decode_field(message, field_number(index), field.type, depth + 1)
-    local parameter? = self.positions[index]
+    const decoded = decode_field(message, field_number(index), field.type, depth + 1)
+    const parameter? = self.positions[index]
     if parameter ~= nil then arguments[parameter] = decoded end
     trace_leave()
   end
@@ -395,7 +395,7 @@ end
 -- @return Protocol Buffers bytes, with the same mapping as serialize_fields.
 -- @usage standard-library-protobuf.md#portable-codecs
 function PortableCodec:encode(...: value): string
-  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  const buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
   ffi.titan_protobuf_buf_init_heap(buf, 0)
   defer ffi.titan_protobuf_buf_free_heap(buf)
   serialize_fields_to_buffer_with_context(buf as foreign *void, self.fields, self, ...)

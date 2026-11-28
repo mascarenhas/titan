@@ -5,23 +5,23 @@ function test_coverage_parent_terminal_streams_and_close_noop(_context: test.Con
     test.skip("capability: isolated POSIX PTYs are unavailable; Windows ConPTY is a separate capability")
   end
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function () command.remove_tree(workspace) end)
-    local source = fs.read_file("spec/fixtures/stdlib/titan/os_parent_tty_app.titan")
+    const source = fs.read_file("spec/fixtures/stdlib/titan/os_parent_tty_app.titan")
     fs.write_file(workspace .. "/os_parent_tty_app.titan", source)
     local diagnostic, why, compiled = command.compile(workspace, "os_parent_tty_app")
     test.assert(why == "exit" and compiled == 0,
                 "could not compile parent-terminal fixture: " .. diagnostic)
-    local result_path = workspace .. "/parent-terminal.result"
-    local program = command.program(workspace, "os_parent_tty_app")
-    local input = "PTY_INPUT\nPTY_SECOND\n"
-    local output: owned char[] = foreign char.new_array(4096)
-    local result: owned *titan_cov_pty_child_result = foreign titan_cov_pty_child_result.new()
-    local status: integer = ffi.titan_cov_pty_run_child(
+    const result_path = workspace .. "/parent-terminal.result"
+    const program = command.program(workspace, "os_parent_tty_app")
+    const input = "PTY_INPUT\nPTY_SECOND\n"
+    const output: owned char[] = foreign char.new_array(4096)
+    const result: owned *titan_cov_pty_child_result = foreign titan_cov_pty_child_result.new()
+    const status: integer = ffi.titan_cov_pty_run_child(
       program, result_path, input, #input, output, 4096, result)
-    local captured = strings.sub(output as string, 1, result.output_length)
+    const captured = strings.sub(output as string, 1, result.output_length)
     test.assert(status == 0 and result.timed_out == 0 and result.exit_status == 0,
                 "parent-terminal fixture failed (" .. status .. "/" ..
                 (result.exit_status as integer) .. "): " .. captured)

@@ -1,12 +1,12 @@
 local function nil_payload_run(): boolean
-  local co = coroutine.create(function(arg: value): value
+  const co = coroutine.create(function(arg: value): value
     test.assert(arg == nil, "initial argument was not nil")
-    local got = coroutine.yield(nil, "tag")
+    const got = coroutine.yield(nil, "tag")
     test.assert(got == nil, "resume argument was not nil")
     return nil
   end, "tag")
-  local first = co:resume(nil)
-  local second = co:resume(nil)
+  const first = co:resume(nil)
+  const second = co:resume(nil)
   return first == nil and second == nil and co:status() == "dead"
 end
 
@@ -30,7 +30,7 @@ local function uncaught_body(_: value): value
 end
 
 local function uncaught(): value
-  local co = coroutine.create(uncaught_body, "tag")
+  const co = coroutine.create(uncaught_body, "tag")
   return co:resume(nil)
 end
 
@@ -47,9 +47,9 @@ local function catcher(_: value): value
 end
 
 local function inject(): string
-  local co = coroutine.create(catcher, "tag")
-  local first = co:resume(nil)
-  local second = co:error("oops")
+  const co = coroutine.create(catcher, "tag")
+  const first = co:resume(nil)
+  const second = co:error("oops")
   return (first as string) .. "," .. (second as string) ..
          "," .. co:status()
 end
@@ -62,9 +62,9 @@ function test_preserves_callback_traces_and_injects_suspended_error(
   catch
     caught = true
     test.assert(error == "boom", "coroutine changed the callback error")
-    local trace = traceback
+    const trace = traceback
     test.assert(#trace > 0, "coroutine callback omitted its traceback")
-    context:run("callback_symbolic_frames", function (_context: test.Context)
+    context:run("callback_symbolic_frames", function (_: test.Context)
       test.assert(support.contains(trace, "in coroutine.tests.fail"),
                   "missing coroutine callback frame\n" .. trace)
       test.assert(support.contains(trace, "in coroutine.tests.uncaught"),
@@ -74,9 +74,9 @@ function test_preserves_callback_traces_and_injects_suspended_error(
   test.assert(caught, "uncaught callback error was not raised")
 
   test.assert(inject() == "ready,caught:oops,dead")
-  local injected = injected_trace as string
+  const injected = injected_trace as string
   test.assert(#injected > 0, "injected error omitted its traceback")
-  context:run("injected_symbolic_frames", function (_context: test.Context)
+  context:run("injected_symbolic_frames", function (_: test.Context)
     test.assert(support.contains(injected, "in coroutine.tests.catcher"),
                 "missing injected yield frame\n" .. injected)
     test.assert(not support.contains(injected, "in coroutine.tests.inject"),
@@ -89,9 +89,9 @@ function test_preserves_callback_traces_and_injects_suspended_error(
   catch
     caught = true
     test.assert(error == "fresh", "fresh raise changed its error")
-    local trace = traceback
+    const trace = traceback
     test.assert(#trace > 0, "fresh error omitted its traceback")
-    context:run("fresh_symbolic_frames", function (_context: test.Context)
+    context:run("fresh_symbolic_frames", function (_: test.Context)
       test.assert(support.contains(trace, "in coroutine.tests.fresh_fail"),
                   "fresh trace missing fresh raise\n" .. trace)
       test.assert(not support.contains(trace, "in coroutine.tests.fail"),
@@ -115,10 +115,10 @@ end
 
 local function finally_run(): string
   finally_log = ""
-  local co = coroutine.create(finally_body, "tag")
-  local first = co:resume(nil)
-  local middle = finally_log
-  local second = co:resume(nil)
+  const co = coroutine.create(finally_body, "tag")
+  const first = co:resume(nil)
+  const middle = finally_log
+  const second = co:resume(nil)
   return (first as string) .. ":" .. middle .. ":" .. (second as string)
 end
 
@@ -132,13 +132,13 @@ local function dead_body(arg: value): value
 end
 
 local function after_dead(): string
-  local co = coroutine.create(dead_body, "tag")
-  local got = co:resume("done")
-  local status = co:status()
+  const co = coroutine.create(dead_body, "tag")
+  const got = co:resume("done")
+  const status = co:status()
   do
     co:resume("again")
   catch
-    local resume_error = support.caught_string(error)
+    const resume_error = support.caught_string(error)
     do
       co:error("oops")
     catch
@@ -151,7 +151,7 @@ end
 
 function test_rejects_resume_and_error_after_coroutine_is_dead(
     _context: test.Context)
-  local text = after_dead()
+  const text = after_dead()
   test.assert(text ==
               "done:dead:Coroutine not suspended:Coroutine not suspended",
               text)
@@ -163,7 +163,7 @@ local function missing_body(arg: value): value
 end
 
 local function missing(): value
-  local co = coroutine.create(missing_body)
+  const co = coroutine.create(missing_body)
   return co:resume(nil)
 end
 
@@ -173,7 +173,7 @@ function test_rejects_missing_effective_tags(_context: test.Context)
     missing()
   catch
     caught = true
-    local message = support.caught_string(error)
+    const message = support.caught_string(error)
     test.assert(support.contains(message, "must provide tag argument"), message)
   end
   test.assert(caught, "missing effective tag did not raise")
@@ -187,7 +187,7 @@ local function before_start_body(arg: value): value
 end
 
 local function before_start(): value
-  local co = coroutine.create(before_start_body, "tag")
+  const co = coroutine.create(before_start_body, "tag")
   return co:error("pre-start")
 end
 

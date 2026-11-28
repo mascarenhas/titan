@@ -12,7 +12,7 @@ local retained_shutdown_ticker: timer.Ticker? = nil
 local function assert_symbolic_frame(context: test.Context, trace: string,
                                       frame: string)
   test.assert(#trace > 0, "failure did not retain a traceback")
-  context:run("symbolic_frame", function (_context: test.Context)
+  context:run("symbolic_frame", function (_: test.Context)
     test.assert(common.contains(trace, frame), "traceback lost its Titan frame: " .. frame)
   end)
 end
@@ -23,7 +23,7 @@ function test_runtime_shutdown_closes_native_handles_but_not_files(
   runtime_test.run(function ()
     path = fs.tmpname()
     retained_shutdown_file = fs.open(path, "w")
-    local file = retained_shutdown_file as fs.File
+    const file = retained_shutdown_file as fs.File
     file:write("left-open-for-runtime-shutdown")
 
     -- A File owns a process descriptor rather than a loop handle. A Ticker is
@@ -31,7 +31,7 @@ function test_runtime_shutdown_closes_native_handles_but_not_files(
     retained_shutdown_ticker = timer.ticker(60000)
   end)
 
-  local file = retained_shutdown_file as fs.File
+  const file = retained_shutdown_file as fs.File
   test.assert(not file:is_closed(),
               "Runtime shutdown closed a retained File descriptor")
 
@@ -50,7 +50,7 @@ function test_runtime_shutdown_closes_native_handles_but_not_files(
               "rejected close changed the retained File state")
 
   runtime_test.run(function ()
-    local ticker = retained_shutdown_ticker as timer.Ticker
+    const ticker = retained_shutdown_ticker as timer.Ticker
     test.assert(not ticker:tick(),
                 "prior Runtime left its retained Ticker active")
     file:write("-second-runtime")
@@ -67,7 +67,7 @@ end
 local type BootstrapFixtureCase = function (string): ()
 
 local function compile_bootstrap_fixture(workspace: string, name: string)
-  local source = fs.read_file(
+  const source = fs.read_file(
     "spec/fixtures/stdlib/titan/uv_bootstrap/" .. name .. ".titan")
   fs.write_file(workspace .. "/" .. name .. ".titan", source)
   local output, why, code = command.compile(workspace, name)
@@ -79,7 +79,7 @@ end
 local function run_bootstrap_fixture(workspace: string,
                                      arguments: {string}):
     (string, string, integer)
-  local command_line: {string} = { command.program(workspace, arguments[1]) }
+  const command_line: {string} = { command.program(workspace, arguments[1]) }
   for index = 2, #arguments do
     command_line[#command_line + 1] = arguments[index]
   end
@@ -89,7 +89,7 @@ end
 local function with_bootstrap_fixture(include_sync: boolean,
                                       body: BootstrapFixtureCase)
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
@@ -135,7 +135,7 @@ end
 function test_default_bootstrap_isolates_failed_child(
     context: test.Context)
   with_bootstrap_fixture(false, function (workspace: string)
-    local marker = workspace .. "/isolated.marker"
+    const marker = workspace .. "/isolated.marker"
     local output, why, code = run_bootstrap_fixture(
       workspace, {"uv_bootstrap_app", "isolated", marker})
     context:log("BEGIN expected child-bootstrap Task diagnostics")
@@ -155,7 +155,7 @@ end
 function test_default_bootstrap_finishes_child_after_failed_main(
     context: test.Context)
   with_bootstrap_fixture(false, function (workspace: string)
-    local marker = workspace .. "/main-failure.marker"
+    const marker = workspace .. "/main-failure.marker"
     local output, why, code = run_bootstrap_fixture(
       workspace, {"uv_bootstrap_app", "main-failure", marker})
     context:log("BEGIN expected failed-main bootstrap diagnostics")
@@ -179,7 +179,7 @@ local function compile_stdio_fixture(workspace: string)
     fs.read_file("spec/fixtures/stdlib/native/uv_stdio_probe.h"))
   fs.write_file(workspace .. "/uv_stdio_app.titan",
     fs.read_file("spec/fixtures/stdlib/titan/uv_stdio_app.titan"))
-  local probe_object = command.fixture_object("uv_stdio_probe")
+  const probe_object = command.fixture_object("uv_stdio_probe")
   local output, why, status = command.compile(workspace, "uv_stdio_app", {"-X", probe_object})
   test.assert(why == "exit" and status == 0,
               "could not compile uv stdio fixture: " .. output)
@@ -187,7 +187,7 @@ end
 
 local function with_stdio_fixture(body: StdioFixtureCase)
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
@@ -214,7 +214,7 @@ local function assert_stdio_fixture(workspace: string, mode: string,
                                     expected_stderr: string,
                                     pipe_hint: string?,
                                     stderr_fragment: boolean?)
-  local result_path = fs.tmpname()
+  const result_path = fs.tmpname()
   defer fs.unlink(result_path)
   if ffi.titan_uv_test_stdio_setup(parent_mode) ~= 0 then
     raise ffi.titan_uv_test_stdio_failure() as string
@@ -226,7 +226,7 @@ local function assert_stdio_fixture(workspace: string, mode: string,
   local captured_stderr = ""
   do
     defer restore_stdio_probe()
-    local arguments = {command.program(workspace, "uv_stdio_app"), mode, result_path}
+    const arguments = {command.program(workspace, "uv_stdio_app"), mode, result_path}
     if pipe_hint ~= nil then
       status = command.system(arguments, nil, {["TITAN_STDIO_PIPE_FDS"] = pipe_hint})
     else
@@ -238,8 +238,8 @@ local function assert_stdio_fixture(workspace: string, mode: string,
     captured_stdout = ffi.titan_uv_test_stdio_output(1) as string
     captured_stderr = ffi.titan_uv_test_stdio_output(2) as string
   end
-  local report = fs.read_file(result_path)
-  local probe_failure = ffi.titan_uv_test_stdio_failure() as string
+  const report = fs.read_file(result_path)
+  const probe_failure = ffi.titan_uv_test_stdio_failure() as string
   local stderr_matches = captured_stderr == expected_stderr
   if stderr_fragment then
     stderr_matches = common.contains(captured_stderr, expected_stderr)
@@ -367,26 +367,26 @@ function test_parent_stdio_hints_preserve_known_descriptor_kinds(
     end)
     compile_stdio_fixture(workspace)
   end)
-  context:run("pipe", function (_context: test.Context)
+  context:run("pipe", function (_: test.Context)
     runtime_test.run(function ()
       assert_stdio_fixture(workspace, "pipes", "parent-pipes-ok",
         ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
         "pipe-stdout", "pipe-stderr", "invalid")
     end)
   end)
-  context:run("tty", function (_context: test.Context)
+  context:run("tty", function (_: test.Context)
     runtime_test.run(function ()
       assert_stdio_fixture(workspace, "tty", "parent-tty-ok",
         ffi.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "", "1")
     end)
   end)
-  context:run("regular_file", function (_context: test.Context)
+  context:run("regular_file", function (_: test.Context)
     runtime_test.run(function ()
       assert_stdio_fixture(workspace, "file", "parent-file-ok",
         ffi.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "file-output", "", "1")
     end)
   end)
-  context:run("connected_tcp", function (_context: test.Context)
+  context:run("connected_tcp", function (_: test.Context)
     if ffi.titan_uv_test_stdio_mode_supported(ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL as integer) == 0 then
       test.skip("platform: connected TCP parent stdio is supported on Linux and macOS")
     end
@@ -396,20 +396,20 @@ function test_parent_stdio_hints_preserve_known_descriptor_kinds(
         "tcp-stdout", "tcp-stderr", "invalid")
     end)
   end)
-  local modes: {integer} = {
+  const modes: {integer} = {
     ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
     ffi.TITAN_UV_TEST_STDIO_TCP_LISTENER_STDOUT,
     ffi.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT,
     ffi.TITAN_UV_TEST_STDIO_INET_CONNECTED_DATAGRAM_STDOUT,
     ffi.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT,
   }
-  local names = {
+  const names = {
     "inet_stream", "inet_listener", "inet_datagram",
     "inet_connected_datagram", "unix_datagram",
   }
   for index = 1, #modes do
-    local mode = modes[index]
-    context:run(names[index], function (_context: test.Context)
+    const mode = modes[index]
+    context:run(names[index], function (_: test.Context)
       if ffi.titan_uv_test_stdio_mode_supported(mode) == 0 then
         test.skip("platform: Windows standard handles do not represent Unix socket descriptors")
       end
@@ -435,7 +435,7 @@ function test_parent_denied_unix_stdio_uses_only_valid_per_fd_pipe_hints(
     test.skip("platform: stdio metadata denial requires the Linux x86_64 or aarch64 seccomp fixture")
   end
   with_stdio_fixture(function (workspace: string)
-    local sockets = ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
+    const sockets = ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
     assert_stdio_fixture(workspace, "denied-pipes", "parent-pipes-ok",
       sockets, 7, "pipe-stdout", "pipe-stderr", "0,1,2")
     assert_stdio_fixture(workspace, "denied-pipes-access", "parent-pipes-ok",
@@ -448,7 +448,7 @@ function test_parent_denied_unix_stdio_uses_only_valid_per_fd_pipe_hints(
       sockets, 4, "", "pipe-stderr", "2")
     assert_stdio_fixture(workspace, "denied-reject", "parent-denied-rejected",
       sockets, 0, "", "")
-    local invalid_hints = {"0,2", "", "01", "1 ", "1,9", "1,,2", "1,", "10"}
+    const invalid_hints = {"0,2", "", "01", "1 ", "1,9", "1,,2", "1,", "10"}
     for index = 1, #invalid_hints do
       assert_stdio_fixture(workspace, "denied-reject", "parent-denied-rejected",
         sockets, 0, "", "", invalid_hints[index])
@@ -462,7 +462,7 @@ function test_parent_partial_metadata_denial_preserves_socket_contradictions(
     test.skip("platform: stdio metadata denial requires the Linux x86_64 or aarch64 seccomp fixture")
   end
   with_stdio_fixture(function (workspace: string)
-    local sockets = ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
+    const sockets = ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
     assert_stdio_fixture(workspace, "deny-name-stdout", "parent-stdout-ok",
       sockets, 2, "pipe-stdout", "", "1")
     assert_stdio_fixture(workspace, "deny-type-stdout", "parent-stdout-ok",

@@ -6,7 +6,7 @@ function test_coverage_parent_stdin_read_start_failure_retires_pipe_and_restores
     test.skip("platform: wrong-direction inherited pipe requires POSIX pipe descriptors")
   end
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function () command.remove_tree(workspace) end)
@@ -16,8 +16,8 @@ function test_coverage_parent_stdin_read_start_failure_retires_pipe_and_restores
       "os_read_failure_app", {"--no-uv-bootstrap"})
     test.assert(why == "exit" and compiled == 0,
                 "could not compile read startup child: " .. output)
-    local result_path = workspace .. "/read-start.result"
-    local status = command.system({
+    const result_path = workspace .. "/read-start.result"
+    const status = command.system({
       command.program(workspace, "os_read_failure_app"), result_path,
     }, workspace, nil, nil, "READ_START_INPUT_MARKER")
     test.assert(status == 0 and
@@ -32,7 +32,7 @@ function test_coverage_unknown_signal_exit_keeps_native_number_and_sticky_result
     test.skip("platform: unknown terminating signal requires POSIX SIGALRM")
   end
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function () command.remove_tree(workspace) end)
@@ -42,11 +42,11 @@ function test_coverage_unknown_signal_exit_keeps_native_number_and_sticky_result
       "os_read_failure_app", {"--no-uv-bootstrap"})
     test.assert(why == "exit" and compiled == 0,
                 "could not compile unknown-signal child: " .. output)
-    local child = system.spawn(command.program(workspace, "os_read_failure_app"),
+    const child = system.spawn(command.program(workspace, "os_read_failure_app"),
                                {"unknown-signal"})
     defer cleanup_process(child)
-    local first = child:wait()
-    local second = child:wait()
+    const first = child:wait()
+    const second = child:wait()
     test.assert(first.signal == nil and
                 first.signal_number == coverage_read_failure_uv.SIGALRM and
                 first.signal_number > 0 and not child:is_running(),
@@ -68,7 +68,7 @@ function test_coverage_parent_stdout_write_start_failure_restores_output(
     test.skip("platform: wrong-direction inherited pipe requires POSIX pipe descriptors")
   end
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function () command.remove_tree(workspace) end)
@@ -78,7 +78,7 @@ function test_coverage_parent_stdout_write_start_failure_restores_output(
       "os_read_failure_app", {"--no-uv-bootstrap"})
     test.assert(why == "exit" and compiled == 0,
                 "could not compile write startup child: " .. output)
-    local result_path = workspace .. "/write-start.result"
+    const result_path = workspace .. "/write-start.result"
     local result, reason, status = command.capture({
       command.program(workspace, "os_read_failure_app"), "write-start", result_path,
     }, workspace)

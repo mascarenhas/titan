@@ -9,7 +9,7 @@ local function expect_ssl_failure(action: function (): (), operation: string,
   catch
     test.assert(error is ssl.Error,
                 "expected a nominal SSL failure: " .. common.error_text(error))
-    local failure = error as ssl.Error
+    const failure = error as ssl.Error
     test.assert(failure.operation == operation and failure.name == name,
                 "unexpected TLS failure " .. failure.name .. " from " ..
                   failure.operation)
@@ -24,7 +24,7 @@ local function expect_ssl_failure(action: function (): (), operation: string,
 end
 
 local function pem_file(context: test.Context, bytes: string): string
-  local path = support.temporary_path(context)
+  const path = support.temporary_path(context)
   fs.write_file(path, bytes)
   return path
 end
@@ -33,7 +33,7 @@ function test_ssl_coverage_decodes_certificate_blocks_strictly(
     context: test.Context)
   context:run("invalid_trust_der", function (child: test.Context)
     runtime_test.run(function ()
-      local invalid = pem_file(child,
+      const invalid = pem_file(child,
         "-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----\n")
       expect_ssl_failure(function ()
         ssl.connect("127.0.0.1", 40000, invalid)
@@ -42,7 +42,7 @@ function test_ssl_coverage_decodes_certificate_blocks_strictly(
   end)
   context:run("invalid_server_der", function (child: test.Context)
     runtime_test.run(function ()
-      local invalid = pem_file(child,
+      const invalid = pem_file(child,
         "-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----\n")
       expect_ssl_failure(function ()
         ssl.listen("127.0.0.1", 40000, invalid, support.PRIVATE_KEY)
@@ -83,7 +83,7 @@ function test_ssl_coverage_rejects_encrypted_and_malformed_private_keys(
     context: test.Context)
   context:run("invalid_der", function (child: test.Context)
     runtime_test.run(function ()
-      local invalid = pem_file(child,
+      const invalid = pem_file(child,
         "-----BEGIN PRIVATE KEY-----\nMAA=\n-----END PRIVATE KEY-----\n")
       expect_ssl_failure(function ()
         ssl.listen("127.0.0.1", 40000, support.CERTIFICATE, invalid)
@@ -101,7 +101,7 @@ function test_ssl_coverage_rejects_encrypted_and_malformed_private_keys(
   end)
   context:run("encrypted_pkcs8_label", function (child: test.Context)
     runtime_test.run(function ()
-      local encrypted = pem_file(child,
+      const encrypted = pem_file(child,
         "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAA==\n" ..
         "-----END ENCRYPTED PRIVATE KEY-----\n")
       expect_ssl_failure(function ()
@@ -142,22 +142,22 @@ end
 function test_ssl_coverage_trusted_chain_and_multiple_private_keys(
     context: test.Context)
   runtime_test.run(function ()
-    local trusted = fs.read_file(FIXTURES .. "trusted-ca.pem")
-    local chain = pem_file(context,
+    const trusted = fs.read_file(FIXTURES .. "trusted-ca.pem")
+    const chain = pem_file(context,
       fs.read_file(support.CERTIFICATE) .. "\n" .. trusted)
-    local key = fs.read_file(support.PRIVATE_KEY)
-    local keys = pem_file(context, key .. "\n" .. key)
+    const key = fs.read_file(support.PRIVATE_KEY)
+    const keys = pem_file(context, key .. "\n" .. key)
     local server, port = support.listen_available(45800, chain, keys)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local connection = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const connection = server:accept()
       defer connection:abort()
       connection:write("trusted chain\n")
       test.assert(connection:read_until("\n", true) == "multiple keys")
       return nil
     end)
     task_support.cleanup_task(peer, "TLS trusted-chain peer")
-    local connection = ssl.connect("localhost", port,
+    const connection = ssl.connect("localhost", port,
                                    FIXTURES .. "trusted-ca.pem")
     defer connection:abort()
     test.assert(connection:read_until("\n", true) == "trusted chain")
@@ -181,7 +181,7 @@ function test_ssl_coverage_listener_validation_and_closed_accept(
     common.assert_raises_contains(function ()
       ssl.listen("127.0.0.1", 65536, support.CERTIFICATE, support.PRIVATE_KEY)
     end, "listen port must be between 0 and 65535")
-    local server = support.listen_available(45900, support.CERTIFICATE,
+    const server = support.listen_available(45900, support.CERTIFICATE,
                                            support.PRIVATE_KEY)
     defer server:close()
     server:close()
@@ -196,15 +196,15 @@ function test_ssl_coverage_default_context_adoption_is_lazy(
   runtime_test.run(function ()
     local server, port = net_support.listen_available(46000)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:close()
       test.assert(accepted:read() == nil,
                   "lazy default-trust adoption sent a ClientHello")
       return nil
     end)
     task_support.cleanup_task(peer, "TLS default-context adoption peer")
-    local connection = ssl.client(net.connect("127.0.0.1", port), "localhost")
+    const connection = ssl.client(net.connect("127.0.0.1", port), "localhost")
     connection:abort()
     connection:abort()
     async.join(peer)
@@ -219,8 +219,8 @@ function test_ssl_coverage_scoped_ip_verification_keeps_certificate_identity(
     local server, port = support.listen_available(46100, support.CERTIFICATE,
                                                  support.PRIVATE_KEY)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:abort()
       accepted:write("verified IPv6 identity\n")
       test.assert(accepted:read_until("\n", true) == "scope removed only for X509")
@@ -229,7 +229,7 @@ function test_ssl_coverage_scoped_ip_verification_keeps_certificate_identity(
     task_support.cleanup_task(peer, "TLS scoped-IP peer")
     -- Adoption deliberately separates the already connected transport from
     -- its original endpoint identity. The fixture certificate includes ::1.
-    local connection = ssl.client(net.connect("127.0.0.1", port), "::1%1",
+    const connection = ssl.client(net.connect("127.0.0.1", port), "::1%1",
                                    support.TRUST_ROOT)
     defer connection:abort()
     connection:handshake()
@@ -246,8 +246,8 @@ function test_ssl_coverage_read_until_returns_unterminated_tail_once(
     local server, port = support.listen_available(46200, support.CERTIFICATE,
                                                  support.PRIVATE_KEY)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:abort()
       accepted:write("EN")
       accepted:shutdown()
@@ -255,7 +255,7 @@ function test_ssl_coverage_read_until_returns_unterminated_tail_once(
       return nil
     end)
     task_support.cleanup_task(peer, "TLS unterminated-tail peer")
-    local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+    const connection = ssl.connect("localhost", port, support.TRUST_ROOT)
     defer connection:abort()
     test.assert(connection:read_until("END") == "EN",
                 "authenticated EOF discarded the delimiter prefix")
@@ -272,8 +272,8 @@ function test_ssl_coverage_lazy_shutdown_completes_handshake_and_is_idempotent(
     local server, port = support.listen_available(46300, support.CERTIFICATE,
                                                  support.PRIVATE_KEY)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:abort()
       accepted:shutdown()
       test.assert(accepted:read() == nil)
@@ -282,7 +282,7 @@ function test_ssl_coverage_lazy_shutdown_completes_handshake_and_is_idempotent(
       return nil
     end)
     task_support.cleanup_task(peer, "TLS lazy-shutdown peer")
-    local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+    const connection = ssl.connect("localhost", port, support.TRUST_ROOT)
     defer connection:abort()
     test.assert(connection:read() == nil and connection:read() == nil,
                 "lazy shutdown did not become stable authenticated EOF")
@@ -303,14 +303,14 @@ function test_ssl_coverage_aborted_connection_rejects_every_operation(
   runtime_test.run(function ()
     local server, port = net_support.listen_available(46400)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:close()
       test.assert(accepted:read() == nil)
       return nil
     end)
     task_support.cleanup_task(peer, "TLS aborted-owner peer")
-    local connection = ssl.client(net.connect("127.0.0.1", port), "localhost",
+    const connection = ssl.client(net.connect("127.0.0.1", port), "localhost",
                                    support.TRUST_ROOT)
     connection:abort()
     expect_ssl_failure(function () connection:handshake() end,
@@ -336,21 +336,21 @@ function test_ssl_coverage_cancelled_handshake_retires_transport(
     local server, port = net_support.listen_available(46500)
     defer server:close()
     local bytes = 0
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:close()
       while true do
-        local chunk? = accepted:read()
+        const chunk? = accepted:read()
         if chunk == nil then break end
         bytes = bytes + #chunk
       end
       return nil
     end)
     task_support.cleanup_task(peer, "TLS cancelled-handshake peer")
-    local connection = ssl.client(net.connect("127.0.0.1", port), "localhost",
+    const connection = ssl.client(net.connect("127.0.0.1", port), "localhost",
                                    support.TRUST_ROOT)
     defer connection:abort()
-    local handshaker = async.run<|value, value|>(function (): value
+    const handshaker = async.run<|value, value|>(function (): value
       connection:handshake()
       return nil
     end)
@@ -375,8 +375,8 @@ function test_ssl_coverage_tcp_reset_is_truncated_tls_eof(
     local server, port = support.listen_available(46600, support.CERTIFICATE,
                                                  support.PRIVATE_KEY)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:abort()
       test.assert(accepted:read_until("\n", true) == "before reset")
       accepted:write("ready\n")
@@ -385,9 +385,9 @@ function test_ssl_coverage_tcp_reset_is_truncated_tls_eof(
       return nil
     end)
     task_support.cleanup_task(peer, "TLS TCP-reset peer")
-    local proxy = backpressure.new(port)
+    const proxy = backpressure.new(port)
     defer proxy:close()
-    local connection = ssl.connect("localhost", proxy.port, support.TRUST_ROOT)
+    const connection = ssl.connect("localhost", proxy.port, support.TRUST_ROOT)
     defer connection:abort()
     connection:write("before reset\n")
     test.assert(connection:read_until("\n", true) == "ready",
@@ -412,8 +412,8 @@ function test_ssl_coverage_rejected_sni_retires_adopted_transport(
   runtime_test.run(function ()
     local server, port = net_support.listen_available(46700)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:close()
       test.assert(accepted:read() == nil,
                   "rejected SNI leaked or used its adopted TCP transport")
@@ -424,7 +424,7 @@ function test_ssl_coverage_rejected_sni_retires_adopted_transport(
     -- Keep labels short: OpenSSL 4 rejects a 256-byte label during peer-name
     -- verification setup, before SNI configuration can reach that limit.
     -- Adoption has already transferred TCP ownership when configuration fails.
-    local host = string.rep("a.", 127) .. "aa"
+    const host = string.rep("a.", 127) .. "aa"
     expect_ssl_failure(function ()
       ssl.client(net.connect("127.0.0.1", port), host, support.TRUST_ROOT)
     end, "ssl.connect.sni", "OPENSSL")
@@ -440,8 +440,8 @@ function test_ssl_coverage_close_after_reset_preserves_transport_failure(
     local server, port = support.listen_available(46800, support.CERTIFICATE,
                                                  support.PRIVATE_KEY)
     defer server:close()
-    local peer = async.run<|value, value|>(function (): value
-      local accepted = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const accepted = server:accept()
       defer accepted:abort()
       test.assert(accepted:read_until("\n", true) == "before close")
       accepted:write("ready\n")
@@ -450,9 +450,9 @@ function test_ssl_coverage_close_after_reset_preserves_transport_failure(
       return nil
     end)
     task_support.cleanup_task(peer, "TLS reset-during-close peer")
-    local proxy = backpressure.new(port)
+    const proxy = backpressure.new(port)
     defer proxy:close()
-    local connection = ssl.connect("localhost", proxy.port, support.TRUST_ROOT)
+    const connection = ssl.connect("localhost", proxy.port, support.TRUST_ROOT)
     defer connection:abort()
     connection:write("before close\n")
     test.assert(connection:read_until("\n", true) == "ready")
@@ -472,7 +472,7 @@ function test_ssl_coverage_close_after_reset_preserves_transport_failure(
         test.assert(error is async.OperationError,
                     "TLS close replaced its transport failure: " ..
                       common.error_text(error))
-        local failure = error as async.OperationError
+        const failure = error as async.OperationError
         test.assert((failure.operation == "net.write" or
                      failure.operation == "net.shutdown") and
                     (failure.name == "ECONNRESET" or failure.name == "EPIPE" or

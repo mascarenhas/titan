@@ -65,7 +65,7 @@ local function expect_error(source: string, kind: string,
   test.assert(parsed == nil,
         "invalid URL returned both a result and an error: " .. source)
   test.assert(parse_error ~= nil, "invalid URL was accepted: " .. source)
-  local diagnostic = parse_error as url.Error
+  const diagnostic = parse_error as url.Error
   test.assert(diagnostic.kind == kind,
         "URL diagnostic kind was " .. diagnostic.kind ..
         ", expected " .. kind)
@@ -85,7 +85,7 @@ local function expect_request_error(scheme: string, authority: string,
   test.assert(parsed == nil,
         "invalid request URL parts returned both a result and an error")
   test.assert(parse_error ~= nil, "invalid request URL parts were accepted")
-  local diagnostic = parse_error as url.Error
+  const diagnostic = parse_error as url.Error
   test.assert(diagnostic.kind == kind,
         "request URL diagnostic kind was " .. diagnostic.kind ..
         ", expected " .. kind)
@@ -103,7 +103,7 @@ local function expect_rejected(source: string)
   test.assert(parsed == nil,
         "invalid URL returned both a result and an error: " .. source)
   test.assert(parse_error ~= nil, "invalid URL was accepted: " .. source)
-  local diagnostic = parse_error as url.Error
+  const diagnostic = parse_error as url.Error
   test.assert(#diagnostic.kind > 0, "URL diagnostic kind was empty")
   test.assert(diagnostic.position >= 1 and
         diagnostic.position <= #source + 1,
@@ -114,7 +114,7 @@ local function expect_rejected(source: string)
 end
 
 function test_url_normalization_and_errors(context: test.Context)
-  local full = parse_valid(
+  const full = parse_valid(
     "http://Example.COM:8080/path/to?q=one")
   test.assert(full.scheme == "http" and full.host == "example.com" and
         full.port == 8080 and full.path == "/path/to" and
@@ -123,7 +123,7 @@ function test_url_normalization_and_errors(context: test.Context)
         full:host_header() == full.authority,
         "full absolute HTTP URL was parsed incorrectly")
 
-  local secure = parse_valid("HtTpS://LOCALHOST")
+  const secure = parse_valid("HtTpS://LOCALHOST")
   test.assert(secure.scheme == "https" and secure.host == "localhost" and
         secure.port == 443 and secure.path == "/" and
         not secure.query and secure.target == "/" and
@@ -131,34 +131,34 @@ function test_url_normalization_and_errors(context: test.Context)
         secure:host_header() == secure.authority,
         "HTTPS scheme, localhost, or default path normalization failed")
 
-  local empty_query = parse_valid("http://localhost?")
+  const empty_query = parse_valid("http://localhost?")
   test.assert(empty_query.path == "/" and empty_query.query == "" and
         empty_query.target == "/?",
         "empty path or present empty query was lost")
 
-  local explicit_default = parse_valid("https://localhost:00443/")
+  const explicit_default = parse_valid("https://localhost:00443/")
   test.assert(explicit_default.port == 443 and
         explicit_default.authority == "localhost:443",
         "explicit default port was not retained and canonicalized")
 
-  local numeric_reg_name =
+  const numeric_reg_name =
     parse_valid("http://1.2.3.4.example/numeric-name")
   test.assert(numeric_reg_name.host == "1.2.3.4.example" and
         numeric_reg_name.path == "/numeric-name",
         "an IPv4-shaped registered-name prefix captured the host")
 
-  local ipv6 = parse_valid("http://[::1]:80")
+  const ipv6 = parse_valid("http://[::1]:80")
   test.assert(ipv6.host == "::1" and ipv6.port == 80 and
         ipv6.authority == "[::1]:80",
         "bracketed IPv6 URL was parsed incorrectly")
 
-  local future = parse_valid("http://[V4.2]:81/future")
+  const future = parse_valid("http://[V4.2]:81/future")
   test.assert(future.host == "v4.2" and future.port == 81 and
         future.path == "/future" and
         future.authority == "[v4.2]:81",
         "IPvFuture URL was parsed incorrectly")
 
-  local zoned = parse_valid("http://[::1%25eth0]/zone")
+  const zoned = parse_valid("http://[::1%25eth0]/zone")
   test.assert(zoned.host == "::1%eth0" and zoned.path == "/zone" and
         zoned.authority == "[::1%25eth0]",
         "IPv6 zone identifier was parsed incorrectly")
@@ -166,15 +166,15 @@ function test_url_normalization_and_errors(context: test.Context)
   -- These are the HTTP-authority forms of the valid address matrix in
   -- lpeg_patterns' spec/IPv6_spec.lua. The public URL value deliberately
   -- preserves compression and group spelling while lowercasing hex digits.
-  local valid_ipv6 = {
+  const valid_ipv6 = {
     "::", "::0.0.0.0", "::0:0.0.0.0", "0::0.0.0.0", "::1",
     "ff02::1", "2001:0db8:85a3:0042:1000:8a2e:0370:7334",
     "::FFFF:204.152.189.116",
   }
   for index = 1, #valid_ipv6 do
-    local literal = valid_ipv6[index]
-    local parsed = parse_valid("http://[" .. literal .. "]/address")
-    local normalized = string.lower(literal)
+    const literal = valid_ipv6[index]
+    const parsed = parse_valid("http://[" .. literal .. "]/address")
+    const normalized = string.lower(literal)
     test.assert(parsed.host == normalized and
           parsed.authority == "[" .. normalized .. "]",
           "valid IPv6 authority was not preserved: " .. literal)
@@ -182,7 +182,7 @@ function test_url_normalization_and_errors(context: test.Context)
 
   -- And the corresponding invalid upstream matrix, specialized to a
   -- bracketed HTTP authority. Every rejection has structured error fields.
-  local invalid_ipv6 = {
+  const invalid_ipv6 = {
     "", "not an ip", "::x", "x::", ":::", ":1::",
     "1234::5678::", "::FFFF:0.0.0", "::FFFF:0.999.0.0",
     "::01.02.03.04",
@@ -191,7 +191,7 @@ function test_url_normalization_and_errors(context: test.Context)
     expect_rejected("http://[" .. invalid_ipv6[index] .. "]/")
   end
 
-  local escaped = parse_valid(
+  const escaped = parse_valid(
     "https://l%4FcAlH%6fSt/under%73core%5fcharacter/" ..
     "%00/kept%2fslash?query%26with%5fescapes")
   test.assert(escaped.host == "localhost" and
@@ -201,7 +201,7 @@ function test_url_normalization_and_errors(context: test.Context)
           "/underscore_character/%00/kept%2Fslash?query%26with_escapes",
         "percent escapes were not normalized without ambiguity")
 
-  local request = parse_request_valid(
+  const request = parse_request_valid(
     "HtTpS", "Example.COM:00443",
     "/under%73core%5f?query=%7e")
   test.assert(request.scheme == "https" and request.host == "example.com" and
@@ -210,7 +210,7 @@ function test_url_normalization_and_errors(context: test.Context)
         request.target == "/underscore_?query=~",
         "request URL parts were not normalized by the absolute parser")
 
-  local maximum_port = parse_request_valid(
+  const maximum_port = parse_request_valid(
     "http", "example.com:65535", "/maximum-port")
   test.assert(maximum_port.port == 65535 and
         maximum_port.authority == "example.com:65535",
@@ -253,15 +253,15 @@ function test_url_normalization_and_errors(context: test.Context)
 end
 
 function test_websocket_url_schemes(_context: test.Context)
-  local plain = parse_valid("Ws://EXAMPLE.COM:00080/a%2fb?empty=")
+  const plain = parse_valid("Ws://EXAMPLE.COM:00080/a%2fb?empty=")
   test.assert(plain.scheme == "ws" and plain.host == "example.com" and
               plain.port == 80 and plain.authority == "example.com:80" and
               plain.target == "/a%2Fb?empty=", "WS normalization changed")
-  local secure = parse_valid("WSS://[::1]/")
+  const secure = parse_valid("WSS://[::1]/")
   test.assert(secure.scheme == "wss" and secure.port == 443 and
               secure.host == "::1" and secure.authority == "[::1]",
               "WSS default port or IPv6 authority changed")
-  local request = parse_request_valid("wss", "LOCALHOST:443", "/socket?")
+  const request = parse_request_valid("wss", "LOCALHOST:443", "/socket?")
   test.assert(request.scheme == "wss" and request.target == "/socket?" and
               request.query == "", "WebSocket component URL changed")
   expect_rejected("ws://user@host/")

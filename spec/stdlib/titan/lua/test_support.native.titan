@@ -17,17 +17,17 @@ local function make_source_fifo(path: string)
 end
 
 local record PackageSearchState
-  local package_table: {string: value}
-  local searchers: {integer: value}
-  local saved_path: string
-  local custom_index: integer
+  local const package_table: {string: value}
+  local const searchers: {integer: value}
+  local const saved_path: string
+  local const custom_index: integer
 end
 
 local function find_literal(subject: string, needle: string): integer?
   if #needle == 0 then return 1 end
   if #needle > #subject then return nil end
-  local bytes = subject as foreign const *unsigned char
-  local wanted = needle as foreign const *unsigned char
+  const bytes = subject as foreign const *unsigned char
+  const wanted = needle as foreign const *unsigned char
   local first = 0
   while first <= #subject - #needle do
     local equal = true
@@ -57,7 +57,7 @@ end
 
 local function temporary_file(_: test.Context,
                               suffix: string?): string
-  local temporary = fs.tmpname()
+  const temporary = fs.tmpname()
   local path = temporary
   if suffix then
     path = temporary .. suffix
@@ -70,7 +70,7 @@ local function temporary_file(_: test.Context,
 end
 
 local function lua_package_table(): {string: value}
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for native package lookup"
@@ -79,32 +79,32 @@ local function lua_package_table(): {string: value}
   if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "global 'package' is not a table"
   end
-  local raw_package: value = ffi.lua_totvalue(L, -1)
+  const raw_package: value = ffi.lua_totvalue(L, -1)
   return raw_package as {string: value}
 end
 
 local function install_miss_search(path: string,
                                    diagnostic: string): PackageSearchState
-  local package_table = lua_package_table()
-  local raw_path: value = package_table["path"]
+  const package_table = lua_package_table()
+  const raw_path: value = package_table["path"]
   if not (raw_path is string) then
     raise "'package.path' is not a string"
   end
-  local raw_searchers: value = package_table["searchers"]
+  const raw_searchers: value = package_table["searchers"]
   if not (raw_searchers is {integer: value}) then
     raise "'package.searchers' is not a table"
   end
-  local searchers = raw_searchers as {integer: value}
+  const searchers = raw_searchers as {integer: value}
   local index = 1
   while searchers[index] ~= nil do index = index + 1 end
 
-  local custom: PackageSearcher =
+  const custom: PackageSearcher =
     function (_: string): (value, value)
       return diagnostic, nil
     end
   package_table["path"] = path
   searchers[index] = custom
-  return PackageSearchState.new(
+  return PackageSearchState(
     package_table, searchers, raw_path as string, index)
 end
 
@@ -114,7 +114,7 @@ local function PackageSearchState:restore()
 end
 
 local function temporary_directory(_: test.Context): string
-  local root = fs.tmpname()
+  const root = fs.tmpname()
   fs.unlink(root)
   fs.mkdir(root)
   runtime_test.cleanup(function () fs.rmdir(root) end)
@@ -129,7 +129,7 @@ end
 
 local function package_loaded_table(
     package_table: {string: value}): {string: value}
-  local raw_loaded: value = package_table["loaded"]
+  const raw_loaded: value = package_table["loaded"]
   if not (raw_loaded is {string: value}) then
     raise "'package.loaded' is not a table"
   end
@@ -146,7 +146,7 @@ local function late_nominal_probe(packets: thread.Receiver<|value|>, name: strin
   when is_value() then
   else raise "nominal was registered before its packet arrived: " .. name
   end
-  local item = packets:receive()
+  const item = packets:receive()
   case reflect.NamedType(name):resolve()
   when is_record(descriptor) then
     if descriptor.name ~= name then raise "late registration resolved another record" end
@@ -186,13 +186,13 @@ local function late_held_probe(packets: thread.Receiver<|value|>, name: string):
   when is_value() then
   else raise "nominal was registered before its packet arrived: " .. name
   end
-  local packet = packets:receive()
+  const packet = packets:receive()
   local held: value = nil
   if packet is LateHolder then
-    local holder: LateHolder = packet
+    const holder: LateHolder = packet
     held = holder.item
   elseif packet is LateBox then
-    local box: LateBox = packet
+    const box: LateBox = packet
     held = box.item
   else raise "decoded packet is not a holder"
   end

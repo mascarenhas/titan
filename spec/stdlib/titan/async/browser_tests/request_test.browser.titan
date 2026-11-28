@@ -3,14 +3,14 @@
 
 function test_request_delivery_failure_reaches_the_awaiting_task(_: test.Context)
   runtime_test.run(function ()
-    local source = browser.binding("released_settlement")
+    const source = browser.binding("released_settlement")
     defer source:close()
     local request: browser.BrowserRequest?
     defer do
       if request ~= nil then request:close() end
     end
-    local before = macrotasks()
-    local result = async.await<|boolean, browser.BrowserError|>(function (
+    const before = macrotasks()
+    const result = async.await<|boolean, browser.BrowserError|>(function (
         resolve: function (boolean): (), reject: function (browser.BrowserError): (),
         _: function (value, string): ())
       request = source:start(function (...: Value): Value
@@ -50,7 +50,7 @@ function test_timer_sleep_delivery_failure_is_an_operation_error(_: test.Context
     catch
       caught = true
       test.assert(error is async.OperationError, "timer delivery failure lost OperationError")
-      local failure: async.OperationError = error
+      const failure: async.OperationError = error
       test.assert(failure.operation == "timer.sleep" and
         failure.message == "injected delivery allocation failure",
         "timer delivery failure lost its operation or message")
@@ -61,21 +61,21 @@ function test_timer_sleep_delivery_failure_is_an_operation_error(_: test.Context
 end
 
 local record RequestMarker
-  weight: integer
+  const weight: integer
 end
 local request_markers_collected = 0
 
 local function request_marker_finalize(candidate: value)
-  local marker: RequestMarker = candidate
+  const marker: RequestMarker = candidate
   request_markers_collected = request_markers_collected + marker.weight
 end
 
 local function start_undelivered_request(): browser.BrowserRequest
-  local source = browser.binding("delay")
+  const source = browser.binding("delay")
   defer source:close()
-  local done = RequestMarker { weight = 1 }
+  const done = RequestMarker { weight = 1 }
   gc.finalizable<|value|>(done, request_marker_finalize)
-  local failed = RequestMarker { weight = 2 }
+  const failed = RequestMarker { weight = 2 }
   gc.finalizable<|value|>(failed, request_marker_finalize)
   return source:start(function (...: Value): Value
     return Value.is_integer(done.weight)
@@ -87,7 +87,7 @@ end
 function test_undeliverable_request_drops_holds_inside_a_drive(_: test.Context)
   runtime_test.run(function ()
     request_markers_collected = 0
-    local request = start_undelivered_request()
+    const request = start_undelivered_request()
     defer request:close()
     ffi.scheduler_fail_deliveries(2)
     while ffi.scheduler_delivery_failures() > 0 do async.yield() end

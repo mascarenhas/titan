@@ -13,13 +13,13 @@ record ClientResponse
   headers: Headers
   url: string?
   redirected: boolean
-  local parser: Parser
-  local connection: io.ReaderWriterCloser
-  local abort: function (): ()
-  local client: Client?
-  local lease: ClientConnection?
-  local request_keep_alive: boolean
-  local body_length: integer?
+  local const parser: Parser
+  local const connection: io.ReaderWriterCloser
+  local const abort: function (): ()
+  local const client: Client?
+  local const lease: ClientConnection?
+  local const request_keep_alive: boolean
+  local const body_length: integer?
   local upgrade_pending: boolean
   local closed: boolean
   local connection_closed: boolean
@@ -29,18 +29,18 @@ end
 local function client_connection(parsed_url: url.Url, ca_file: string?,
                                    key: string): ClientConnection
   if parsed_url.scheme == "https" then
-    local secure = ssl.connect(parsed_url.host, parsed_url.port, ca_file)
+    const secure = ssl.connect(parsed_url.host, parsed_url.port, ca_file)
     local adopted = false
     defer if not adopted then secure:abort() end
-    local lease = ClientConnection(Transport(secure, secure:abort),
+    const lease = ClientConnection(Transport(secure, secure:abort),
       secure:has_pending_input, secure:add_input_listener, nil, true, key, 0)
     adopted = true
     return lease
   end
-  local plain = net.connect(parsed_url.host, parsed_url.port)
+  const plain = net.connect(parsed_url.host, parsed_url.port)
   local adopted = false
   defer if not adopted then plain:close() end
-  local lease = ClientConnection(Transport(plain, plain:close),
+  const lease = ClientConnection(Transport(plain, plain:close),
     plain:has_pending_input, plain:add_input_listener, nil, false, key, 0)
   adopted = true
   return lease
@@ -49,8 +49,8 @@ end
 local function client_request_headers(parsed_url: url.Url,
                                       supplied: Headers?,
                                       body: string?): Headers
-  local result = copy_headers(supplied)
-  local hosts = result:values("Host")
+  const result = copy_headers(supplied)
+  const hosts = result:values("Host")
   if #hosts > 1 then raise "HTTP request has more than one Host header" end
   if #hosts == 0 then
     result:add("Host", parsed_url:host_header())
@@ -66,7 +66,7 @@ local function client_request_headers(parsed_url: url.Url,
   end
   local body_length = 0
   if body then body_length = #body end
-  local lengths = result:values("Content-Length")
+  const lengths = result:values("Content-Length")
   if #lengths > 1 then
     raise "HTTP request has more than one Content-Length header"
   elseif #lengths == 1 then
@@ -105,7 +105,7 @@ local function response_body_length(parser: Parser): integer?
       parser.status_number == 205 or parser.status_number == 304 then
     return 0
   end
-  local length? = parser.parsed_headers:get("Content-Length")
+  const length? = parser.parsed_headers:get("Content-Length")
   if length == nil then return nil end
   return decimal_header(length, "HTTP Content-Length")
 catch
@@ -117,12 +117,12 @@ end
 local function stale_client_failure(failure: value): boolean
   if failure == "HTTP message ended before it was complete" then return true end
   if failure is async.OperationError then
-    local problem: async.OperationError = failure
+    const problem: async.OperationError = failure
     return problem.name == "EPIPE" or problem.name == "ECONNRESET" or
       problem.name == "ENOTCONN" or problem.name == "ECONNABORTED"
   end
   if failure is ssl.Error then
-    local problem: ssl.Error = failure
+    const problem: ssl.Error = failure
     return problem.name == "TLS_TRUNCATED_EOF"
   end
   return false
@@ -139,10 +139,10 @@ end
 -- RFC 3986 section 5.2.4. Each output entry is one path segment, including
 -- its leading slash, so removing a parent never reparses a growing string.
 local function remove_dot_segments(path: string): string
-  local segments: {string} = {}
+  const segments: {string} = {}
   local index = 1
   while index <= #path do
-    local remaining = #path - index + 1
+    const remaining = #path - index + 1
     if string.sub(path, index, index + 2) == "../" then
       index = index + 3
     elseif string.sub(path, index, index + 1) == "./" then
@@ -166,38 +166,38 @@ local function remove_dot_segments(path: string): string
     else
       local start = index
       if string.byte(path, index) == 47 then start = start + 1 end
-      local slash? = string.find(path, "/", start)
-      local last = (slash or (#path + 1)) - 1
+      const slash? = string.find(path, "/", start)
+      const last = (slash or (#path + 1)) - 1
       segments[#segments + 1] = string.sub(path, index, last)
       index = last + 1
     end
   end
-  local builder = string.writer()
+  const builder = string.writer()
   for index = 1, #segments do builder:write(segments[index]) end
   return builder:drain()
 end
 
 local function resolve_redirect(base: url.Url, location: string): url.Url
   local reference = trim_header_value(location)
-  local fragment? = string.find(reference, "#", 1)
+  const fragment? = string.find(reference, "#", 1)
   if fragment then reference = string.sub(reference, 1, fragment - 1) end
   local query: string? = nil
-  local question? = string.find(reference, "?", 1)
+  const question? = string.find(reference, "?", 1)
   if question then
     query = string.sub(reference, question + 1)
     reference = string.sub(reference, 1, question - 1)
   end
   local scheme: string? = nil
-  local scheme_match? = string.match(reference, "^[A-Za-z][A-Za-z0-9+.-]*:")
+  const scheme_match? = string.match(reference, "^[A-Za-z][A-Za-z0-9+.-]*:")
   if scheme_match then
-    local prefix = scheme_match:whole()
+    const prefix = scheme_match:whole()
     scheme = string.sub(prefix, 1, #prefix - 1)
     reference = string.sub(reference, #prefix + 1)
   end
   local authority = base.authority
   local path = reference
   if string.sub(reference, 1, 2) == "//" then
-    local slash? = string.find(reference, "/", 3)
+    const slash? = string.find(reference, "/", 3)
     authority = string.sub(reference, 3, (slash or (#reference + 1)) - 1)
     path = ""
     if slash then path = string.sub(reference, slash) end
@@ -208,12 +208,12 @@ local function resolve_redirect(base: url.Url, location: string): url.Url
     if query == nil then query = base.query end
   elseif string.sub(path, 1, 1) ~= "/" then
     -- A relative reference's first segment cannot contain a colon.
-    local slash? = string.find(path, "/", 1)
-    local first = string.sub(path, 1, (slash or (#path + 1)) - 1)
+    const slash? = string.find(path, "/", 1)
+    const first = string.sub(path, 1, (slash or (#path + 1)) - 1)
     if string.find(first, ":", 1) then
       raise request_policy_error("HTTP redirect Location is malformed")
     end
-    local directory = string.match(base.path, "^.*/"):whole()
+    const directory = string.match(base.path, "^.*/"):whole()
     path = directory .. path
   end
   local target = path
@@ -237,16 +237,16 @@ end
 local function Client:exchange(method: string, parsed_url: url.Url,
                                supplied_headers: Headers?, body: string?,
                                ca_file: string?): ClientResponse
-  local request_headers = client_request_headers(parsed_url, supplied_headers, body)
-  local keep_alive = not header_has_token(request_headers, "Connection", "close")
-  local builder = string.writer()
+  const request_headers = client_request_headers(parsed_url, supplied_headers, body)
+  const keep_alive = not header_has_token(request_headers, "Connection", "close")
+  const builder = string.writer()
   builder:write(method .. " " .. parsed_url.target .. " HTTP/1.1\r\n")
   builder:write(render_headers(request_headers))
   builder:write("\r\n")
   if body then builder:write(body) end
-  local output = builder:drain()
+  const output = builder:drain()
   self:bind()
-  local key = client_pool_key(parsed_url, request_headers, ca_file)
+  const key = client_pool_key(parsed_url, request_headers, ca_file)
   local lease? = self:acquire(key)
   local reused = lease ~= nil
   if lease == nil then lease = client_connection(parsed_url, ca_file, key) end
@@ -288,7 +288,7 @@ local function Client:exchange(method: string, parsed_url: url.Url,
     catch
       -- Idle input observed before the write permits a fresh dial for any
       -- method: no request was sent. A failed sent request has stricter rules.
-      local retry = attempt == 1 and reused and (idle_input or
+      const retry = attempt == 1 and reused and (idle_input or
         (body == nil and (method == "GET" or method == "HEAD") and
          (exact == nil or not exact.input_received) and
          stale_client_failure(error)))
@@ -316,16 +316,16 @@ function Client:request(method: string, source_url: string,
   async.checkpoint()
   validate_http_token(method, "HTTP method")
   local parsed_url = parse_url_or_raise(source_url)
-  local policy = options or RequestOptions()
+  const policy = options or RequestOptions()
   if is_no_cors(policy.mode) then validate_no_cors_method(method) end
   if is_only_if_cached(policy.cache) then
     raise request_policy_error("HTTP response not in cache (only-if-cached)")
   end
-  local working_headers = copy_headers(policy.headers)
+  const working_headers = copy_headers(policy.headers)
   local body? = policy.body
   local hops = 0
   while true do
-    local response = self:exchange(method, parsed_url, working_headers, body, policy.ca_file)
+    const response = self:exchange(method, parsed_url, working_headers, body, policy.ca_file)
     local returned = false
     defer if not returned then response:close() end
     response.redirected = hops > 0
@@ -340,7 +340,7 @@ function Client:request(method: string, source_url: string,
     when error() then
       raise request_policy_error("HTTP redirect disallowed by RedirectMode.error")
     when follow() then
-      local locations = response.headers:values("Location")
+      const locations = response.headers:values("Location")
       if #locations == 0 then
         returned = true
         return response
@@ -351,7 +351,7 @@ function Client:request(method: string, source_url: string,
       if hops == 20 then
         raise request_policy_error("HTTP redirect limit (20) exceeded")
       end
-      local next_url = resolve_redirect(parsed_url, locations[1])
+      const next_url = resolve_redirect(parsed_url, locations[1])
       if not same_http_origin(parsed_url, next_url) then
         working_headers:remove("Authorization")
         working_headers:remove("Proxy-Authorization")
@@ -359,7 +359,7 @@ function Client:request(method: string, source_url: string,
         working_headers:remove("Cookie2")
         working_headers:remove("Host")
       end
-      local normalized_method = lower_header_name(method)
+      const normalized_method = lower_header_name(method)
       if ((response.status == 301 or response.status == 302) and normalized_method == "post") or
           (response.status == 303 and normalized_method ~= "get" and normalized_method ~= "head") then
         method = "GET"
@@ -418,21 +418,21 @@ function request_upgrade_on(connection: io.ReaderWriterCloser,
                              protocol: string,
                              supplied_headers: Headers?): ClientResponse
   validate_upgrade_protocol(protocol)
-  local parsed_url = parse_url_or_raise(source_url)
-  local request_headers = client_request_headers(
+  const parsed_url = parse_url_or_raise(source_url)
+  const request_headers = client_request_headers(
     parsed_url, validate_upgrade_headers(supplied_headers), nil)
   request_headers:set("Connection", "Upgrade")
   request_headers:set("Upgrade", protocol)
-  local builder = string.writer()
+  const builder = string.writer()
   builder:write("GET " .. parsed_url.target .. " HTTP/1.1\r\n")
   builder:write(render_headers(request_headers))
   builder:write("\r\n")
-  local output = builder:drain()
+  const output = builder:drain()
   -- Argument validation precedes adoption. From this point the supplied
   -- transport is owned by HTTP through failure, rejection or one-shot take.
   local parser: Parser? = nil
   do
-    local exact = new_response_parser(connection, false)
+    const exact = new_response_parser(connection, false)
     parser = exact
     exact.allow_upgrade = true
     exact.header_limit = 65536
@@ -490,8 +490,8 @@ function ClientResponse:take_upgrade(): io.ReaderWriterCloser
   if self.closed or not self.upgrade_pending then
     raise "HTTP response has no pending upgrade"
   end
-  local stream = new_upgraded_stream(Transport(self.connection, self.abort), self.parser)
-  local view: io.ReaderWriterCloser = stream
+  const stream = new_upgraded_stream(Transport(self.connection, self.abort), self.parser)
+  const view: io.ReaderWriterCloser = stream
   self.parser.input_excess = ""
   close_parser(self.parser)
   self.upgrade_pending = false
@@ -531,7 +531,7 @@ function ClientResponse:read(): string?
     if self.closed then close_parser(self.parser) end
   end
   do
-    local chunk? = parser_read(self.parser)
+    const chunk? = parser_read(self.parser)
     if chunk ~= nil then return chunk end
     self.reading = false
     self:close()
@@ -561,7 +561,7 @@ function ClientResponse:read_until(delimiter: string,
     if self.closed then close_parser(self.parser) end
   end
   do
-    local result? = parser_read_until(self.parser, delimiter, chop)
+    const result? = parser_read_until(self.parser, delimiter, chop)
     if result ~= nil then return result end
     self.reading = false
     self:close()
@@ -580,14 +580,14 @@ function ClientResponse:close()
     if not self.connection_closed then self:retire() end
     return
   end
-  local started = uv.hrtime()
+  const started = uv.hrtime()
   self.closed = true
-  local client? = self.client
-  local lease? = self.lease
+  const client? = self.client
+  const lease? = self.lease
   if self.reading or client == nil or lease == nil or client.closed or
       not self.request_keep_alive or not self.parser.keep_alive or
       self.parser.transport_eof or self.upgrade_pending or async.is_closing() then
-    local graceful = not self.reading and not self.upgrade_pending and
+    const graceful = not self.reading and not self.upgrade_pending and
       self.parser.message_complete and not self.parser.transport_eof and
       #self.parser.input_excess == 0
     self:retire(graceful)

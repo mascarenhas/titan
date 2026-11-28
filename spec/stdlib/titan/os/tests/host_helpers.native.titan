@@ -4,7 +4,7 @@ function test_paths_and_process_identity(_context: test.Context)
   support.assert_operation_error(function()
     system.chdir(system.cwd() .. "\0suffix")
   end, "os.chdir")
-  local original = system.cwd()
+  const original = system.cwd()
   local target = system.tmpdir()
   if target == original then target = system.homedir() end
   if target == original then target = "/" end

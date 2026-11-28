@@ -8,11 +8,11 @@ local type PrintableFactory = function (string, string, boolean): (value)
 local type ConversionLog = function (): (string)
 
 local function load_print_helpers(): (PrintableFactory, ConversionLog)
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 3) ~= 0,
               "cannot reserve Lua stack for print fixtures")
-  local source = [[
+  const source = [[
 local conversions = {}
 return
   function(label, rendered, should_fail)
@@ -30,15 +30,15 @@ return
 ]]
   local status = ffi.luaL_loadstring(L, source)
   if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
   status = ffi.lua_pcallk(L, 0, 2, 0, 0, nil)
   if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
-  local factory_value: value = ffi.lua_totvalue(L, -2)
-  local log_value: value = ffi.lua_totvalue(L, -1)
+  const factory_value: value = ffi.lua_totvalue(L, -2)
+  const log_value: value = ffi.lua_totvalue(L, -1)
   return factory_value as PrintableFactory, log_value as ConversionLog
 end

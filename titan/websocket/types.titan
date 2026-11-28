@@ -48,16 +48,16 @@ end
 --- Validated copied client-opening options with finite positive limits and deadlines.
 -- @usage standard-library-websocket.md#public-interface
 record DialOptions
-  local headers: http.Headers
-  local ca_file: string?
-  local protocols: {string}
-  local limit: integer
-  local timeout: integer
+  local const headers: http.Headers
+  local const ca_file: string?
+  local const protocols: {string}
+  local const limit: integer
+  local const timeout: integer
 end
 
 local function positive(supplied: integer?, fallback: integer,
                         subject: string): integer
-  local result = supplied or fallback
+  const result = supplied or fallback
   if result <= 0 then raise subject .. " must be positive" end
   return result
 end
@@ -100,7 +100,7 @@ local const RESERVED_HEADERS: {string: boolean} = {
   ["sec-websocket-extensions"] = true,
 }
 local function ascii_lower(text: string): string
-  local result = string.gsub(text, "[A-Z]", function (letter: string): string
+  const result = string.gsub(text, "[A-Z]", function (letter: string): string
     return string.char(string.byte(letter, 1) + 32)
   end, nil)
   return result
@@ -112,10 +112,10 @@ local function trim(text: string): string
   return string.sub(text, first, last)
 end
 local function copy_protocols(supplied: ({string})?): {string}
-  local result: {string} = {}; local seen: {string: boolean} = {}
+  const result: {string} = {}; const seen: {string: boolean} = {}
   if supplied then
     for index = 1, #supplied do
-      local token = supplied[index]
+      const token = supplied[index]
       if not string.match(token, TOKEN_PATTERN) or seen[token] then
         raise "invalid or duplicate WebSocket subprotocol"
       end
@@ -125,11 +125,11 @@ local function copy_protocols(supplied: ({string})?): {string}
   return result
 end
 local function copy_dial_headers(supplied: http.Headers?): http.Headers
-  local result = http.headers(nil)
+  const result = http.headers(nil)
   if supplied then
-    local entries = supplied:all()
+    const entries = supplied:all()
     for index = 1, #entries do
-      local entry = entries[index]
+      const entry = entries[index]
       if RESERVED_HEADERS[ascii_lower(entry.name)] then
         raise "WebSocket dial headers contain a reserved handshake field"
       end

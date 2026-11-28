@@ -11,7 +11,7 @@
 local REGEX_PATTERN_LIMIT = 32757
 
 local record RegexCompileState
-  local rules: {peg.Rule}
+  local const rules: {peg.Rule}
   local next_rule: integer
 end
 
@@ -57,7 +57,7 @@ local function regex_projected_size(node: RegexNode):
     local size = 1
     local index = 1
     while index <= #children do
-      local child = children[index]
+      const child = children[index]
       local child_size, overflow = regex_projected_size(child)
       if overflow ~= 0 then return child_size, overflow end
       size = regex_saturating_add(
@@ -72,7 +72,7 @@ local function regex_projected_size(node: RegexNode):
     local size = 1
     local index = 1
     while index <= #children do
-      local child = children[index]
+      const child = children[index]
       local child_size, overflow = regex_projected_size(child)
       if overflow ~= 0 then return child_size, overflow end
       size = regex_saturating_add(
@@ -87,7 +87,7 @@ local function regex_projected_size(node: RegexNode):
     local child_size, overflow =
       regex_projected_size(child)
     if overflow ~= 0 then return child_size, overflow end
-    local size = regex_saturating_add(child_size, 8)
+    const size = regex_saturating_add(child_size, 8)
     if size > REGEX_PATTERN_LIMIT then
       return size, position
     end
@@ -96,7 +96,7 @@ local function regex_projected_size(node: RegexNode):
     local child_size, overflow =
       regex_projected_size(child)
     if overflow ~= 0 then return child_size, overflow end
-    local unit = regex_saturating_add(
+    const unit = regex_saturating_add(
       child_size, 4)
     local size = 0
     if maximum < 0 then
@@ -104,7 +104,7 @@ local function regex_projected_size(node: RegexNode):
         regex_saturating_multiply(
           unit, regex_saturating_add(minimum, 1)), 8)
     else
-      local optional = maximum - minimum
+      const optional = maximum - minimum
       local optional_overhead = REGEX_PATTERN_LIMIT + 1
       if optional <= REGEX_PATTERN_LIMIT then
         optional_overhead = optional + 1
@@ -154,12 +154,12 @@ local function regex_backreference_capture(
     first: value, group_after_value: value): value
   if first == _regex_group_sentinel then return false end
   if group_after_value == nil then return false end
-  local group_first = first as integer
-  local group_after = group_after_value as integer
-  local length = group_after - group_first
+  const group_first = first as integer
+  const group_after = group_after_value as integer
+  const length = group_after - group_first
   if length < 0 or length > #subject - position + 1 then return false end
   if length > 0 then
-    local bytes = subject as foreign const *char
+    const bytes = subject as foreign const *char
     if ffi.memcmp(
         bytes + position - 1, bytes + group_first - 1,
         length as foreign size_t) ~= 0 then
@@ -180,8 +180,8 @@ local function regex_group_result(
   if group_after_value == nil then
     raise "internal regular-expression group capture is invalid"
   end
-  local group_first = first as integer
-  local group_after = group_after_value as integer
+  const group_first = first as integer
+  const group_after = group_after_value as integer
   return Span(group_first, group_after - 1)
 end
 
@@ -225,14 +225,14 @@ local function regex_compile_node(node: RegexNode,
     -- one named capture. LPeg scopes captures nested inside a named group;
     -- sibling markers leave nested numbered groups visible to the final Cb
     -- projection and to later backreferences.
-    local start = peg.group(
+    const start = peg.group(
       peg.position(), regex_group_start_key(number))
-    local finish = peg.group(
+    const finish = peg.group(
       peg.sequence(
         peg.back_capture(regex_group_start_key(number)),
         peg.position()),
       regex_group_key(number))
-    local body = regex_compile_node(
+    const body = regex_compile_node(
       child, peg.sequence(finish, continuation), state)
     return peg.sequence(start, body)
   when repetition{minimum, maximum, atom = child} then
@@ -241,14 +241,14 @@ local function regex_compile_node(node: RegexNode,
       local shared, owns_scope = (function (state: RegexCompileState?):
           (RegexCompileState, boolean)
         if state then return state as RegexCompileState, false end
-        local rules: {peg.Rule} = {}
+        const rules: {peg.Rule} = {}
         return RegexCompileState(rules, 0), true
       end)(state)
       shared.next_rule = shared.next_rule + 1
-      local rule_name =
+      const rule_name =
         "\0titan.regex.repeat." .. shared.next_rule
-      local recursive = peg.variable(rule_name)
-      local body = peg.choice(
+      const recursive = peg.variable(rule_name)
+      const body = peg.choice(
         regex_compile_node(atom, recursive, shared), continuation)
       shared.rules[#shared.rules + 1] =
         peg.rule(rule_name, body)
@@ -258,7 +258,7 @@ local function regex_compile_node(node: RegexNode,
         result = recursive
       end
     else
-      local optional_count = maximum - minimum
+      const optional_count = maximum - minimum
       local index = 1
       while index <= optional_count do
         result = peg.choice(
@@ -273,7 +273,7 @@ local function regex_compile_node(node: RegexNode,
     end
     return result
   when backreference{number} then
-    local captured = peg.back_capture(
+    const captured = peg.back_capture(
       regex_group_key(number))
     return peg.sequence(
       peg.match_time(captured, regex_backreference_capture),
@@ -301,7 +301,7 @@ local function regex_build_pattern(parsed: ParsedRegex): peg.Pattern
   if parsed.anchored_end then
     tail = peg.sequence(peg.negative(peg.any()), tail)
   end
-  local body = regex_compile_node(parsed.root, tail, nil)
+  const body = regex_compile_node(parsed.root, tail, nil)
   local complete = peg.sequence(peg.position(), body)
 
   index = parsed.capture_count
@@ -317,9 +317,9 @@ local function regex_build_pattern(parsed: ParsedRegex): peg.Pattern
 end
 
 local function parse_regex(expression: string): ParsedRegex
-  local pieces: {RegexNode} = {}
-  local alternatives: {RegexNode} = {}
-  local root_frame = RegexParseFrame {
+  const pieces: {RegexNode} = {}
+  const alternatives: {RegexNode} = {}
+  const root_frame = RegexParseFrame {
     group_position = 0,
     group_index = 0,
     capturing = false,
@@ -328,10 +328,10 @@ local function parse_regex(expression: string): ParsedRegex
     pieces = pieces,
     alternatives = alternatives
   }
-  local frames: {RegexParseFrame} = {root_frame}
-  local closed: {integer: boolean} = {}
-  local nullable: {integer: boolean} = {}
-  local state = RegexParseState {
+  const frames: {RegexParseFrame} = {root_frame}
+  const closed: {integer: boolean} = {}
+  const nullable: {integer: boolean} = {}
+  const state = RegexParseState {
     source = expression,
     frames = frames,
     depth = 1,

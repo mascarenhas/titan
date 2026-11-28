@@ -3,7 +3,7 @@ local function caught_all_two(first: async.Task,
   do
     async.all_two(first, second)
   catch
-    local rejected = error as async.AllTwoError
+    const rejected = error as async.AllTwoError
     case rejected
     when first(status) then
       support.cancelled_payload(status)
@@ -21,7 +21,7 @@ local function caught_all_three(first: async.Task, second: async.Task,
   do
     async.all_three(first, second, third)
   catch
-    local rejected = error as async.AllThreeError
+    const rejected = error as async.AllThreeError
     case rejected
     when first(status) then
       support.cancelled_payload(status)
@@ -43,7 +43,7 @@ local function caught_all_four(first: async.Task, second: async.Task,
   do
     async.all_four(first, second, third, fourth)
   catch
-    local rejected = error as async.AllFourError
+    const rejected = error as async.AllFourError
     case rejected
     when first(status) then
       support.cancelled_payload(status)
@@ -68,7 +68,7 @@ local function caught_all_five(first: async.Task, second: async.Task,
   do
     async.all_five(first, second, third, fourth, fifth)
   catch
-    local rejected = error as async.AllFiveError
+    const rejected = error as async.AllFiveError
     case rejected
     when first(status) then
       support.cancelled_payload(status)
@@ -93,15 +93,15 @@ end
 function test_all_combinators_values_and_error_positions(context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local first = support.sleeping(3, "one")
+    const first = support.sleeping(3, "one")
     task_support.cleanup_task(first, "all first cleanup")
-    local second = support.successful(nil)
+    const second = support.successful(nil)
     task_support.cleanup_task(second, "all second cleanup")
-    local third = support.successful("three")
+    const third = support.successful("three")
     task_support.cleanup_task(third, "all third cleanup")
-    local fourth = support.successful("four")
+    const fourth = support.successful("four")
     task_support.cleanup_task(fourth, "all fourth cleanup")
-    local fifth = support.successful("five")
+    const fifth = support.successful("five")
     task_support.cleanup_task(fifth, "all fifth cleanup")
 
     local one, two = async.all_two(first, second)
@@ -117,14 +117,14 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
     test.assert(h == "one" and i == nil and j == "three" and
           k == "four" and l == "five", "all_five success values")
 
-    local live_duplicate = support.sleeping(2, "all-live-duplicate")
+    const live_duplicate = support.sleeping(2, "all-live-duplicate")
     task_support.cleanup_task(live_duplicate, "all duplicate cleanup")
     local duplicate_first, duplicate_second =
       async.all_two(live_duplicate, live_duplicate)
     test.assert(duplicate_first == "all-live-duplicate" and
           duplicate_second == "all-live-duplicate",
           "live all duplicate lost a positional result")
-    local live_three = support.sleeping(2, "all-live-three")
+    const live_three = support.sleeping(2, "all-live-three")
     task_support.cleanup_task(live_three, "all three cleanup")
     local three_first, three_second, three_third =
       async.all_three(live_three, live_three, live_three)
@@ -132,7 +132,7 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
           three_second == "all-live-three" and
           three_third == "all-live-three",
           "live all_three duplicate lost a positional result")
-    local live_four = support.sleeping(2, "all-live-four")
+    const live_four = support.sleeping(2, "all-live-four")
     task_support.cleanup_task(live_four, "all four cleanup")
     local four_first, four_second, four_third, four_fourth =
       async.all_four(live_four, live_four, live_four, live_four)
@@ -141,7 +141,7 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
           four_third == "all-live-four" and
           four_fourth == "all-live-four",
           "live all_four duplicate lost a positional result")
-    local live_five = support.sleeping(2, "all-live-five")
+    const live_five = support.sleeping(2, "all-live-five")
     task_support.cleanup_task(live_five, "all five cleanup")
     local five_first, five_second, five_third, five_fourth, five_fifth =
       async.all_five(live_five, live_five, live_five, live_five, live_five)
@@ -152,14 +152,14 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
           five_fifth == "all-live-five",
           "live all_five duplicate lost a positional result")
 
-    local rejected = support.cancelled("all-cancelled")
+    const rejected = support.cancelled("all-cancelled")
     task_support.cleanup_task(rejected, "all rejected cleanup")
     async.join(rejected)
     test.assert(caught_all_two(rejected, first) == "1",
           "AllTwoError first variant")
     test.assert(caught_all_two(first, rejected) == "2",
           "AllTwoError second variant")
-    local tied_rejection = support.cancelled("all-tied-cancellation")
+    const tied_rejection = support.cancelled("all-tied-cancellation")
     task_support.cleanup_task(tied_rejection, "all tied rejection cleanup")
     async.join(tied_rejection)
     test.assert(caught_all_two(rejected, tied_rejection) == "1",
@@ -190,15 +190,15 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
           "AllFiveError fifth variant")
 
     -- Exercise the live fifth listener rather than the initial status scan.
-    local live_all_peer = support.sleeping(60000, "all live peer returned")
+    const live_all_peer = support.sleeping(60000, "all live peer returned")
     task_support.cleanup_task(live_all_peer, "all live peer cleanup")
-    local live_all_failure = support.failing("all-live-logged-failure")
+    const live_all_failure = support.failing("all-live-logged-failure")
     task_support.cleanup_task(live_all_failure, "all live failure cleanup")
     do
       async.all_five(live_all_peer, live_all_peer, live_all_peer,
                      live_all_peer, live_all_failure)
     catch
-      local failure = error as async.AllFiveError
+      const failure = error as async.AllFiveError
       case failure
       when fifth(status) then
         local failed, details? = status:has_failed()
@@ -214,7 +214,7 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
       async.CancellationReason.simple("all live peer cleanup"))
     async.join(live_all_peer)
 
-    local pending = support.sleeping(60000, "late")
+    const pending = support.sleeping(60000, "late")
     task_support.cleanup_task(pending, "all cleanup")
     do
       async.all_two(rejected, pending)
@@ -227,13 +227,13 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
     pending:cancel(async.CancellationReason.simple("all cleanup"))
     async.join(pending)
 
-    local failed_task = support.failing("all-logged-failure")
+    const failed_task = support.failing("all-logged-failure")
     task_support.cleanup_task(failed_task, "all failure cleanup")
     async.join(failed_task)
     do
       async.all_two(first, failed_task)
     catch
-      local failure = error as async.AllTwoError
+      const failure = error as async.AllTwoError
       case failure
       when second(status) then
         local failed, details? = status:has_failed()
@@ -250,18 +250,18 @@ end
 function test_join_arities_and_complete_status_payloads(context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local timer_task = async.run<|value, value|>(function (): value
+    const timer_task = async.run<|value, value|>(function (): value
       timer.sleep(2)
       return "joined-timer"
     end)
     task_support.cleanup_task(timer_task, "join timer cleanup")
-    local nil_task = support.successful(nil)
+    const nil_task = support.successful(nil)
     task_support.cleanup_task(nil_task, "join nil cleanup")
-    local cancelled_task = support.cancelled("join-cancelled")
+    const cancelled_task = support.cancelled("join-cancelled")
     task_support.cleanup_task(cancelled_task, "join cancelled cleanup")
-    local failed_task = support.failing("join-logged-failure")
+    const failed_task = support.failing("join-logged-failure")
     task_support.cleanup_task(failed_task, "join failure cleanup")
-    local operation_task = async.run<|value, value|>(function (): value
+    const operation_task = async.run<|value, value|>(function (): value
       timer.sleep(-1)
       return nil
     end)
@@ -279,16 +279,16 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
     test.assert(support.cancelled_payload(cancelled_status) == "join-cancelled",
           "join lost cancellation reason")
 
-    local default_cancelled = support.sleeping(60000, "default cancellation returned")
+    const default_cancelled = support.sleeping(60000, "default cancellation returned")
     task_support.cleanup_task(default_cancelled, "default cancellation cleanup")
     default_cancelled:cancel(nil)
     test.assert(support.cancelled_payload(async.join(default_cancelled)) == "cancelled",
           "cancel(nil) did not preserve the default simple reason")
-    local marker: value = {}
-    local complex_cancelled = support.sleeping(60000, "complex cancellation returned")
+    const marker: value = {}
+    const complex_cancelled = support.sleeping(60000, "complex cancellation returned")
     task_support.cleanup_task(complex_cancelled, "complex cancellation cleanup")
     complex_cancelled:cancel(async.CancellationReason<|value|>.complex(marker))
-    local complex_status = async.join(complex_cancelled)
+    const complex_status = async.join(complex_cancelled)
     local has_complex, complex_reason? = complex_status:has_cancelled()
     test.assert(has_complex and complex_reason ~= nil,
           "complex cancellation did not produce cancelled status")
@@ -315,7 +315,7 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
           "OperationError Task did not fail")
     test.assert((operation_failure as async.Error).error is async.OperationError,
           "Error.error wrapped or replaced the OperationError")
-    local operation_error =
+    const operation_error =
       (operation_failure as async.Error).error as async.OperationError
     test.assert(operation_error.operation == "timer.sleep" and
           operation_error.code < 0 and #operation_error.name > 0 and
@@ -345,14 +345,14 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
           j12:has_finished() and j13:has_finished() and
           j14:has_finished(), "join_five returned active status")
 
-    local live_duplicate = support.sleeping(2, "join-live-duplicate")
+    const live_duplicate = support.sleeping(2, "join-live-duplicate")
     task_support.cleanup_task(live_duplicate, "join duplicate cleanup")
     local duplicate_first, duplicate_second =
       async.join_two(live_duplicate, live_duplicate)
     test.assert(support.success_payload(duplicate_first) == "join-live-duplicate" and
           support.success_payload(duplicate_second) == "join-live-duplicate",
           "live join duplicate lost a positional status")
-    local live_three = support.sleeping(2, "join-live-three")
+    const live_three = support.sleeping(2, "join-live-three")
     task_support.cleanup_task(live_three, "join three cleanup")
     local three_first, three_second, three_third =
       async.join_three(live_three, live_three, live_three)
@@ -360,7 +360,7 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
           support.success_payload(three_second) == "join-live-three" and
           support.success_payload(three_third) == "join-live-three",
           "live join_three duplicate lost a positional status")
-    local live_four = support.sleeping(2, "join-live-four")
+    const live_four = support.sleeping(2, "join-live-four")
     task_support.cleanup_task(live_four, "join four cleanup")
     local four_first, four_second, four_third, four_fourth =
       async.join_four(live_four, live_four, live_four, live_four)
@@ -369,7 +369,7 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
           support.success_payload(four_third) == "join-live-four" and
           support.success_payload(four_fourth) == "join-live-four",
           "live join_four duplicate lost a positional status")
-    local live_five = support.sleeping(2, "join-live-five")
+    const live_five = support.sleeping(2, "join-live-five")
     task_support.cleanup_task(live_five, "join five cleanup")
     local five_first, five_second, five_third, five_fourth, five_fifth =
       async.join_five(live_five, live_five, live_five,
@@ -386,27 +386,27 @@ end
 
 function test_generic_all_and_join_operand_positions(context: test.Context)
   runtime_test.run(function ()
-    local number = async.run<|integer, string|>(function (): integer
+    const number = async.run<|integer, string|>(function (): integer
       return 41
     end)
     task_support.cleanup_task(number, "generic all/join number cleanup")
-    local text = async.run<|string, integer|>(function (): string
+    const text = async.run<|string, integer|>(function (): string
       return "typed"
     end)
     task_support.cleanup_task(text, "generic all/join text cleanup")
-    local flag = async.run<|boolean, {string: integer}|>(function (): boolean
+    const flag = async.run<|boolean, {string: integer}|>(function (): boolean
       return true
     end)
     task_support.cleanup_task(flag, "generic all/join flag cleanup")
-    local nothing = async.run<|nil, boolean|>(function ()
+    const nothing = async.run<|nil, boolean|>(function ()
     end)
     task_support.cleanup_task(nothing, "generic all/join nil cleanup")
-    local decimal = async.run<|float, string|>(function (): float
+    const decimal = async.run<|float, string|>(function (): float
       return 2.5
     end)
     task_support.cleanup_task(decimal, "generic all/join float cleanup")
 
-    local number_status = async.join(number)
+    const number_status = async.join(number)
     local number_ok, number_value? = number_status:has_succeeded()
     test.assert(number_ok and (number_value as integer) + 1 == 42,
           "generic join lost its result type")

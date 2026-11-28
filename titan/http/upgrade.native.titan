@@ -6,13 +6,13 @@ local const upgraded_transfer_fields: const {reflect.Type} = {
 }
 
 local record Transport
-  connection: io.ReaderWriterCloser
-  abort: function (): ()
+  const connection: io.ReaderWriterCloser
+  const abort: function (): ()
 end
 
 local record ExchangeState
-  transport: Transport
-  parser: Parser
+  const transport: Transport
+  const parser: Parser
   active: boolean
   transferred: boolean
   output_started: boolean
@@ -22,7 +22,7 @@ local record ExchangeState
 end
 
 record UpgradedStream
-  local transport: Transport
+  local const transport: Transport
   local prefix: string
   local closed: boolean
   local reading: boolean
@@ -32,7 +32,7 @@ end
 local function UpgradedStream:read_chunk(): string?
   if self.closed then return nil end
   if #self.prefix > 0 then
-    local result = self.prefix
+    const result = self.prefix
     self.prefix = ""
     return result
   end
@@ -53,20 +53,20 @@ function UpgradedStream:read_until(delimiter: string, chop: boolean?): string?
   if self.reading then raise "HTTP upgraded stream already has a reader" end
   self.reading = true
   defer do self.reading = false end
-  local builder = string.writer()
+  const builder = string.writer()
   local tail = ""
   while true do
-    local chunk? = self:read_chunk()
+    const chunk? = self:read_chunk()
     if chunk == nil then
       builder:write(tail)
-      local result = builder:drain()
+      const result = builder:drain()
       if #result == 0 then return nil end
       return result
     end
-    local boundary = tail .. chunk
-    local first? = string.find(boundary, delimiter)
+    const boundary = tail .. chunk
+    const first? = string.find(boundary, delimiter)
     if first then
-      local last = first + #delimiter - 1
+      const last = first + #delimiter - 1
       local result_last = last
       if chop then result_last = first - 1 end
       builder:write(string.sub(boundary, 1, result_last))
@@ -75,7 +75,7 @@ function UpgradedStream:read_until(delimiter: string, chop: boolean?): string?
     end
     local keep = #delimiter - 1
     if keep > #boundary then keep = #boundary end
-    local committed = #boundary - keep
+    const committed = #boundary - keep
     builder:write(string.sub(boundary, 1, committed))
     tail = string.sub(boundary, committed + 1)
   end
@@ -123,10 +123,10 @@ end
 
 local function restore_transfer_transport(kind: integer, payload: string): Transport
   if kind == 1 then
-    local connection = net.Connection.from_transfer_payload(payload)
+    const connection = net.Connection.from_transfer_payload(payload)
     return Transport(connection, connection:close)
   elseif kind == 2 then
-    local connection = ssl.Connection.from_transfer_payload(payload)
+    const connection = ssl.Connection.from_transfer_payload(payload)
     return Transport(connection, connection:abort)
   end
   raise "invalid HTTP transport transfer payload"
@@ -139,13 +139,13 @@ function UpgradedStream:to_transfer_payload(): string
   if self.reading or self.writing ~= 0 then
     raise "HTTP upgraded stream has a pending operation"
   end
-  local prefix = self.prefix
+  const prefix = self.prefix
   local kind, transport_payload = transfer_transport(self.transport)
   self.closed = true
   self.prefix = ""
   local exported = false
   defer if not exported then discard_transfer_transport(kind, transport_payload) end
-  local payload = protobuf.serialize_fields(upgraded_transfer_fields, prefix, kind, transport_payload)
+  const payload = protobuf.serialize_fields(upgraded_transfer_fields, prefix, kind, transport_payload)
   exported = true
   return payload
 end
@@ -155,7 +155,7 @@ end
 function UpgradedStream.from_transfer_payload(payload: string): UpgradedStream
   local prefix: string, kind: integer, transport_payload: string =
     protobuf.deserialize_fields(payload, upgraded_transfer_fields)
-  local transport = restore_transfer_transport(kind, transport_payload)
+  const transport = restore_transfer_transport(kind, transport_payload)
   return UpgradedStream(transport, prefix, false, false, 0)
 end
 
@@ -163,15 +163,15 @@ end
 -- @return Native transport close status; the payload must not be adopted later.
 -- @usage standard-library-http.md#resource-handoff
 function UpgradedStream.discard_transfer_payload(payload: string): integer
-  local _prefix: string, kind: integer, transport_payload: string =
+  local _: string, kind: integer, transport_payload: string =
     protobuf.deserialize_fields(payload, upgraded_transfer_fields)
   return discard_transfer_transport(kind, transport_payload)
 end
 
 local record UpgradeOutcome<|A|>
-  succeeded: boolean
-  result: A?
-  failure: async.Error?
+  const succeeded: boolean
+  const result: A?
+  const failure: async.Error?
 end
 
 -- Implementation notes: doc/implementation/http-library.md#bounded-opening-and-protocol-takeover
@@ -181,7 +181,7 @@ end
 local function supervised_http_io<|A|>(abort: function (): (),
     operation: function (): (A)): A
   async.checkpoint()
-  local child = async.run<|UpgradeOutcome<|A|>, value|>(function (): UpgradeOutcome<|A|>
+  const child = async.run<|UpgradeOutcome<|A|>, value|>(function (): UpgradeOutcome<|A|>
     return UpgradeOutcome<|A|>(true, operation(), nil)
   catch
     return UpgradeOutcome<|A|>(false, nil, async.Error(error, traceback))
@@ -208,7 +208,7 @@ local function supervised_http_io<|A|>(abort: function (): (),
 end
 
 local function validate_upgrade_headers(supplied: Headers?): Headers
-  local result = copy_headers(supplied)
+  const result = copy_headers(supplied)
   if #result:values("Content-Length") > 0 or
       #result:values("Transfer-Encoding") > 0 then
     raise "HTTP upgrade must not include body framing"
@@ -217,11 +217,11 @@ local function validate_upgrade_headers(supplied: Headers?): Headers
 end
 
 local function Response:upgrade_headers(supplied: Headers?): Headers
-  local result = copy_headers(self.response_headers)
+  const result = copy_headers(self.response_headers)
   if supplied then
-    local entries = supplied:all()
+    const entries = supplied:all()
     for index = 1, #entries do
-      local entry = entries[index]
+      const entry = entries[index]
       result:add(entry.name, entry.contents)
     end
   end
@@ -247,21 +247,21 @@ function Response:upgrade(request_value: Request, protocol: string,
       not upgrade_header_has_protocol(request_value.headers, protocol) then
     raise "HTTP request does not offer the requested upgrade"
   end
-  local lengths = request_value.headers:values("Content-Length")
+  const lengths = request_value.headers:values("Content-Length")
   if #request_value.headers:values("Transfer-Encoding") > 0 or
       (#lengths > 0 and decimal_header(lengths[1], "HTTP Content-Length") ~= 0) then
     raise "HTTP upgrade request must not have a body"
   end
-  local selected = self:upgrade_headers(supplied_headers)
+  const selected = self:upgrade_headers(supplied_headers)
   selected:set("Connection", "Upgrade")
   selected:set("Upgrade", protocol)
-  local builder = string.writer()
+  const builder = string.writer()
   builder:write("HTTP/1.1 101 Switching Protocols\r\n")
   builder:write(render_headers(selected))
   builder:write("\r\n")
-  local output = builder:drain()
-  local stream = new_upgraded_stream(self.exchange.transport, self.exchange.parser)
-  local view: io.ReaderWriterCloser = stream
+  const output = builder:drain()
+  const stream = new_upgraded_stream(self.exchange.transport, self.exchange.parser)
+  const view: io.ReaderWriterCloser = stream
   self:write_upgrade_output(output)
   if not self.exchange.active then raise "HTTP response exchange has ended" end
   -- Fallible construction and all suspension precede this ownership commit.
@@ -322,11 +322,11 @@ function Response:reject_upgrade(request_value: Request, status: integer,
   if status < 400 or status > 599 then
     raise "HTTP upgrade rejection status must be between 400 and 599"
   end
-  local selected = self:upgrade_headers(supplied_headers)
+  const selected = self:upgrade_headers(supplied_headers)
   selected:set("Content-Length", "0")
   selected:set("Connection", "close")
-  local reason = default_reason(status)
-  local builder = string.writer()
+  const reason = default_reason(status)
+  const builder = string.writer()
   builder:write("HTTP/1.1 " .. status .. " " .. reason .. "\r\n")
   builder:write(render_headers(selected))
   builder:write("\r\n")

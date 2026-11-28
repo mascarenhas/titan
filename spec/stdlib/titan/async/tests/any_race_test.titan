@@ -81,15 +81,15 @@ end
 function test_any_combinators_all_arities_and_positions(context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local succeeded = support.successful("ok")
+    const succeeded = support.successful("ok")
     task_support.cleanup_task(succeeded, "any succeeded cleanup")
-    local nil_succeeded = support.successful(nil)
+    const nil_succeeded = support.successful(nil)
     task_support.cleanup_task(nil_succeeded, "any nil cleanup")
-    local first_cancelled = support.cancelled("first-cancel")
+    const first_cancelled = support.cancelled("first-cancel")
     task_support.cleanup_task(first_cancelled, "any first cancellation cleanup")
-    local second_cancelled = support.cancelled("second-cancel")
+    const second_cancelled = support.cancelled("second-cancel")
     task_support.cleanup_task(second_cancelled, "any second cancellation cleanup")
-    local logged_failure = support.failing("combinator-logged-failure")
+    const logged_failure = support.failing("combinator-logged-failure")
     task_support.cleanup_task(logged_failure, "any failure cleanup")
     async.join_five(succeeded, nil_succeeded, first_cancelled,
                     second_cancelled, logged_failure)
@@ -174,22 +174,22 @@ function test_any_combinators_all_arities_and_positions(context: test.Context)
     test.assert(any_two_tag(async.any_two(succeeded, succeeded)) == "1:ok",
           "any duplicate tie was not left-to-right")
 
-    local live_duplicate = support.sleeping(2, "live-duplicate")
+    const live_duplicate = support.sleeping(2, "live-duplicate")
     task_support.cleanup_task(live_duplicate, "any duplicate cleanup")
     test.assert(any_two_tag(async.any_two(live_duplicate,
                                     live_duplicate)) == "1:live-duplicate",
           "live any duplicate tie was not left-to-right")
-    local live_three = support.sleeping(2, "live-three")
+    const live_three = support.sleeping(2, "live-three")
     task_support.cleanup_task(live_three, "any three cleanup")
     test.assert(any_three_tag(async.any_three(live_three, live_three,
                                        live_three)) == "1:live-three",
           "live any_three duplicate tie was not left-to-right")
-    local live_four = support.sleeping(2, "live-four")
+    const live_four = support.sleeping(2, "live-four")
     task_support.cleanup_task(live_four, "any four cleanup")
     test.assert(any_four_tag(async.any_four(live_four, live_four, live_four,
                                      live_four)) == "1:live-four",
           "live any_four duplicate tie was not left-to-right")
-    local live_five = support.sleeping(2, "live-five")
+    const live_five = support.sleeping(2, "live-five")
     task_support.cleanup_task(live_five, "any five cleanup")
     test.assert(any_five_tag(async.any_five(live_five, live_five, live_five,
                                      live_five, live_five)) == "1:live-five",
@@ -198,15 +198,15 @@ function test_any_combinators_all_arities_and_positions(context: test.Context)
     -- Keep every operand live through the initial scan so the copied
     -- failed/cancelled listener arms, rather than only the scan arms, decide
     -- that no Task succeeded.
-    local live_none_failure = support.failing("any-live-logged-failure")
+    const live_none_failure = support.failing("any-live-logged-failure")
     task_support.cleanup_task(live_none_failure, "any live failure cleanup")
-    local live_none_second = support.cancelled("any-live-second")
+    const live_none_second = support.cancelled("any-live-second")
     task_support.cleanup_task(live_none_second, "any live second cleanup")
-    local live_none_third = support.cancelled("any-live-third")
+    const live_none_third = support.cancelled("any-live-third")
     task_support.cleanup_task(live_none_third, "any live third cleanup")
-    local live_none_fourth = support.cancelled("any-live-fourth")
+    const live_none_fourth = support.cancelled("any-live-fourth")
     task_support.cleanup_task(live_none_fourth, "any live fourth cleanup")
-    local live_none_fifth = support.cancelled("any-live-fifth")
+    const live_none_fifth = support.cancelled("any-live-fifth")
     task_support.cleanup_task(live_none_fifth, "any live fifth cleanup")
     test.assert(any_five_tag(async.any_five(
               live_none_failure, live_none_second, live_none_third,
@@ -219,15 +219,15 @@ end
 function test_race_combinators_all_arities_ties_and_statuses(context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local succeeded = support.successful("winner")
+    const succeeded = support.successful("winner")
     task_support.cleanup_task(succeeded, "race winner cleanup")
-    local pending = support.sleeping(60000, "late")
+    const pending = support.sleeping(60000, "late")
     task_support.cleanup_task(pending, "race cleanup")
     async.join(succeeded)
 
     test.assert(race_two_tag(async.race_two(succeeded, pending)) == "1:succeeded",
           "race_two first variant")
-    local race_two_second =
+    const race_two_second =
       race_two_tag(async.race_two(pending, succeeded))
     test.assert(race_two_second == "2:succeeded",
           "race_two second variant: " .. race_two_second)
@@ -275,29 +275,29 @@ function test_race_combinators_all_arities_ties_and_statuses(context: test.Conte
                                       succeeded)) == "1:succeeded",
           "race duplicate tie was not left-to-right")
 
-    local live_duplicate = support.sleeping(2, "race-live-duplicate")
+    const live_duplicate = support.sleeping(2, "race-live-duplicate")
     task_support.cleanup_task(live_duplicate, "race duplicate cleanup")
     test.assert(race_two_tag(async.race_two(live_duplicate,
                                       live_duplicate)) == "1:succeeded",
           "live race duplicate tie was not left-to-right")
-    local live_three = support.sleeping(2, "race-live-three")
+    const live_three = support.sleeping(2, "race-live-three")
     task_support.cleanup_task(live_three, "race three cleanup")
     test.assert(race_three_tag(async.race_three(live_three, live_three,
                                          live_three)) == "1:succeeded",
           "live race_three duplicate tie was not left-to-right")
-    local live_four = support.sleeping(2, "race-live-four")
+    const live_four = support.sleeping(2, "race-live-four")
     task_support.cleanup_task(live_four, "race four cleanup")
     test.assert(race_four_tag(async.race_four(live_four, live_four, live_four,
                                        live_four)) == "1:succeeded",
           "live race_four duplicate tie was not left-to-right")
-    local live_five = support.sleeping(2, "race-live-five")
+    const live_five = support.sleeping(2, "race-live-five")
     task_support.cleanup_task(live_five, "race five cleanup")
     test.assert(race_five_tag(async.race_five(live_five, live_five, live_five,
                                        live_five,
                                        live_five)) == "1:succeeded",
           "live race_five duplicate tie was not left-to-right")
 
-    local live_race_cancelled = support.cancelled("race-live-cancelled")
+    const live_race_cancelled = support.cancelled("race-live-cancelled")
     task_support.cleanup_task(live_race_cancelled, "race live cancellation cleanup")
     test.assert(race_five_tag(async.race_five(
               pending, pending, pending, pending,
@@ -306,9 +306,9 @@ function test_race_combinators_all_arities_ties_and_statuses(context: test.Conte
     test.assert(not pending:status():has_finished(),
           "race cancelled an unfinished loser")
 
-    local cancelled_task = support.cancelled("race-cancelled")
+    const cancelled_task = support.cancelled("race-cancelled")
     task_support.cleanup_task(cancelled_task, "race cancellation cleanup")
-    local failed_task = support.failing("race-logged-failure")
+    const failed_task = support.failing("race-logged-failure")
     task_support.cleanup_task(failed_task, "race failure cleanup")
     async.join_two(cancelled_task, failed_task)
     test.assert(race_two_tag(async.race_two(cancelled_task,
@@ -326,23 +326,23 @@ end
 
 function test_generic_any_and_race_operand_positions(context: test.Context)
   runtime_test.run(function ()
-    local number = async.run<|integer, string|>(function (): integer
+    const number = async.run<|integer, string|>(function (): integer
       return 41
     end)
     task_support.cleanup_task(number, "generic any/race number cleanup")
-    local text = async.run<|string, integer|>(function (): string
+    const text = async.run<|string, integer|>(function (): string
       return "typed"
     end)
     task_support.cleanup_task(text, "generic any/race text cleanup")
-    local flag = async.run<|boolean, {string: integer}|>(function (): boolean
+    const flag = async.run<|boolean, {string: integer}|>(function (): boolean
       return true
     end)
     task_support.cleanup_task(flag, "generic any/race flag cleanup")
-    local nothing = async.run<|nil, boolean|>(function ()
+    const nothing = async.run<|nil, boolean|>(function ()
       return
     end)
     task_support.cleanup_task(nothing, "generic any/race nil cleanup")
-    local decimal = async.run<|float, string|>(function (): float
+    const decimal = async.run<|float, string|>(function (): float
       return 2.5
     end)
     task_support.cleanup_task(decimal, "generic any/race float cleanup")

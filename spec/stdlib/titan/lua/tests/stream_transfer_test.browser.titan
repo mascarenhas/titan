@@ -1,12 +1,12 @@
 local stream_os = import "os"
 
 local function check_parent_stream_transfers(run: IndependentRun)
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
-  local input = async.TransferValue.from_value(stream_os.stdin)
-  local output = async.TransferValue.from_value(stream_os.stdout)
-  local errors = async.TransferValue.from_value(stream_os.stderr)
-  local returned: {async.TransferValue} = {run(state, [[
+  const input = async.TransferValue.from_value(stream_os.stdin)
+  const output = async.TransferValue.from_value(stream_os.stdout)
+  const errors = async.TransferValue.from_value(stream_os.stderr)
+  const returned: {async.TransferValue} = {run(state, [[
     local input, output, errors = ...
     local os = require('titan.os')
     assert(input == os.stdin and output == os.stdout and errors == os.stderr,
@@ -16,12 +16,12 @@ local function check_parent_stream_transfers(run: IndependentRun)
   ]], nil, input, output, errors)}
   state:close()
   test.assert(#returned == 3)
-  local restored_input: stream_os.InputStream = returned[1]:to_value()
-  local restored_output: stream_os.OutputStream = returned[2]:to_value()
-  local restored_errors: stream_os.OutputStream = returned[3]:to_value()
+  const restored_input: stream_os.InputStream = returned[1]:to_value()
+  const restored_output: stream_os.OutputStream = returned[2]:to_value()
+  const restored_errors: stream_os.OutputStream = returned[3]:to_value()
   test.assert(restored_input == stream_os.stdin and
     restored_output == stream_os.stdout and restored_errors == stream_os.stderr)
-  local packets = {input, output, errors}
+  const packets = {input, output, errors}
   for index = 1, #packets do
     case packets[index]
     when is_record_payload(module, name, payload) then

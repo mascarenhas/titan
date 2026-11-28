@@ -38,13 +38,13 @@ function test_request_options_cache_requires_explicit_same_origin(context: test.
 end
 
 function test_headers_copy_order_duplicates_and_case(_: test.Context)
-  local initial = {http.Header("X-One", "first"), http.Header("x-one", "second")}
-  local fields = http.headers(initial)
+  const initial = {http.Header("X-One", "first"), http.Header("x-one", "second")}
+  const fields = http.headers(initial)
   initial[1].contents = "changed"
   test.assert(fields:get("X-ONE") == "first")
-  local values = fields:values("x-one")
+  const values = fields:values("x-one")
   test.assert(#values == 2 and values[1] == "first" and values[2] == "second")
-  local entries = fields:all()
+  const entries = fields:all()
   entries[1].contents = "changed again"
   test.assert(fields:get("x-one") == "first")
   fields:set("X-One", "replacement")
@@ -54,7 +54,7 @@ function test_headers_copy_order_duplicates_and_case(_: test.Context)
 end
 
 function test_headers_validate_names_and_values(_: test.Context)
-  local fields = http.headers()
+  const fields = http.headers()
   assert_options_error(function () fields:add("", "ok") end, "HTTP header name must not be empty")
   assert_options_error(function () fields:add("bad name", "ok") end, "HTTP header name contains an invalid byte")
   assert_options_error(function () fields:add("X-Valid", "bad\r\nvalue") end, "HTTP header value contains a forbidden byte")
@@ -85,7 +85,7 @@ function test_request_header_framing_errors_precede_transport(_: test.Context)
     for _, name in iteration.ipairs({"Host", "Content-Length"}) do
       local contents = "0"
       if name == "Host" then contents = "127.0.0.1:1" end
-      local headers = http.headers({http.Header(name, contents), http.Header(string.lower(name), contents)})
+      const headers = http.headers({http.Header(name, contents), http.Header(string.lower(name), contents)})
       assert_options_error(function ()
         http.get("http://127.0.0.1:1", http.RequestOptions {headers = headers})
       end, "HTTP request has more than one " .. name .. " header")
@@ -95,7 +95,7 @@ function test_request_header_framing_errors_precede_transport(_: test.Context)
       {"1.5", "must contain only decimal digits"},
       {"18446744073709551616", "is too large"},
     }) do
-      local headers = http.headers({http.Header("Content-Length", row[1])})
+      const headers = http.headers({http.Header("Content-Length", row[1])})
       assert_options_error(function ()
         http.get("http://127.0.0.1:1", http.RequestOptions {headers = headers})
       end, "HTTP Content-Length " .. row[2])
@@ -105,7 +105,7 @@ end
 
 function test_client_close_rejects_requests(_: test.Context)
   runtime_test.run(function ()
-    local client = http.Client()
+    const client = http.Client()
     client:close()
     client:close()
     assert_options_error(function () client:get("http://127.0.0.1:1") end,
@@ -127,17 +127,17 @@ end
 -- fetch; both targets accept every mode when options are built.
 function test_request_options_accept_every_credentials_mode(context: test.Context)
   context:run("omit", function (_: test.Context)
-    local credentials = http.CredentialsMode.omit()
+    const credentials = http.CredentialsMode.omit()
     test.assert(credentials_mode_name(credentials) == "omit", "omit() built another mode")
     http.RequestOptions {credentials = credentials}
   end)
   context:run("same_origin", function (_: test.Context)
-    local credentials = http.CredentialsMode.same_origin()
+    const credentials = http.CredentialsMode.same_origin()
     test.assert(credentials_mode_name(credentials) == "same_origin", "same_origin() built another mode")
     http.RequestOptions {credentials = credentials, mode = http.RequestMode.same_origin()}
   end)
   context:run("include", function (_: test.Context)
-    local credentials = http.CredentialsMode.include()
+    const credentials = http.CredentialsMode.include()
     test.assert(credentials_mode_name(credentials) == "include", "include() built another mode")
     http.RequestOptions {credentials = credentials, mode = http.RequestMode.cors()}
   end)

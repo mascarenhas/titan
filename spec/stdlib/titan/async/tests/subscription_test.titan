@@ -1,12 +1,12 @@
 -- Subscription storage, ownership, terminal state, and waiter identity.
 local record SubscriptionResource
-  id: integer
+  const id: integer
   closed: boolean
 end
 
 local record SubscriptionWatchEvent
-  registration: integer
-  value: string
+  const registration: integer
+  const value: string
 end
 
 local function subscription_actions(): async.SubscriptionActions<|value|>
@@ -69,8 +69,8 @@ end
 local function subscription_inline_fifo()
   local registration_finished = false
   local stop_count, close_count = 0, 0
-  local stream = async.BufferedSubscription<|value, value|>(function (publish: function (value): (boolean), fail: function (value): (boolean), _: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = async.SubscriptionActions<|value|>(
+  const stream = async.BufferedSubscription<|value, value|>(function (publish: function (value): (boolean), fail: function (value): (boolean), _: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = async.SubscriptionActions<|value|>(
       function () stop_count = stop_count + 1 end,
       function (drain: function (): (async.SubscriptionBatch<|value|>))
         close_count = close_count + 1
@@ -88,7 +88,7 @@ local function subscription_inline_fifo()
   defer stream:close()
   test.assert(registration_finished, "constructor returned during registration")
   test.assert(subscription_item(stream:next()) == nil, "nil item lost")
-  local rest = subscription_batch(stream:next_batch())
+  const rest = subscription_batch(stream:next_batch())
   test.assert(rest.count == 2 and rest:get(1) == false and rest:get(2) == 3, "mixed batch lost FIFO or false")
   subscription_terminal_error(stream:next(), false)
   subscription_terminal_error(stream:next(), false)
@@ -102,8 +102,8 @@ end
 local function subscription_coalescing_and_nil_error()
   local publish: (function (value): (boolean))? = nil
   local fail: (function (value): (boolean))? = nil
-  local latest = async.CoalescingSubscription<|value, value|>(function (emit: function (value): (boolean), reject: function (value): (boolean), _: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = subscription_actions()
+  const latest = async.CoalescingSubscription<|value, value|>(function (emit: function (value): (boolean), reject: function (value): (boolean), _: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = subscription_actions()
     publish = emit
     fail = reject
     emit(1)
@@ -125,20 +125,20 @@ end
 local function subscription_one_fifo()
   local publish: (function (value): (boolean))? = nil
   local finish: (function (): (boolean))? = nil
-  local stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), end_stream: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = subscription_actions()
+  const stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), end_stream: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = subscription_actions()
     publish, finish = emit, end_stream
     for n = 1, 5 do emit(n) end
     return result
   end)
   defer stream:close()
   test.assert(subscription_item(stream:next()) == 1, "first item")
-  local first_batch = subscription_batch(stream:next_batch())
+  const first_batch = subscription_batch(stream:next_batch())
   test.assert(first_batch.count == 4, "first batch count")
   for n = 1, 4 do test.assert(first_batch:get(n) == n + 1, "first batch FIFO") end
   publish(6); publish(nil); publish(8)
   test.assert(subscription_item(stream:next()) == 6, "single after batch")
-  local second_batch = subscription_batch(stream:next_batch())
+  const second_batch = subscription_batch(stream:next_batch())
   test.assert(second_batch.count == 2 and second_batch:get(1) == nil and second_batch:get(2) == 8, "second batch FIFO")
   test.assert(first_batch:get(1) == 2 and first_batch:get(4) == 5, "detached batch mutated")
   test.assert(finish(), "finish failed")
@@ -150,8 +150,8 @@ end
 local function subscription_stop_drains_before_end()
   local stop_count = 0
   local publish: (function (value): (boolean))? = nil
-  local stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = async.SubscriptionActions<|value|>(function () stop_count = stop_count + 1 end,
+  const stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = async.SubscriptionActions<|value|>(function () stop_count = stop_count + 1 end,
       function (_: function (): (async.SubscriptionBatch<|value|>)) end)
     publish = emit
     emit(false)
@@ -168,21 +168,21 @@ end
 
 
 local function subscription_close_drains_resources()
-  local resources = {SubscriptionResource(1, false), SubscriptionResource(2, false), SubscriptionResource(3, false)}
+  const resources = {SubscriptionResource(1, false), SubscriptionResource(2, false), SubscriptionResource(3, false)}
   local cleanup_started, cleanup_finished, cleanup_released = false, false, false
   local cleanup_resolver: (function (value): ())? = nil
   local close_count, disposed = 0, 0
-  local stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = async.SubscriptionActions<|value|>(function () end,
+  const stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = async.SubscriptionActions<|value|>(function () end,
       function (drain: function (): (async.SubscriptionBatch<|value|>))
         close_count = close_count + 1
         cleanup_started = true
         async.await_cleanup<|value, value|>(function (resolve: function (value): (), _: function (value): (), _fatal: function (value, string): ())
           cleanup_resolver = resolve
         end)
-        local queued = drain()
+        const queued = drain()
         for n = 1, queued.count do
-          local resource = queued:get(n) as SubscriptionResource
+          const resource = queued:get(n) as SubscriptionResource
           test.assert(not resource.closed, "resource disposed twice")
           resource.closed = true
           disposed = disposed + 1
@@ -194,7 +194,7 @@ local function subscription_close_drains_resources()
     return result
   end)
   defer stream:close()
-  local closer = async.run<|value, value|>(function (): value stream:close(); return nil end)
+  const closer = async.run<|value, value|>(function (): value stream:close(); return nil end)
   defer do
     if cleanup_resolver and not cleanup_released then
       cleanup_released = true
@@ -221,8 +221,8 @@ end
 local function subscription_cancelled_cleanup()
   local cleanup_count, drained = 0, 0
   local returned_normally = false
-  local stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = async.SubscriptionActions<|value|>(function () end,
+  const stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = async.SubscriptionActions<|value|>(function () end,
       function (drain: function (): (async.SubscriptionBatch<|value|>))
         async.await_cleanup<|value, value|>(function (resolve: function (value): (), _: function (value): (), _fatal: function (value, string): ())
           cleanup_count = cleanup_count + 1
@@ -234,7 +234,7 @@ local function subscription_cancelled_cleanup()
     return result
   end)
   defer stream:close()
-  local reader = async.run<|value, value|>(function (): value
+  const reader = async.run<|value, value|>(function (): value
     async.running():cancel(async.CancellationReason<|value|>.simple("reader cancelled"))
     defer stream:close()
     stream:next()
@@ -251,20 +251,20 @@ end
 
 local function subscription_watcher_retirement_and_empty_wake()
   local publish: (function (value): (boolean))? = nil
-  local stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = subscription_actions(); publish = emit; return result
+  const stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = subscription_actions(); publish = emit; return result
   end)
   defer stream:close()
   publish(SubscriptionWatchEvent(1, "live"))
   test.assert(stream:drain_if(function (value: value): boolean return (value as SubscriptionWatchEvent).registration == 0 end) == nil,
     "live-only queue was detached")
   publish(SubscriptionWatchEvent(0, "retired"))
-  local pending? = stream:drain_if(function (value: value): boolean return (value as SubscriptionWatchEvent).registration == 0 end)
+  const pending? = stream:drain_if(function (value: value): boolean return (value as SubscriptionWatchEvent).registration == 0 end)
   test.assert(pending ~= nil and pending.count == 2, "retired event did not detach whole batch")
   test.assert((pending:get(1) as SubscriptionWatchEvent).value == "live" and (pending:get(2) as SubscriptionWatchEvent).value == "retired", "retirement drain reordered queue")
   test.assert(stream:drain_pending().count == 0, "conditional drain duplicated events")
   local empty_seen = false
-  local reader = async.run<|value, value|>(function (): value
+  const reader = async.run<|value, value|>(function (): value
     test.assert(subscription_batch(stream:next_batch()).count == 0, "empty notification did not wake batch poll")
     empty_seen = true
   test.assert(subscription_item(stream:next()) == 12, "watcher did not remain reusable")
@@ -285,8 +285,8 @@ end
 
 local function subscription_cleanup_after_stop_error()
   local cleaned = false
-  local stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = async.SubscriptionActions<|value|>(function () raise "stop failed" end,
+  const stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = async.SubscriptionActions<|value|>(function () raise "stop failed" end,
       function (drain: function (): (async.SubscriptionBatch<|value|>))
         test.assert(drain().count == 1, "stop failure lost queued item")
         cleaned = true
@@ -304,12 +304,12 @@ end
 
 
 local function subscription_cancelled_buffered_resource(use_batch: boolean)
-  local resource = SubscriptionResource(41, false)
+  const resource = SubscriptionResource(41, false)
   local drained, transferred = 0, false
-  local stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
-    local result = async.SubscriptionActions<|value|>(function () end,
+  const stream = async.BufferedSubscription<|value, value|>(function (emit: function (value): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|value|>
+    const result = async.SubscriptionActions<|value|>(function () end,
       function (drain: function (): (async.SubscriptionBatch<|value|>))
-        local queue = drain()
+        const queue = drain()
         drained = queue.count
         test.assert(queue.count == 1 and queue:get(1) == resource, "cancelled read transferred resource")
         test.assert(not resource.closed, "resource was already disposed")
@@ -319,7 +319,7 @@ local function subscription_cancelled_buffered_resource(use_batch: boolean)
     return result
   end)
   defer stream:close()
-  local reader = async.run<|value, value|>(function (): value
+  const reader = async.run<|value, value|>(function (): value
     defer stream:close()
     async.running():cancel(async.CancellationReason<|value|>.complex(false))
     if use_batch then stream:next_batch() else stream:next() end
@@ -336,9 +336,9 @@ end
 
 local function subscription_mixed_compaction()
   local emit: (function (integer): (boolean))? = nil
-  local stream = async.BufferedSubscription<|integer, value|>(function (publish: function (integer): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|integer|>
+  const stream = async.BufferedSubscription<|integer, value|>(function (publish: function (integer): (boolean), _: function (value): (boolean), _end: function (): (boolean)): async.SubscriptionActions<|integer|>
     emit = publish
-    local result = async.SubscriptionActions<|integer|>(function () end,
+    const result = async.SubscriptionActions<|integer|>(function () end,
       function (_: function (): (async.SubscriptionBatch<|integer|>)) end)
     for n = 1, 96 do test.assert(publish(n), "initial publish") end
     return result
@@ -398,7 +398,7 @@ local function subscription_replace_waiter(has_waiter: function (): (boolean),
     next_item: function (): (integer), publish: function (integer): (boolean))
   local old_unwound = false
   local old_delivered = false
-  local old = async.run<|nil, value|>(function (): nil
+  const old = async.run<|nil, value|>(function (): nil
     defer old_unwound = true
     next_item()
     old_delivered = true
@@ -411,7 +411,7 @@ local function subscription_replace_waiter(has_waiter: function (): (boolean),
   test.assert(not has_waiter(), "cancel failed to detach reservation immediately")
   test.assert(not old_unwound, "cancellation unwound old reader inline")
 
-  local observer = async.run<|nil, value|>(function (): nil
+  const observer = async.run<|nil, value|>(function (): nil
     test.assert(has_waiter(), "replacement did not reserve before scheduler resumed")
     async.join(old)
     test.assert(old_unwound and old:status():has_cancelled() and not old_delivered,
@@ -438,10 +438,10 @@ end
 local function subscription_waiter_coalescing()
   runtime_test.run(function ()
     local publish: function (integer): (boolean) = function (_: integer): boolean raise "not registered" end
-    local subscription = async.CoalescingSubscription<|integer, integer|>(function (send, _fail, _finish)
+    const subscription = async.CoalescingSubscription<|integer, integer|>(function (send, _fail, _finish)
       publish = send
       return async.SubscriptionActions<|integer|>(function () end,
-          function (_drain: function (): (async.SubscriptionBatch<|integer|>)) end)
+          function (_: function (): (async.SubscriptionBatch<|integer|>)) end)
     end)
     defer subscription:close()
     test.assert(not subscription:has_waiter(), "new coalescing subscription has waiter")
@@ -459,10 +459,10 @@ end
 local function subscription_waiter_buffered(batch: boolean)
   runtime_test.run(function ()
     local publish: function (integer): (boolean) = function (_: integer): boolean raise "not registered" end
-    local subscription = async.BufferedSubscription<|integer, integer|>(function (send, _fail, _finish)
+    const subscription = async.BufferedSubscription<|integer, integer|>(function (send, _fail, _finish)
       publish = send
       return async.SubscriptionActions<|integer|>(function () end,
-          function (_drain: function (): (async.SubscriptionBatch<|integer|>)) end)
+          function (_: function (): (async.SubscriptionBatch<|integer|>)) end)
     end)
     defer subscription:close()
     test.assert(not subscription:has_waiter(), "new buffered subscription has waiter")
@@ -495,7 +495,7 @@ function test_buffered_subscription_pending_query_preserves_nil_and_terminal(_: 
   runtime_test.run(function ()
     local publish: (function (value): (boolean))? = nil
     local finish: (function (): (boolean))? = nil
-    local source = async.BufferedSubscription<|value, value|>(function (emit, _, ended)
+    const source = async.BufferedSubscription<|value, value|>(function (emit, _, ended)
       publish = emit
       finish = ended
       return subscription_actions()
@@ -522,7 +522,7 @@ function test_buffered_subscription_snapshot_preserves_queue_and_terminal(_: tes
   runtime_test.run(function ()
     local publish: (function (value): (boolean))? = nil
     local fail: (function (value): (boolean))? = nil
-    local source = async.BufferedSubscription<|value, value|>(function (emit, reject, _)
+    const source = async.BufferedSubscription<|value, value|>(function (emit, reject, _)
       publish, fail = emit, reject
       return subscription_actions()
     end)
@@ -546,7 +546,7 @@ function test_buffered_subscription_snapshot_preserves_queue_and_terminal(_: tes
     local empty, closed? = source:snapshot_pending()
     test.assert(empty.count == 0, "closed snapshot retained discarded entries")
     subscription_closed(closed)
-    local ended = async.BufferedSubscription<|value, value|>(function (_emit, _reject, finish)
+    const ended = async.BufferedSubscription<|value, value|>(function (_emit, _reject, finish)
       finish()
       return subscription_actions()
     end)
@@ -571,8 +571,8 @@ local function subscription_wake_window(driver: boolean,
     wake: function (SubscriptionWindow): (), expected: value)
   runtime_test.run(function ()
     task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
-      local window = SubscriptionWindow(nil, nil, nil, nil)
-      local stream = async.BufferedSubscription<|value, value|>(function (publish: function (value): (boolean), fail: function (value): (boolean), finish: function (): (boolean)): async.SubscriptionActions<|value|>
+      const window = SubscriptionWindow(nil, nil, nil, nil)
+      const stream = async.BufferedSubscription<|value, value|>(function (publish: function (value): (boolean), fail: function (value): (boolean), finish: function (): (boolean)): async.SubscriptionActions<|value|>
         window.publish, window.fail, window.finish = publish, fail, finish
         return subscription_actions()
       end)

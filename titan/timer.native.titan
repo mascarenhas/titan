@@ -8,8 +8,8 @@ local uv = import "uv"
 --- A Runtime-bound recurring timer that coalesces missed firings.
 -- @usage standard-library-timer.md#recurring-tickers
 record Ticker
-  local timer: uv.timer_t
-  local loop: uv.loop_t
+  local const timer: uv.timer_t
+  local const loop: uv.loop_t
   local subscription: async.CoalescingSubscription<|boolean, async.OperationError|>?
   local closed: boolean
   local close_done: async.Completion<|Ticker, nil, async.OperationError|>?
@@ -17,9 +17,9 @@ record Ticker
 end
 
 local record Sleep
-  local timer: uv.timer_t
-  local task: async.Task
-  local token: async.ResumeToken
+  local const timer: uv.timer_t
+  local const task: async.Task
+  local const token: async.ResumeToken
   local close_done: async.Completion<|Sleep, nil, async.OperationError|>?
   local close_number: integer
 end
@@ -33,9 +33,9 @@ local function check_work()
 end
 
 local function ticker_closed(timer: uv.timer_t)
-  local ticker: Ticker = uv.timer_get_data(timer)
-  local done = ticker.close_done as async.Completion<|Ticker, nil, async.OperationError|>
-  local number = ticker.close_number
+  const ticker: Ticker = uv.timer_get_data(timer)
+  const done = ticker.close_done as async.Completion<|Ticker, nil, async.OperationError|>
+  const number = ticker.close_number
   ticker.close_done = nil
   uv.timer_set_data(timer, nil)
   do done:resolve(number, nil)
@@ -43,7 +43,7 @@ local function ticker_closed(timer: uv.timer_t)
 end
 
 local function start_ticker_close(done: async.Completion<|Ticker, nil, async.OperationError|>, number: integer): uv.req_t?
-  local ticker = done:context(number)
+  const ticker = done:context(number)
   ticker.close_done = done
   ticker.close_number = number
   uv.timer_set_data(ticker.timer, ticker)
@@ -57,7 +57,7 @@ local function start_ticker_close(done: async.Completion<|Ticker, nil, async.Ope
 end
 
 local function close_timer(ticker: Ticker)
-  local result = async.await_cleanup_with<|Ticker, nil, async.OperationError|>(ticker, start_ticker_close)
+  const result = async.await_cleanup_with<|Ticker, nil, async.OperationError|>(ticker, start_ticker_close)
   case result
   when error(failure) then raise failure
   else
@@ -65,22 +65,22 @@ local function close_timer(ticker: Ticker)
 end
 
 local function start_timer(milliseconds: integer, repeat_time: integer): Ticker
-  local loop = async.current_loop()
-  local timer = uv.timer_t.new()
-  local ticker: Ticker = {timer = timer, loop = loop, subscription = nil,
+  const loop = async.current_loop()
+  const timer = uv.timer_t()
+  const ticker: Ticker = {timer = timer, loop = loop, subscription = nil,
     closed = false, close_done = nil, close_number = 0}
-  local subscription = async.CoalescingSubscription<|boolean, async.OperationError|>(
+  const subscription = async.CoalescingSubscription<|boolean, async.OperationError|>(
     function (publish, _fail, _finish): async.SubscriptionActions<|boolean|>
-      local fired = function (_: uv.timer_t) publish(true) end
-      local stop = function ()
-        local status = uv.timer_stop(timer)
+      const fired = function (_: uv.timer_t) publish(true) end
+      const stop = function ()
+        const status = uv.timer_stop(timer)
         if status < 0 then raise operation_error(status, "timer.stop") end
       end
-      local close = function (_drain: function (): (async.SubscriptionBatch<|boolean|>))
+      const close = function (_: function (): (async.SubscriptionBatch<|boolean|>))
         ticker.closed = true
         close_timer(ticker)
       end
-      local actions = async.SubscriptionActions<|boolean|>(stop, close)
+      const actions = async.SubscriptionActions<|boolean|>(stop, close)
       local initialized = false
       local accepted = false
       defer do
@@ -99,7 +99,7 @@ local function start_timer(milliseconds: integer, repeat_time: integer): Ticker
 end
 
 local function sleep_fired(timer: uv.timer_t)
-  local sleep: Sleep = uv.timer_get_data(timer)
+  const sleep: Sleep = uv.timer_get_data(timer)
   -- Both native firing and cancellation request the same deferred token wake.
   -- A failed wake propagates to UV so Runtime shutdown can retry cancellation
   -- and still enter this Task's deferred ownership cleanup.
@@ -107,9 +107,9 @@ local function sleep_fired(timer: uv.timer_t)
 end
 
 local function sleep_closed(timer: uv.timer_t)
-  local sleep: Sleep = uv.timer_get_data(timer)
-  local done = sleep.close_done as async.Completion<|Sleep, nil, async.OperationError|>
-  local number = sleep.close_number
+  const sleep: Sleep = uv.timer_get_data(timer)
+  const done = sleep.close_done as async.Completion<|Sleep, nil, async.OperationError|>
+  const number = sleep.close_number
   sleep.close_done = nil
   uv.timer_set_data(timer, nil)
   do done:resolve(number, nil)
@@ -117,7 +117,7 @@ local function sleep_closed(timer: uv.timer_t)
 end
 
 local function start_sleep_close(done: async.Completion<|Sleep, nil, async.OperationError|>, number: integer): uv.req_t?
-  local sleep = done:context(number)
+  const sleep = done:context(number)
   sleep.close_done = done
   sleep.close_number = number
   do uv.timer_close(sleep.timer, sleep_closed)
@@ -126,7 +126,7 @@ local function start_sleep_close(done: async.Completion<|Sleep, nil, async.Opera
 end
 
 local function close_sleep(sleep: Sleep)
-  local result = async.await_cleanup_with<|Sleep, nil, async.OperationError|>(sleep, start_sleep_close)
+  const result = async.await_cleanup_with<|Sleep, nil, async.OperationError|>(sleep, start_sleep_close)
   case result
   when error(failure) then raise failure
   else
@@ -139,8 +139,8 @@ end
 function sleep(milliseconds: integer)
   check_work()
   if milliseconds < 0 then raise operation_error(uv.EINVAL, "timer.sleep") end
-  local timer = uv.timer_t.new()
-  local waiting = Sleep(timer, async.running(), async.ResumeToken("timer.sleep"), nil, 0)
+  const timer = uv.timer_t()
+  const waiting = Sleep(timer, async.running(), async.ResumeToken("timer.sleep"), nil, 0)
   local status = uv.timer_init(async.current_loop(), timer)
   if status < 0 then raise operation_error(status, "timer.init") end
   defer close_sleep(waiting)
@@ -173,7 +173,7 @@ function Ticker:tick(): boolean
   check_work()
   if self.closed or self.loop ~= async.current_loop() then return false end
   if self.subscription:has_waiter() then raise "Ticker already has a waiting Task" end
-  local outcome = self.subscription:next()
+  const outcome = self.subscription:next()
   case outcome
   when item(value) then return value
   when error(failure) then raise failure

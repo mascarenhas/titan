@@ -1,6 +1,6 @@
 local function coverage_calendar_rejection(context: test.Context,
                                            name: string, format: string)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     support.assert_raises_contains(function () system.date(format, 0) end,
                                   "invalid conversion specifier '" .. format .. "'")
   end)

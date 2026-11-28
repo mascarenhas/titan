@@ -116,8 +116,65 @@ elseif action == "imports" then
     end
     print(string.format("Browser image imports: %d image(s) use only imports listed for %s.",
         #arguments - 2, first))
+elseif action == "lint-roots" then
+    -- The lint gates cover the whole test tree: every `.titan` file there is
+    -- a selected source of a listed native or browser lint root.
+    local driver = require "titan-compiler.driver"
+    local path = require "titan-compiler.path"
+    local roots, target = { native = {}, browser = {} }, nil
+    for index = 3, #arguments do
+        local word = arguments[index]
+        if word == "--native" or word == "--browser" then
+            target = word:sub(3)
+        else
+            assert(target, "lint-roots requires --native or --browser before its roots")
+            roots[target][#roots[target] + 1] = word
+        end
+    end
+    assert(first and #roots.native > 0 and #roots.browser > 0,
+        "lint-roots requires a test tree and nonempty --native and --browser root lists")
+    local function key(file) return path.normalize((file:gsub("\\", "/"))) end
+    local covered = {}
+    for _, name in ipairs({ "native", "browser" }) do
+        -- Browser selection reads the installed browser SDK, as `titanc --lint` does.
+        local context = driver.new_resolver_context(name == "browser" and { io = strategy,
+            target = "browser", analysis_only = true,
+            browser_analysis_target = need(driver.browser_analysis_target(nil)) } or { io = strategy })
+        for _, root in ipairs(roots[name]) do
+            local source, err = driver.resolve_source(context, root, first)
+            if not source or source.kind == "blocked" then
+                driver.close_resolver_context(context)
+                need(nil, err or name .. " lint root " .. root .. " is not a source module under " .. first)
+            end
+            for _, file in ipairs(source.files) do covered[key(file)] = true end
+        end
+        need(driver.close_resolver_context(context))
+    end
+    local missing, count = {}, 0
+    local function visit(directory)
+        local entries = need(strategy:list(directory))
+        table.sort(entries)
+        for _, name in ipairs(entries) do
+            local file = directory .. "/" .. name
+            local info = need(strategy:stat(file))
+            if info.kind == "directory" then
+                visit(file)
+            elseif info.kind == "file" and name:match("%.titan$") then
+                count = count + 1
+                if not covered[key(file)] then missing[#missing + 1] = file end
+            end
+        end
+    end
+    visit(first)
+    if #missing > 0 then
+        need(nil, "no native or browser lint root selects these test sources (add their owners to " ..
+            "spec/support/stdlib_test_modules.mk):\n  " .. table.concat(missing, "\n  "))
+    end
+    print(string.format("Stdlib lint roots: %d native and %d browser roots select all %d test sources.",
+        #roots.native, #roots.browser, count))
 else
     error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | " ..
         "inventory-fixture BROWSER [TABLE] | " ..
-        "output ROOTS FILTER LOG | fixture BROWSER [FILE] | imports CLASS[,CLASS...] WASM...")
+        "output ROOTS FILTER LOG | fixture BROWSER [FILE] | imports CLASS[,CLASS...] WASM... | " ..
+        "lint-roots TREE --native ROOT... --browser ROOT...")
 end

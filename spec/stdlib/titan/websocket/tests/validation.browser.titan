@@ -11,9 +11,9 @@ function test_browser_connect_rejects_native_options(_: test.Context)
 end
 
 function test_browser_websocket_child_state_construction_and_refusal(_: test.Context)
-  local state = lua.new()
+  const state = lua.new()
   defer state:close()
-  local loader = string.reader([[
+  const loader = string.reader([[
     local http = require "titan.http"
     local websocket = require "titan.websocket"
     local fields = http.headers()

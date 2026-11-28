@@ -34,18 +34,18 @@ end
 --- An immutable subject and its whole-match and capture spans.
 -- @usage standard-library-string.md#compiled-regular-expressions
 record RegexMatch
-  local subject: string
-  local matched_span: Span
-  local groups: {Span}
+  local const subject: string
+  local const matched_span: Span
+  local const groups: {Span}
 end
 
 --- A compiled byte-oriented regular expression.
 -- @usage standard-library-string.md#compiled-regular-expressions
 record Regex
-  local expression: string
-  local capture_count: integer
-  local pattern: peg.Pattern
-  local anchored_start: boolean
+  local const expression: string
+  local const capture_count: integer
+  local const pattern: peg.Pattern
+  local const anchored_start: boolean
 end
 
 --- A synchronous reader over immutable in-memory bytes.
@@ -78,11 +78,11 @@ end
 -- @usage standard-library-string.md#byte-operations
 function sub(subject: string, first: integer,
              last: integer?): string
-  local length = #subject
-  local normalized_first = initial_position(first, length)
+  const length = #subject
+  const normalized_first = initial_position(first, length)
   local raw_last = -1
   if last then raw_last = last end
-  local normalized_last = ending_position(raw_last, length)
+  const normalized_last = ending_position(raw_last, length)
   if normalized_first > normalized_last then return "" end
   return copy_interval(subject, normalized_first,
                        normalized_last - normalized_first + 1)
@@ -93,10 +93,10 @@ end
 -- @return String with its byte order reversed.
 -- @usage standard-library-string.md#byte-operations
 function reverse(subject: string): string
-  local length = #subject
+  const length = #subject
   if length == 0 then return "" end
-  local storage = foreign char.new_array(length)
-  local source = subject as foreign const *char
+  const storage = foreign char.new_array(length)
+  const source = subject as foreign const *char
   local index = 0
   while index < length do
     storage[index] = source[length - index - 1]
@@ -110,13 +110,13 @@ end
 -- @return String with lowercase byte conversion applied.
 -- @usage standard-library-string.md#byte-operations
 function lower(subject: string): string
-  local length = #subject
+  const length = #subject
   if length == 0 then return "" end
-  local storage = foreign char.new_array(length)
-  local source = subject as foreign const *char
+  const storage = foreign char.new_array(length)
+  const source = subject as foreign const *char
   local index = 0
   while index < length do
-    local octet = source[index] as foreign unsigned char
+    const octet = source[index] as foreign unsigned char
     storage[index] =
       ffi.tolower(octet as foreign int) as foreign char
     index = index + 1
@@ -129,13 +129,13 @@ end
 -- @return String with uppercase byte conversion applied.
 -- @usage standard-library-string.md#byte-operations
 function upper(subject: string): string
-  local length = #subject
+  const length = #subject
   if length == 0 then return "" end
-  local storage = foreign char.new_array(length)
-  local source = subject as foreign const *char
+  const storage = foreign char.new_array(length)
+  const source = subject as foreign const *char
   local index = 0
   while index < length do
-    local octet = source[index] as foreign unsigned char
+    const octet = source[index] as foreign unsigned char
     storage[index] =
       ffi.toupper(octet as foreign int) as foreign char
     index = index + 1
@@ -155,25 +155,25 @@ function rep(subject: string, count: integer,
 
   local actual_separator = ""
   if separator then actual_separator = separator end
-  local subject_length = #subject
-  local separator_length = #actual_separator
+  const subject_length = #subject
+  const separator_length = #actual_separator
   if subject_length == 0 and separator_length == 0 then return "" end
-  local maximum_length = MAXIMUM_STRING_BYTES
+  const maximum_length = MAXIMUM_STRING_BYTES
 
   if subject_length > maximum_length - separator_length then
     raise "resulting string is too large"
   end
-  local unit_length = subject_length + separator_length
+  const unit_length = subject_length + separator_length
   if unit_length > maximum_length // count then
     raise "resulting string is too large"
   end
-  local total_length = unit_length * count - separator_length
+  const total_length = unit_length * count - separator_length
   if total_length == 0 then return "" end
 
-  local storage = foreign char.new_array(total_length)
-  local output = storage as foreign *char
-  local subject_bytes = subject as foreign const *char
-  local separator_bytes =
+  const storage = foreign char.new_array(total_length)
+  const output = storage as foreign *char
+  const subject_bytes = subject as foreign const *char
+  const separator_bytes =
     actual_separator as foreign const *char
   local occurrence = 1
   local offset = 0
@@ -205,19 +205,19 @@ end
 -- @usage standard-library-string.md#byte-operations
 function byte(subject: string, first: integer?,
               last: integer?): (...: integer)
-  local length = #subject
+  const length = #subject
   local raw_first = 1
   if first then raw_first = first end
-  local normalized_first = initial_position(raw_first, length)
+  const normalized_first = initial_position(raw_first, length)
   local raw_last = raw_first
   if last then raw_last = last end
-  local normalized_last = ending_position(raw_last, length)
+  const normalized_last = ending_position(raw_last, length)
   if normalized_first > normalized_last then return end
   if normalized_last - normalized_first + 1 > 200 then
     raise "too many flexible return values (max 200)"
   end
-  local source = subject as foreign const *unsigned char
-  local bytes: { integer } = {}
+  const source = subject as foreign const *unsigned char
+  const bytes: { integer } = {}
   for i = normalized_first, normalized_last do
     bytes[i - normalized_first + 1] = source[i - 1] as integer
   end
@@ -229,16 +229,16 @@ end
 -- @return Binary string containing the supplied byte values.
 -- @usage standard-library-string.md#byte-operations
 function char(...: integer): string
-  local length = #...
+  const length = #...
   if length == 0 then return "" end
-  local storage = foreign char.new_array(length)
+  const storage = foreign char.new_array(length)
   local index = 1
   while index <= length do
-    local octet = ...[index]
+    const octet = ...[index]
     if octet < 0 or octet > 255 then
       raise "character value out of range"
     end
-    local byte = octet as foreign unsigned char
+    const byte = octet as foreign unsigned char
     storage[index - 1] = byte as foreign char
     index = index + 1
   end
@@ -251,7 +251,7 @@ end
 -- @usage standard-library-string.md#value-conversion
 function tostring(candidate: value): string
   -- Implementation notes: doc/implementation/string-library.md#raw-lua-conversions-and-fixed-call-adjustment
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
   if ffi.lua_checkstack(L, 3) == 0 then
@@ -275,7 +275,7 @@ end
 -- @usage standard-library-string.md#in-memory-streams
 function StringReader:read(): string?
   if self.position > #self.contents then return nil end
-  local result = sub(self.contents, self.position)
+  const result = sub(self.contents, self.position)
   self.position = #self.contents + 1
   return result
 end
@@ -295,16 +295,16 @@ function StringReader:read_until(delimiter: string,
   local first: integer?, last: integer? =
     find(self.contents, delimiter, self.position)
   if not first then
-    local result = sub(self.contents, self.position)
+    const result = sub(self.contents, self.position)
     self.position = #self.contents + 1
     return result
   end
 
-  local delimiter_first = first as integer
-  local delimiter_last = last as integer
+  const delimiter_first = first as integer
+  const delimiter_last = last as integer
   local result_last = delimiter_last
   if chop then result_last = delimiter_first - 1 end
-  local result = sub(self.contents, self.position, result_last)
+  const result = sub(self.contents, self.position, result_last)
   self.position = delimiter_last + 1
   return result
 end
@@ -334,8 +334,8 @@ end
 -- @return Accumulated bytes, leaving this writer empty.
 -- @usage standard-library-string.md#in-memory-streams
 function StringWriter:drain(): string
-  local result = builder_finish(self)
-  local chunks: {string} = {}
+  const result = builder_finish(self)
+  const chunks: {string} = {}
   self.chunks = chunks
   self.length = 0
   return result
@@ -359,9 +359,9 @@ function find(subject: string, needle: string,
               init: integer?): (integer?, integer?)
   local raw_init = 1
   if init then raw_init = init end
-  local subject_length = #subject
-  local needle_length = #needle
-  local first = initial_position(raw_init, subject_length)
+  const subject_length = #subject
+  const needle_length = #needle
+  const first = initial_position(raw_init, subject_length)
   if first > subject_length + 1 then return nil, nil end
   if needle_length == 0 then return first, first - 1 end
   if first > subject_length or
@@ -369,12 +369,12 @@ function find(subject: string, needle: string,
     return nil, nil
   end
 
-  local subject_bytes =
+  const subject_bytes =
     subject as foreign const *char
-  local needle_bytes =
+  const needle_bytes =
     needle as foreign const *char
   local offset = first - 1
-  local limit = subject_length - needle_length
+  const limit = subject_length - needle_length
   while offset <= limit do
     if subject_bytes[offset] == needle_bytes[0] and
         ffi.memcmp(
@@ -393,16 +393,16 @@ end
 -- @return Formatted string.
 -- @usage standard-library-string.md#formatting
 function format(format_string: string, ...: value): string
-  local captured = FORMAT_PATTERN:match(format_string)
+  const captured = FORMAT_PATTERN:match(format_string)
   if captured == nil then raise "invalid conversion to 'format'" end
-  local plan = captured as FormatPlan
-  local builder = StringWriter()
+  const plan = captured as FormatPlan
+  const builder = StringWriter()
   local argument = 1
   while argument <= #plan.partials do
     if argument > #... then
       raise "no value for format conversion"
     end
-    local partial = plan.partials[argument] as FormatPartial
+    const partial = plan.partials[argument] as FormatPartial
     builder_append(builder, partial(...[argument]))
     argument = argument + 1
   end
@@ -416,13 +416,13 @@ end
 -- @return Encoded binary bytes.
 -- @usage standard-library-string.md#binary-packing
 function pack(format_string: string, ...: value): string
-  local state = new_pack_state(format_string)
-  local builder = StringWriter()
-  local arguments: {value} = {...}
+  const state = new_pack_state(format_string)
+  const builder = StringWriter()
+  const arguments: {value} = {...}
   local argument = 0
 
   while not pack_format_at_end(state) do
-    local option = read_pack_details(state, builder.length)
+    const option = read_pack_details(state, builder.length)
     checked_pack_growth(builder.length, option.padding)
     checked_pack_growth(
       builder.length + option.padding, option.size)
@@ -432,7 +432,7 @@ function pack(format_string: string, ...: value): string
 
     if option.kind == PACK_INT then
       argument = argument + 1
-      local number =
+      const number =
         (next_pack_argument(arguments, argument) as integer)
           as foreign lua_Integer
       check_signed_pack_range(number, option.size)
@@ -442,7 +442,7 @@ function pack(format_string: string, ...: value): string
           number, option.size, state.little_endian, number < 0))
     elseif option.kind == PACK_UINT then
       argument = argument + 1
-      local number =
+      const number =
         (next_pack_argument(arguments, argument) as integer)
           as foreign lua_Integer
       check_unsigned_pack_range(number, option.size)
@@ -476,7 +476,7 @@ function pack(format_string: string, ...: value): string
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_CHAR then
       argument = argument + 1
-      local text =
+      const text =
         next_pack_argument(arguments, argument) as string
       if #text > option.size then
         raise "string longer than given size"
@@ -488,7 +488,7 @@ function pack(format_string: string, ...: value): string
       end
     elseif option.kind == PACK_STRING then
       argument = argument + 1
-      local text =
+      const text =
         next_pack_argument(arguments, argument) as string
       check_unsigned_pack_range(
         #text as foreign lua_Integer, option.size)
@@ -501,7 +501,7 @@ function pack(format_string: string, ...: value): string
       builder_append(builder, text)
     elseif option.kind == PACK_ZSTRING then
       argument = argument + 1
-      local text =
+      const text =
         next_pack_argument(arguments, argument) as string
       if contains_byte(text, 0) then
         raise "string contains zeros"
@@ -523,10 +523,10 @@ end
 -- @return Fixed format size in bytes.
 -- @usage standard-library-string.md#binary-packing
 function packsize(format_string: string): integer
-  local state = new_pack_state(format_string)
+  const state = new_pack_state(format_string)
   local total_size = 0
   while not pack_format_at_end(state) do
-    local option = read_pack_details(state, total_size)
+    const option = read_pack_details(state, total_size)
     if option.kind == PACK_STRING or
         option.kind == PACK_ZSTRING then
       raise "variable-length format"
@@ -555,10 +555,10 @@ function unpack(format_string: string, data: string,
     raise "initial position out of string"
   end
 
-  local state = new_pack_state(format_string)
-  local results: {value} = {}
+  const state = new_pack_state(format_string)
+  const results: {value} = {}
   while not pack_format_at_end(state) do
-    local option = read_pack_details(state, position)
+    const option = read_pack_details(state, position)
     if option.padding > #data - position or
         option.size > #data - position - option.padding then
       raise "data string too short"
@@ -611,7 +611,7 @@ function unpack(format_string: string, data: string,
       if #results >= 199 then
         raise "too many flexible return values (max 200)"
       end
-      local packed_length =
+      const packed_length =
         unpack_integer_bytes(
           data, position, option.size,
           state.little_endian, false) as foreign lua_Unsigned
@@ -619,7 +619,7 @@ function unpack(format_string: string, data: string,
           (MAXIMUM_STRING_BYTES as foreign lua_Unsigned) then
         raise "data string too short"
       end
-      local length = packed_length as integer
+      const length = packed_length as integer
       if length > #data - position - option.size then
         raise "data string too short"
       end
@@ -635,7 +635,7 @@ function unpack(format_string: string, data: string,
       if #results >= 199 then
         raise "too many flexible return values (max 200)"
       end
-      local bytes =
+      const bytes =
         data as foreign const *unsigned char
       local ending = position
       while ending < #data and bytes[ending] ~= 0 do
@@ -660,7 +660,7 @@ end
 -- @return Compiled regular expression.
 -- @usage standard-library-string.md#compiled-regular-expressions
 function compile_regex(expression: string): Regex
-  local parsed = parse_regex(expression)
+  const parsed = parse_regex(expression)
   local projected, overflow_position =
     regex_projected_size(parsed.root)
   projected = regex_saturating_add(
@@ -729,19 +729,19 @@ function Regex:gmatch(subject: string,
   local current = position
   local previous_end = 0
   local finished = overshoot
-  local anchored = regex_is_start_anchored(self)
+  const anchored = regex_is_start_anchored(self)
 
   return function (): RegexMatch?
     while not finished do
-      local found: RegexMatch? =
+      const found: RegexMatch? =
         regex_find_from(self, subject, current)
       if not found then
         finished = true
         return nil
       end
-      local actual = found as RegexMatch
-      local span = actual.matched_span
-      local after = span.last + 1
+      const actual = found as RegexMatch
+      const span = actual.matched_span
+      const after = span.last + 1
       if span.last < span.first and after == previous_end then
         if after > #subject then
           finished = true
@@ -778,22 +778,22 @@ function Regex:gsub(subject: string,
 
   if limit <= 0 then return subject, 0 end
 
-  local builder = StringWriter()
+  const builder = StringWriter()
   local search = 1
   local copied = 1
   local previous_end = 0
   local count = 0
-  local anchored = regex_is_start_anchored(self)
+  const anchored = regex_is_start_anchored(self)
   local finished = false
   while not finished and count < limit do
-    local found: RegexMatch? =
+    const found: RegexMatch? =
       regex_find_from(self, subject, search)
     if not found then
       finished = true
     else
-      local actual = found as RegexMatch
-      local span = actual.matched_span
-      local after = span.last + 1
+      const actual = found as RegexMatch
+      const span = actual.matched_span
+      const after = span.last + 1
       if span.last < span.first and after == previous_end then
         if after > #subject or anchored then
           finished = true
@@ -846,7 +846,7 @@ function RegexMatch:group_span(index: integer): Span?
   if index < 1 or index > #self.groups then
     raise "capture group index out of range"
   end
-  local span = self.groups[index] as Span
+  const span = self.groups[index] as Span
   if span.first == 0 and span.last == -1 then return nil end
   return Span(span.first, span.last)
 end
@@ -865,9 +865,9 @@ end
 -- @return Captured bytes, or nil when the group did not participate.
 -- @usage standard-library-string.md#compiled-regular-expressions
 function RegexMatch:group(index: integer): string?
-  local span: Span? = self:group_span(index)
+  const span: Span? = self:group_span(index)
   if not span then return nil end
-  local actual = span as Span
+  const actual = span as Span
   return copy_interval(
     self.subject, actual.first, actual.last - actual.first + 1)
 end
@@ -877,7 +877,7 @@ end
 -- @usage standard-library-string.md#compiled-regular-expressions
 function RegexMatch:values(): (string?, ...: string?)
   if #self.groups == 0 then return self:whole() end
-  local results: { string? } = {}
+  const results: { string? } = {}
   for i = 1, #self.groups do
     results[i] = self:group(i)
   end
@@ -913,9 +913,9 @@ end
 -- @usage standard-library-string.md#iteration-and-substitution
 function matches(subject: string, pattern: string):
                  function (): (string?, ...: string?)
-  local iterator = cached_regex(pattern):gmatch(subject, nil)
+  const iterator = cached_regex(pattern):gmatch(subject, nil)
   return function (): (string?, ...: string?)
-    local found: RegexMatch? = iterator()
+    const found: RegexMatch? = iterator()
     if not found then return nil end
     return found:values()
   end
@@ -931,25 +931,25 @@ function split(subject: string, delimiter: string?): function (): (string?)
     local position = 1
     return function (): string?
       if position > #subject then return nil end
-      local result = sub(subject, position, position)
+      const result = sub(subject, position, position)
       position = position + 1
       return result
     end
   end
 
-  local separator = cached_regex(delimiter)
-  local iterator = separator:gmatch(subject, nil)
+  const separator = cached_regex(delimiter)
+  const iterator = separator:gmatch(subject, nil)
   local position = 1
   local finished = false
   return function (): string?
     if finished then return nil end
-    local found: RegexMatch? = iterator()
+    const found: RegexMatch? = iterator()
     if not found then
       finished = true
       return sub(subject, position)
     end
-    local span = found:span()
-    local result = sub(subject, position, span.first - 1)
+    const span = found:span()
+    const result = sub(subject, position, span.first - 1)
     position = span.last + 1
     return result
   end

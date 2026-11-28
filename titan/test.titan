@@ -16,16 +16,16 @@ local type TraceScanner =
 local type PatternMatcher = function (string, string): (boolean)
 
 local record RegisteredTest
-  name: string
-  callback: TestFunction
+  const name: string
+  const callback: TestFunction
 end
 
 --- A named test callback registered by a generated or custom runner.
 -- @usage standard-library-test.md
 record Case
-  local full_name: string
-  local owner_module: string
-  local body: TestFunction
+  local const full_name: string
+  local const owner_module: string
+  local const body: TestFunction
 end
 
 --- Construct a named test case with its source-owner attribution.
@@ -108,9 +108,9 @@ end
 --- The current test's name, deferred subtests, logging, and LIFO cleanup scope.
 -- @usage standard-library-test.md#contexts-subtests-and-cleanup
 record Context
-  local full_name: string
+  local const full_name: string
   local subtests: {RegisteredTest}
-  local cleanups: {Cleanup}
+  local const cleanups: {Cleanup}
   local subtests_open: boolean
   local cleanups_open: boolean
 end
@@ -179,7 +179,7 @@ end
 
 local function runner_take_subtests(context: Context): {RegisteredTest}
   context.subtests_open = false
-  local subtests = context.subtests
+  const subtests = context.subtests
   context.subtests = {}
   return subtests
 end
@@ -187,16 +187,16 @@ end
 local function runner_take_cleanup(context: Context): Cleanup?
   context.subtests_open = false
   context.cleanups_open = false
-  local index = #context.cleanups
+  const index = #context.cleanups
   if index == 0 then return nil end
-  local cleanup? = context.cleanups[index]
+  const cleanup? = context.cleanups[index]
   context.cleanups[index] = nil
   return cleanup
 end
 
 local function runner_skip_reason(failure: value): (boolean, string?)
   if failure is Skip then
-    local marker: Skip = failure
+    const marker: Skip = failure
     return true, marker.reason
   end
   return false, nil
@@ -212,7 +212,7 @@ end
 local function runner_trace_location(trace: string, preferred: string?):
     (string, string, integer)
   ensure_lua_helpers()
-  local scanner = trace_scanner as TraceScanner
+  const scanner = trace_scanner as TraceScanner
   local filename?, function_name?, line? = scanner(trace, preferred)
   if filename and function_name and line then
     return filename, function_name, line
@@ -223,13 +223,13 @@ end
 local function runner_error_text(failure: value): string
   local result = "<error while rendering test failure>"
   do
-    local top = ffi.lua_gettop(L)
+    const top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
     -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
     if ffi.lua_checkstack(L, 3) ~= 0 then
       ffi.lua_pushtvalue(L, failure)
       ffi.luaL_tolstring(L, -1, nil)
-      local rendered: value = ffi.lua_totvalue(L, -1)
+      const rendered: value = ffi.lua_totvalue(L, -1)
       if rendered is string then result = rendered as string end
     end
   catch
@@ -240,20 +240,20 @@ end
 
 local function runner_matches(name: string, pattern: string): boolean
   ensure_lua_helpers()
-  local matches = pattern_matcher as PatternMatcher
+  const matches = pattern_matcher as PatternMatcher
   return matches(name, pattern)
 end
 
 local function raw_lua_function(
     table_index: foreign int, name: string): boolean
   ffi.lua_pushstring(L, name)
-  local kind = ffi.lua_rawget(L, table_index)
+  const kind = ffi.lua_rawget(L, table_index)
   ffi.lua_settop(L, ffi.lua_gettop(L) - 1)
   return kind == ffi.LUA_TFUNCTION
 end
 
 local function lua_helpers_available(): boolean
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 3) == 0 then
     raise "cannot reserve Lua stack for titan.test helper inspection"
@@ -262,11 +262,11 @@ local function lua_helpers_available(): boolean
   ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX,
                   ffi.LUA_RIDX_GLOBALS as foreign lua_Integer)
   if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then return false end
-  local globals_index = ffi.lua_gettop(L)
+  const globals_index = ffi.lua_gettop(L)
 
   ffi.lua_pushstring(L, "string")
   if ffi.lua_rawget(L, globals_index) ~= ffi.LUA_TTABLE then return false end
-  local string_index = ffi.lua_gettop(L)
+  const string_index = ffi.lua_gettop(L)
   if not raw_lua_function(string_index, "gmatch") or
       not raw_lua_function(string_index, "match") or
       not raw_lua_function(string_index, "sub") or
@@ -279,14 +279,14 @@ local function lua_helpers_available(): boolean
 end
 
 local function load_lua_helpers(): (TraceScanner, PatternMatcher)
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   -- luaL_loadstring pushes one value: the chunk or its error message.
   if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for titan.test helpers"
   end
 
-  local source = [[
+  const source = [[
 local string_gmatch = string.gmatch
 local string_match = string.match
 local string_sub = string.sub
@@ -324,45 +324,45 @@ return
     return string_find(subject, pattern) ~= nil
   end
 ]]
-  local status = ffi.luaL_loadstring(L, source)
-  local loaded: value = ffi.lua_totvalue(L, -1)
+  const status = ffi.luaL_loadstring(L, source)
+  const loaded: value = ffi.lua_totvalue(L, -1)
   if status ~= ffi.LUA_OK then raise loaded end
-  local factory: function (): (TraceScanner, PatternMatcher) = loaded
+  const factory: function (): (TraceScanner, PatternMatcher) = loaded
   local scanner, matcher = factory()
   return scanner, matcher
 end
 
 local record OwnerTiming
-  name: string
+  const name: string
   elapsed: integer
 end
 
 local record State
-  local filters: {string}
+  local const filters: {string}
   local verbose: boolean
   local run: integer
   local passed: integer
   local skipped: integer
   local failed: integer
-  local failed_names: {string}
-  local owners: {OwnerTiming}
-  local owner_by_name: {string: OwnerTiming}
+  local const failed_names: {string}
+  local const owners: {OwnerTiming}
+  local const owner_by_name: {string: OwnerTiming}
 end
 
 local function copy_interval(subject: string, first: integer,
                              count: integer): string
   if count == 0 then return "" end
-  local storage = foreign char.new_array(count)
-  local output = storage as foreign *char
-  local source = subject as foreign const *char
+  const storage = foreign char.new_array(count)
+  const output = storage as foreign *char
+  const source = subject as foreign const *char
   ffi.memcpy(output, source + first - 1, count as foreign size_t)
   return storage as string
 end
 
 local function has_prefix(subject: string, prefix: string): boolean
   if #subject < #prefix then return false end
-  local left = subject as foreign const *unsigned char
-  local right = prefix as foreign const *unsigned char
+  const left = subject as foreign const *unsigned char
+  const right = prefix as foreign const *unsigned char
   for index = 0, #prefix - 1 do
     if left[index] ~= right[index] then return false end
   end
@@ -370,7 +370,7 @@ local function has_prefix(subject: string, prefix: string): boolean
 end
 
 local function write(output: string)
-  local bytes = output as foreign const *unsigned char
+  const bytes = output as foreign const *unsigned char
   for index = 0, #output - 1 do
     ffi.putchar(bytes[index] as foreign int)
   end
@@ -396,25 +396,25 @@ local function count_text(count: integer): string
 end
 
 local function monotonic_now(): integer
-  local now: integer = ffi.titan_test_monotonic_ns()
+  const now: integer = ffi.titan_test_monotonic_ns()
   if now < 0 then raise "cannot read monotonic test clock" end
   return now
 end
 
 local function duration_text(nanoseconds: integer): string
-  local hundredths = (nanoseconds + 5000) // 10000
-  local fraction = hundredths % 100
+  const hundredths = (nanoseconds + 5000) // 10000
+  const fraction = hundredths % 100
   local decimal = count_text(fraction)
   if fraction < 10 then decimal = "0" .. decimal end
   return count_text(hundredths // 100) .. "." .. decimal
 end
 
 local function State:add_owner_time(name: string, elapsed: integer)
-  local owner? = self.owner_by_name[name]
+  const owner? = self.owner_by_name[name]
   if owner then
     owner.elapsed = owner.elapsed + elapsed
   else
-    local timing = OwnerTiming(name, elapsed)
+    const timing = OwnerTiming(name, elapsed)
     self.owners[#self.owners + 1] = timing
     self.owner_by_name[name] = timing
   end
@@ -430,7 +430,7 @@ end
 
 local function print_trace(trace: string)
   writeln("stack traceback:")
-  local bytes = trace as foreign const *unsigned char
+  const bytes = trace as foreign const *unsigned char
   local position = 1
   while position <= #trace do
     local ending = position
@@ -473,7 +473,7 @@ local function skip_registered(state: State,
                                subtests: {RegisteredTest},
                                reason: string)
   for index = 1, #subtests do
-    local child = subtests[index]
+    const child = subtests[index]
     if selected(state, child.name) then
       state.run = state.run + 1
       report_skipped(state, child.name, reason, 0)
@@ -487,11 +487,11 @@ local function execute(state: State, full_name: string,
   state.run = state.run + 1
   writeln("[ RUN      ] " .. full_name)
 
-  local context = runner_new_context(full_name)
+  const context = runner_new_context(full_name)
   local status = 0
   local message = ""
   local failure_trace = ""
-  local started = monotonic_now()
+  const started = monotonic_now()
   do
     body(context)
   catch
@@ -507,11 +507,11 @@ local function execute(state: State, full_name: string,
       message = runner_error_text(error)
     end
   end
-  local subtests = runner_take_subtests(context)
+  const subtests = runner_take_subtests(context)
 
   if status == 0 then
     for index = 1, #subtests do
-      local child = subtests[index]
+      const child = subtests[index]
       execute(state, child.name, owner_module, child.callback)
     end
   elseif status == 1 then
@@ -523,7 +523,7 @@ local function execute(state: State, full_name: string,
   end
 
   while true do
-    local maybe_cleanup: Cleanup? = runner_take_cleanup(context)
+    const maybe_cleanup: Cleanup? = runner_take_cleanup(context)
     if not maybe_cleanup then break end
     do
       (maybe_cleanup as Cleanup)()
@@ -546,7 +546,7 @@ local function execute(state: State, full_name: string,
     end
   end
 
-  local elapsed = monotonic_now() - started
+  const elapsed = monotonic_now() - started
   if status == 0 then
     state.passed = state.passed + 1
     writeln("[       OK ] " .. full_name .. " (" ..
@@ -575,7 +575,7 @@ local function parse_options(args: {string}, state: State):
     (boolean, integer)
   local index = 1
   while index <= #args do
-    local argument = args[index]
+    const argument = args[index]
     if argument == "-h" or argument == "--help" or argument == "-help" then
       usage()
       return false, 0
@@ -595,13 +595,11 @@ local function parse_options(args: {string}, state: State):
   end
 
   for filter_index = 1, #state.filters do
-    do
-      runner_matches("", state.filters[filter_index])
-    catch
-      return option_error("invalid Lua pattern '" ..
-        state.filters[filter_index] .. "': " ..
-        runner_error_text(error))
-    end
+    runner_matches("", state.filters[filter_index])
+  catch
+    return option_error("invalid Lua pattern '" ..
+      state.filters[filter_index] .. "': " ..
+      runner_error_text(error))
   end
   return true, 0
 end
@@ -612,7 +610,7 @@ end
 -- @return Zero on success, one on test failure, or two for invalid options.
 -- @usage standard-library-test.md
 function run(args: {string}, cases: {Case}): integer
-  local state = State.new {
+  const state = State {
     filters = {}, verbose = false, run = 0, passed = 0, skipped = 0,
     failed = 0, failed_names = {}, owners = {}, owner_by_name = {}
   }
@@ -621,18 +619,18 @@ function run(args: {string}, cases: {Case}): integer
 
   runner_begin(state.verbose, report_log)
   defer runner_end()
-  local started = monotonic_now()
+  const started = monotonic_now()
   writeln("[==========] Running Titan tests.")
   for index = 1, #cases do
-    local test_case = cases[index]
-    local elapsed? = execute(state, test_case.full_name, test_case.owner_module,
+    const test_case = cases[index]
+    const elapsed? = execute(state, test_case.full_name, test_case.owner_module,
                              test_case.body)
     if elapsed then state:add_owner_time(test_case.owner_module, elapsed) end
   end
-  local elapsed = monotonic_now() - started
+  const elapsed = monotonic_now() - started
 
   for index = 1, #state.owners do
-    local owner = state.owners[index]
+    const owner = state.owners[index]
     writeln("[----------] " .. owner.name .. " (" ..
             duration_text(owner.elapsed) .. " ms total)")
   end

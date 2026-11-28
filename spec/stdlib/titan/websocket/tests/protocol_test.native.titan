@@ -1,6 +1,6 @@
 local record BadFrame
-  name: string
-  bytes: string
+  const name: string
+  const bytes: string
 end
 
 function test_close_during_fragmented_input_discards_unfinished_message(_context: test.Context)
@@ -18,7 +18,7 @@ function test_close_during_fragmented_input_discards_unfinished_message(_context
 end
 
 function test_server_rejects_malformed_frame_structure(context: test.Context)
-  local cases: {BadFrame} = {
+  const cases: {BadFrame} = {
     BadFrame("unmasked_client", frame(1, "x")),
     BadFrame("rsv1", "\xc1\x80"),
     BadFrame("rsv2", "\xa1\x80"),
@@ -36,8 +36,8 @@ function test_server_rejects_malformed_frame_structure(context: test.Context)
     BadFrame("one_byte_close", frame(8, "x", true)),
   }
   for index = 1, #cases do
-    local item = cases[index]
-    context:run(item.name, function (_child: test.Context)
+    const item = cases[index]
+    context:run(item.name, function (_: test.Context)
       runtime_test.run(function () server_receives_error(item.bytes, "protocol", 1002) end)
     end)
   end
@@ -55,15 +55,15 @@ function test_client_rejects_masked_server_frame(_context: test.Context)
 end
 
 function test_server_rejects_invalid_utf8_scalar_sequences(context: test.Context)
-  local cases: {BadFrame} = {
+  const cases: {BadFrame} = {
     BadFrame("lone_continuation", "\x80"), BadFrame("overlong_two", "\xc0\xaf"),
     BadFrame("overlong_three", "\xe0\x80\x80"), BadFrame("surrogate", "\xed\xa0\x80"),
     BadFrame("above_unicode_max", "\xf4\x90\x80\x80"), BadFrame("invalid_lead", "\xf5\x80\x80\x80"),
     BadFrame("incomplete_fin", "\xf0\x9f\x98"), BadFrame("wrong_continuation", "\xe2A\xac"),
   }
   for index = 1, #cases do
-    local item = cases[index]
-    context:run(item.name, function (_child: test.Context)
+    const item = cases[index]
+    context:run(item.name, function (_: test.Context)
       runtime_test.run(function () server_receives_error(frame(1, item.bytes, true), "utf8", 1007) end)
     end)
   end
@@ -76,10 +76,10 @@ function test_server_validates_utf8_close_reason(_context: test.Context)
 end
 
 function test_server_rejects_reserved_and_unassigned_close_codes(context: test.Context)
-  local codes: {integer} = {0, 999, 1004, 1005, 1006, 1015, 1016, 2999, 5000, 65535}
+  const codes: {integer} = {0, 999, 1004, 1005, 1006, 1015, 1016, 2999, 5000, 65535}
   for index = 1, #codes do
-    local code = codes[index]
-    context:run("code_" .. code, function (_child: test.Context)
+    const code = codes[index]
+    context:run("code_" .. code, function (_: test.Context)
       runtime_test.run(function ()
         server_receives_error(frame(8, close_bytes(code), true), "protocol", 1002)
       end)
@@ -88,10 +88,10 @@ function test_server_rejects_reserved_and_unassigned_close_codes(context: test.C
 end
 
 function test_server_preserves_modern_and_application_peer_close_codes(context: test.Context)
-  local codes: {integer} = {1000, 1001, 1002, 1003, 1007, 1008, 1009, 1011, 1012, 1013, 1014, 3000, 4999}
+  const codes: {integer} = {1000, 1001, 1002, 1003, 1007, 1008, 1009, 1011, 1012, 1013, 1014, 3000, 4999}
   for index = 1, #codes do
-    local code = codes[index]
-    context:run("code_" .. code, function (_child: test.Context)
+    const code = codes[index]
+    context:run("code_" .. code, function (_: test.Context)
       runtime_test.run(function ()
         with_server(function (connection: websocket.Connection)
           local kind?, bytes? = connection:read()
@@ -156,7 +156,7 @@ function test_protocol_failure_preserves_first_identity_and_trace_on_later_calls
         test.assert(string.find(first_trace, "frames.native.titan") ~= nil,
                     "symbolic trace did not retain the incoming frame origin")
       end
-      local operations: {function (): ()} = {
+      const operations: {function (): ()} = {
         function () connection:read() end,
         function () connection:write(websocket.BINARY, "later") end,
         function () connection:ping(1000) end,

@@ -2,7 +2,7 @@
 
 function test_coverage_calendar_unrepresentable_time_result(
     _context: test.Context)
-  local previous: string? = support.install_test_timezone()
+  const previous: string? = support.install_test_timezone()
   defer support.restore_test_timezone(previous)
   -- mktime's -1 result is rejected by the public API, including the instant
   -- immediately before the epoch when a host can otherwise represent it.

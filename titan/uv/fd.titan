@@ -14,7 +14,7 @@ end
 -- @usage uv/supplemental.md#os_fd_tfrom_integer
 function os_fd_t.from_integer(identifier: integer): os_fd_t
   local native = foreign titan_uv_fd_storage.new()
-  local status = ffi.titan_uv_fd_from_integer(identifier, native)
+  const status = ffi.titan_uv_fd_from_integer(identifier, native)
   if status < 0 then raise "OS file identifier is out of range" end
   return {native = native}
 end
@@ -32,12 +32,12 @@ end
 -- @return Copied or retained os_fd_t result, or nil on failure or absence.
 -- @usage uv/functions/handle.md#fileno
 function fileno(handle: handle_t): (integer, os_fd_t?)
-  local pointer = handle:pointer()
+  const pointer = handle:pointer()
   if pointer == nil then return ffi.UV_EINVAL, nil end
   local native = foreign titan_uv_fd_storage.new()
-  local owner: os_fd_t = {native = native}
+  const owner: os_fd_t = {native = native}
   local output = foreign uv_os_fd_t.new_array(1)
-  local status: integer = ffi.uv_fileno(pointer, output)
+  const status: integer = ffi.uv_fileno(pointer, output)
   owner.native.value = output[0]
   if status < 0 then return status, nil end
   return status, owner
@@ -48,7 +48,7 @@ end
 -- @return Native os_fd_t result with the documented lifetime and units.
 -- @usage uv/functions/fs.md#get_osfhandle
 function get_osfhandle(file: integer): os_fd_t
-  local fd = file as foreign int
+  const fd = file as foreign int
   local native = foreign titan_uv_fd_storage.new()
   native.value = ffi.uv_get_osfhandle(fd)
   return {native = native}
@@ -76,7 +76,7 @@ function poll_init_socket(loop: loop_t, handle: poll_t, socket: os_sock_t): inte
   handle.ready = false
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_poll_init_socket(loop.native, handle.native, socket.native)
+  const status: integer = ffi.uv_poll_init_socket(loop.native, handle.native, socket.native)
   if ffi.uv_handle_get_type(handle.native as foreign *uv_handle_t) ~= ffi.UV_POLL then
     loop.handles[handle] = nil; handle.loop = nil; return status
   end
@@ -96,9 +96,9 @@ end
 -- @usage uv/functions/misc.md#if_indextoname
 function if_indextoname(index: integer, buffer: buf_t): (integer, integer)
   if not buffer.writable then return ffi.UV_EINVAL, buffer.native.len as integer end
-  local native_index = index as foreign unsigned int
+  const native_index = index as foreign unsigned int
   local size: foreign size_t = buffer.native.len as integer
-  local status: integer = ffi.uv_if_indextoname(native_index, buffer.native.base, size)
+  const status: integer = ffi.uv_if_indextoname(native_index, buffer.native.base, size)
   return status, size
 end
 
@@ -110,8 +110,8 @@ end
 -- @usage uv/functions/misc.md#if_indextoiid
 function if_indextoiid(index: integer, buffer: buf_t): (integer, integer)
   if not buffer.writable then return ffi.UV_EINVAL, buffer.native.len as integer end
-  local native_index = index as foreign unsigned int
+  const native_index = index as foreign unsigned int
   local size: foreign size_t = buffer.native.len as integer
-  local status: integer = ffi.uv_if_indextoiid(native_index, buffer.native.base, size)
+  const status: integer = ffi.uv_if_indextoiid(native_index, buffer.native.base, size)
   return status, size
 end

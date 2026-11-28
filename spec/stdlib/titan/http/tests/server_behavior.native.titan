@@ -3,7 +3,7 @@ local function start_server_streaming(first_port: integer): async.Task
   return async.run<|value, value|>(function (): value
     local handler_started = false
     local server_value: http.Server? = nil
-    local handler: http.Handler = function (request: http.Request,
+    const handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
       handler_started = true
       test.assert(request.method == "POST" and request.url.path == "/upload",
@@ -14,7 +14,7 @@ local function start_server_streaming(first_port: integer): async.Task
             "HTTP server parsed the wrong header")
       test.assert(request:read_until("END", true) == "body\0",
             "HTTP Request Reader did not decode the body")
-      local tail: string? = request:read()
+      const tail: string? = request:read()
       test.assert(tail == nil, "HTTP Request Reader did not end")
 
       local header_control_rejected = false
@@ -44,12 +44,12 @@ local function start_server_streaming(first_port: integer): async.Task
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
     server_value = server
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
     defer task_support.cancel_and_join_task(serving, "nested HTTP serving cleanup")
-    local client = net.connect("127.0.0.1", port)
+    const client = net.connect("127.0.0.1", port)
     defer client:close()
     client:write(
       "POST /upload?part=1 HTTP/1.1\r\n" ..
@@ -65,13 +65,13 @@ local function start_server_streaming(first_port: integer): async.Task
     test.assert(handler_started,
           "HTTP handler did not start after headers were complete")
     client:write("body\0END")
-    local response = client:read_until("\r\n\r\n", true)
+    const response = client:read_until("\r\n\r\n", true)
     if not response then raise "HTTP server sent no response" end
-    local response_text = response as string
+    const response_text = response as string
     test.assert(support.contains(response_text, "HTTP/1.1 201 Created\r\n") and
           support.contains(response_text, "Transfer-Encoding: chunked\r\n"),
           "HTTP server sent the wrong response headers")
-    local body = string.writer()
+    const body = string.writer()
     for chunk in client:read do body:write(chunk) end
     test.assert(body:drain() ==
           "5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n",
@@ -88,12 +88,12 @@ local function start_expect_continue(first_port: integer): async.Task
   support.outcome = "running"
   return async.run<|value, value|>(function (): value
     local handled = 0
-    local handler: http.Handler = function (request: http.Request,
+    const handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
       handled = handled + 1
       test.assert(request.target == "/continue",
             "HTTP Expect request reached the wrong handler path")
-      local body = string.writer()
+      const body = string.writer()
       for chunk in request:read do body:write(chunk) end
       test.assert(body:drain() == "body",
             "HTTP Expect request body was not delivered after 100 Continue")
@@ -103,7 +103,7 @@ local function start_expect_continue(first_port: integer): async.Task
 
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -111,24 +111,24 @@ local function start_expect_continue(first_port: integer): async.Task
     local current: net.Connection? = nil
     defer do
       if current ~= nil then
-        do (current as net.Connection):close() catch end
-      end
+        (current as net.Connection):close()
+      catch end
     end
     local timed_out = false
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       support.outcome = "expect-timeout-after-" .. support.outcome
       if current then
-        do (current as net.Connection):close() catch end
-      end
+        (current as net.Connection):close()
+      catch end
       do server:close() catch end
       return nil
     end)
     defer task_support.cancel_and_join_task(watchdog, "nested HTTP watchdog cleanup")
 
     support.outcome = "expect-waiting-for-continue"
-    local client = net.connect("127.0.0.1", port)
+    const client = net.connect("127.0.0.1", port)
     defer client:close()
     current = client
     client:write(
@@ -140,15 +140,15 @@ local function start_expect_continue(first_port: integer): async.Task
     -- Deliberately withhold the body until the server acknowledges it. This
     -- would deadlock if the handler entered Request:read before the interim
     -- response was written.
-    local interim? = client:read_until("\r\n\r\n", false)
+    const interim? = client:read_until("\r\n\r\n", false)
     if not interim then raise "HTTP server sent no interim response" end
     test.assert((interim as string) == "HTTP/1.1 100 Continue\r\n\r\n",
           "HTTP server did not acknowledge 100-continue before the body")
     support.outcome = "expect-sending-body"
     client:write("body")
-    local final = string.writer()
+    const final = string.writer()
     for chunk in client:read do final:write(chunk) end
-    local final_text = final:drain()
+    const final_text = final:drain()
     test.assert(support.contains(final_text, "HTTP/1.1 200 OK\r\n") and
           support.contains(final_text, "Content-Length: 2\r\n") and
           string.sub(final_text, #final_text - 1) == "ok",
@@ -156,14 +156,14 @@ local function start_expect_continue(first_port: integer): async.Task
     client:close()
     current = nil
 
-    local rejected = {
+    const rejected = {
       "Expect: unsupported\r\n",
       "Expect: 100-continue, 100-continue\r\n",
       "Expect: 100-continue\r\nExpect: 100-continue\r\n",
     }
     for index = 1, #rejected do
       support.outcome = "expect-rejecting-" .. string.tostring(index)
-      local rejected_client = net.connect("127.0.0.1", port)
+      const rejected_client = net.connect("127.0.0.1", port)
       defer rejected_client:close()
       current = rejected_client
       rejected_client:write(
@@ -172,7 +172,7 @@ local function start_expect_continue(first_port: integer): async.Task
         "Content-Length: 4\r\n" .. rejected[index] .. "\r\n")
       -- No body follows. A final 417 must arrive and close the connection
       -- without entering the handler or trying to drain the declared body.
-      local refusal = string.writer()
+      const refusal = string.writer()
       for chunk in rejected_client:read do refusal:write(chunk) end
       test.assert(refusal:drain() ==
               "HTTP/1.1 417 Expectation Failed\r\n" ..
@@ -200,7 +200,7 @@ local function start_buffered_next_requests(first_port: integer): async.Task
   support.outcome = "running"
   return async.run<|value, value|>(function (): value
     local handled = 0
-    local handler: http.Handler = function (_: http.Request,
+    const handler: http.Handler = function (_: http.Request,
                                             response: http.Response)
       handled = handled + 1
       support.outcome = "buffered-handler-" .. string.tostring(handled)
@@ -209,15 +209,15 @@ local function start_buffered_next_requests(first_port: integer): async.Task
     end
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
     defer task_support.cancel_and_join_task(serving, "nested HTTP serving cleanup")
-    local client = net.connect("127.0.0.1", port)
+    const client = net.connect("127.0.0.1", port)
     defer client:close()
     local watchdog_fired = false
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       watchdog_fired = true
       support.outcome = "buffered-timeout-after-" .. support.outcome
@@ -231,7 +231,7 @@ local function start_buffered_next_requests(first_port: integer): async.Task
       "GET /two HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
     support.outcome = "buffered-reading"
-    local all = string.writer()
+    const all = string.writer()
     for chunk in client:read do all:write(chunk) end
     server:close()
     watchdog:cancel(async.CancellationReason.simple(
@@ -239,8 +239,8 @@ local function start_buffered_next_requests(first_port: integer): async.Task
     async.join(watchdog)
     test.assert(not watchdog_fired,
           "buffered HTTP requests required the watchdog: " .. support.outcome)
-    local responses = all:drain()
-    local first: integer? = string.find(responses, "HTTP/1.1 200 OK")
+    const responses = all:drain()
+    const first: integer? = string.find(responses, "HTTP/1.1 200 OK")
     local second: integer? = nil
     if first then
       second = string.find(responses, "HTTP/1.1 200 OK",
@@ -266,8 +266,8 @@ local function start_unread_request_drain(first_port: integer): async.Task
   support.outcome = "running"
   return async.run<|value, value|>(function (): value
     local handled = 0
-    local targets: {string} = {}
-    local handler: http.Handler = function (request: http.Request,
+    const targets: {string} = {}
+    const handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
       handled = handled + 1
       targets[handled] = request.target
@@ -279,15 +279,15 @@ local function start_unread_request_drain(first_port: integer): async.Task
     end
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
     defer task_support.cancel_and_join_task(serving, "nested HTTP serving cleanup")
-    local client = net.connect("127.0.0.1", port)
+    const client = net.connect("127.0.0.1", port)
     defer client:close()
     local timed_out = false
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       support.outcome = "request-drain-timeout-after-" .. support.outcome
@@ -305,7 +305,7 @@ local function start_unread_request_drain(first_port: integer): async.Task
       "GET /last HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
     support.outcome = "request-drain-reading"
-    local all = string.writer()
+    const all = string.writer()
     for chunk in client:read do all:write(chunk) end
     client:close()
     server:close()
@@ -316,7 +316,7 @@ local function start_unread_request_drain(first_port: integer): async.Task
     test.assert(handled == 3 and targets[1] == "/fixed" and
           targets[2] == "/chunked" and targets[3] == "/last",
           "HTTP server lost ordering while draining unread bodies")
-    local responses = all:drain()
+    const responses = all:drain()
     test.assert(support.contains(responses, "Content-Length: 1\r\n\r\nA") and
           support.contains(responses, "Content-Length: 1\r\n\r\nB") and
           support.contains(responses,
@@ -335,7 +335,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
   return async.run<|value, value|>(function (): value
     local handled = 0
     local reset_body_rejected = false
-    local handler: http.Handler = function (request: http.Request,
+    const handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
       handled = handled + 1
       if request.target == "/bad-204" then
@@ -360,7 +360,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
 
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -368,44 +368,44 @@ local function start_server_failure_isolation(first_port: integer): async.Task
     local current: net.Connection? = nil
     defer do
       if current ~= nil then
-        do (current as net.Connection):close() catch end
-      end
+        (current as net.Connection):close()
+      catch end
     end
     local timed_out = false
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       support.outcome = "server-failure-timeout-after-" .. support.outcome
       if current then
-        do (current as net.Connection):close() catch end
-      end
+        (current as net.Connection):close()
+      catch end
       do server:close() catch end
       return nil
     end)
     defer task_support.cancel_and_join_task(watchdog, "nested HTTP watchdog cleanup")
 
-    local exchange: function (string): (string) = function (
+    const exchange: function (string): (string) = function (
         request_text: string): string
-      local connection = net.connect("127.0.0.1", port)
+      const connection = net.connect("127.0.0.1", port)
       defer connection:close()
       current = connection
       connection:write(request_text)
-      local received = string.writer()
+      const received = string.writer()
       for chunk in connection:read do received:write(chunk) end
       connection:close()
       current = nil
       return received:drain()
     end
 
-    local authority = "127.0.0.1:" .. string.tostring(port)
+    const authority = "127.0.0.1:" .. string.tostring(port)
     support.outcome = "server-rejecting-204-length"
-    local bad_204 = exchange(
+    const bad_204 = exchange(
       "GET /bad-204 HTTP/1.1\r\nHost: " .. authority .. "\r\n" ..
       "Connection: close\r\n\r\n")
     test.assert(#bad_204 == 0 and handled == 1,
           "HTTP 204 response admitted Content-Length")
 
-    local non_origin_lines = {
+    const non_origin_lines = {
       "OPTIONS * HTTP/1.1\r\n",
       "GET http://other.example/path HTTP/1.1\r\n",
       "GET example.com:443 HTTP/1.1\r\n",
@@ -414,7 +414,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
     for index = 1, #non_origin_lines do
       support.outcome = "server-rejecting-non-origin-target-" ..
         string.tostring(index)
-      local non_origin = exchange(
+      const non_origin = exchange(
         non_origin_lines[index] .. "Host: " .. authority .. "\r\n" ..
         "Connection: close\r\n\r\n")
       test.assert(#non_origin == 0 and handled == 1,
@@ -423,13 +423,13 @@ local function start_server_failure_isolation(first_port: integer): async.Task
 
     -- These delimiters would reinterpret the separately received origin-form
     -- target if Host were accepted merely as a prefix of a combined URL.
-    local malicious_hosts = {
+    const malicious_hosts = {
       "localhost/path", "localhost?query", "localhost#fragment",
       "user@localhost",
     }
     for index = 1, #malicious_hosts do
       support.outcome = "server-rejecting-host-" .. string.tostring(index)
-      local rejected = exchange(
+      const rejected = exchange(
         "GET /never HTTP/1.1\r\nHost: " .. malicious_hosts[index] ..
         "\r\nConnection: close\r\n\r\n")
       test.assert(#rejected == 0 and handled == 1,
@@ -437,14 +437,14 @@ local function start_server_failure_isolation(first_port: integer): async.Task
     end
 
     support.outcome = "server-isolating-handler-failure"
-    local failed = exchange(
+    const failed = exchange(
       "GET /fail HTTP/1.1\r\nHost: " .. authority .. "\r\n" ..
       "Connection: close\r\n\r\n")
     test.assert(#failed == 0 and handled == 2,
           "HTTP handler failure did not close only its connection")
 
     support.outcome = "server-returning-205"
-    local reset = exchange(
+    const reset = exchange(
       "GET /reset HTTP/1.1\r\nHost: " .. authority .. "\r\n" ..
       "Connection: close\r\n\r\n")
     test.assert(handled == 3 and reset_body_rejected,
@@ -453,7 +453,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
           support.contains(reset, "\r\nContent-Length: 0\r\n") and
           not support.contains(reset, "\r\nTransfer-Encoding:"),
           "HTTP 205 response did not use zero-length framing")
-    local header_end? = string.find(reset, "\r\n\r\n")
+    const header_end? = string.find(reset, "\r\n\r\n")
     test.assert(header_end ~= nil and
           string.sub(reset, (header_end as integer) + 4) == "",
           "HTTP 205 response emitted body bytes")
@@ -474,13 +474,13 @@ end
 local function start_cancelled_server_close(first_port: integer): async.Task
   support.outcome = "running"
   return async.run<|value, value|>(function (): value
-    local handler: http.Handler = function (_request: http.Request,
+    const handler: http.Handler = function (_request: http.Request,
                                             _response: http.Response)
       raise "cancelled-close server unexpectedly accepted a request"
     end
     local server, _ = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run<|value, value|>(function (): value
+    const serving = async.run<|value, value|>(function (): value
       server:serve()
       return nil
     end)
@@ -500,13 +500,13 @@ local function start_cancelled_server_close(first_port: integer): async.Task
     end)
     defer task_support.cancel_and_join_task(
       closer as async.Task, "nested HTTP closer cleanup")
-    local close_task = closer as async.Task
+    const close_task = closer as async.Task
     while task_support.active(close_task) do timer.yield() end
     test.assert(close_task:status():has_cancelled() and close_returned,
           "Task cancellation interrupted HTTP Server close")
 
     local timed_out = false
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       serving:cancel(async.CancellationReason.simple(
@@ -535,14 +535,14 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     local peer_connection: net.Connection? = nil
     defer do
       if peer_connection then
-        do (peer_connection as net.Connection):close() catch end
-      end
+        (peer_connection as net.Connection):close()
+      catch end
       do server:close() catch end
     end
 
     local peer_saw_eof = false
-    local peer = async.run<|value, value|>(function (): value
-      local connection = server:accept()
+    const peer = async.run<|value, value|>(function (): value
+      const connection = server:accept()
       defer connection:close()
       peer_connection = connection
       defer do
@@ -550,11 +550,11 @@ local function start_cancelled_client_close(first_port: integer): async.Task
         connection:close()
         server:close()
       end
-      local preamble? = connection:read_until("\r\n\r\n", false)
+      const preamble? = connection:read_until("\r\n\r\n", false)
       if not preamble then raise "HTTP close peer saw no request" end
       connection:write(
         "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-      local trailing? = connection:read()
+      const trailing? = connection:read()
       test.assert(trailing == nil,
             "HTTP client wrote data after receiving its response")
       peer_saw_eof = true
@@ -562,7 +562,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     end)
     defer task_support.cancel_and_join_task(peer, "nested HTTP peer cleanup")
 
-    local response = http.get(
+    const response = http.get(
       "http://127.0.0.1:" .. string.tostring(port) .. "/close")
     defer response:close()
     local closer: async.Task? = nil
@@ -576,7 +576,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     end)
     defer task_support.cancel_and_join_task(
       closer as async.Task, "nested HTTP closer cleanup")
-    local close_task = closer as async.Task
+    const close_task = closer as async.Task
     while task_support.active(close_task) do timer.yield() end
     test.assert(close_task:status():has_cancelled() and close_returned,
           "Task cancellation interrupted HTTP response close")
@@ -584,7 +584,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
           "logically closed HTTP response remained readable")
 
     local timed_out = false
-    local watchdog = async.run<|value, value|>(function (): value
+    const watchdog = async.run<|value, value|>(function (): value
       timer.sleep(5000)
       timed_out = true
       peer:cancel(async.CancellationReason.simple(
@@ -610,7 +610,7 @@ local function start_idle_timeout_api(first_port: integer,
                                       missing_pem_path: string): async.Task
   support.outcome = "running"
   return async.run<|value, value|>(function (): value
-    local handler: http.Handler = function (_request: http.Request,
+    const handler: http.Handler = function (_request: http.Request,
                                             _response: http.Response)
     end
 
@@ -620,7 +620,7 @@ local function start_idle_timeout_api(first_port: integer,
     defer occupied:close()
     local plain_rejected = false
     do
-      local unexpected =
+      const unexpected =
         http.listen("127.0.0.1", handler, occupied_port, nil, -1)
       defer unexpected:close()
       unexpected:close()
@@ -635,7 +635,7 @@ local function start_idle_timeout_api(first_port: integer,
     -- TLS must likewise reject before attempting synchronous PEM input.
     local tls_rejected = false
     do
-      local unexpected = http.listen_tls(
+      const unexpected = http.listen_tls(
         "127.0.0.1", missing_pem_path, handler, nil, nil, nil, -1)
       defer unexpected:close()
       unexpected:close()
@@ -682,10 +682,10 @@ end
 -- One wire request; the server is expected to close after its response. A
 -- server that keeps reading instead is reported after a bounded wait.
 local function wire_response(port: integer, request_bytes: string): (string, boolean)
-  local client = net.connect("127.0.0.1", port)
+  const client = net.connect("127.0.0.1", port)
   defer client:close()
   local timed_out = false
-  local watchdog = async.run<|nil, value|>(function (): nil
+  const watchdog = async.run<|nil, value|>(function (): nil
     timer.sleep(10000)
     timed_out = true
     client:close()
@@ -693,13 +693,13 @@ local function wire_response(port: integer, request_bytes: string): (string, boo
   end)
   defer task_support.cancel_and_join_task(watchdog, "HTTP wire response watchdog")
   client:write(request_bytes)
-  local output = string.writer()
+  const output = string.writer()
   for chunk in client:read do output:write(chunk) end
   return output:drain(), timed_out
 end
 
 local function serve_in_background(server: http.Server, label: string): async.Task<|nil, value|>
-  local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+  const serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
   task_support.cleanup_task(serving, label)
   return serving
 end
@@ -708,8 +708,8 @@ end
 local function adopting_handler(inner: http.Handler): http.Handler
   return function (request: http.Request, response: http.Response)
     async.yield()
-    local packet = async.TransferValue.from_value(http.Exchange(request, response))
-    local moved: http.Exchange = packet:to_value()
+    const packet = async.TransferValue.from_value(http.Exchange(request, response))
+    const moved: http.Exchange = packet:to_value()
     moved:serve(inner)
   end
 end
@@ -724,10 +724,10 @@ end
 local function framing_handler(notes: {string: string}, kept: {string: http.Response},
                                finished: function (string): ()): http.Handler
   return function (request: http.Request, response: http.Response)
-    local path = request.url.path
+    const path = request.url.path
     defer finished(path)
     kept[path] = response
-    local before = response:is_committed()
+    const before = response:is_committed()
     local failure = ""
     do
       if path == "/fixed" then
@@ -775,8 +775,9 @@ local function framing_handler(notes: {string: string}, kept: {string: http.Resp
       failure = string.tostring(error)
       if path == "/failed-write" then
         -- The failed write must not roll back the reserved commitment.
-        do response:set_status(500)
-        catch failure = failure .. ";" .. string.tostring(error) end
+        response:set_status(500)
+      catch
+        failure = failure .. ";" .. string.tostring(error)
       end
       response:abort()
     end
@@ -786,10 +787,10 @@ local function framing_handler(notes: {string: string}, kept: {string: http.Resp
 end
 
 local record FramingCase
-  path: string
-  request: string
-  response: string
-  note: string
+  const path: string
+  const request: string
+  const response: string
+  const note: string
 end
 
 local function framing_request(method: string, path: string): string
@@ -797,9 +798,9 @@ local function framing_request(method: string, path: string): string
 end
 
 local function framing_cases(): {FramingCase}
-  local large = framing_body()
-  local fixed_head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
-  local chunked_head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+  const large = framing_body()
+  const fixed_head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+  const chunked_head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
   return {
     FramingCase("/fixed", framing_request("GET", "/fixed"), fixed_head .. "hello",
                 "false|true|"),
@@ -842,20 +843,20 @@ end
 -- Exact wire bytes and commitment for every first-write shape, with the
 -- response committed before its transport write even when that write fails.
 local function check_framing_matrix(adopt: boolean)
-  local notes: {string: string} = {}
-  local kept: {string: http.Response} = {}
+  const notes: {string: string} = {}
+  const kept: {string: http.Response} = {}
   local finished, next_finished, close_finished = async.channel<|string|>(16)
   runtime_test.cleanup(close_finished)
   local handler = framing_handler(notes, kept, finished)
   if adopt then handler = adopting_handler(handler) end
-  local server = http.listen("127.0.0.1", handler, 0)
+  const server = http.listen("127.0.0.1", handler, 0)
   runtime_test.cleanup(function () server:close() end)
   server:read_ahead(false)
-  local port = server:local_address().port
+  const port = server:local_address().port
   serve_in_background(server, "HTTP framing matrix listener")
-  local cases = framing_cases()
+  const cases = framing_cases()
   for index = 1, #cases do
-    local item = cases[index]
+    const item = cases[index]
     local wire, timed_out = wire_response(port, item.request)
     test.assert(not timed_out, item.path .. " did not close its connection")
     test.assert(wire == item.response, item.path .. " sent " .. string.format("%q", wire))
@@ -874,7 +875,7 @@ end
 -- a persistent one still drains before the next pipelined request.
 local function drain_handler(): http.Handler
   return function (request: http.Request, response: http.Response)
-    local path = request.url.path
+    const path = request.url.path
     if path == "/big-fixed" or path == "/big-chunked" then
       response:set_status(413)
       response:set_header("Connection", "close")
@@ -895,13 +896,13 @@ end
 local function check_request_drain(adopt: boolean)
   local handler = drain_handler()
   if adopt then handler = adopting_handler(handler) end
-  local server = http.listen("127.0.0.1", handler, 0)
+  const server = http.listen("127.0.0.1", handler, 0)
   runtime_test.cleanup(function () server:close() end)
   server:read_ahead(false)
-  local port = server:local_address().port
+  const port = server:local_address().port
   serve_in_background(server, "HTTP request drain listener")
   -- Response framing re-sets Connection: close after the handler's headers.
-  local rejected = "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+  const rejected = "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
   local wire, timed_out = wire_response(port,
     "POST /big-fixed HTTP/1.1\r\nHost: localhost\r\nContent-Length: 104857600\r\n\r\n")
   test.assert(not timed_out and wire == rejected, "unread fixed-length body was drained")
@@ -914,9 +915,9 @@ local function check_request_drain(adopt: boolean)
   test.assert(not timed_out and
               wire == "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
               "a client-closed exchange drained its unread body")
-  local persistent = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nA" ..
+  const persistent = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nA" ..
                      "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nB"
-  local after = "GET /after HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+  const after = "GET /after HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
   wire, timed_out = wire_response(port,
     "POST /unread HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nskip" .. after)
   test.assert(not timed_out and wire == persistent,
@@ -937,18 +938,18 @@ end
 local function check_request_addresses(server: http.Server, addresses: {net.Address},
                                        kept: {http.Request}, ip: string, encrypted: boolean)
   runtime_test.cleanup(function () server:close() end)
-  local bound = server:local_address()
+  const bound = server:local_address()
   test.assert(bound.ip == ip and bound.port > 0, "HTTP listener reported " .. bound.ip)
   test.assert(server:local_address() == bound, "HTTP listener address was not cached")
   serve_in_background(server, "HTTP address listener")
-  local channel: io.ReaderWriterCloser = (function (): io.ReaderWriterCloser
+  const channel: io.ReaderWriterCloser = (function (): io.ReaderWriterCloser
     if encrypted then return ssl.connect(ip, bound.port, support.TRUST_ROOT) end
     return net.connect(ip, bound.port)
   end)()
   runtime_test.cleanup(function () channel:close() end)
   channel:write("GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
                 "GET /two HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-  local output = string.writer()
+  const output = string.writer()
   for chunk in channel:read do output:write(chunk) end
   test.assert(support.contains(output:drain(), "\r\n\r\nok"), "HTTP address exchange failed")
   test.assert(#addresses == 4, "HTTP handler saw " .. #addresses .. " endpoint snapshots")
@@ -978,33 +979,33 @@ local function address_handler(addresses: {net.Address}, kept: {http.Request}): 
 end
 
 function test_server_and_request_socket_addresses(context: test.Context)
-  context:run("http_ipv4", function (_child: test.Context)
+  context:run("http_ipv4", function (_: test.Context)
     runtime_test.run(function ()
-      local addresses: {net.Address} = {}
-      local kept: {http.Request} = {}
-      local server = http.listen("127.0.0.1", address_handler(addresses, kept), 0)
+      const addresses: {net.Address} = {}
+      const kept: {http.Request} = {}
+      const server = http.listen("127.0.0.1", address_handler(addresses, kept), 0)
       check_request_addresses(server, addresses, kept, "127.0.0.1", false)
     end)
   end)
-  context:run("https_ipv4", function (_child: test.Context)
+  context:run("https_ipv4", function (_: test.Context)
     runtime_test.run(function ()
-      local addresses: {net.Address} = {}
-      local kept: {http.Request} = {}
-      local server = http.listen_tls("127.0.0.1", support.CERTIFICATE,
+      const addresses: {net.Address} = {}
+      const kept: {http.Request} = {}
+      const server = http.listen_tls("127.0.0.1", support.CERTIFICATE,
         address_handler(addresses, kept), support.PRIVATE_KEY, 0)
       check_request_addresses(server, addresses, kept, "127.0.0.1", true)
     end)
   end)
-  context:run("http_ipv6", function (_child: test.Context)
+  context:run("http_ipv6", function (_: test.Context)
     runtime_test.run(function ()
-      local addresses: {net.Address} = {}
-      local kept: {http.Request} = {}
+      const addresses: {net.Address} = {}
+      const kept: {http.Request} = {}
       local server: http.Server? = nil
       do
         server = http.listen("::1", address_handler(addresses, kept), 0)
       catch
         if error is async.OperationError then
-          local name = (error as async.OperationError).name
+          const name = (error as async.OperationError).name
           if name == "EADDRNOTAVAIL" or name == "EAFNOSUPPORT" then
             test.skip("capability: IPv6 loopback is unavailable (" .. name .. ")")
           end
@@ -1020,17 +1021,17 @@ end
 -- commitment remains readable.
 function test_request_addresses_end_with_their_exchange(_context: test.Context)
   runtime_test.run(function ()
-    local notes: {string: string} = {}
+    const notes: {string: string} = {}
     -- The client sees EOF before the handler records its observations.
     local finished, next_finished, close_finished = async.channel<|string|>(4)
     runtime_test.cleanup(close_finished)
-    local handler: http.Handler = function (request: http.Request, response: http.Response)
-      local path = request.url.path
+    const handler: http.Handler = function (request: http.Request, response: http.Response)
+      const path = request.url.path
       defer finished(path)
       if path == "/abort" then
         response:abort()
       elseif path == "/upgrade" then
-        local upgraded = response:upgrade(request, "probe")
+        const upgraded = response:upgrade(request, "probe")
         upgraded:close()
       elseif path == "/reject" then
         response:reject_upgrade(request, 403)
@@ -1043,11 +1044,11 @@ function test_request_addresses_end_with_their_exchange(_context: test.Context)
       end
       notes[path] = ended .. "|" .. string.tostring(response:is_committed())
     end
-    local server = http.listen("127.0.0.1", handler, 0)
+    const server = http.listen("127.0.0.1", handler, 0)
     runtime_test.cleanup(function () server:close() end)
-    local port = server:local_address().port
+    const port = server:local_address().port
     serve_in_background(server, "HTTP ended-exchange listener")
-    local upgrade_offer = "Connection: Upgrade\r\nUpgrade: probe\r\n\r\n"
+    const upgrade_offer = "Connection: Upgrade\r\nUpgrade: probe\r\n\r\n"
     local wire, timed_out = wire_response(port, "GET /abort HTTP/1.1\r\nHost: localhost\r\n\r\n")
     test.assert(not timed_out and wire == "", "aborted exchange sent a response")
     test.assert(next_finished() == "/abort", "abort handler did not finish")
@@ -1072,8 +1073,8 @@ end
 -- explicit send_headers still flushes the header block first.
 function test_server_coalesces_tls_response_records(_context: test.Context)
   runtime_test.run(function ()
-    local handler: http.Handler = function (request: http.Request, response: http.Response)
-      local path = request.url.path
+    const handler: http.Handler = function (request: http.Request, response: http.Response)
+      const path = request.url.path
       if path == "/fixed" then
         response:set_header("Content-Length", "5")
         response:write("hello")
@@ -1085,14 +1086,14 @@ function test_server_coalesces_tls_response_records(_context: test.Context)
         response:write("hello")
       end
     end
-    local server = http.listen_tls("127.0.0.1", support.CERTIFICATE, handler,
+    const server = http.listen_tls("127.0.0.1", support.CERTIFICATE, handler,
                                    support.PRIVATE_KEY, 0)
     runtime_test.cleanup(function () server:close() end)
     serve_in_background(server, "HTTPS record listener")
-    local secure = ssl.connect("127.0.0.1", server:local_address().port, support.TRUST_ROOT)
+    const secure = ssl.connect("127.0.0.1", server:local_address().port, support.TRUST_ROOT)
     runtime_test.cleanup(function () secure:close() end)
-    local fixed_head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"
-    local chunked_head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    const fixed_head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"
+    const chunked_head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
     secure:write("GET /fixed HTTP/1.1\r\nHost: localhost\r\n\r\n")
     test.assert(secure:read() == fixed_head .. "hello", "fixed response was split")
     secure:write("GET /chunked HTTP/1.1\r\nHost: localhost\r\n\r\n")

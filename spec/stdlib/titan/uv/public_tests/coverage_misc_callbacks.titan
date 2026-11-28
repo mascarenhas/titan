@@ -1,5 +1,5 @@
 local function coverage_mc_deadline(loop: uv.loop_t): uv.timer_t
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
   success(uv.timer_start(timer, function ()
     raise "UV miscellaneous behavior exceeded its five-second deadline"
@@ -11,9 +11,9 @@ function test_coverage_mc_interface_addresses_are_independent_snapshots(_context
   local status, addresses?, count = uv.interface_addresses()
   success(status)
   test.assert(addresses ~= nil and #addresses == count and count >= 0)
-  local names: {string} = {}
+  const names: {string} = {}
   for index = 1, count do
-    local address = addresses[index]
+    const address = addresses[index]
     test.assert(#address.name > 0 and #address.phys_addr == 6)
     local ip_status, text? = uv.ip_name(address.address, 128)
     success(ip_status)
@@ -35,7 +35,7 @@ function test_coverage_mc_interface_addresses_are_independent_snapshots(_context
 end
 
 function test_coverage_mc_user_and_group_snapshots(context: test.Context)
-  context:run("effective_user", function (_child: test.Context)
+  context:run("effective_user", function (_: test.Context)
     local status, user? = uv.os_get_passwd()
     success(status)
     test.assert(user ~= nil and #user.username > 0 and #user.homedir > 0)
@@ -46,7 +46,7 @@ function test_coverage_mc_user_and_group_snapshots(context: test.Context)
     test.assert(next_user ~= nil and next_user.username == name)
     test.assert(user.username == name and user.homedir == home and user.uid == uid and user.gid == gid)
   end)
-  context:run("user_by_id", function (_child: test.Context)
+  context:run("user_by_id", function (_: test.Context)
     if common.is_windows() then
       local status, found? = uv.os_get_passwd2(0)
       test.assert(status == uv.ENOTSUP and found == nil,
@@ -66,7 +66,7 @@ function test_coverage_mc_user_and_group_snapshots(context: test.Context)
     collect()
     test.assert(found.homedir == current.homedir)
   end)
-  context:run("effective_group", function (_child: test.Context)
+  context:run("effective_group", function (_: test.Context)
     if common.is_windows() then
       local status, group? = uv.os_get_group(0)
       test.assert(status == uv.ENOTSUP and group == nil,
@@ -83,8 +83,8 @@ function test_coverage_mc_user_and_group_snapshots(context: test.Context)
     end
     success(group_status)
     test.assert(group ~= nil and #group.groupname > 0 and group.gid == current.gid)
-    local name = group.groupname
-    local members: {string} = {}
+    const name = group.groupname
+    const members: {string} = {}
     for index = 1, #group.members do members[index] = group.members[index] end
     local next_status, next_group? = uv.os_get_group(current.gid)
     success(next_status)
@@ -102,7 +102,7 @@ function test_coverage_mc_clocks_memory_and_system_queries(_context: test.Contex
   test.assert(constrained >= 0 or constrained == -1)
   local total, free = uv.get_total_memory(), uv.get_free_memory()
   test.assert(total > 0 and free >= 0 and free <= total)
-  local start = uv.hrtime()
+  const start = uv.hrtime()
   local monotonic_status, monotonic? = uv.clock_gettime(uv.CLOCK_MONOTONIC)
   success(monotonic_status)
   local realtime_status, realtime? = uv.clock_gettime(uv.CLOCK_REALTIME)
@@ -146,7 +146,7 @@ function test_coverage_mc_process_title_and_priority_restore_their_inputs(_conte
   test.assert(uv.setup_process_args(), "native runner did not publish original process arguments")
   local status, title? = uv.get_process_title(4096)
   success(status)
-  local original = title as string
+  const original = title as string
   success(uv.set_process_title("Titan UV query test"))
   defer success(uv.set_process_title(original))
   local changed_status, changed? = uv.get_process_title(4096)
@@ -162,14 +162,14 @@ function test_coverage_mc_process_title_and_priority_restore_their_inputs(_conte
 end
 
 local function coverage_mc_handle_kind(context: test.Context, name: string, kind: uv.handle_type)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     test.assert(uv.handle_type_name(kind) == name)
     test.assert(uv.handle_size(kind) > 0 and uv.loop_size() > 0)
   end)
 end
 
 local function coverage_mc_request_kind(context: test.Context, name: string, kind: uv.req_type)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     test.assert(uv.req_type_name(kind) == name)
     test.assert(uv.req_size(kind) > 0)
   end)
@@ -202,7 +202,7 @@ function test_coverage_mc_native_type_queries(context: test.Context)
   coverage_mc_request_kind(context, "getaddrinfo", uv.GETADDRINFO)
   coverage_mc_request_kind(context, "getnameinfo", uv.GETNAMEINFO)
   coverage_mc_request_kind(context, "random", uv.RANDOM)
-  context:run("unknown_kinds", function (_child: test.Context)
+  context:run("unknown_kinds", function (_: test.Context)
     test.assert(uv.handle_type_name(uv.UNKNOWN_HANDLE) == nil and uv.handle_size(uv.UNKNOWN_HANDLE) == -1)
     test.assert(uv.req_type_name(uv.UNKNOWN_REQ) == nil and uv.req_size(uv.UNKNOWN_REQ) == -1)
     test.assert(uv.handle_type_name(uv.FILE) == "file" and uv.handle_size(uv.FILE) == -1)
@@ -222,13 +222,13 @@ end
 
 local function coverage_mc_hook_failure(context: test.Context, name: string,
     start: function (uv.loop_t, function (): ()): uv.handle_t)
-  context:run(name, function (_child: test.Context)
-    local loop = new_loop()
+  context:run(name, function (_: test.Context)
+    const loop = new_loop()
     defer finish_loop(loop)
-    local deadline = coverage_mc_deadline(loop)
+    const deadline = coverage_mc_deadline(loop)
     local calls = 0
-    local failure = "coverage_mc " .. name .. " delivery"
-    local handle = start(loop, function ()
+    const failure = "coverage_mc " .. name .. " delivery"
+    const handle = start(loop, function ()
       calls = calls + 1
       raise failure
     end)
@@ -252,7 +252,7 @@ end
 
 function test_coverage_mc_loop_hook_failures_retire_after_close(context: test.Context)
   coverage_mc_hook_failure(context, "idle", function (loop, fail): uv.handle_t
-    local owner = uv.idle_t()
+    const owner = uv.idle_t()
     success(uv.idle_init(loop, owner))
     success(uv.idle_start(owner, function (current: uv.idle_t)
       success(uv.idle_stop(current))
@@ -261,7 +261,7 @@ function test_coverage_mc_loop_hook_failures_retire_after_close(context: test.Co
     return owner:as_handle_t()
   end)
   coverage_mc_hook_failure(context, "prepare", function (loop, fail): uv.handle_t
-    local owner = uv.prepare_t()
+    const owner = uv.prepare_t()
     success(uv.prepare_init(loop, owner))
     success(uv.prepare_start(owner, function (current: uv.prepare_t)
       success(uv.prepare_stop(current))
@@ -270,7 +270,7 @@ function test_coverage_mc_loop_hook_failures_retire_after_close(context: test.Co
     return owner:as_handle_t()
   end)
   coverage_mc_hook_failure(context, "check", function (loop, fail): uv.handle_t
-    local owner = uv.check_t()
+    const owner = uv.check_t()
     success(uv.check_init(loop, owner))
     success(uv.check_start(owner, function (current: uv.check_t)
       success(uv.check_stop(current))
@@ -279,17 +279,17 @@ function test_coverage_mc_loop_hook_failures_retire_after_close(context: test.Co
     return owner:as_handle_t()
   end)
   coverage_mc_hook_failure(context, "async", function (loop, fail): uv.handle_t
-    local owner = uv.async_t()
-    success(uv.async_init(loop, owner, function (_current: uv.async_t) fail() end))
+    const owner = uv.async_t()
+    success(uv.async_init(loop, owner, function (_: uv.async_t) fail() end))
     success(uv.async_send(owner))
     return owner:as_handle_t()
   end)
 end
 
 function test_coverage_mc_walk_failure_is_synchronous_and_recoverable(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
   expect_error(function ()
     uv.walk(loop, function (handle: uv.handle_t, argument: value)
@@ -305,14 +305,14 @@ function test_coverage_mc_walk_failure_is_synchronous_and_recoverable(_context: 
 end
 
 function test_coverage_mc_repeating_timer_rearms_and_stops(_context: test.Context)
-  local timer = uv.timer_t()
+  const timer = uv.timer_t()
   test.assert(uv.timer_again(timer) == uv.EINVAL)
   expect_error(function () uv.timer_set_repeat(timer, 1) end, "timer is not initialized")
   expect_error(function () uv.timer_get_repeat(timer) end, "timer is not initialized")
   expect_error(function () uv.timer_get_due_in(timer) end, "timer is not initialized")
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local deadline = coverage_mc_deadline(loop)
+  const deadline = coverage_mc_deadline(loop)
   success(uv.timer_init(loop, timer))
   test.assert(uv.timer_again(timer) == uv.EINVAL)
   uv.timer_set_repeat(timer, 2)
@@ -339,10 +339,10 @@ end
 
 local function coverage_mc_submit_random(loop: uv.loop_t, weak: {value: value},
     completed: function (uv.random_t, integer, uv.buf_t, integer): ())
-  local request = uv.random_t()
-  local storage = uv.buf_t.allocate(34)
+  const request = uv.random_t()
+  const storage = uv.buf_t.allocate(34)
   for index = 1, 34 do storage:set(index, 165) end
-  local slice = storage:slice(2, 32)
+  const slice = storage:slice(2, 32)
   weak[1] = request
   weak[2] = slice
   weak[3] = storage
@@ -353,17 +353,17 @@ local function coverage_mc_submit_random(loop: uv.loop_t, weak: {value: value},
 end
 
 function test_coverage_mc_async_random_retains_slices_and_survives_callback_failure(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local deadline = coverage_mc_deadline(loop)
-  local weak: {value: value} = {}
+  const deadline = coverage_mc_deadline(loop)
+  const weak: {value: value} = {}
   gc.weak(weak)
   local calls = 0
   coverage_mc_submit_random(loop, weak, function (request, status, buffer, length)
     success(status)
     test.assert(length == 32 and buffer == weak[2] and buffer:is_writable())
     test.assert(request == weak[1] and request:as_req_t():get_data() == "random public data")
-    local storage: uv.buf_t = weak[3]
+    const storage: uv.buf_t = weak[3]
     test.assert(storage:get(1) == 165 and storage:get(34) == 165, "random wrote outside its retained slice")
     test.assert(#buffer:to_string(length) == length)
     calls = calls + 1
@@ -391,12 +391,12 @@ function test_coverage_mc_async_random_retains_slices_and_survives_callback_fail
 end
 
 function test_coverage_mc_random_rejection_does_not_accept_owners(_context: test.Context)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
-  local request = uv.random_t()
-  local buffer = uv.buf_t.allocate(4)
+  const request = uv.random_t()
+  const buffer = uv.buf_t.allocate(4)
   local calls = 0
-  local callback = function (_request: uv.random_t, _status: integer,
+  const callback = function (_request: uv.random_t, _status: integer,
                             _buffer: uv.buf_t, _length: integer)
     calls = calls + 1
   end
@@ -413,30 +413,30 @@ function test_coverage_mc_random_rejection_does_not_accept_owners(_context: test
 end
 
 function test_byte_buffer_to_string_zero_length(_: test.Context)
-  local empty = uv.buf_t.allocate(0)
+  const empty = uv.buf_t.allocate(0)
   test.assert(empty:to_string(0) == "", "zero-capacity buffer was not empty")
-  local readonly = uv.buf_t.from_string("A\0B")
+  const readonly = uv.buf_t.from_string("A\0B")
   test.assert(readonly:to_string(0) == "", "zero-length prefix was not empty")
 end
 
 function test_byte_buffer_to_string_rejects_negative_length(_: test.Context)
-  local buffer = uv.buf_t.allocate(4)
+  const buffer = uv.buf_t.allocate(4)
   expect_error(function() buffer:to_string(-1) end,
                "buffer string length is out of bounds")
 end
 
 function test_coverage_mc_byte_buffer_views_preserve_ownership_and_bounds(_context: test.Context)
-  local buffer = uv.buf_t.allocate(4)
+  const buffer = uv.buf_t.allocate(4)
   test.assert(buffer:is_writable())
   buffer:set(1, 0)
   buffer:set(2, 255)
   buffer:set(3, 65)
   buffer:set(4, 66)
-  local slice = buffer:slice(2, 2)
+  const slice = buffer:slice(2, 2)
   test.assert(slice:get(1) == 255 and slice:get(2) == 65 and slice:to_string(2) == "\255A")
   slice:set(2, 0)
   test.assert(buffer:to_string(4) == "\0\255\0B")
-  local readonly = uv.buf_t.from_string("A\0B")
+  const readonly = uv.buf_t.from_string("A\0B")
   test.assert(not readonly:is_writable() and readonly:get(2) == 0)
   expect_error(function () readonly:set(1, 66) end, "buffer is read-only")
   expect_error(function () buffer:get(0) end, "buffer index is out of bounds")
@@ -449,13 +449,13 @@ function test_coverage_mc_byte_buffer_views_preserve_ownership_and_bounds(_conte
 end
 
 local function coverage_mc_named_pipe(context: test.Context, name: string, sized: boolean)
-  context:run(name, function (_child: test.Context)
-    local directory_request = uv.fs_t()
+  context:run(name, function (_: test.Context)
+    const directory_request = uv.fs_t()
     defer uv.fs_req_cleanup(directory_request)
     success(uv.fs_mkdtemp(nil, directory_request, "uv-mc-XXXXXX"))
-    local directory = uv.fs_get_path(directory_request)
+    const directory = uv.fs_get_path(directory_request)
     defer do
-      local cleanup = uv.fs_t()
+      const cleanup = uv.fs_t()
       defer uv.fs_req_cleanup(cleanup)
       success(uv.fs_rmdir(nil, cleanup, directory))
     end
@@ -463,9 +463,9 @@ local function coverage_mc_named_pipe(context: test.Context, name: string, sized
     if common.is_windows() then
       path = "\\\\.\\pipe\\titan-uv-mc-" .. uv.os_getpid() .. "-" .. uv.hrtime()
     end
-    local loop = new_loop()
+    const loop = new_loop()
     defer finish_loop(loop)
-    local deadline = coverage_mc_deadline(loop)
+    const deadline = coverage_mc_deadline(loop)
     local server, client, peer = uv.pipe_t(), uv.pipe_t(), uv.pipe_t()
     success(uv.pipe_init(loop, server, 0))
     success(uv.pipe_init(loop, client, 0))
@@ -478,7 +478,7 @@ local function coverage_mc_named_pipe(context: test.Context, name: string, sized
     else
       success(uv.pipe_bind(server, path))
     end
-    local chmod_status = uv.pipe_chmod(server, uv.READABLE | uv.WRITABLE)
+    const chmod_status = uv.pipe_chmod(server, uv.READABLE | uv.WRITABLE)
     test.assert(chmod_status == 0 or chmod_status == uv.ENOSYS or chmod_status == uv.ENOTSUP,
                 "named pipe permissions failed unexpectedly")
     local accepted, connected = 0, 0
@@ -491,8 +491,8 @@ local function coverage_mc_named_pipe(context: test.Context, name: string, sized
       uv.close(server:as_handle_t())
       raise "coverage_mc pipe connection failure"
     end))
-    local request = uv.connect_t()
-    local callback: uv.connect_cb = function (current: uv.connect_t, status: integer)
+    const request = uv.connect_t()
+    const callback: uv.connect_cb = function (current: uv.connect_t, status: integer)
       success(status)
       test.assert(current == request and current:handle() ~= nil)
       test.assert(uv.req_type_name(uv.req_get_type(current:as_req_t())) == "connect")
@@ -520,11 +520,11 @@ function test_coverage_mc_named_pipe_connections_and_callback_failure(context: t
 end
 
 function test_coverage_mc_tcp_options_and_reset_retire_a_bound_socket(_context: test.Context)
-  local tcp = uv.tcp_t()
+  const tcp = uv.tcp_t()
   test.assert(uv.tcp_keepalive(tcp, 1, 10) == uv.EINVAL)
   test.assert(uv.tcp_simultaneous_accepts(tcp, 1) == uv.EINVAL)
   test.assert(uv.tcp_close_reset(tcp, nil) == uv.EINVAL)
-  local loop = new_loop()
+  const loop = new_loop()
   defer finish_loop(loop)
   success(uv.tcp_init(loop, tcp))
   local address_status, address? = uv.ip4_addr("127.0.0.1", 0)

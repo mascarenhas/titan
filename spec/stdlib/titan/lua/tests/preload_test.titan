@@ -2,7 +2,7 @@ local independent_preload = import "lua.preload_fixture"
 
 function test_lua_independent_preload_snapshot_skips_host_closures(
     _context: test.Context)
-  local configure = common.lua_helper([=[
+  const configure = common.lua_helper([=[
     return function()
       local preload = debug.getregistry()._PRELOAD
       local names = {
@@ -26,10 +26,10 @@ function test_lua_independent_preload_snapshot_skips_host_closures(
   ]=]) as function (): (function (): (), function (): ())
   local restore, register_late = configure()
   defer restore()
-  local first = tlua.new()
+  const first = tlua.new()
   defer first:close()
   register_late()
-  local values: {async.TransferValue} = { first:run([[
+  const values: {async.TransferValue} = { first:run([[
     return package.preload['lua.tests.snapshot_lua'] == nil,
            package.preload['lua.tests.snapshot_c_closure'] == nil,
            package.preload['lua.tests.snapshot_nonfunction'] == nil,
@@ -38,9 +38,9 @@ function test_lua_independent_preload_snapshot_skips_host_closures(
   ]]) }
   test.assert(#values == 5)
   for index = 1, #values do assert_transfer_boolean(values[index], true) end
-  local second = tlua.new()
+  const second = tlua.new()
   defer second:close()
-  local late: async.TransferValue = second:run([[
+  const late: async.TransferValue = second:run([[
     package.path, package.cpath = '', ''
     return require('lua.tests.snapshot_late').increment(1)
   ]])

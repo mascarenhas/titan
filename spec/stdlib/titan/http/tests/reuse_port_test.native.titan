@@ -1,6 +1,6 @@
 -- Both constructors preserve net's native reuse-port capability and errors.
 local function reused_http_listener(encrypted: boolean)
-  local handler: http.Handler = function (_: http.Request,
+  const handler: http.Handler = function (_: http.Request,
                                           response: http.Response)
     response:set_header("Content-Length", "8")
     response:write("survivor")
@@ -16,7 +16,7 @@ local function reused_http_listener(encrypted: boolean)
   catch
     test.assert(error is async.OperationError,
                 "HTTP reuse_port lost its native operation error")
-    local failure = error as async.OperationError
+    const failure = error as async.OperationError
     test.assert(failure.name == "ENOTSUP" and
                 failure.operation == "net.listen",
                 "HTTP reuse_port failed with an unexpected native error")
@@ -34,14 +34,14 @@ local function reused_http_listener(encrypted: boolean)
   end
   defer second:close()
   first:close()
-  local serving = async.run<|value, value|>(function (): value
+  const serving = async.run<|value, value|>(function (): value
     second:serve()
     return nil
   end)
   defer task_support.cancel_and_join_task(serving, "reuse-port HTTP cleanup")
-  local client = http.Client.new()
+  const client = http.Client()
   defer client:close()
-  local response = client:get(scheme .. "://127.0.0.1:" ..
+  const response = client:get(scheme .. "://127.0.0.1:" ..
                              string.tostring(port) .. "/",
                              http.RequestOptions { ca_file = support.TRUST_ROOT })
   defer response:close()

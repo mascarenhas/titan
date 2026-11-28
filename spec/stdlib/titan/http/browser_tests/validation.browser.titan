@@ -1,6 +1,6 @@
 function test_fail_fast_validation_has_zero_server_hits(_: test.Context)
   runtime_test.run(function ()
-    local source = server() .. "/zero/validation"
+    const source = server() .. "/zero/validation"
     for _, invalid in iteration.ipairs({"http://[invalid", "ws://127.0.0.1/zero/validation"}) do
       local invalid_url = false
       do http.get(invalid)
@@ -29,7 +29,7 @@ function test_fail_fast_validation_has_zero_server_hits(_: test.Context)
       string_error(function () http.request(method, source) end)
     end
     -- The nineteen forbidden exact names not stripped by matching Host/length.
-    local names = {"Accept-Charset", "Accept-Encoding", "Access-Control-Request-Headers",
+    const names = {"Accept-Charset", "Accept-Encoding", "Access-Control-Request-Headers",
       "Access-Control-Request-Method", "Connection", "Cookie", "Cookie2", "Date", "DNT", "Expect",
       "Keep-Alive", "Origin", "Referer", "Set-Cookie", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Via",
       "pRoXy-Custom", "sEc-Custom"}
@@ -43,7 +43,7 @@ function test_fail_fast_validation_has_zero_server_hits(_: test.Context)
         string_error(function () http.get(source, http.RequestOptions {headers = one_header(name, contents)}) end)
       end
     end
-    local child = lua.new()
+    const child = lua.new()
     defer child:close()
     child:run(string.format([[
       local http = require "titan.http"

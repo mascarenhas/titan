@@ -28,7 +28,7 @@ local function expect_sqlite_error(action: function (): ()): sqlite3.Error
 end
 
 local function expect_wrapper_error(action: function (): ()): sqlite3.Error
-  local failure = expect_sqlite_error(action)
+  const failure = expect_sqlite_error(action)
   test.assert(failure.code == nil and failure.extended_code == nil,
               "wrapper error invented native SQLite result codes")
   return failure
@@ -36,7 +36,7 @@ end
 
 local function expect_native_error(action: function (): (),
                                    code: integer): sqlite3.Error
-  local failure = expect_sqlite_error(action)
+  const failure = expect_sqlite_error(action)
   test.assert(failure.code == code and failure.extended_code ~= nil,
               "SQLite failure lost its native result codes")
   return failure
@@ -44,13 +44,13 @@ end
 
 local function execute_sql(connection: sqlite3.Connection,
                            sql: string): integer
-  local statement = connection:prepare(sql)
+  const statement = connection:prepare(sql)
   defer statement:close()
   return statement:execute()
 end
 
 local function required_row(cursor: sqlite3.Cursor): sqlite3.Row
-  local row? = cursor:fetch()
+  const row? = cursor:fetch()
   test.assert(row ~= nil, "expected a result row")
   return row
 end
@@ -59,9 +59,9 @@ end
 -- application mapping boundary; no borrowed SQLite memory leaves the Cursor.
 local function first_row(connection: sqlite3.Connection,
                          sql: string): sqlite3.Row
-  local statement = connection:prepare(sql)
+  const statement = connection:prepare(sql)
   defer statement:close()
-  local cursor = statement:query()
+  const cursor = statement:query()
   defer cursor:close()
   return required_row(cursor)
 end

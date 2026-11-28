@@ -18,7 +18,7 @@ LUA_BROWSER_RANLIB ?=
 LUA_BROWSER_MYCFLAGS ?= $(MYCFLAGS)
 LUA_BROWSER_MYLDFLAGS ?= $(MYLDFLAGS)
 
-.PHONY: lua-browser browser-sdk uninstall-browser-sdk titan-stdlib-browser-test
+.PHONY: lua-browser browser-sdk uninstall-browser-sdk titan-stdlib-browser-test titan-stdlib-browser-lint
 lua-browser: ## Build and install the fork's WebAssembly Lua library with configuration + digest reuse
 	+@$(RECURSIVE_WRAPPER_GUARD) \
 	PREFIX=$(call make_shell_quote,$(PREFIX)) \
@@ -163,3 +163,32 @@ titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all
 	    "$$build_dir/roots.txt" "$$filter" "$$build_dir/stdlib.$$engine.log" || overall=1; \
 	done; \
 	test "$$overall" = 0
+
+# Implementation notes: doc/implementation/driver.md#lint-analysis-driverlint_modules
+# Both stdlib lint gates enable every rule and fail on any diagnostic that no
+# in-source `-- titan-lint: allow(...)` exception names. TITAN_LINT_FLAGS
+# replaces the rule switches, for example '--lint-enable=all --lint-format=json'.
+TITAN_LINT_FLAGS ?= --lint-enable=all --lint-deny=warnings --lint-deny=hints
+# The browser gate also proves that the native and browser lint roots cover
+# every test-tree source (it needs the installed browser SDK's selection).
+TITAN_STDLIB_LINT_ROOTS_CHECK = $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E \
+	scripts/check_browser_stdlib.lua lint-roots $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,spec/stdlib/titan)) \
+	--native $(TITAN_STDLIB_TEST_ROOTS) $(TITAN_STDLIB_NATIVE_HELPER_ROOTS) \
+	--browser $(TITAN_STDLIB_BROWSER_TEST_ROOTS) $(TITAN_STDLIB_BROWSER_ONLY_TEST_ROOTS) \
+	$(TITAN_STDLIB_BROWSER_HELPER_ROOTS)
+
+# The browser stdlib as the browser SDK builds it, then every browser test
+# owner and helper as their images build them.
+titan-stdlib-browser-lint: ## Lint the browser stdlib, test owners and helpers under every rule
+	+@$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
+	status=0; \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(BROWSER_INSTALL_TREE)/bin/titanc$(BROWSER_EXE_SUFFIX)) \
+	  -q --lint $(TITAN_LINT_FLAGS) --target browser \
+	  --tree $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,.)) $(BROWSER_STDLIB_ROOTS) || status=1; \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(BROWSER_INSTALL_TREE)/bin/titanc$(BROWSER_EXE_SUFFIX)) \
+	  -q --lint $(TITAN_LINT_FLAGS) --target browser \
+	  --tree $(call make_shell_quote,$(call BROWSER_NATIVE_PATH,spec/stdlib/titan)) \
+	  $(TITAN_STDLIB_BROWSER_TEST_ROOTS) $(TITAN_STDLIB_BROWSER_ONLY_TEST_ROOTS) \
+	  $(TITAN_STDLIB_BROWSER_HELPER_ROOTS) || status=1; \
+	$(TITAN_STDLIB_LINT_ROOTS_CHECK) || status=1; \
+	test "$$status" = 0

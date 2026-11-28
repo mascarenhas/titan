@@ -25,19 +25,19 @@ function test_receiver_lua_two_phase_worker_and_host_gc(_context: test.Context)
   runtime_test.run(function ()
     test.assert(not independent_receiver.initialized(),
                 "host fixture unexpectedly owns an independent Receiver")
-    local replies = async.receiver()
+    const replies = async.receiver()
     defer replies:close()
-    local gate = receiver_sync.sem_t.new()
+    const gate = receiver_sync.sem_t()
     test.assert(gate:init(0) == 0, "could not initialize Receiver shutdown gate")
     defer gate:destroy()
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
-    local handle = transfer_pointer(state:run_async([[
+    const handle = transfer_pointer(state:run_async([[
       package.path, package.cpath = '', ''
       return require('lua.receiver_fixture').bootstrap(...)
     ]], "=receiver-bootstrap", async.TransferValue.is_pointer(replies:handle()),
       async.TransferValue.is_pointer(gate:borrow())))
-    local working = async.run<|integer, value|>(function (): integer
+    const working = async.run<|integer, value|>(function (): integer
       return transfer_integer(state:run_async([[
         return require('lua.receiver_fixture').drive()
       ]], "=receiver-worker-loop"))
@@ -78,18 +78,18 @@ end
 
 function test_receiver_lua_cancelled_worker_waits_for_orderly_stop(_context: test.Context)
   runtime_test.run(function ()
-    local replies = async.receiver()
+    const replies = async.receiver()
     defer replies:close()
-    local gate = receiver_sync.sem_t.new()
+    const gate = receiver_sync.sem_t()
     test.assert(gate:init(0) == 0, "could not initialize Receiver shutdown gate")
     defer gate:destroy()
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
-    local handle = transfer_pointer(state:run_async([[
+    const handle = transfer_pointer(state:run_async([[
       return require('lua.receiver_fixture').bootstrap(...)
     ]], "=cancelled-receiver-bootstrap", async.TransferValue.is_pointer(replies:handle()),
       async.TransferValue.is_pointer(gate:borrow())))
-    local working = async.run<|nil, value|>(function (): nil
+    const working = async.run<|nil, value|>(function (): nil
       state:run_async("return require('lua.receiver_fixture').drive()")
       return nil
     end)
@@ -119,17 +119,17 @@ end
 
 function test_receiver_lua_failed_bootstrap_closes_retained_endpoint(_context: test.Context)
   runtime_test.run(function ()
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     common.assert_raises_contains(function ()
       state:run_async("require('lua.receiver_fixture').fail_bootstrap()")
     end, "Receiver fixture bootstrap failed")
-    local handle = transfer_pointer(state:run(
+    const handle = transfer_pointer(state:run(
       "return require('lua.receiver_fixture').retained_handle()"))
     common.assert_raises_contains(function ()
       async.send(handle, async.TransferValue.is_nil())
     end, "receiver is closed")
-    local drained = state:run([[
+    const drained = state:run([[
       require('titan.async').loop()
       collectgarbage('collect')
       return 42
@@ -145,18 +145,18 @@ end
 
 function test_receiver_lua_coordinated_close_rejects_late_sends(_context: test.Context)
   runtime_test.run(function ()
-    local replies = async.receiver()
+    const replies = async.receiver()
     defer replies:close()
-    local gate = receiver_sync.sem_t.new()
+    const gate = receiver_sync.sem_t()
     test.assert(gate:init(0) == 0, "could not initialize Receiver shutdown gate")
     defer gate:destroy()
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
-    local handle = transfer_pointer(state:run_async([[
+    const handle = transfer_pointer(state:run_async([[
       return require('lua.receiver_fixture').bootstrap(...)
     ]], "=closing-receiver-bootstrap", async.TransferValue.is_pointer(replies:handle()),
       async.TransferValue.is_pointer(gate:borrow())))
-    local working = async.run<|nil, value|>(function (): nil
+    const working = async.run<|nil, value|>(function (): nil
       state:run_async("return require('lua.receiver_fixture').drive()")
       return nil
     end)

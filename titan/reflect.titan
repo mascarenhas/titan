@@ -235,7 +235,7 @@ end
 -- @usage standard-library-reflect.md#public-nominal-members
 function RecordType:public_constructor(): StaticFunctionType?
   for index = 1, #self.statics do
-    local candidate = self.statics[index]
+    const candidate = self.statics[index]
     if candidate.name == "new" then
       if candidate.vararg_descriptor ~= nil or candidate.flexret_descriptor ~= nil or
           #candidate.return_descriptors ~= 1 then return nil end
@@ -452,7 +452,7 @@ function RecordValue:get(i: integer): value
   if i < 1 or i > self.n_fields then
     raise "field index " .. i .. " out of bounds [1, " .. self.n_fields .. "]"
   end
-  local field = self.type.fields[i]
+  const field = self.type.fields[i]
   local module: foreign TValue = field.module
   local result: foreign TValue = nil
   field.accessor(L, ffi.lmacro_uvalue(module), self.udata, result, 0)
@@ -468,7 +468,7 @@ function RecordValue:set(i: integer, v: value)
   if i < 1 or i > self.n_fields then
     raise "field index " .. i .. " out of bounds [1, " .. self.n_fields .. "]"
   end
-  local field = self.type.fields[i]
+  const field = self.type.fields[i]
   local module: foreign TValue = field.module
   local source: foreign TValue = v
   field.accessor(L, ffi.lmacro_uvalue(module), self.udata, source, 1)
@@ -479,7 +479,7 @@ end
 -- ordinal const Arrays of projections. Other Titan values remain unchanged.
 function RecordValue:project(i: integer): value
   if i < 1 or i > self.n_fields then raise "projection field out of bounds" end
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   local result: foreign TValue = nil
   self.type.projector(L, self.udata, i, result)
@@ -490,7 +490,7 @@ end
 -- This uses default storage construction and never invokes a custom new.
 function RecordType:construct(fields: const {value}): value
   if not self.all_public then raise "cannot construct a record with private fields" end
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   local module: foreign TValue = self.module
   local input: foreign TValue = fields
@@ -516,7 +516,7 @@ end
 --- Read an active union part as a lossless native-storage projection.
 function UnionValue:project(i: integer): value
   if i < 1 or i > self.n_parts then raise "projection part out of bounds" end
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   local result: foreign TValue = nil
   self.type.projector(L, self.udata, i, result)
@@ -525,7 +525,7 @@ end
 
 --- Initialize a public variant from its ordered payload projections.
 function UnionType:construct(tag: integer, parts: const {value}): value
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   local module: foreign TValue = self.module
   local input: foreign TValue = parts
@@ -542,7 +542,7 @@ function InterfaceValue:get(i: integer): value
   if i < 1 or i > self.n_fields then
     raise "field index " .. i .. " out of bounds [1, " .. self.n_fields .. "]"
   end
-  local field = self.type.fields[i]
+  const field = self.type.fields[i]
   local module: foreign TValue = field.module
   local result: foreign TValue = nil
   field.accessor(L, ffi.lmacro_uvalue(module), self.udata, result, 0)
@@ -564,13 +564,13 @@ end
 -- @return Resolved nominal descriptor, or Type.is_value for an unknown name.
 -- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 function NamedType:resolve(): Type
-  local cached? = resolved_named_types[self.name]
+  const cached? = resolved_named_types[self.name]
   if cached ~= nil then return cached end
-  local found: NominalType? = find_nominal(self.name)
+  const found: NominalType? = find_nominal(self.name)
   if found == nil then
     return Type.is_value()
   end
-  local resolved = nominal_descriptor(found)
+  const resolved = nominal_descriptor(found)
   resolved_named_types[self.name] = resolved
   return resolved
 end
@@ -579,7 +579,7 @@ end
 -- @return One retained C struct, union, or typedef descriptor.
 -- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 function ForeignNamedType:resolve(): Type
-  local resolved: Type? = self.declarations[self.name]
+  const resolved: Type? = self.declarations[self.name]
   if resolved == nil then
     raise "unknown foreign type " .. self.name
   end
@@ -604,12 +604,12 @@ end
 local METATABLE_BY_NAME: { string: { value: value } } = {}
 
 local function init_metatable_by_name()
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve stack for the nominal registry"
   end
-  local t = ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
+  const t = ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
   if t ~= ffi.LUA_TTABLE then
     raise "Titan metatable by name registry is not a table"
   end
@@ -640,7 +640,7 @@ local seen_ctypes: { string: Type } = {}
 
 local function sort_strings(arr: {string})
   for i = 2, #arr do
-    local key = arr[i]
+    const key = arr[i]
     local j = i - 1
     while j >= 1 and arr[j] > key do
       arr[j + 1] = arr[j]
@@ -651,7 +651,7 @@ local function sort_strings(arr: {string})
 end
 
 local function to_array<|T|>(v: {integer: T}?): const {T}
-  local res: {T} = {}
+  const res: {T} = {}
   if v == nil then return res as const {T} end
   for i = 1, #v do
     res[#res + 1] = v[i]
@@ -660,10 +660,10 @@ local function to_array<|T|>(v: {integer: T}?): const {T}
 end
 
 local function to_sorted_array<|T|>(v: {string: T}?): const {T}
-  local res: {T} = {}
+  const res: {T} = {}
   if v == nil then return res as const {T} end
-  local names: {string} = {}
-  for name, val in iteration.pairs(v) do
+  const names: {string} = {}
+  for name, _ in iteration.pairs(v) do
     names[#names + 1] = name
   end
   sort_strings(names)
@@ -722,7 +722,7 @@ local function init_hydration_env()
   end
 
   hydration_env["Array"] = function(elem: Type, isconst: {string: string}): Type
-    local tag = isconst["tag"]
+    const tag = isconst["tag"]
     local ic = ArrayTypeConstness.is_mutable()
     if tag == "yes" then
       ic = ArrayTypeConstness.is_const()
@@ -759,8 +759,8 @@ local function init_hydration_env()
 
   hydration_env["Variant"] = function(fqtn: string, name: string,
         fields: {integer: FieldType}, index: integer): VariantType
-    local descriptors = to_array(fields)
-    local parts: {VariantPartType} = {}
+    const descriptors = to_array(fields)
+    const parts: {VariantPartType} = {}
     for i = 1, #descriptors do
       parts[i] = { name = descriptors[i].name, type = descriptors[i].type }
     end
@@ -906,7 +906,7 @@ local function init_hydration_env()
         origin: string?): Type
     local name? = cname
     if name == nil then name = tagname end
-    local t = Type.is_foreign_struct({
+    const t = Type.is_foreign_struct({
       cname = cname or "",
       tagname = tagname or "",
       typedef = typedef or "",
@@ -924,7 +924,7 @@ local function init_hydration_env()
         fields: {integer: ForeignFieldType}, complete: boolean, origin: string?): Type
     local name? = cname
     if name == nil then name = tagname end
-    local t = Type.is_foreign_union({
+    const t = Type.is_foreign_union({
       cname = cname or "",
       tagname = tagname or "",
       typedef = typedef or "",
@@ -949,7 +949,7 @@ local function init_hydration_env()
 
   hydration_env["CTypedef"] = function(name: string, target: Type, quals: {integer: string}?,
         origin: string?): Type
-    local t = Type.is_foreign_typedef{
+    const t = Type.is_foreign_typedef{
       name = name,
       target_descriptor = target,
       quals = to_array(quals)
@@ -979,7 +979,7 @@ local function init_hydration_env()
   end
 
   -- Binder and module tokens do not contribute runtime descriptors.
-  local ignore_fn = function(): value return nil end
+  const ignore_fn = function(): value return nil end
   hydration_env["GenericScope"] = ignore_fn
   hydration_env["TypeParameter"] = ignore_fn
   hydration_env["GenericAlias"] = ignore_fn
@@ -991,21 +991,21 @@ end
 
 -- Implementation notes: doc/implementation/standard-library-reflect.md#descriptor-hydration
 local function hydrate_type(typestr: string, mt: {value: value}?): Type
-  local previous_membermap? = active_membermap
-  local previous_statics? = active_statics
-  local previous_module = active_module
-  local previous_has_fields = active_has_fields
-  local previous_payload_reader = active_payload_reader
-  local previous_projector = active_projector
-  local previous_constructor = active_constructor
-  local previous_public = active_public
-  local previous_ctypes = seen_ctypes
+  const previous_membermap? = active_membermap
+  const previous_statics? = active_statics
+  const previous_module = active_module
+  const previous_has_fields = active_has_fields
+  const previous_payload_reader = active_payload_reader
+  const previous_projector = active_projector
+  const previous_constructor = active_constructor
+  const previous_public = active_public
+  const previous_ctypes = seen_ctypes
   seen_ctypes = {}
   if mt then
     active_membermap = mt[ffi.TITAN_MT_MEMBERMAP]
     active_statics = mt[ffi.TITAN_MT_STATICS]
     active_module = mt[ffi.TITAN_MT_MOD]
-    local brand: integer = mt[ffi.TITAN_BRAND]
+    const brand: integer = mt[ffi.TITAN_BRAND]
     active_has_fields = brand == ffi.TITAN_RECORD or brand == ffi.TITAN_INTERFACE
     active_payload_reader = mt[ffi.TITAN_MT_PAYLOAD]
     active_projector = mt[ffi.TITAN_MT_PROJECT]
@@ -1033,35 +1033,35 @@ local function hydrate_type(typestr: string, mt: {value: value}?): Type
     active_public = previous_public
   end
   -- Trusted compiler metadata only. Keep this loader independent of titan.lua.
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 2) == 0 then
     raise "cannot reserve stack for reflection hydration"
   end
-  local source = "return " .. typestr
+  const source = "return " .. typestr
   if ffi.luaL_loadbufferx(L, source, #source as foreign size_t, "=descriptor", "t") ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
+    const failure: value = ffi.lua_totvalue(L, -1)
     raise failure
   end
   ffi.lua_pushtvalue(L, hydration_env)
   if not ffi.lua_setupvalue(L, -2, 1) then
     raise "reflection descriptor has no environment"
   end
-  local loaded: value = ffi.lua_totvalue(L, -1)
-  local chunk: function(): Type = loaded
+  const loaded: value = ffi.lua_totvalue(L, -1)
+  const chunk: function(): Type = loaded
   return chunk()
 end
 
 local function get_or_hydrate_from_metatable(mt: { value: value }): Type
-  local cached? = mt_cache[mt]
+  const cached? = mt_cache[mt]
   if cached then
     return cached
   end
-  local typestr: string? = mt[ffi.TITAN_MT_TYPE]
+  const typestr: string? = mt[ffi.TITAN_MT_TYPE]
   if typestr == nil then
     raise "metatable has no type descriptor"
   end
-  local t = hydrate_type(typestr, mt)
+  const t = hydrate_type(typestr, mt)
   mt_cache[mt] = t
   return t
 end
@@ -1071,20 +1071,20 @@ end
 -- @return Registered nominal descriptor, or nil when the name is unknown.
 -- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 function find_nominal(name: string): NominalType?
-  local cached: NominalType? = nominal_cache[name]
+  const cached: NominalType? = nominal_cache[name]
   if cached then
     return cached
   end
-  local mt? = METATABLE_BY_NAME[name]
+  const mt? = METATABLE_BY_NAME[name]
   if mt == nil then
     return nil
   end
-  local brand: integer? = mt[ffi.TITAN_BRAND]
+  const brand: integer? = mt[ffi.TITAN_BRAND]
   if brand == nil then
     return nil
   end
   local nom: NominalType? = nil
-  local t = get_or_hydrate_from_metatable(mt)
+  const t = get_or_hydrate_from_metatable(mt)
   case t
     when is_record(rec) then
       nom = NominalType.is_record(rec)
@@ -1104,7 +1104,7 @@ local function is_titan_closure(cl: foreign *CClosure): boolean
     return false
   end
   -- Lua declares a one-element trailing array; nupvalues owns its real extent.
-  local upvalues = cl.upvalue as foreign *TValue
+  const upvalues = cl.upvalue as foreign *TValue
   if ffi.lmacro_ttislightuserdata(upvalues[3]) == 0 then
     return false
   end
@@ -1115,12 +1115,12 @@ end
 local function inspect_function(v: value): Value
   local tv: foreign TValue = v
   if ffi.lmacro_ttisLclosure(tv) ~= 0 then
-    local top = ffi.lua_gettop(L)
+    const top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
     if ffi.lua_checkstack(L, 1) == 0 then
       raise "cannot reserve stack for Lua function inspection"
     end
-    local ar: owned *lua_Debug = foreign lua_Debug.new()
+    const ar: owned *lua_Debug = foreign lua_Debug.new()
     ffi.lua_pushtvalue(L, tv)
     if ffi.lua_getinfo(L, ">Su", ar) == 0 then
       raise "could not get Lua function info"
@@ -1129,12 +1129,12 @@ local function inspect_function(v: value): Value
     if ar.source ~= nil then
       src = ar.source as string
     end
-    local short_src = (ar.short_src as foreign *char) as string
+    const short_src = (ar.short_src as foreign *char) as string
     local what = ""
     if ar.what ~= nil then
       what = ar.what as string
     end
-    local desc: LuaFunctionType = {
+    const desc: LuaFunctionType = {
       source = src,
       short_source = short_src,
       line_defined = ar.linedefined as integer,
@@ -1148,15 +1148,15 @@ local function inspect_function(v: value): Value
       type = desc
     }
   elseif ffi.lmacro_ttisCclosure(tv) ~= 0 then
-    local cl: foreign *CClosure = ffi.lmacro_clCvalue(tv)
+    const cl: foreign *CClosure = ffi.lmacro_clCvalue(tv)
     if is_titan_closure(cl) then
-      local upvalues = cl.upvalue as foreign *TValue
-      local native_entry = ffi.lmacro_pvalue(upvalues[2])
-      local lua_entry: foreign function (*lua_State): int = cl.f
-      local tag_ptr = ffi.lmacro_pvalue(upvalues[1]) as foreign *char
-      local tag_str = tag_ptr as string
-      local ftype = hydrate_type(tag_str)
-      local desc = (function (descriptor: Type): FunctionType
+      const upvalues = cl.upvalue as foreign *TValue
+      const native_entry = ffi.lmacro_pvalue(upvalues[2])
+      const lua_entry: foreign function (*lua_State): int = cl.f
+      const tag_ptr = ffi.lmacro_pvalue(upvalues[1]) as foreign *char
+      const tag_str = tag_ptr as string
+      const ftype = hydrate_type(tag_str)
+      const desc = (function (descriptor: Type): FunctionType
         case descriptor
         when is_function(ft) then return ft
         else raise "invalid function descriptor for Titan function"
@@ -1169,14 +1169,14 @@ local function inspect_function(v: value): Value
         type = desc
       }
     else
-      local entry: foreign function (*lua_State): int = cl.f
+      const entry: foreign function (*lua_State): int = cl.f
       return Value.is_lua_c_function{
         value = v as function (...: value): (...: value),
         entry = entry
       }
     end
   elseif ffi.lmacro_ttislcf(tv) ~= 0 then
-    local entry: foreign function (*lua_State): int = ffi.lmacro_fvalue(tv)
+    const entry: foreign function (*lua_State): int = ffi.lmacro_fvalue(tv)
     return Value.is_lua_c_function{
       value = v as function (...: value): (...: value),
       entry = entry
@@ -1198,11 +1198,11 @@ local function init_brand_handlers()
   end
 
   brand_handlers[ffi.TITAN_RECORD] = function(v: value, mt: {value: value}?): Value
-    local t = get_or_hydrate_from_metatable(mt)
+    const t = get_or_hydrate_from_metatable(mt)
     case t
     when is_record(desc) then
       local tv: foreign TValue = v
-      local u = ffi.lmacro_uvalue(tv)
+      const u = ffi.lmacro_uvalue(tv)
       return Value.is_record({
         udata = u,
         n_fields = #desc.fields,
@@ -1215,16 +1215,16 @@ local function init_brand_handlers()
   end
 
   brand_handlers[ffi.TITAN_UNION] = function(v: value, mt: {value: value}?): Value
-    local t = get_or_hydrate_from_metatable(mt)
+    const t = get_or_hydrate_from_metatable(mt)
     case t
     when is_union(desc) then
       local tv: foreign TValue = v
-      local u = ffi.lmacro_uvalue(tv)
+      const u = ffi.lmacro_uvalue(tv)
       local descriptor: foreign TValue = nil
       desc.payload_reader(L, u, 0, descriptor)
-      local tag: integer = descriptor as value
+      const tag: integer = descriptor as value
       desc.payload_reader(L, u, -1, descriptor)
-      local arity: integer = descriptor as value
+      const arity: integer = descriptor as value
       return Value.is_union({
         tag = tag,
         udata = u,
@@ -1238,12 +1238,12 @@ local function init_brand_handlers()
   end
 
   brand_handlers[ffi.TITAN_INTERFACE] = function(v: value, mt: {value: value}?): Value
-    local t = get_or_hydrate_from_metatable(mt)
+    const t = get_or_hydrate_from_metatable(mt)
     case t
     when is_interface(desc) then
       local tv: foreign TValue = v
-      local u = ffi.lmacro_uvalue(tv)
-      local uv_ptr = u.uv as foreign *UValue
+      const u = ffi.lmacro_uvalue(tv)
+      const uv_ptr = u.uv as foreign *UValue
       local wrapped = uv_ptr[1].uv
       return Value.is_interface({
         udata = u,
@@ -1258,17 +1258,17 @@ local function init_brand_handlers()
   end
 
   brand_handlers[ffi.TITAN_OWNED] = function(v: value, mt: {value: value}?): Value
-    local t = get_or_hydrate_from_metatable(mt)
+    const t = get_or_hydrate_from_metatable(mt)
     local tv: foreign TValue = v
-    local u = ffi.lmacro_uvalue(tv)
-    local payload = ffi.lmacro_getudatamem(u)
-    local size = u.len as integer
+    const u = ffi.lmacro_uvalue(tv)
+    const payload = ffi.lmacro_getudatamem(u)
+    const size = u.len as integer
     case t
     when is_owned_foreign_array(arr_t) then
       local count: integer = 0
       if (u.nuvalue as integer) > 0 then
-        local uv_ptr = u.uv as foreign *UValue
-        local count_val: value = uv_ptr[0].uv
+        const uv_ptr = u.uv as foreign *UValue
+        const count_val: value = uv_ptr[0].uv
         if count_val is integer then
           count = count_val as integer
         end
@@ -1295,19 +1295,19 @@ end
 
 local function inspect_userdata(v: value): Value
   local tv: foreign TValue = v
-  local ud: foreign *Udata = ffi.lmacro_uvalue(tv)
-  local mt = ud.metatable
+  const ud: foreign *Udata = ffi.lmacro_uvalue(tv)
+  const mt = ud.metatable
   if mt == nil then
     return Value.is_lua_userdata{ value = v }
   end
   local mtv: foreign TValue = nil
   ffi.lmacro_sethvalue(L, mtv, mt)
-  local mtm: { value: value } = mtv as value
-  local brand: integer? = mtm[ffi.TITAN_BRAND]
+  const mtm: { value: value } = mtv as value
+  const brand: integer? = mtm[ffi.TITAN_BRAND]
   if brand == nil then
     return Value.is_lua_userdata{ value = v }
   end
-  local brand_handler? = brand_handlers[brand]
+  const brand_handler? = brand_handlers[brand]
   if brand_handler == nil then
     return Value.is_lua_userdata{ value = v }
   end
@@ -1317,7 +1317,7 @@ end
 local tag_handlers: {function (value): (Value)} = {}
 
 local function init_tag_handlers()
-  tag_handlers[1] = function(v: value): Value
+  tag_handlers[1] = function(_: value): Value
     return Value.is_nil()
   end
 
@@ -1367,8 +1367,8 @@ end
 -- @usage standard-library-reflect.md#inspecting-values
 function inspect(v: value): Value
   local tv: foreign TValue = v
-  local tag: integer = ffi.lmacro_ttype(tv)
-  local handler? = tag_handlers[tag + 1]
+  const tag: integer = ffi.lmacro_ttype(tv)
+  const handler? = tag_handlers[tag + 1]
   if handler then
     return handler(v)
   else

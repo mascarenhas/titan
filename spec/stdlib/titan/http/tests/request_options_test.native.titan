@@ -1,5 +1,5 @@
 local function request_body(request: http.Request): string
-  local builder = string.writer()
+  const builder = string.writer()
   for chunk in request:read do builder:write(chunk) end
   return builder:drain()
 end
@@ -11,7 +11,7 @@ local function assert_request_policy_error(action: OptionsAction, expected: stri
   catch
     rejected = true
     test.assert(error is async.OperationError, "request policy lost its OperationError identity")
-    local failure = error as async.OperationError
+    const failure = error as async.OperationError
     test.assert(failure.name == "EIO" and failure.operation == "http.request",
                 "request policy reported the wrong operation or error name")
     if expected ~= nil then test.assert(failure.message == expected, "unexpected request policy message") end
@@ -22,22 +22,22 @@ end
 function test_request_options_pre_io_policies(_: test.Context)
   run_reuse_case(function ()
     local hits = 0
-    local base = reuse_http_server(false, 28100, function (_: http.Request, response: http.Response)
+    const base = reuse_http_server(false, 28100, function (_: http.Request, response: http.Response)
       hits = hits + 1
       response:set_header("Content-Length", "0")
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
     for _ = 1, 2 do
-      local cached = http.RequestOptions {
+      const cached = http.RequestOptions {
         cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.same_origin(),
       }
       assert_request_policy_error(function ()
-        local response = client:get(base, cached)
+        const response = client:get(base, cached)
         defer response:close()
       end, "HTTP response not in cache (only-if-cached)")
       assert_options_error(function ()
-        local response = client:request("pUt", base,
+        const response = client:request("pUt", base,
           http.RequestOptions { mode = http.RequestMode.no_cors() })
         defer response:close()
       end, "HTTP request mode 'no-cors' allows only GET, HEAD, or POST")
@@ -49,20 +49,20 @@ end
 function test_request_options_get_rejects_body(_: test.Context)
   run_reuse_case(function ()
     local hits = 0
-    local base = reuse_http_server(false, 28100, function (_: http.Request, response: http.Response)
+    const base = reuse_http_server(false, 28100, function (_: http.Request, response: http.Response)
       hits = hits + 1
       response:set_header("Content-Length", "0")
     end)
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
     defer http.close_idle_connections()
-    local options = http.RequestOptions { body = "" }
+    const options = http.RequestOptions { body = "" }
     assert_options_error(function ()
-      local response = client:get(base, options)
+      const response = client:get(base, options)
       defer response:close()
     end, "HTTP get does not accept a request body")
     assert_options_error(function ()
-      local response = http.get(base, options)
+      const response = http.get(base, options)
       defer response:close()
     end, "HTTP get does not accept a request body")
     test.assert(hits == 0, "bodyful get reached the server")
@@ -74,23 +74,23 @@ local function add_native_option_case(context: test.Context, name: string,
                                       mode: http.RequestMode?, method: string?)
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
-      local selected_method = method or "GET"
+      const selected_method = method or "GET"
       local hits = 0
-      local base = reuse_http_server(false, 28100, function (request: http.Request, response: http.Response)
+      const base = reuse_http_server(false, 28100, function (request: http.Request, response: http.Response)
         hits = hits + 1
         test.assert(request.method == selected_method, "request mode changed the allowed method")
         test.assert(request.headers:get("Cookie") == "explicit=1", "native policy dropped explicit cookies")
         response:set_header("Content-Length", "2")
         if selected_method ~= "HEAD" then response:write("ok") end
       end)
-      local client = http.Client()
+      const client = http.Client()
       defer client:close()
-      local options = http.RequestOptions {
+      const options = http.RequestOptions {
         headers = http.headers({http.Header("Cookie", "explicit=1")}),
         cache = cache, credentials = credentials, mode = mode,
       }
       for _ = 1, 2 do
-        local response = client:request(selected_method, base, options)
+        const response = client:request(selected_method, base, options)
         defer response:close()
         test.assert(response.status == 200 and not response.redirected)
         if selected_method == "HEAD" then test.assert(response:read() == nil)
@@ -115,7 +115,7 @@ end
 function test_request_options_snapshot_and_native_get_body(_: test.Context)
   run_reuse_case(function ()
     local hits = 0
-    local base = reuse_http_server(false, 28100, function (request: http.Request, response: http.Response)
+    const base = reuse_http_server(false, 28100, function (request: http.Request, response: http.Response)
       hits = hits + 1
       test.assert(request.method == "GET", "native GET method changed")
       test.assert(request.headers:get("X-Snapshot") == "original", "caller mutation changed the snapshot")
@@ -124,14 +124,14 @@ function test_request_options_snapshot_and_native_get_body(_: test.Context)
       response:set_header("Content-Length", "2")
       response:write("ok")
     end)
-    local supplied = http.headers({http.Header("X-Snapshot", "original")})
-    local options = http.RequestOptions { headers = supplied, body = "body\0bytes" }
+    const supplied = http.headers({http.Header("X-Snapshot", "original")})
+    const options = http.RequestOptions { headers = supplied, body = "body\0bytes" }
     supplied:set("X-Snapshot", "changed")
     supplied:add("X-Later", "new")
-    local client = http.Client()
+    const client = http.Client()
     defer client:close()
     for _ = 1, 2 do
-      local response = client:request("GET", base, options)
+      const response = client:request("GET", base, options)
       defer response:close()
       test.assert(support.read_response(response) == "ok")
     end

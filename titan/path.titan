@@ -36,8 +36,8 @@ end
 local function prefix_fold(subject: string, prefix: string): boolean
   if #subject < #prefix then return false end
   for index = 1, #prefix do
-    local a = character(subject, index)
-    local b = character(prefix, index)
+    const a = character(subject, index)
+    const b = character(prefix, index)
     if is_separator(b) then
       if not is_separator(a) then return false end
     elseif string.upper(a) ~= string.upper(b) then
@@ -93,7 +93,7 @@ local function volume_length(subject: string): integer
 end
 
 local function replace_separator(subject: string, from: string, to: string): string
-  local writer = string.writer()
+  const writer = string.writer()
   local first = 1
   for index = 1, #subject do
     if character(subject, index) == from then
@@ -169,7 +169,7 @@ end
 -- @usage standard-library-path.md#api
 function is_absolute(subject: string): boolean
   if not windows then return character(subject, 1) == "/" end
-  local length = volume_length(subject)
+  const length = volume_length(subject)
   if length == 0 then return false end
   if is_separator(character(subject, 1)) and
      is_separator(character(subject, 2)) then return true end
@@ -191,17 +191,17 @@ end
 -- @usage standard-library-path.md#api
 function normalize(subject: string): string
   -- Implementation notes: doc/implementation/standard-library-path.md#normalization-and-join
-  local length = volume_length(subject)
-  local prefix = string.sub(subject, 1, length)
-  local tail = string.sub(subject, length + 1)
+  const length = volume_length(subject)
+  const prefix = string.sub(subject, 1, length)
+  const tail = string.sub(subject, length + 1)
   if tail == "" then
     if length > 1 and is_separator(character(subject, 1)) and
        is_separator(character(subject, 2)) then return from_slash(subject) end
     return subject .. "."
   end
-  local rooted = is_separator(character(tail, 1))
-  local components: {string} = {}
-  local ends: {integer} = {}
+  const rooted = is_separator(character(tail, 1))
+  const components: {string} = {}
+  const ends: {integer} = {}
   local count = 0
   local first = 1
   local written = 0
@@ -209,7 +209,7 @@ function normalize(subject: string): string
   local rewritten = rooted and character(tail, 1) ~= separator
   for index = 1, #tail + 1 do
     if index > #tail or is_separator(character(tail, index)) then
-      local component = string.sub(tail, first, index - 1)
+      const component = string.sub(tail, first, index - 1)
       local append = false
       if component == ".." then
         if count > 0 and components[count] ~= ".." then
@@ -241,7 +241,7 @@ function normalize(subject: string): string
       first = index + 1
     end
   end
-  local writer = string.writer()
+  const writer = string.writer()
   if rooted then writer:write(separator) end
   for index = 1, count do
     if index > 1 then writer:write(separator) end
@@ -280,7 +280,7 @@ end
 --   -- directory is "src//"; filename is "main.titan".
 -- @usage standard-library-path.md#api
 function split(subject: string): (string, string)
-  local length = volume_length(subject)
+  const length = volume_length(subject)
   local index = #subject
   while index > length and not is_separator(character(subject, index)) do
     index = index - 1
@@ -312,7 +312,7 @@ function basename(subject: string): string
   while index > 0 and not is_separator(character(tail, index)) do
     index = index - 1
   end
-  local leaf = string.sub(tail, index + 1)
+  const leaf = string.sub(tail, index + 1)
   if leaf ~= "" then return leaf end
   return separator
 end
@@ -330,13 +330,13 @@ end
 --   -- directory is "src".
 -- @usage standard-library-path.md#api
 function dirname(subject: string): string
-  local length = volume_length(subject)
+  const length = volume_length(subject)
   local index = #subject
   while index > length and not is_separator(character(subject, index)) do
     index = index - 1
   end
-  local directory = normalize(string.sub(subject, length + 1, index))
-  local prefix = volume(subject)
+  const directory = normalize(string.sub(subject, length + 1, index))
+  const prefix = volume(subject)
   if directory == "." and length > 2 then return prefix end
   return prefix .. directory
 end
@@ -354,7 +354,7 @@ end
 -- @usage standard-library-path.md#api
 function extension(subject: string): string
   for index = #subject, 1, -1 do
-    local byte = character(subject, index)
+    const byte = character(subject, index)
     if is_separator(byte) then break end
     if byte == "." then return string.sub(subject, index) end
   end
@@ -374,7 +374,7 @@ end
 --   -- "include/titan.h" on POSIX; [[include\titan.h]] on Windows.
 -- @usage standard-library-path.md#api
 function join(...: string): string
-  local writer = string.writer()
+  const writer = string.writer()
   local size = 0
   local last = ""
   for index = 1, #... do

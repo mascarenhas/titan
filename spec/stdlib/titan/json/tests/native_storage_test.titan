@@ -6,7 +6,7 @@ record MappingNativeNumbers
 end
 
 record MappingPrivateNativeNumber
-  local hidden: foreign unsigned long long
+  local const hidden: foreign unsigned long long
   visible: integer
 end
 
@@ -25,7 +25,7 @@ local function expect_native_json_boxing_failure(candidate: value)
 end
 
 function test_mapping_native_numbers_fail_only_at_the_boxed_boundary(_context: test.Context)
-  local candidate = MappingNativeNumbers.new(ffi.ULLONG_MAX, ffi.ULLONG_MAX)
+  const candidate = MappingNativeNumbers(ffi.ULLONG_MAX, ffi.ULLONG_MAX)
   expect_native_json_boxing_failure(candidate)
   test.assert(candidate.count == ffi.ULLONG_MAX)
   test.assert((candidate.optional as foreign unsigned long long) == ffi.ULLONG_MAX)
@@ -41,7 +41,7 @@ function test_mapping_native_numbers_fail_only_at_the_boxed_boundary(_context: t
 end
 
 function test_mapping_private_native_numbers_do_not_cross_the_boxed_boundary(_context: test.Context)
-  local candidate = MappingPrivateNativeNumber.new(ffi.ULLONG_MAX, 42)
+  const candidate = MappingPrivateNativeNumber(ffi.ULLONG_MAX, 42)
   test.assert(json.encode(candidate) == '{"visible":42}')
   test.assert(candidate.hidden == ffi.ULLONG_MAX)
 end

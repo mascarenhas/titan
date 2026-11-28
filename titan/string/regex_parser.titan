@@ -39,42 +39,42 @@ local union RegexNode
 end
 
 local record ParsedRegex
-  local root: RegexNode
-  local capture_count: integer
-  local anchored_start: boolean
-  local anchored_end: boolean
+  local const root: RegexNode
+  local const capture_count: integer
+  local const anchored_start: boolean
+  local const anchored_end: boolean
 end
 
 local record RegexQuantifier
-  local position: integer
-  local minimum: integer
-  local maximum: integer
+  local const position: integer
+  local const minimum: integer
+  local const maximum: integer
 end
 
 local record RegexClassItem
-  local position: integer
-  local bytes: string
-  local single: boolean
-  local escaped: boolean
+  local const position: integer
+  local const bytes: string
+  local const single: boolean
+  local const escaped: boolean
 end
 
 local record RegexParseFrame
-  local group_position: integer
-  local group_index: integer
-  local capturing: boolean
+  local const group_position: integer
+  local const group_index: integer
+  local const capturing: boolean
   local alternation_position: integer
   local branch_position: integer
   local pieces: {RegexNode}
-  local alternatives: {RegexNode}
+  local const alternatives: {RegexNode}
 end
 
 local record RegexParseState
-  local source: string
-  local frames: {RegexParseFrame}
+  local const source: string
+  local const frames: {RegexParseFrame}
   local depth: integer
   local capture_count: integer
-  local closed_groups: {integer: boolean}
-  local nullable_groups: {integer: boolean}
+  local const closed_groups: {integer: boolean}
+  local const nullable_groups: {integer: boolean}
   local anchored_start: boolean
   local anchored_end: boolean
 end
@@ -171,14 +171,14 @@ end
 
 local function regex_byte(source: string,
                           position: integer): integer
-  local bytes =
+  const bytes =
     source as foreign const *unsigned char
   return bytes[position - 1] as integer
 end
 
 local function regex_byte_flags(bytes: string):
                                 {integer: boolean}
-  local flags: {integer: boolean} = {}
+  const flags: {integer: boolean} = {}
   local position = 1
   while position <= #bytes do
     flags[regex_byte(bytes, position)] = true
@@ -193,7 +193,7 @@ local function regex_line_details(source: string, position: integer):
   local line_start = 1
   local cursor = 1
   while cursor < position and cursor <= #source do
-    local character = regex_character(source, cursor)
+    const character = regex_character(source, cursor)
     if character == "\r" then
       -- CRLF is one line ending, but do not skip the LF when that exact byte
       -- is the diagnostic position: it is column one of the following line.
@@ -212,7 +212,7 @@ local function regex_line_details(source: string, position: integer):
 
   local line_end = line_start
   while line_end <= #source do
-    local character = regex_character(source, line_end)
+    const character = regex_character(source, line_end)
     if character == "\n" or character == "\r" then break end
     line_end = line_end + 1
   end
@@ -227,7 +227,7 @@ local function raise_regex_diagnostic(label: string, message: string,
   if actual > #source + 1 then actual = #source + 1 end
   local line, column, source_line =
     regex_line_details(source, actual)
-  local diagnostic = RegexDiagnostic {
+  const diagnostic = RegexDiagnostic {
     label = label,
     message = message,
     source = source,
@@ -282,7 +282,7 @@ end
 
 local function regex_byte_set_contains(bytes: string,
                                        candidate: string): boolean
-  local first: integer? = find(bytes, candidate, 1)
+  const first: integer? = find(bytes, candidate, 1)
   if first then return true end
   return false
 end
@@ -297,7 +297,7 @@ local function regex_complement_bytes(bytes: string): string
   local result = ""
   local position = 1
   while position <= #REGEX_ALL_BYTES do
-    local candidate = regex_character(REGEX_ALL_BYTES, position)
+    const candidate = regex_character(REGEX_ALL_BYTES, position)
     if not regex_byte_set_contains(bytes, candidate) then
       result = result .. candidate
     end
@@ -370,9 +370,9 @@ local function regex_class_add_range(
     included: {string: boolean}, first: RegexClassItem,
     last: RegexClassItem, position: integer,
     state: RegexParseState)
-  local first_index: integer? =
+  const first_index: integer? =
     find(REGEX_ALL_BYTES, first.bytes, 1)
-  local last_index: integer? =
+  const last_index: integer? =
     find(REGEX_ALL_BYTES, last.bytes, 1)
   if not first_index or not last_index or
       (last_index as integer) < (first_index as integer) then
@@ -389,11 +389,11 @@ local function regex_class_node(
     position: integer, complement: string,
     items: {integer: RegexClassItem},
     state: RegexParseState): RegexNode
-  local included: {string: boolean} = {}
+  const included: {string: boolean} = {}
   local index = 1
   local have_item = false
   while index <= #items do
-    local first = items[index]
+    const first = items[index]
     if first.single and first.bytes == "-" and
         not first.escaped and have_item and index < #items then
       raise_regex_diagnostic(
@@ -402,19 +402,19 @@ local function regex_class_node(
         state.source, first.position)
     end
 
-    local has_range =
+    const has_range =
       index + 2 <= #items and
       items[index + 1].single and
       items[index + 1].bytes == "-" and
       not items[index + 1].escaped
     if not first.single and has_range then
-      local separator = items[index + 1]
+      const separator = items[index + 1]
       raise_regex_diagnostic(
         "bad_range", "character-class ranges require byte endpoints",
         state.source, separator.position)
     elseif has_range then
-      local separator = items[index + 1]
-      local last = items[index + 2]
+      const separator = items[index + 1]
+      const last = items[index + 2]
       if not last.single then
         raise_regex_diagnostic(
           "bad_range", "invalid or reversed character range",
@@ -433,7 +433,7 @@ local function regex_class_node(
   local bytes = ""
   local all_position = 1
   while all_position <= #REGEX_ALL_BYTES do
-    local candidate =
+    const candidate =
       regex_character(REGEX_ALL_BYTES, all_position)
     local admitted = included[candidate] == true
     if complement == "^" then admitted = not admitted end
@@ -467,7 +467,7 @@ end
 
 local function regex_backreference_node(position: integer,
                                         digit: string): RegexNode
-  local digit_position: integer? =
+  const digit_position: integer? =
     find(REGEX_DIGIT_BYTES, digit, 1)
   return RegexNode.backreference(position, (digit_position as integer) - 1, false)
 end
@@ -477,14 +477,14 @@ local function regex_decimal(source: string, expression: string,
   local result = 0
   local index = 1
   while index <= #source do
-    local digit_text = regex_character(source, index)
-    local digit_position: integer? =
+    const digit_text = regex_character(source, index)
+    const digit_position: integer? =
       find(REGEX_DIGIT_BYTES, digit_text, 1)
     if not digit_position then
       raise "internal regular-expression decimal is invalid"
     end
-    local digit = (digit_position as integer) - 1
-    local maximum = ffi.LUA_MAXINTEGER as integer
+    const digit = (digit_position as integer) - 1
+    const maximum = ffi.LUA_MAXINTEGER as integer
     if result > (maximum - digit) // 10 then
       raise_regex_diagnostic(
         "bad_quantifier", "repeat bound is too large",
@@ -513,7 +513,7 @@ local function regex_counted_quantifier(
     position: integer, minimum_text: string,
     maximum_text: string, comma: string,
     state: RegexParseState): (boolean, RegexQuantifier)
-  local minimum =
+  const minimum =
     regex_decimal(minimum_text, state.source, position)
   local maximum = minimum
   if comma == "," then
@@ -554,7 +554,7 @@ end
 
 local function regex_append_node(state: RegexParseState,
                                  node: RegexNode)
-  local frame = regex_current_frame(state)
+  const frame = regex_current_frame(state)
   frame.pieces[#frame.pieces + 1] = node
 end
 
@@ -573,7 +573,7 @@ local function regex_parse_start(
     _: string, after: integer,
     state: RegexParseState): boolean
   state.anchored_start = true
-  local frame = regex_current_frame(state)
+  const frame = regex_current_frame(state)
   frame.alternation_position = after
   frame.branch_position = after
   return true
@@ -583,7 +583,7 @@ local function regex_parse_open_group(
     _: string, after: integer,
     position: integer, marker: string,
     state: RegexParseState): boolean
-  local capturing = marker == "c"
+  const capturing = marker == "c"
   local group_index = 0
 
   state.depth = state.depth + 1
@@ -605,8 +605,8 @@ local function regex_parse_open_group(
     group_index = state.capture_count
   end
 
-  local pieces: {RegexNode} = {}
-  local alternatives: {RegexNode} = {}
+  const pieces: {RegexNode} = {}
+  const alternatives: {RegexNode} = {}
   state.frames[state.depth] = RegexParseFrame {
     group_position = position,
     group_index = group_index,
@@ -622,9 +622,9 @@ end
 local function regex_parse_alternative(
     _: string, after: integer,
     state: RegexParseState): boolean
-  local frame = regex_current_frame(state)
+  const frame = regex_current_frame(state)
   regex_finish_branch(frame)
-  local pieces: {RegexNode} = {}
+  const pieces: {RegexNode} = {}
   frame.pieces = pieces
   frame.branch_position = after
   return true
@@ -679,8 +679,8 @@ local function regex_parse_close_group(
     _subject: string, _after: integer,
     position: integer, quantifier: RegexQuantifier,
     state: RegexParseState): boolean
-  local frame = regex_current_frame(state)
-  local child = regex_finish_frame(frame)
+  const frame = regex_current_frame(state)
+  const child = regex_finish_frame(frame)
   state.depth = state.depth - 1
   local node = child
   if frame.capturing then
@@ -737,7 +737,7 @@ local function regex_parse_finish(
       "expected_group_close", "expected ')'",
       state.source, position)
   end
-  local root = regex_finish_frame(state.frames[1])
+  const root = regex_finish_frame(state.frames[1])
   return true, ParsedRegex {
     root = root,
     capture_count = state.capture_count,
@@ -748,10 +748,10 @@ end
 
 -- Implementation notes: doc/implementation/string-library.md#regex-parser-and-compiler
 local function build_regex_parser(): peg.Pattern
-  local any = peg.any()
-  local no_quantifier =
+  const any = peg.any()
+  const no_quantifier =
     RegexQuantifier { position = 0, minimum = 0, maximum = 0 }
-  local definitions: {peg.Definition} = {
+  const definitions: {peg.Definition} = {
     peg.define("state", peg.argument(1)),
     peg.define("capturing", peg.constant("c")),
     peg.define("noncapturing", peg.constant("n")),

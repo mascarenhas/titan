@@ -32,7 +32,7 @@ local function begin_stdout_capture(): (integer, integer)
   status = ffi.titan_spec_capture_replace(write_descriptor, 1)
   test.assert(status == 1, "could not redirect stdout")
   redirected = true
-  local closing = write_descriptor
+  const closing = write_descriptor
   write_descriptor = -1
   test.assert(ffi.titan_spec_capture_close(closing) == 0,
               "could not release redirected pipe descriptor")
@@ -42,10 +42,10 @@ end
 
 local function end_stdout_capture(read_descriptor: integer,
                                    saved_stdout: integer)
-  local flushed = ffi.fflush(nil) == 0
-  local restored = ffi.titan_spec_capture_replace(saved_stdout, 1) == 1
-  local saved_closed = ffi.titan_spec_capture_close(saved_stdout) == 0
-  local read_closed = ffi.titan_spec_capture_close(read_descriptor) == 0
+  const flushed = ffi.fflush(nil) == 0
+  const restored = ffi.titan_spec_capture_replace(saved_stdout, 1) == 1
+  const saved_closed = ffi.titan_spec_capture_close(saved_stdout) == 0
+  const read_closed = ffi.titan_spec_capture_close(read_descriptor) == 0
   test.assert(flushed, "could not flush redirected stdout")
   test.assert(restored, "could not restore stdout")
   test.assert(saved_closed, "could not release saved stdout descriptor")
@@ -54,17 +54,17 @@ end
 
 local function captured_bytes(read_descriptor: integer,
                               capacity: integer): string
-  local storage = foreign char.new_array(capacity)
-  local count: integer = ffi.titan_spec_capture_read(
+  const storage = foreign char.new_array(capacity)
+  const count: integer = ffi.titan_spec_capture_read(
       read_descriptor, storage as foreign *char,
       capacity as foreign titan_spec_size)
   test.assert(count >= 0, "stdout capture had no completed write")
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 1) ~= 0,
               "cannot reserve Lua stack for captured stdout")
   ffi.lua_pushlstring(L, storage as foreign *char,
                       count as foreign titan_spec_size)
-  local result: value = ffi.lua_totvalue(L, -1)
+  const result: value = ffi.lua_totvalue(L, -1)
   return result as string
 end

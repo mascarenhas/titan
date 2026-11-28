@@ -32,28 +32,28 @@ local function assert_integer_arrays(actual: {integer},
 end
 
 function test_synchronous_memory_streams(context: test.Context)
-  local reader = string.reader("alpha\0beta\nlast")
+  const reader = string.reader("alpha\0beta\nlast")
   test.assert(reader:read_until("\n", true) == "alpha\0beta")
   test.assert(reader:read() == "last")
   test.assert(reader:read() == nil)
   reader:close()
   reader:close()
 
-  local closed = string.reader("unread\0suffix")
+  const closed = string.reader("unread\0suffix")
   closed:close()
   closed:close()
   test.assert(closed:read() == nil)
   test.assert(closed:read_until("suffix", true) == nil)
   test.assert(closed:read_until("", true) == nil)
 
-  local boundaries = string.reader("::a::::")
+  const boundaries = string.reader("::a::::")
   test.assert(boundaries:read_until("::", true) == "")
   test.assert(boundaries:read_until("::", false) == "a::")
   test.assert(boundaries:read_until("::", true) == "")
   test.assert(boundaries:read_until("::", true) == nil)
 
-  local absent = string.reader("tail\0bytes")
-  local invalid = string.reader("still-open")
+  const absent = string.reader("tail\0bytes")
+  const invalid = string.reader("still-open")
   support.expect_error(function()
     invalid:read_until("", true)
   end, "delimiter must not be empty")
@@ -61,7 +61,7 @@ function test_synchronous_memory_streams(context: test.Context)
   test.assert(absent:read_until("missing", true) == nil)
   test.assert(absent:read_until("", true) == nil)
 
-  local writer = string.writer()
+  const writer = string.writer()
   writer:write("")
   test.assert(writer:drain() == "")
   writer:write("left\0")
@@ -73,47 +73,47 @@ function test_synchronous_memory_streams(context: test.Context)
   writer:close()
   writer:close()
 
-  local concrete_writer = string.writer()
-  local shaped_writer: WriterCloserShape = concrete_writer
+  const concrete_writer = string.writer()
+  const shaped_writer: WriterCloserShape = concrete_writer
   shaped_writer:write("interface\0stream")
   shaped_writer:close()
-  local concrete_reader = string.reader(concrete_writer:drain())
-  local shaped_reader: ReaderCloserShape = concrete_reader
-  local result? = shaped_reader:read()
+  const concrete_reader = string.reader(concrete_writer:drain())
+  const shaped_reader: ReaderCloserShape = concrete_reader
+  const result? = shaped_reader:read()
   shaped_reader:close()
   test.assert(result == "interface\0stream")
 end
 
 function test_lua_compatible_byte_operations(context: test.Context)
-  local previous_locale? = support.set_c_locale()
+  const previous_locale? = support.set_c_locale()
   test.assert(previous_locale ~= nil, "could not select the C locale")
   defer support.restore_locale(previous_locale as string)
-  local minimum = -9223372036854775807 - 1
-  local maximum = 9223372036854775807
-  local subjects: {string} = {
+  const minimum = -9223372036854775807 - 1
+  const maximum = 9223372036854775807
+  const subjects: {string} = {
     "", "abc", "a\0b",
     string.char(0, 65, 90, 97, 122, 127, 128, 255),
     string.rep("ab\0", 40),
   }
-  local positions: {integer} = {
+  const positions: {integer} = {
     minimum, -1000, -5, -1, 0, 1, 2, 5, 1000, maximum,
   }
 
   for subject_index = 1, #subjects do
-    local subject = subjects[subject_index]
+    const subject = subjects[subject_index]
     test.assert(string.len(subject) == support.lua_len(subject))
     test.assert(string.reverse(subject) == support.lua_reverse(subject))
     test.assert(string.lower(subject) == support.lua_lower(subject))
     test.assert(string.upper(subject) == support.lua_upper(subject))
     for first_index = 1, #positions do
-      local first = positions[first_index]
+      const first = positions[first_index]
       test.assert(string.sub(subject, first) ==
                   support.lua_sub(subject, first, nil))
       local actual: {integer} = {string.byte(subject, first)}
       local expected: {integer} = {support.lua_byte(subject, first, nil)}
       assert_integer_arrays(actual, expected, "byte result differs")
       for last_index = 1, #positions do
-        local last = positions[last_index]
+        const last = positions[last_index]
         test.assert(string.sub(subject, first, last) ==
                     support.lua_sub(subject, first, last))
         actual = {string.byte(subject, first, last)}
@@ -134,24 +134,24 @@ function test_lua_compatible_byte_operations(context: test.Context)
 end
 
 function test_literal_binary_find(context: test.Context)
-  local minimum = -9223372036854775807 - 1
-  local maximum = 9223372036854775807
-  local subjects: {string} = {
+  const minimum = -9223372036854775807 - 1
+  const maximum = 9223372036854775807
+  const subjects: {string} = {
     "", "abcabc", "a\0b\0c", string.char(0, 255, 0, 255),
   }
-  local needles: {string} = {
+  const needles: {string} = {
     "", "a", "abc", "\0", "\0b", string.char(255, 0), "missing",
   }
-  local positions: {integer} = {
+  const positions: {integer} = {
     minimum, -1000, -5, -1, 0, 1, 2, 5, 1000, maximum,
   }
 
   for subject_index = 1, #subjects do
-    local subject = subjects[subject_index]
+    const subject = subjects[subject_index]
     for needle_index = 1, #needles do
-      local needle = needles[needle_index]
+      const needle = needles[needle_index]
       for position_index = 1, #positions do
-        local position = positions[position_index]
+        const position = positions[position_index]
         local actual_first?, actual_last? =
           string.find(subject, needle, position)
         local expected_first?, expected_last? =
@@ -170,18 +170,18 @@ function test_literal_binary_find(context: test.Context)
 end
 
 function test_repeat_char_and_flexible_bounds(context: test.Context)
-  local maximum = 9223372036854775807
-  local subjects: {string} = {
+  const maximum = 9223372036854775807
+  const subjects: {string} = {
     "", "x", "a\0b", string.rep("z", 64),
   }
-  local separators: {string} = {"", "-", "\0"}
-  local counts: {integer} = {-5, 0, 1, 2, 7}
+  const separators: {string} = {"", "-", "\0"}
+  const counts: {integer} = {-5, 0, 1, 2, 7}
   for subject_index = 1, #subjects do
-    local subject = subjects[subject_index]
+    const subject = subjects[subject_index]
     for separator_index = 1, #separators do
-      local separator = separators[separator_index]
+      const separator = separators[separator_index]
       for count_index = 1, #counts do
-        local count = counts[count_index]
+        const count = counts[count_index]
         test.assert(string.rep(subject, count, separator) ==
                     support.lua_rep(subject, count, separator))
       end
@@ -197,19 +197,19 @@ function test_repeat_char_and_flexible_bounds(context: test.Context)
   test.assert(string.char() == "")
   test.assert(string.char(0, 65, 127, 128, 255) ==
               support.lua_char(0, 65, 127, 128, 255))
-  local invalid: {integer} = {-1, 256, -9223372036854775807 - 1, maximum}
+  const invalid: {integer} = {-1, 256, -9223372036854775807 - 1, maximum}
   for invalid_index = 1, #invalid do
-    local octet = invalid[invalid_index]
+    const octet = invalid[invalid_index]
     support.expect_error(function()
       string.char(octet)
     end, "character value out of range")
   end
 
-  local expected = string.char(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99) ..
+  const expected = string.char(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99) ..
     string.char(100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199)
-  local built = string.char(support.lua_byte(expected, 1, 200))
+  const built = string.char(support.lua_byte(expected, 1, 200))
   test.assert(#built == 200)
-  local returned: {integer} = {string.byte(built, 1, 200)}
+  const returned: {integer} = {string.byte(built, 1, 200)}
   test.assert(#returned == 200)
   local index = 1
   while index <= 200 do
@@ -228,27 +228,27 @@ function test_tostring_fixed_adjustment_and_state(context: test.Context)
   test.assert(string.tostring(nil) == "nil")
   test.assert(string.tostring(false) == "false")
   observed = ""
-  local converted = string.tostring(42, mark("left"), mark("right"))
+  const converted = string.tostring(42, mark("left"), mark("right"))
   test.assert(converted == "42" and observed == "leftright")
 
   local direct_seen = ""
-  local extra: function (string): (string) = function(text: string): string
+  const extra: function (string): (string) = function(text: string): string
     direct_seen = direct_seen .. text
     return text
   end
   test.assert(string.tostring(17, extra("a"), extra("b")) == "17")
   test.assert(direct_seen == "ab")
 
-  local object = support.custom_tostring_value("custom\0text")
+  const object = support.custom_tostring_value("custom\0text")
   test.assert(string.tostring(object) == "custom\0text")
 
   do
-    local original = support.replace_global_tostring()
+    const original = support.replace_global_tostring()
     defer support.restore_global_tostring(original)
     test.assert(string.tostring(73) == "73")
   end
 
-  local bad = support.failing_tostring_value("conversion failed")
+  const bad = support.failing_tostring_value("conversion failed")
   support.expect_error(function()
     string.tostring(bad)
   end, "conversion failed")

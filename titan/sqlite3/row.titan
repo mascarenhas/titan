@@ -99,8 +99,8 @@ end
 
 local function Row:fill_field(target: reflect.RecordValue, ordinal: integer,
                              column: integer)
-  local field = target.type.fields[ordinal]
-  local cell = fill_value(self:get(column), field.type, field.name)
+  const field = target.type.fields[ordinal]
+  const cell = fill_value(self:get(column), field.type, field.name)
   target:set(ordinal, cell)
 catch
   if error is Error then raise end
@@ -117,12 +117,12 @@ end
 -- @param target Mutable record with public fields matching all column names.
 -- @usage standard-library-sqlite3.md#rows-and-mapping
 function Row:fill(target: value)
-  local inspected = reflect.inspect(target)
+  const inspected = reflect.inspect(target)
   case inspected
   when is_record(record_value) then
-    local positions: {string: integer} = {}
+    const positions: {string: integer} = {}
     for index = 1, #self.columns do
-      local name = self.columns[index].name
+      const name = self.columns[index].name
       if positions[name] ~= nil then
         raise Error {
           message = "duplicate column name " .. name,
@@ -144,7 +144,7 @@ function Row:fill(target: value)
     -- Validate the whole shape before the first write. Value conversions are
     -- deliberately in public descriptor order and may leave prior writes.
     for ordinal = 1, record_value.n_fields do
-      local field = record_value.type.fields[ordinal]
+      const field = record_value.type.fields[ordinal]
       if positions[field.name] == nil then
         raise Error {
           message = "missing column for field " .. field.name,

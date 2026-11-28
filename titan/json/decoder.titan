@@ -11,7 +11,7 @@ local function Decoder:resolve(target: reflect.Type, position: integer,
                                path: Path): reflect.Type
   case target
   when is_named(named) then
-    local found? = reflect.find_nominal(named.name)
+    const found? = reflect.find_nominal(named.name)
     if found == nil then
       json_fail("unknown_type", "nominal type is not registered: " .. named.name,
                 path, self.source, position)
@@ -44,17 +44,17 @@ local function Decoder:dynamic(node: Node, path: Path): value
   elseif node.kind == "number" then
     return number_value(node, false, false, self.source, path)
   elseif node.kind == "array" then
-    local elements = node.elements
-    local result: {value} = {}
+    const elements = node.elements
+    const result: {value} = {}
     for index = 1, #elements do
       result[index] = self:dynamic(elements[index], index_path(path, index))
     end
     return result
   else
-    local members = node.members
-    local result: {string: value} = {}
+    const members = node.members
+    const result: {string: value} = {}
     for index = 1, #members do
-      local member = members[index]
+      const member = members[index]
       result[member.name] = self:dynamic(
         member.node, field_path(path, member.name))
     end
@@ -66,7 +66,7 @@ end
 -- Only genuinely dynamic elements use the caller's null sentinel.
 local function Decoder:slot(node: Node, target: reflect.Type,
                             path: Path): value
-  local resolved = self:resolve(target, node.position, path)
+  const resolved = self:resolve(target, node.position, path)
   if node.kind == "null" then
     case resolved
     when is_value() then return self.settings.null_value
@@ -79,8 +79,8 @@ end
 local function Decoder:decode_array(node: Node, constness: reflect.ArrayTypeConstness,
                              element: reflect.Type, path: Path): value
   self:require_kind(node, "array", path)
-  local elements = node.elements
-  local result: {value} = {}
+  const elements = node.elements
+  const result: {value} = {}
   for index = 1, #elements do
     result[index] = self:slot(
       elements[index], element, index_path(path, index))
@@ -94,7 +94,7 @@ end
 local function Decoder:decode_map(node: Node, keys: reflect.Type,
                            values: reflect.Type, path: Path): value
   self:require_kind(node, "object", path)
-  local key_type = self:resolve(keys, node.position, path)
+  const key_type = self:resolve(keys, node.position, path)
   local string_keys = false
   case key_type
   when is_string() then string_keys = true
@@ -104,10 +104,10 @@ local function Decoder:decode_map(node: Node, keys: reflect.Type,
     json_fail("unsupported_type", "JSON objects require string or value Map keys",
               path, self.source, node.position)
   end
-  local members = node.members
-  local result: {string: value} = {}
+  const members = node.members
+  const result: {string: value} = {}
   for index = 1, #members do
-    local member = members[index]
+    const member = members[index]
     result[member.name] = self:slot(
       member.node, values, field_path(path, member.name))
   end
@@ -116,7 +116,7 @@ end
 
 local function Decoder:missing(target: reflect.Type, position: integer,
                                path: Path)
-  local resolved = self:resolve(target, position, path)
+  const resolved = self:resolve(target, position, path)
   case resolved
   when is_nil() then return
   when is_option() then return
@@ -130,19 +130,19 @@ end
 local function Decoder:decode_record(node: Node, descriptor: reflect.RecordType,
                               path: Path): value
   self:require_kind(node, "object", path)
-  local constructor? = descriptor:public_constructor()
+  const constructor? = descriptor:public_constructor()
   if constructor == nil then
     json_fail("constructor_unavailable", "record has no compatible public constructor: " ..
               descriptor.name, path, self.source, node.position)
   end
 
-  local arity = #constructor.param_descriptors
-  local known: {string: boolean} = {}
+  const arity = #constructor.param_descriptors
+  const known: {string: boolean} = {}
   for index = 1, arity do known[constructor.param_names[index]] = true end
-  local members = node.members
-  local supplied: {string: Node} = {}
+  const members = node.members
+  const supplied: {string: Node} = {}
   for index = 1, #members do
-    local member = members[index]
+    const member = members[index]
     if known[member.name] == nil and not self.settings.ignore_unknown_fields then
       json_fail("unknown_field", "unknown record field: " .. member.name,
                 field_path(path, member.name), self.source, member.position)
@@ -150,12 +150,12 @@ local function Decoder:decode_record(node: Node, descriptor: reflect.RecordType,
     supplied[member.name] = member.node
   end
 
-  local arguments: {value} = {}
+  const arguments: {value} = {}
   for index = 1, arity do
-    local name = constructor.param_names[index]
-    local target = constructor.param_descriptors[index]
-    local member? = supplied[name]
-    local member_path = field_path(path, name)
+    const name = constructor.param_names[index]
+    const target = constructor.param_descriptors[index]
+    const member? = supplied[name]
+    const member_path = field_path(path, name)
     if member == nil then
       self:missing(target, node.position, member_path)
     else
@@ -169,16 +169,16 @@ local function Decoder:decode_union(node: Node, descriptor: reflect.UnionType,
                              path: Path): value
   self:require_kind(node, "object", path)
   local tag: Node?
-  local tag_field = self.settings.tag_field
-  local members = node.members
-  local supplied: {string: Node} = {}
+  const tag_field = self.settings.tag_field
+  const members = node.members
+  const supplied: {string: Node} = {}
   for index = 1, #members do
-    local member = members[index]
+    const member = members[index]
     if member.name == tag_field then tag = member.node
     else supplied[member.name] = member.node
     end
   end
-  local tag_path = field_path(path, tag_field)
+  const tag_path = field_path(path, tag_field)
   if tag == nil then
     json_fail("invalid_union", "union envelope requires a string tag",
               tag_path, self.source, node.position)
@@ -187,11 +187,11 @@ local function Decoder:decode_union(node: Node, descriptor: reflect.UnionType,
     json_fail("invalid_union", "union tag must be a string",
               tag_path, self.source, tag.position)
   end
-  local name: string = tag.scalar
-  local variant: reflect.VariantType? = (function (
+  const name: string = tag.scalar
+  const variant: reflect.VariantType? = (function (
       descriptor: reflect.UnionType, name: string): reflect.VariantType?
     for index = 1, #descriptor.variants do
-      local candidate = descriptor.variants[index]
+      const candidate = descriptor.variants[index]
       if candidate.name == name then return candidate end
     end
     return nil
@@ -200,10 +200,10 @@ local function Decoder:decode_union(node: Node, descriptor: reflect.UnionType,
     json_fail("unknown_variant", "unknown public union variant: " .. name,
               tag_path, self.source, tag.position)
   end
-  local arity = #variant.parts
-  local known: {string: boolean} = {[tag_field] = true}
+  const arity = #variant.parts
+  const known: {string: boolean} = {[tag_field] = true}
   for index = 1, arity do
-    local part = variant.parts[index]
+    const part = variant.parts[index]
     if part.name == tag_field then
       json_fail("invalid_union", "union part conflicts with tag field: " .. tag_field,
                 tag_path, self.source, tag.position)
@@ -211,17 +211,17 @@ local function Decoder:decode_union(node: Node, descriptor: reflect.UnionType,
     known[part.name] = true
   end
   for index = 1, #members do
-    local member = members[index]
+    const member = members[index]
     if known[member.name] == nil then
       json_fail("invalid_union", "unknown union envelope member: " .. member.name,
                 field_path(path, member.name), self.source, member.position)
     end
   end
-  local arguments: {value} = {}
+  const arguments: {value} = {}
   for index = 1, arity do
-    local part = variant.parts[index]
-    local member? = supplied[part.name]
-    local part_path = field_path(path, part.name)
+    const part = variant.parts[index]
+    const member? = supplied[part.name]
+    const part_path = field_path(path, part.name)
     if member == nil then
       self:missing(part.type, node.position, part_path)
     else
@@ -234,7 +234,7 @@ end
 local function Decoder:decode(node: Node, target: reflect.Type?,
                               path: Path): value
   if target == nil then return self:dynamic(node, path) end
-  local resolved = self:resolve(target, node.position, path)
+  const resolved = self:resolve(target, node.position, path)
   case resolved
   when is_value() then
     return self:dynamic(node, path)
@@ -274,6 +274,6 @@ end
 
 local function decode_node(node: Node, target: reflect.Type?, settings: Settings,
                            source: string, path: Path): value
-  local decoder = Decoder(settings, source)
+  const decoder = Decoder(settings, source)
   return decoder:decode(node, target, path)
 end

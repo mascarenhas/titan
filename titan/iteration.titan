@@ -14,7 +14,7 @@ foreign import "titan/ffi.h"
 -- @usage standard-library-iteration.md
 function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
   -- Implementation notes: doc/implementation/iteration-library.md#next-as-an-audited-lua-stack-operation
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 3) == 0 then
     raise "cannot reserve Lua stack for map iteration"
@@ -26,8 +26,8 @@ function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
     return nil, nil
   end
 
-  local next_key: K = ffi.lua_totvalue(L, -2)
-  local next_value: V = ffi.lua_totvalue(L, -1)
+  const next_key: K = ffi.lua_totvalue(L, -2)
+  const next_value: V = ffi.lua_totvalue(L, -1)
   return next_key, next_value
 end
 
@@ -42,7 +42,7 @@ end
 
 local function array_next<|T|>(array: {T}, index: integer):
     (integer?, T?)
-  local next_index = index + 1
+  const next_index = index + 1
   if next_index > #array then
     return nil, nil
   end

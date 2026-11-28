@@ -1,8 +1,8 @@
 function test_connect_memory_and_temporary_databases(context: test.Context)
   runtime_test.run(function ()
-    local memory = sqlite3.connect(":memory:")
+    const memory = sqlite3.connect(":memory:")
     defer memory:close()
-    local temporary = sqlite3.connect("")
+    const temporary = sqlite3.connect("")
     defer temporary:close()
     execute_sql(memory, "CREATE TABLE item (value INTEGER)")
     execute_sql(memory, "INSERT INTO item VALUES (17)")
@@ -15,16 +15,16 @@ end
 
 function test_file_database_persists_across_connections(context: test.Context)
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     defer fs.rmdir(workspace)
-    local directory = workspace .. "/sqlite persistence héllo 世界"
+    const directory = workspace .. "/sqlite persistence héllo 世界"
     fs.mkdir(directory)
     defer fs.rmdir(directory)
-    local path = directory .. "/database héllo 世界.sqlite3"
+    const path = directory .. "/database héllo 世界.sqlite3"
     defer remove_if_present(path)
-    local connection = sqlite3.connect(path)
+    const connection = sqlite3.connect(path)
     defer connection:close()
     execute_sql(connection, "CREATE TABLE persisted (value INTEGER)")
     test.assert(connection:get_autocommit(),
@@ -42,7 +42,7 @@ function test_file_database_persists_across_connections(context: test.Context)
                 "file ROLLBACK retained data or restarted a transaction")
     connection:close()
 
-    local reopened = sqlite3.connect(path)
+    const reopened = sqlite3.connect(path)
     defer reopened:close()
     test.assert(scalar_integer(reopened, "SELECT value FROM persisted") == 73,
                 "closed file database lost its committed data")
@@ -56,13 +56,13 @@ function test_connect_rejects_nul_and_reports_native_open_failure(
     context: test.Context)
   runtime_test.run(function ()
     expect_wrapper_error(function ()
-      local connection = sqlite3.connect(":memory:\0suffix")
+      const connection = sqlite3.connect(":memory:\0suffix")
       connection:close()
     end)
-    local file = fs.tmpname()
+    const file = fs.tmpname()
     defer fs.unlink(file)
     expect_native_error(function ()
-      local connection = sqlite3.connect(file .. "/database")
+      const connection = sqlite3.connect(file .. "/database")
       connection:close()
     end, 14)
   end)
@@ -70,24 +70,24 @@ end
 
 function test_prepare_requires_one_real_statement(context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
-    local invalid: {string} = {
+    const invalid: {string} = {
       "", " \n\t ", "-- comment only", "/* only a comment */",
       "SELECT 1\0; SELECT 2", "SELECT 1; SELECT 2",
     }
     for index = 1, #invalid do
       expect_wrapper_error(function ()
-        local statement = connection:prepare(invalid[index])
+        const statement = connection:prepare(invalid[index])
         statement:close()
       end)
     end
-    local row = first_row(connection,
+    const row = first_row(connection,
         "SELECT ';not another statement' AS text; -- ; trailing\n/* ; */")
     test.assert(row:get(1) as string == ";not another statement",
                 "single-statement validation parsed semicolons itself")
     expect_native_error(function ()
-      local statement = connection:prepare("SELECT FROM")
+      const statement = connection:prepare("SELECT FROM")
       statement:close()
     end, 1)
     test.assert(scalar_integer(connection, "SELECT 7") == 7,
@@ -97,12 +97,12 @@ end
 
 function test_connection_close_rejects_owned_statements(context: test.Context)
   runtime_test.run(function ()
-    local connection = sqlite3.connect(":memory:")
+    const connection = sqlite3.connect(":memory:")
     defer connection:close()
-    local statement = connection:prepare("SELECT 1")
+    const statement = connection:prepare("SELECT 1")
     defer statement:close()
     expect_wrapper_error(function () connection:close() end)
-    local cursor = statement:query()
+    const cursor = statement:query()
     defer cursor:close()
     test.assert(required_row(cursor):get(1) as integer == 1,
                 "rejected Connection close damaged its Statement")

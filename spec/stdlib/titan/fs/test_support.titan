@@ -21,16 +21,16 @@ local function cleanup_path(context: test.Context, path: string)
 end
 
 local function new_workspace(context: test.Context): string
-  local parent = system.getenv("TITAN_TEST_ROOT") or fs.tmpdir()
-  local pattern = parent .. "/titan-fs-ação世界-XXXXXX"
-  local storage = foreign char.new_array(#pattern + 1)
+  const parent = system.getenv("TITAN_TEST_ROOT") or fs.tmpdir()
+  const pattern = parent .. "/titan-fs-ação世界-XXXXXX"
+  const storage = foreign char.new_array(#pattern + 1)
   ffi.memcpy(storage as foreign *char,
                  pattern as foreign const *char,
                  #pattern as foreign size_t)
   storage[#pattern] = 0
-  local status = ffi.titan_spec_mkdtemp(storage as foreign *char)
+  const status = ffi.titan_spec_mkdtemp(storage as foreign *char)
   test.assert(status == 0, "could not create native workspace")
-  local root = (storage as foreign *char) as string
+  const root = (storage as foreign *char) as string
   cleanup_path(context, root)
   return root
 end
@@ -38,9 +38,9 @@ end
 local function make_symlink(context: test.Context,
                             target: string, link: string)
   cleanup_path(context, link)
-  local info? = fs.stat(target)
-  local directory = info ~= nil and info.kind == "directory"
-  local status: integer = ffi.titan_spec_symlink(target, link, directory and 1 or 0)
+  const info? = fs.stat(target)
+  const directory = info ~= nil and info.kind == "directory"
+  const status: integer = ffi.titan_spec_symlink(target, link, directory and 1 or 0)
   if common.is_windows() and status == 1 then
     test.skip("capability: symbolic links require Windows Developer Mode or symlink privilege")
   end
@@ -53,7 +53,7 @@ end
 
 local function set_fixture_environment(context: test.Context,
                                        name: string, contents: string)
-  local old_value? = system.getenv(name)
+  const old_value? = system.getenv(name)
   context:cleanup(function ()
     if old_value then
       system.setenv(name, old_value)
@@ -65,15 +65,15 @@ local function set_fixture_environment(context: test.Context,
 end
 
 local function write_file_synchronously(path: string, contents: string)
-  local status = ffi.titan_spec_write_file(
+  const status = ffi.titan_spec_write_file(
       path, contents, #contents as foreign size_t)
   test.assert(status == 0, "could not write native fixture file")
 end
 
 local function make_boundary_payload(): string
-  local prefix_length = 65535
-  local length = prefix_length + 6
-  local storage = foreign char.new_array(length)
+  const prefix_length = 65535
+  const length = prefix_length + 6
+  const storage = foreign char.new_array(length)
   ffi.memset(storage as foreign *char, 120,
                  prefix_length as foreign size_t)
   storage[prefix_length] = 0
@@ -86,30 +86,30 @@ local function make_boundary_payload(): string
 end
 
 local function require_descriptor_inventory()
-  local directory? = fs.stat("/dev/fd")
+  const directory? = fs.stat("/dev/fd")
   if not directory or directory.kind ~= "directory" then
     test.skip("capability: process descriptor inventory at /dev/fd is unavailable")
   end
 end
 
 local function file_descriptor(path: string): integer
-  local wanted = fs.stat(path)
+  const wanted = fs.stat(path)
   -- Linux and Darwin both expose /dev/fd. Match physical file identity through
   -- public fstat results rather than relying on platform-specific link text.
-  local entries = fs.list("/dev/fd")
+  const entries = fs.list("/dev/fd")
   for index = 1, #entries do
-    local name = entries[index]
+    const name = entries[index]
     local descriptor = 0
     for digit = 1, #name do
-      local byte = strings.byte(name, digit)
+      const byte = strings.byte(name, digit)
       test.assert(byte >= 48 and byte <= 57,
                   "descriptor inventory contains a nonnumeric entry")
       descriptor = descriptor * 10 + byte - 48
     end
-    local request = uv.fs_t.new()
+    const request = uv.fs_t()
     defer uv.fs_req_cleanup(request)
     if uv.fs_fstat(nil, request, descriptor) >= 0 then
-      local found = uv.fs_get_statbuf(request)
+      const found = uv.fs_get_statbuf(request)
       if found.st_dev == wanted.device and found.st_ino == wanted.inode then
         return descriptor
       end
@@ -119,7 +119,7 @@ local function file_descriptor(path: string): integer
 end
 
 local function close_descriptor(descriptor: integer)
-  local request = uv.fs_t.new()
+  const request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
   test.assert(uv.fs_close(nil, request, descriptor) == 0,
               "could not close the native fixture descriptor")

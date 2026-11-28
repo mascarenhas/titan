@@ -2,10 +2,10 @@
 -- Task identity, explicit suspension, synchronous resume scheduling, and
 -- terminal notification are the primitives beneath every combinator.
 function test_ready_queue_preserves_fifo_and_services_native_work(context: test.Context)
-  local order: {integer} = {}
-  local tasks: {async.Task<|nil, nil|>} = {}
+  const order: {integer} = {}
+  const tasks: {async.Task<|nil, nil|>} = {}
   for index = 1, 130 do
-    local id = index
+    const id = index
     tasks[index] = async.run<|nil, nil|>(function (): nil
       for round = 1, 4 do
         order[#order + 1] = id
@@ -15,10 +15,10 @@ function test_ready_queue_preserves_fifo_and_services_native_work(context: test.
     end)
   end
   local observed = 0
-  local observer = uv.timer_t.new()
+  const observer = uv.timer_t()
   test.assert(uv.timer_init(async.current_loop(), observer) == 0,
       "queue observer timer initialization failed")
-  local fired = function (owner: uv.timer_t)
+  const fired = function (owner: uv.timer_t)
     observed = #order
     uv.timer_close(owner)
   end
@@ -43,16 +43,17 @@ end
 -- a subscription now, whose explicit suspension has its own token source.
 local function wait_for_native_callback(milliseconds: integer)
   async.await<|nil, nil|>(function (resolve, _reject, fatal)
-    local timer = uv.timer_t.new()
-    local handle = timer:as_handle_t()
-    local closed = function (_: uv.handle_t)
-      do resolve(nil)
-      catch fatal(error, traceback); raise end
+    const timer = uv.timer_t()
+    const handle = timer:as_handle_t()
+    const closed = function (_: uv.handle_t)
+      resolve(nil)
+    catch
+      fatal(error, traceback); raise
     end
-    local fired = function (_: uv.timer_t) uv.close(handle, closed) end
+    const fired = function (_: uv.timer_t) uv.close(handle, closed) end
     test.assert(uv.timer_init(async.current_loop(), timer) == 0,
         "native-wait timer initialization failed")
-    local status = uv.timer_start(timer, fired, milliseconds, 0)
+    const status = uv.timer_start(timer, fired, milliseconds, 0)
     if status < 0 then uv.close(handle); raise "native-wait timer start failed" end
   end)
 end
@@ -61,7 +62,7 @@ function test_resume_token_cannot_wake_native_callback_wait(
     context: test.Context)
   runtime_test.run(function ()
     local completed = false
-    local target = async.run<|nil, value|>(function (): nil
+    const target = async.run<|nil, value|>(function (): nil
       wait_for_native_callback(50)
       completed = true
       return nil
@@ -71,7 +72,7 @@ function test_resume_token_cannot_wake_native_callback_wait(
 
     local mismatch = ""
     do
-      target:resume(async.ResumeToken.new("native wait outsider"))
+      target:resume(async.ResumeToken("native wait outsider"))
     catch
       mismatch = error as string
     end
@@ -88,10 +89,10 @@ end
 function test_retired_resume_token_cannot_wake_next_native_wait(
     context: test.Context)
   runtime_test.run(function ()
-    local token = async.ResumeToken.new("completed explicit suspension")
+    const token = async.ResumeToken("completed explicit suspension")
     local resumed_mismatch = ""
     local phase = 0
-    local target = async.run<|nil, value|>(function (): nil
+    const target = async.run<|nil, value|>(function (): nil
       phase = 1
       async.suspend(token)
       do

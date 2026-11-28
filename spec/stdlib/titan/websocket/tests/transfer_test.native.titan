@@ -1,13 +1,13 @@
 local function transfer_session(source: websocket.Connection): websocket.Connection
   if common.is_windows() then
-    local failure = expect_error(function () source:to_transfer_payload() end)
+    const failure = expect_error(function () source:to_transfer_payload() end)
     test.assert(failure is async.OperationError and
       (failure as async.OperationError).name == "EBUSY",
       "pending native WebSocket read was not rejected before detach")
     return source
   end
-  local packet = async.TransferValue.from_value(source)
-  local connection: websocket.Connection = packet:to_value()
+  const packet = async.TransferValue.from_value(source)
+  const connection: websocket.Connection = packet:to_value()
   source:close()
   return connection
 end
@@ -15,14 +15,14 @@ end
 function test_transfer_client_preserves_prefetched_frames_role_and_subprotocol(_context: test.Context)
   runtime_test.run(function ()
     with_client(function (wire: Wire)
-      local reply = wire:frame()
+      const reply = wire:frame()
       test.assert(reply.opcode == 2 and reply.masked and reply.payload == "moved\0")
       wire.stream:write(frame(8, ""))
       assert_close(wire, nil, true)
     end, function (source: websocket.Connection)
       local first_kind?, first? = source:read()
       assert_text(first_kind, first, "before")
-      local connection = transfer_session(source)
+      const connection = transfer_session(source)
       defer connection:close()
       test.assert(connection:subprotocol() == "transfer-test")
       local kind?, bytes? = connection:read()
@@ -40,7 +40,7 @@ local function transfer_server_session(secure: boolean)
   with_server(function (source: websocket.Connection)
     local first_kind?, first? = source:read()
     assert_text(first_kind, first, "before")
-    local connection = transfer_session(source)
+    const connection = transfer_session(source)
     defer connection:close()
     local kind?, bytes? = connection:read()
     assert_binary(kind, bytes, "after\0")
@@ -48,7 +48,7 @@ local function transfer_server_session(secure: boolean)
     local done_kind?, done? = connection:read()
     test.assert(done_kind == nil and done == nil)
   end, function (wire: Wire)
-    local reply = wire:frame()
+    const reply = wire:frame()
     test.assert(reply.opcode == 2 and not reply.masked and reply.payload == "moved\0")
     wire.stream:write(frame(8, "", true))
     assert_close(wire, nil, false)
@@ -56,10 +56,10 @@ local function transfer_server_session(secure: boolean)
 end
 
 function test_transfer_server_preserves_ws_and_wss_buffered_bytes(context: test.Context)
-  context:run("ws", function (_child: test.Context)
+  context:run("ws", function (_: test.Context)
     runtime_test.run(function () transfer_server_session(false) end)
   end)
-  context:run("wss", function (_child: test.Context)
+  context:run("wss", function (_: test.Context)
     runtime_test.run(function () transfer_server_session(true) end)
   end)
 end
@@ -72,9 +72,9 @@ function test_transfer_open_session_survives_source_state_close(context: test.Co
   runtime_test.run(function ()
     local peer: async.Task? = nil
     local accepted: websocket.Connection? = nil
-    local handler: http.Handler = function (request: http.Request, response: http.Response)
+    const handler: http.Handler = function (request: http.Request, response: http.Response)
       peer = async.running()
-      local connection = websocket.accept(request, response)
+      const connection = websocket.accept(request, response)
       accepted = connection
       defer connection:close()
       local kind?, bytes? = connection:read()
@@ -84,21 +84,21 @@ function test_transfer_open_session_survives_source_state_close(context: test.Co
     end
     local listener, port = listen_http(handler, false)
     runtime_test.cleanup(function () listener:close() end)
-    local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
+    const serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
     runtime_test.cleanup(function ()
       listener:close()
       if accepted then accepted:close() end
       if peer then task_support.cancel_and_join_task(peer, "transferred WebSocket peer") end
       task_support.cancel_and_join_task(serving, "transferred WebSocket listener")
     end)
-    local state = transfer_lua.new()
+    const state = transfer_lua.new()
     defer state:close()
-    local operation = function (): async.TransferValue
-      local connection = websocket.connect("ws://127.0.0.1:" .. port .. "/transfer")
+    const operation = function (): async.TransferValue
+      const connection = websocket.connect("ws://127.0.0.1:" .. port .. "/transfer")
       defer connection:close()
       return async.TransferValue.from_value(connection)
     end
-    local packet: async.TransferValue = state:run_async([[
+    const packet: async.TransferValue = state:run_async([[
       local operation = ...
       local async = require('titan.async')
       local task = async.run(operation)
@@ -113,7 +113,7 @@ function test_transfer_open_session_survives_source_state_close(context: test.Co
     ]], "=websocket-session-transfer", async.TransferValue.from_value(operation))
     state:close()
     gc.collect(); gc.collect()
-    local connection: websocket.Connection = packet:to_value()
+    const connection: websocket.Connection = packet:to_value()
     defer connection:close()
     connection:write(websocket.BINARY, "new-state\0")
     local kind?, bytes? = connection:read()
@@ -140,7 +140,7 @@ function test_transfer_rejects_reader_until_public_epilogue_returns(_context: te
       local recovered: websocket.Connection? = nil
       defer if recovered then recovered:close() else source:close() end
       local reader_returned = false
-      local reader = async.run<|nil, value|>(function (): nil
+      const reader = async.run<|nil, value|>(function (): nil
         local kind?, bytes? = source:read()
         assert_text(kind, bytes, "after")
         reader_returned = true
@@ -148,7 +148,7 @@ function test_transfer_rejects_reader_until_public_epilogue_returns(_context: te
       end)
       cleanup_operation(source, reader, "WebSocket transfer reader epilogue")
       local rejected = false
-      local contender = async.run<|nil, value|>(function (): nil
+      const contender = async.run<|nil, value|>(function (): nil
         -- FIFO order is reader, contender, internal read worker. Yielding puts
         -- this contender after that worker and before the resumed public read.
         async.yield()

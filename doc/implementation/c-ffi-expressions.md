@@ -290,13 +290,19 @@ The persistent directory is `<prefix>/var/cache/titan-probes/<VERSION>`
 (`cprobe_cache.VERSION`, currently 2; `driver.PROBE_CACHE_DIRECTORY`). The
 prefix is `TITAN_PREFIX`, otherwise `driver.TITAN_ROOT`, the [compiler
 root](driver.md#the-compiler-root). Each source has one bounded record
-at `<digest>.result` for either outcome. An accepted enum-carrier query also
-stores its typed selection result: match count and carrier identifier (the
-identifier sum when several match).
+at `<digest>.result` for either outcome, with one exception: a
+`compiler_rejection` during the header-baseline stage (`stage == "baseline"`)
+is cached in-process only (`"process_only"` in `Service:_publish_result`) and
+is not persisted to disk. Because a failed header baseline typically reflects
+omitted `-D`/`-I` flags on one ad-hoc CLI invocation, keeping it process-local
+prevents poisoning later runs while keeping the `SHA256(source)` cache key
+unchanged. Accepted probes and non-baseline candidate rejections persist as
+usual. An accepted enum-carrier query also stores its typed selection result:
+match count and carrier identifier (the identifier sum when several match).
 Readers reject malformed, truncated, trailing, oversized, or impossible typed
-results and treat cache I/O failures as misses. Private source/object paths in diagnostics
-are normalized before storing or returning them. Oversized diagnostics may be
-reused in memory but are not persisted.
+results and treat cache I/O failures as misses. Private source/object paths in
+diagnostics are normalized before storing or returning them. Oversized
+diagnostics may be reused in memory but are not persisted.
 
 Both outcomes are published by complete-file replacement. Publication failure
 does not change the compiler verdict. Within one service or analysis, the

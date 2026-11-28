@@ -42,7 +42,7 @@ end
 local function lower_header_name(name: string): string
   -- HTTP field names use ASCII case folding. string.lower follows the mutable
   -- process C locale, so it cannot provide that protocol invariant.
-  local lowered = string.gsub(name, "[A-Z]", lower_ascii_letter, nil)
+  const lowered = string.gsub(name, "[A-Z]", lower_ascii_letter, nil)
   return lowered
 end
 
@@ -55,12 +55,12 @@ end
 -- @return New validated header collection.
 -- @usage standard-library-http.md#headers
 function headers(initial: {Header}?): Headers
-  local result = Headers({})
+  const result = Headers({})
   if initial then
-    local supplied = initial as {Header}
+    const supplied = initial as {Header}
     local index = 1
     while index <= #supplied do
-      local entry = supplied[index]
+      const entry = supplied[index]
       result:add(entry.name, entry.contents)
       index = index + 1
     end
@@ -95,7 +95,7 @@ function Headers:get(name: string): string?
   validate_header_name(name)
   local index = 1
   while index <= #self.entries do
-    local entry = self.entries[index]
+    const entry = self.entries[index]
     if same_header_name(entry.name, name) then return entry.contents end
     index = index + 1
   end
@@ -108,10 +108,10 @@ end
 -- @usage standard-library-http.md#headers
 function Headers:values(name: string): {string}
   validate_header_name(name)
-  local result: {string} = {}
+  const result: {string} = {}
   local index = 1
   while index <= #self.entries do
-    local entry = self.entries[index]
+    const entry = self.entries[index]
     if same_header_name(entry.name, name) then
       result[#result + 1] = entry.contents
     end
@@ -125,10 +125,10 @@ end
 -- @usage standard-library-http.md#headers
 function Headers:remove(name: string)
   validate_header_name(name)
-  local kept: {Header} = {}
+  const kept: {Header} = {}
   local index = 1
   while index <= #self.entries do
-    local entry = self.entries[index]
+    const entry = self.entries[index]
     if not same_header_name(entry.name, name) then
       kept[#kept + 1] = entry
     end
@@ -141,10 +141,10 @@ end
 -- @return Copied header records in insertion order.
 -- @usage standard-library-http.md#headers
 function Headers:all(): {Header}
-  local result: {Header} = {}
+  const result: {Header} = {}
   local index = 1
   while index <= #self.entries do
-    local entry = self.entries[index]
+    const entry = self.entries[index]
     result[#result + 1] = Header(entry.name, entry.contents)
     index = index + 1
   end
@@ -160,12 +160,12 @@ local function trim_header_value(contents: string): string
   local first = 1
   local last = #contents
   while first <= last do
-    local byte = string.byte(contents, first)
+    const byte = string.byte(contents, first)
     if byte ~= 32 and byte ~= 9 then break end
     first = first + 1
   end
   while last >= first do
-    local byte = string.byte(contents, last)
+    const byte = string.byte(contents, last)
     if byte ~= 32 and byte ~= 9 then break end
     last = last - 1
   end
@@ -175,11 +175,11 @@ end
 
 local function header_has_token(headers_value: Headers, name: string,
                                 wanted: string): boolean
-  local lower_wanted = lower_header_name(wanted)
-  local found = headers_value:values(name)
+  const lower_wanted = lower_header_name(wanted)
+  const found = headers_value:values(name)
   local index = 1
   while index <= #found do
-    local contents = found[index]
+    const contents = found[index]
     for item in string.split(contents, ",") do
       if lower_header_name(trim_header_value(item)) == lower_wanted then
         return true
@@ -200,13 +200,13 @@ end
 -- Upgrade uses protocol-name ["/" protocol-version], unlike Connection's
 -- bare token options. Names are ASCII case-insensitive; versions are exact.
 local function upgrade_protocol_parts(protocol: string): (string?, string?)
-  local slash? = string.find(protocol, "/", 1)
+  const slash? = string.find(protocol, "/", 1)
   if not slash then
     if string.match(protocol, HTTP_TOKEN_PATTERN) then return protocol, nil end
     return nil, nil
   end
-  local name = string.sub(protocol, 1, slash - 1)
-  local version = string.sub(protocol, slash + 1)
+  const name = string.sub(protocol, 1, slash - 1)
+  const version = string.sub(protocol, slash + 1)
   if not string.match(name, HTTP_TOKEN_PATTERN) or
       not string.match(version, HTTP_TOKEN_PATTERN) then
     return nil, nil
@@ -216,7 +216,7 @@ end
 
 local function validate_upgrade_protocol(protocol: string)
   if #protocol == 0 then raise "HTTP upgrade protocol must not be empty" end
-  local name?, _version? = upgrade_protocol_parts(protocol)
+  local name?, _? = upgrade_protocol_parts(protocol)
   if not name then raise "HTTP upgrade protocol contains an invalid byte" end
 end
 
@@ -225,10 +225,10 @@ local function upgrade_header_has_protocol(headers_value: Headers,
   local wanted_name?, wanted_version? = upgrade_protocol_parts(wanted)
   if not wanted_name then return false end
   local matched = false
-  local fields = headers_value:values("Upgrade")
+  const fields = headers_value:values("Upgrade")
   for index = 1, #fields do
     for item in string.split(fields[index], ",") do
-      local protocol = trim_header_value(item)
+      const protocol = trim_header_value(item)
       -- HTTP list recipients ignore empty elements; every actual protocol
       -- entry still has to follow the Upgrade grammar.
       if #protocol > 0 then
@@ -245,11 +245,11 @@ local function upgrade_header_has_protocol(headers_value: Headers,
 end
 
 local function render_headers(headers_value: Headers): string
-  local builder = string.writer()
-  local entries = headers_value:all()
+  const builder = string.writer()
+  const entries = headers_value:all()
   local index = 1
   while index <= #entries do
-    local entry = entries[index]
+    const entry = entries[index]
     builder:write(entry.name .. ": " .. entry.contents .. "\r\n")
     index = index + 1
   end
@@ -264,7 +264,7 @@ local function decimal_header(contents: string,
   if not string.match(contents, DECIMAL_PATTERN) then
     raise subject .. " must contain only decimal digits"
   end
-  local result? = math.tointeger(contents)
+  const result? = math.tointeger(contents)
   if not result then raise subject .. " is too large" end
   return result as integer
 end

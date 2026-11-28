@@ -28,9 +28,9 @@ local function receiver_send_transient_string(handle: foreign *void)
 end
 
 function test_receiver_preloop_burst_coalesces_to_latest_message(_context: test.Context)
-  local receiver = async.receiver()
+  const receiver = async.receiver()
   defer receiver:close()
-  local handle = receiver:handle()
+  const handle = receiver:handle()
   -- No loop callback can run between these sends.
   for ordinal = 1, 257 do
     async.send(handle, async.TransferValue.is_integer(ordinal))
@@ -46,9 +46,9 @@ function test_receiver_preloop_burst_coalesces_to_latest_message(_context: test.
 end
 
 function test_receiver_callbacks_replace_unread_value(_context: test.Context)
-  local receiver = async.receiver()
+  const receiver = async.receiver()
   defer receiver:close()
-  local handle = receiver:handle()
+  const handle = receiver:handle()
   -- Drive each callback before starting a reader. The second callback must
   -- replace a value already delivered by the first, beyond native coalescing.
   async.send(handle, async.TransferValue.is_integer(41))
@@ -69,62 +69,62 @@ end
 function test_receiver_preserves_all_transfer_variants_and_copied_bytes(
     _context: test.Context)
   runtime_test.run(function ()
-    local state = ffi.luaL_newstate()
+    const state = ffi.luaL_newstate()
     test.assert(state ~= nil, "could not allocate borrowed state fixture")
     defer ffi.lua_close(state)
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local handle = receiver:handle()
-    local memory: owned int[] = foreign int.new_array(1)
+    const handle = receiver:handle()
+    const memory: owned int[] = foreign int.new_array(1)
     memory[0] = 42
-    local expected_callback: foreign function (*lua_State): int = receiver_test_callback
+    const expected_callback: foreign function (*lua_State): int = receiver_test_callback
     async.send(handle, async.TransferValue.is_nil())
     test.assert(receiver:wait() == nil, "Receiver changed nil's variant")
     async.send(handle, nil)
     test.assert(receiver:wait() == nil, "Receiver changed direct nil")
     async.send(handle, async.TransferValue.is_boolean(false))
-    local false_val = receiver:wait()
+    const false_val = receiver:wait()
     test.assert(false_val is boolean and false_val == false,
                 "Receiver changed false's variant")
     async.send(handle, false)
-    local direct_false = receiver:wait()
+    const direct_false = receiver:wait()
     test.assert(direct_false is boolean and direct_false == false,
                 "Receiver changed direct false")
     async.send(handle, async.TransferValue.is_boolean(true))
-    local true_val = receiver:wait()
+    const true_val = receiver:wait()
     test.assert(true_val is boolean and true_val == true,
                 "Receiver changed true's variant")
     async.send(handle, async.TransferValue.is_integer(-73))
     test.assert(receiver_integer(receiver:wait()) == -73)
     async.send(handle, async.TransferValue.is_float(2.5))
-    local float_val = receiver:wait()
+    const float_val = receiver:wait()
     test.assert(float_val is float and (float_val as float) == 2.5,
                 "Receiver changed a float's variant")
     receiver_send_transient_string(handle)
     support.collect_garbage()
     support.collect_garbage()
-    local string_val = receiver:wait()
+    const string_val = receiver:wait()
     test.assert(string_val is string, "Receiver changed a string's variant")
-    local bytes: string = string_val
+    const bytes: string = string_val
     test.assert(bytes == receiver_string.rep("receiver\0bytes", 4096),
                 "Receiver lost copied string bytes after sender GC")
     async.send(handle, async.TransferValue.is_lua_state(state))
-    local state_pointer = receiver:wait() as foreign *lua_State
+    const state_pointer = receiver:wait() as foreign *lua_State
     test.assert(state_pointer == state,
                 "Receiver changed a borrowed state's pointer")
     async.send(handle, async.TransferValue.is_function(receiver_test_callback))
-    local callback = receiver:wait()
-    local top = ffi.lua_gettop(L)
+    const callback = receiver:wait()
+    const top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
     test.assert(ffi.lua_checkstack(L, 1) ~= 0,
                 "could not reserve callback inspection slot")
     ffi.lua_pushtvalue(L, callback)
-    local actual_callback = ffi.lua_tocfunction(L, -1)
+    const actual_callback = ffi.lua_tocfunction(L, -1)
     ffi.lua_settop(L, top)
     test.assert(actual_callback == expected_callback,
                 "Receiver changed a native Lua C function")
     async.send(handle, async.TransferValue.is_pointer(memory as foreign *void))
-    local pointer = receiver:wait() as foreign *void
+    const pointer = receiver:wait() as foreign *void
     test.assert(pointer == memory as foreign *void,
                 "Receiver changed a raw pointer's address")
     test.assert(memory[0] == 42, "Receiver wrote through a borrowed pointer")
@@ -133,9 +133,9 @@ end
 
 function test_receiver_reserves_one_waiter_without_barging(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local waiting = async.run<|value, value|>(receiver:wait)
+    const waiting = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting, "Receiver reserved waiter cleanup")
     support.wait_until_waiting(waiting)
     receiver_error(function () receiver:wait() end)
@@ -175,19 +175,19 @@ end
 
 function test_receiver_copies_nominal_names_and_wire_bytes(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
     receiver_send_record_bytes(receiver:handle())
     support.collect_garbage()
     support.collect_garbage()
-    local record_val: ReceiverNominalRecord = receiver:wait()
+    const record_val: ReceiverNominalRecord = receiver:wait()
     test.assert(record_val.label == receiver_string.rep("record.label", 128))
     test.assert(record_val.payload == receiver_string.rep("record\0bytes", 4096))
     test.assert(record_val.ordinal == 91)
     receiver_send_union_bytes(receiver:handle())
     support.collect_garbage()
     support.collect_garbage()
-    local union_val: ReceiverNominalUnion = receiver:wait()
+    const union_val: ReceiverNominalUnion = receiver:wait()
     case union_val
     when bytes(data) then
       test.assert(data == receiver_string.rep("union\0bytes", 4096))
@@ -203,9 +203,9 @@ end
 
 function test_receiver_cancellation_preserves_pending_message(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local waiting = async.run<|value, value|>(receiver:wait)
+    const waiting = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting, "cancelled Receiver waiter cleanup")
     support.wait_until_waiting(waiting)
     -- Neither send nor cancel yields: cancellation wins before delivery.
@@ -223,15 +223,15 @@ end
 
 function test_receiver_cancelled_reader_exit_keeps_successor_reservation(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local first = async.run<|value, value|>(receiver:wait)
+    const first = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(first, "cancelled Receiver reader cleanup")
     support.wait_until_waiting(first)
     -- Queue the successor before cancelling: cancellation withdraws the first
     -- reservation at once, so the successor reserves and suspends before the
     -- cancelled reader's queued wake unwinds through its own wait.
-    local successor = async.run<|value, value|>(receiver:wait)
+    const successor = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(successor, "successor Receiver reader cleanup")
     first:cancel(async.CancellationReason.simple("first Receiver reader cancelled"))
     support.wait_until_waiting(successor)
@@ -244,7 +244,7 @@ function test_receiver_cancelled_reader_exit_keeps_successor_reservation(_contex
     else raise "cancelled Receiver reader withdrew its successor's reservation" end
     -- A reader woken by the callback leaves no stale notification for the next
     -- reader that must suspend on the same Receiver.
-    local third = async.run<|value, value|>(receiver:wait)
+    const third = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(third, "third Receiver reader cleanup")
     support.wait_until_waiting(third)
     async.send(receiver:handle(), async.TransferValue.is_integer(82))
@@ -258,7 +258,7 @@ function test_receiver_cancelled_reader_exit_keeps_successor_reservation(_contex
 end
 
 function test_receiver_failed_first_wait_leaves_reusable_reader_state(_context: test.Context)
-  local receiver = async.receiver()
+  const receiver = async.receiver()
   defer receiver:close()
   -- A wait outside a Task is rejected and leaves the Receiver usable by Tasks.
   receiver_error(function () receiver:wait() end,
@@ -266,7 +266,7 @@ function test_receiver_failed_first_wait_leaves_reusable_reader_state(_context: 
   runtime_test.run(function ()
     -- The first wait in a Task creates and reserves the reader state, then
     -- fails at its checkpoint; that failure must release the reservation.
-    local pre_cancelled = async.run<|value, value|>(function (): value
+    const pre_cancelled = async.run<|value, value|>(function (): value
       async.running():cancel(async.CancellationReason.simple("first Receiver wait cancelled"))
       return receiver:wait()
     end)
@@ -283,13 +283,13 @@ end
 -- Returns whether the wait raised, the injected failures and the unused count.
 local function receiver_wait_with_failing_allocation(receiver: async.Receiver,
     countdown: integer): (boolean, integer, integer)
-  local ctrl: owned size_t[] = foreign size_t.new_array(3)
+  const ctrl: owned size_t[] = foreign size_t.new_array(3)
   ctrl[0] = 1 as foreign size_t
   ctrl[1] = countdown as foreign size_t
   ctrl[2] = 0 as foreign size_t
   local failed = false
   local previous_data: foreign *void = nil
-  local previous = ffi.lua_getallocf(L, previous_data)
+  const previous = ffi.lua_getallocf(L, previous_data)
   ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
   do
     receiver:wait()
@@ -310,27 +310,27 @@ function test_receiver_first_wait_allocation_failure_leaves_no_partial_state(_co
     -- Warm this call depth on one Receiver, then count every fresh Lua
     -- allocation of a first wait on another (a packet is ready, so the
     -- wait never suspends and the scalar decode allocates nothing).
-    local warm = async.receiver()
+    const warm = async.receiver()
     defer warm:close()
     async.send(warm:handle(), async.TransferValue.is_integer(1))
-    local warm_failed, warm_injected, _warm_left =
+    local warm_failed, warm_injected, _ =
       receiver_wait_with_failing_allocation(warm, 1000000)
     test.assert(not warm_failed and warm_injected == 0, "warm Receiver wait failed")
-    local counted = async.receiver()
+    const counted = async.receiver()
     defer counted:close()
     async.send(counted:handle(), async.TransferValue.is_integer(2))
     local count_failed, count_injected, unused =
       receiver_wait_with_failing_allocation(counted, 1000000)
-    local first_wait_allocations = 1000000 - unused
+    const first_wait_allocations = 1000000 - unused
     -- At least the reader record, its ResumeToken and its cancellation action.
     test.assert(not count_failed and count_injected == 0 and first_wait_allocations >= 3,
                 "first Receiver wait did not allocate its reader state")
     for nth = 1, first_wait_allocations do
-      local receiver = async.receiver()
+      const receiver = async.receiver()
       defer receiver:close()
-      local handle = receiver:handle()
+      const handle = receiver:handle()
       async.send(handle, async.TransferValue.is_integer(100 + nth))
-      local failed, injected, _left = receiver_wait_with_failing_allocation(receiver, nth)
+      local failed, injected, _ = receiver_wait_with_failing_allocation(receiver, nth)
       test.assert(failed and injected >= 1,
                   "first Receiver wait survived failing allocation " .. nth)
       -- No partial reader state remains: a later wait succeeds, a suspended
@@ -339,7 +339,7 @@ function test_receiver_first_wait_allocation_failure_leaves_no_partial_state(_co
       async.send(handle, async.TransferValue.is_integer(200 + nth))
       test.assert(receiver_integer(receiver:wait()) == 200 + nth,
                   "Receiver wait after allocation failure " .. nth .. " failed")
-      local cancelled = async.run<|value, value|>(receiver:wait)
+      const cancelled = async.run<|value, value|>(receiver:wait)
       task_support.cleanup_task(cancelled, "Receiver reader after allocation failure cleanup")
       support.wait_until_waiting(cancelled)
       async.send(handle, async.TransferValue.is_integer(300 + nth))
@@ -356,12 +356,12 @@ end
 
 function test_receiver_close_wakes_successor_after_cancelled_reader(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local first = async.run<|value, value|>(receiver:wait)
+    const first = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(first, "cancelled Receiver reader cleanup")
     support.wait_until_waiting(first)
-    local successor = async.run<|value, value|>(receiver:wait)
+    const successor = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(successor, "closed successor Receiver reader cleanup")
     first:cancel(async.CancellationReason.simple("first Receiver reader cancelled"))
     support.wait_until_waiting(successor)
@@ -382,9 +382,9 @@ end
 
 function test_receiver_cancel_after_queued_wake_keeps_packet_and_successor(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local first = async.run<|value, value|>(receiver:wait)
+    const first = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(first, "queued-wake Receiver reader cleanup")
     support.wait_until_waiting(first)
     async.send(receiver:handle(), async.TransferValue.is_integer(91))
@@ -398,8 +398,8 @@ function test_receiver_cancel_after_queued_wake_keeps_packet_and_successor(_cont
     -- the packet unread, before the cancelled reader has unwound.
     test.assert(receiver_integer(receiver:wait()) == 91,
                 "cancelled reader with a queued wake kept its reservation or packet")
-    local successor = async.running()
-    local prober = async.run<|nil, value|>(function (): nil
+    const successor = async.running()
+    const prober = async.run<|nil, value|>(function (): nil
       while not first:status():has_finished() do async.yield() end
       async.send(receiver:handle(), async.TransferValue.is_integer(92))
       do
@@ -427,10 +427,10 @@ function test_receiver_close_wakes_waiter_and_rejects_late_sends(_context: test.
     receiver_error(function ()
       async.send(nil, async.TransferValue.is_nil())
     end, "receiver handle must not be NULL")
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local handle = receiver:handle()
-    local waiting = async.run<|value, value|>(receiver:wait)
+    const handle = receiver:handle()
+    const waiting = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting, "closed Receiver waiter cleanup")
     support.wait_until_waiting(waiting)
     receiver:close()
@@ -444,7 +444,7 @@ function test_receiver_close_wakes_waiter_and_rejects_late_sends(_context: test.
     end, "receiver is closed")
     receiver_error(function () receiver:wait() end, "receiver is closed")
 
-    local queued = async.receiver()
+    const queued = async.receiver()
     defer queued:close()
     receiver_send_transient_string(queued:handle())
     queued:close()
@@ -455,11 +455,11 @@ end
 
 function test_receiver_runtime_shutdown_retires_retained_endpoint(_context: test.Context)
   -- Construction and send are allowed before a Task starts driving this Runtime.
-  local receiver = async.receiver()
+  const receiver = async.receiver()
   defer receiver:close()
-  local handle = receiver:handle()
+  const handle = receiver:handle()
   async.send(handle, async.TransferValue.is_integer(29))
-  local waiting = async.run<|value, value|>(receiver:wait)
+  const waiting = async.run<|value, value|>(receiver:wait)
   async.loop()
   case waiting:status()
   when succeeded(item) then test.assert(receiver_integer(item) == 29)
@@ -477,29 +477,29 @@ end
 
 local function receiver_send_transient_closure(handle: foreign *void)
   local count = 13
-  local text = receiver_string.rep("queued\0closure", 1024)
-  local callback = function (): integer
+  const text = receiver_string.rep("queued\0closure", 1024)
+  const callback = function (): integer
     count = count + 1
     return count + #text
   end
-  local packet = async.TransferValue.from_value(callback)
+  const packet = async.TransferValue.from_value(callback)
   test.assert(callback() == 14 + #text)
   async.send(handle, packet)
 end
 
 function test_receiver_copies_closure_snapshots_and_retires_packet_bytes(_context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local handle = receiver:handle()
+    const handle = receiver:handle()
     receiver_send_transient_closure(handle)
     support.collect_garbage()
     support.collect_garbage()
-    local callback: function (): integer = receiver:wait()
-    local size = #receiver_string.rep("queued\0closure", 1024)
+    const callback: function (): integer = receiver:wait()
+    const size = #receiver_string.rep("queued\0closure", 1024)
     test.assert(callback() == 14 + size and callback() == 15 + size,
       "Receiver did not snapshot the sender's closure captures")
-    local invalid = async.TransferValue.is_closure("async.tests", nil, "invalid protobuf")
+    const invalid = async.TransferValue.is_closure("async.tests", nil, "invalid protobuf")
     async.send(handle, invalid)
     receiver_error(function () receiver:wait() end,
       "closure transfer entry belongs to a different provider or is invalid")
@@ -533,7 +533,7 @@ record ReceiverCloseOnCollect
 end
 
 local function receiver_close_on_collect(item: value)
-  local owner: ReceiverCloseOnCollect = item
+  const owner: ReceiverCloseOnCollect = item
   receiver_closing_finalized = true
   -- A finalizer error would only become a Lua warning; record it instead.
   do owner.receiver:close()
@@ -546,7 +546,7 @@ local function receiver_drop_close_on_collect(target: async.Receiver)
 end
 
 function ReceiverClosingProbe.from_transfer_payload(payload: string): ReceiverClosingProbe
-  local target = receiver_closing_target
+  const target = receiver_closing_target
   receiver_closing_target = nil
   if receiver_closing_by_finalizer then
     receiver_drop_close_on_collect(target)
@@ -559,7 +559,7 @@ end
 
 local function receiver_close_during_first_pass_decode(by_finalizer: boolean)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
     -- The packet is already in the slot, so wait decodes on its first pass
     -- while its reader Task is running, never suspended on the reader token.
@@ -569,24 +569,24 @@ local function receiver_close_during_first_pass_decode(by_finalizer: boolean)
     receiver_closing_finalized = false
     receiver_closing_failure = nil
     -- Before the fix this raised "Task resume token mismatch" from the decode.
-    local item = receiver:wait()
+    const item = receiver:wait()
     test.assert(receiver_closing_target == nil, "the closing decode hook did not run")
     test.assert(receiver_closing_finalized == by_finalizer,
       "the closing finalizer did not run inside decode")
     test.assert(receiver_closing_failure == nil,
       "closing the Receiver from its reader's decode raised")
     test.assert(item is ReceiverClosingProbe, "wait lost the message decoded before close")
-    local probe: ReceiverClosingProbe = item
+    const probe: ReceiverClosingProbe = item
     test.assert(probe.label == "closed-during-decode", "wait changed the decoded message")
     receiver_error(function () receiver:wait() end, "receiver is closed")
   end)
 end
 
 function test_receiver_decode_may_close_its_receiver(context: test.Context)
-  context:run("decode_hook", function (_child: test.Context)
+  context:run("decode_hook", function (_: test.Context)
     receiver_close_during_first_pass_decode(false)
   end)
-  context:run("finalizer", function (_child: test.Context)
+  context:run("finalizer", function (_: test.Context)
     receiver_close_during_first_pass_decode(true)
   end)
 end
@@ -598,7 +598,7 @@ local function receiver_wake_window(driver: boolean, wake: function (async.Recei
     expected: value)
   runtime_test.run(function ()
     task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
-      local receiver = async.receiver()
+      const receiver = async.receiver()
       runtime_test.cleanup(function () receiver:close() end)
       return task_support.WakeCase(function (): value
         return receiver:wait()

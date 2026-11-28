@@ -8,21 +8,21 @@ local foreign function lua_close_record(cells: *void, slot: int, code: int)
 end
 
 local function lua_close_code(cells: foreign *void, slot: integer): integer
-  local codes = cells as foreign *int
+  const codes = cells as foreign *int
   return codes[slot] as integer
 end
 
 -- Cell 0: 1 once the abandoned worker's chunk finished. Cell 1: the nested
 -- state closed after that chunk finished (1) or under it (2).
 local record LuaCloseWatch
-  cells: foreign *void
+  const cells: foreign *void
 end
 
 local lua_close_watch: LuaCloseWatch? = nil
 local lua_close_submitted = false
 
 local function lua_close_watched(candidate: value)
-  local watch: LuaCloseWatch = candidate
+  const watch: LuaCloseWatch = candidate
   if lua_close_code(watch.cells, 0) == 1 then
     lua_close_record(watch.cells, 1, 1)
   else
@@ -32,7 +32,7 @@ end
 
 -- Public only so a fresh independent state can call it; test infrastructure.
 function lua_close_watch_state(cells_raw: value)
-  local watch = LuaCloseWatch(cells_raw as foreign *void)
+  const watch = LuaCloseWatch(cells_raw as foreign *void)
   lua_close_gc.finalizable<|value|>(watch, lua_close_watched)
   lua_close_watch = watch
 end
@@ -44,7 +44,7 @@ function lua_close_worker_chunk(cells_raw: value, finish_first: boolean)
 end
 
 local function lua_close_new_inner(cells: foreign *void): tlua.Lua
-  local inner = tlua.new()
+  const inner = tlua.new()
   inner:run([[
     package.path, package.cpath = '', ''
     require('lua.tests').lua_close_watch_state(...)
@@ -63,14 +63,14 @@ local lua_close_anchor: async.Receiver? = nil
 -- worker returned but its completion was never delivered.
 function lua_close_park_in_run_async(cells_raw: value, inner_first: boolean,
                                      finish_first: boolean)
-  local cells = cells_raw as foreign *void
+  const cells = cells_raw as foreign *void
   local held: tlua.Lua? = nil
   if inner_first then
     lua_close_anchor = async.receiver()
     held = lua_close_new_inner(cells)
   end
-  local task = async.run<|nil, value|>(function (): nil
-    local inner = held or lua_close_new_inner(cells)
+  const task = async.run<|nil, value|>(function (): nil
+    const inner = held or lua_close_new_inner(cells)
     lua_close_submitted = true
     inner:run_async([[
       require('lua.tests').lua_close_worker_chunk(...)
@@ -85,10 +85,10 @@ end
 local function lua_close_worker_case(context: test.Context, name: string,
                                      inner_first: boolean, finish_first: boolean)
   context:run(name, function (_: test.Context)
-    local cells: owned int[] = foreign int.new_array(2)
+    const cells: owned int[] = foreign int.new_array(2)
     cells[0] = 0
     cells[1] = 0
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     state:run([[
       package.path, package.cpath = '', ''
@@ -147,7 +147,7 @@ end
 
 -- Cell 0 counts the runs of a finalizer that re-arms itself on every run.
 local function lua_close_rearmed(candidate: value)
-  local watch: LuaCloseWatch = candidate
+  const watch: LuaCloseWatch = candidate
   lua_close_record(watch.cells, 0, lua_close_code(watch.cells, 0) + 1)
   lua_close_gc.finalizable<|value|>(watch, lua_close_rearmed)
 end
@@ -162,9 +162,9 @@ end
 -- closing the state ends. A coroutine owner that a synchronous browser
 -- callback re-armed relies on that last run to unwind at state close.
 function test_lua_close_runs_a_rearmed_finalizer_once(_: test.Context)
-  local cells: owned int[] = foreign int.new_array(1)
+  const cells: owned int[] = foreign int.new_array(1)
   cells[0] = 0
-  local state = tlua.new()
+  const state = tlua.new()
   defer state:close()
   state:run([[
     package.path, package.cpath = '', ''

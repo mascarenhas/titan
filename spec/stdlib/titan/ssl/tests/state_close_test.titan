@@ -6,12 +6,10 @@ end
 -- Slot codes: 0 the cleanup never ran, 1 it returned, 2 it raised.
 local function ssl_close_attempt(cells: foreign *void, slot: integer,
                                  cleanup: function (): ())
-  do
-    cleanup()
-    ssl_close_record(cells, slot, 1)
-  catch
-    ssl_close_record(cells, slot, 2)
-  end
+  cleanup()
+  ssl_close_record(cells, slot, 1)
+catch
+  ssl_close_record(cells, slot, 2)
 end
 
 local ssl_close_parked = false
@@ -39,8 +37,8 @@ end
 -- Public only so a fresh independent state can call it; test infrastructure.
 -- The Connection is newer than its parked Task, so its finalizer runs first.
 function ssl_close_park_with_new_connection(port: integer, cells_raw: value)
-  local cells = cells_raw as foreign *void
-  local task = async.run<|nil, value|>(function (): nil
+  const cells = cells_raw as foreign *void
+  const task = async.run<|nil, value|>(function (): nil
     ssl_close_listen(port)
     ssl_close_hold(ssl.client(net.connect("127.0.0.1", port), "localhost",
                               support.TRUST_ROOT), cells, 0)
@@ -53,8 +51,8 @@ end
 -- The Connection is older than the parked Task, so the Task unwinds first.
 -- The opener stays parked too: a Runtime whose last Task finished is closing.
 function ssl_close_park_with_older_connection(port: integer, cells_raw: value)
-  local cells = cells_raw as foreign *void
-  local opener = async.run<|nil, value|>(function (): nil
+  const cells = cells_raw as foreign *void
+  const opener = async.run<|nil, value|>(function (): nil
     ssl_close_listen(port)
     ssl_close_shared = ssl.client(net.connect("127.0.0.1", port), "localhost",
                                   support.TRUST_ROOT)
@@ -64,7 +62,7 @@ function ssl_close_park_with_older_connection(port: integer, cells_raw: value)
   task_support.drive_until(opener, function (): boolean
     return ssl_close_shared ~= nil
   end)
-  local task = async.run<|nil, value|>(function (): nil
+  const task = async.run<|nil, value|>(function (): nil
     ssl_close_hold(ssl_close_shared as ssl.Connection, cells, 1)
     return nil
   end)
@@ -79,10 +77,10 @@ local function ssl_close_case(context: test.Context, name: string, entry: string
       -- peer never accepts, so the TLS handshake cannot progress.
       local listener, port = net_support.listen_available(46100)
       defer listener:close()
-      local cells: owned int[] = foreign int.new_array(2)
+      const cells: owned int[] = foreign int.new_array(2)
       cells[0] = 0
       cells[1] = 0
-      local state = transfer_lua.new()
+      const state = transfer_lua.new()
       defer state:close()
       state:run([[
         package.path, package.cpath = '', ''

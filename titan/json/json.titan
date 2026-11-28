@@ -94,7 +94,7 @@ end
 
 local function path_text(path: Path): string
   if path.parent == nil then return "$" end
-  local prefix = path_text(path.parent)
+  const prefix = path_text(path.parent)
   if path.name ~= nil then
     return prefix .. "[" .. quoted_string(path.name, root_path()) .. "]"
   end
@@ -155,7 +155,7 @@ end
 -- @return Complete JSON document.
 -- @usage standard-library-json.md
 function encode(subject: value, ...: EncodeOption): string
-  local settings = default_settings()
+  const settings = default_settings()
   for index = 1, #... do
     case ...[index]
     when tag_field(name) then settings.tag_field = name
@@ -176,7 +176,7 @@ end
 -- @return Decoded value; nil is a valid successful null result.
 -- @usage standard-library-json.md
 function decode(source: string, target: reflect.Type?, ...: DecodeOption): value
-  local settings = default_settings()
+  const settings = default_settings()
   for index = 1, #... do
     case ...[index]
     when tag_field(name) then settings.tag_field = name
@@ -191,7 +191,7 @@ function decode(source: string, target: reflect.Type?, ...: DecodeOption): value
   if #source > settings.max_bytes then
     json_fail("limit_exceeded", "input exceeds max_bytes", root_path(), source, settings.max_bytes + 1)
   end
-  local node = parse_document(source, settings)
+  const node = parse_document(source, settings)
   return decode_node(node, target, settings, source, root_path())
 end
 

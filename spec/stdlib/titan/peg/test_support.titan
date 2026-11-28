@@ -5,8 +5,8 @@ foreign import "locale.h"
 local function bytes_contain(subject: string, needle: string): boolean
   if #needle == 0 then return true end
   if #needle > #subject then return false end
-  local haystack = subject as foreign const *unsigned char
-  local wanted = needle as foreign const *unsigned char
+  const haystack = subject as foreign const *unsigned char
+  const wanted = needle as foreign const *unsigned char
   local first = 0
   while first <= #subject - #needle do
     local equal = true
@@ -35,10 +35,10 @@ local function caught_string(callback: function (): ()): string?
 end
 
 local function assert_raises(fragment: string, callback: function (): ())
-  local message? = caught_string(callback)
+  const message? = caught_string(callback)
   test.assert(message ~= nil,
               "expected a string error containing '" .. fragment .. "'")
-  local actual: string = message
+  const actual: string = message
   test.assert(bytes_contain(actual, fragment), actual)
 end
 
@@ -76,9 +76,9 @@ local function repeat_text(piece: string, count: integer): string
 end
 
 local function use_c_ctype_locale(): string
-  local previous_pointer = ffi.setlocale(ffi.LC_CTYPE, nil)
+  const previous_pointer = ffi.setlocale(ffi.LC_CTYPE, nil)
   test.assert(previous_pointer ~= nil, "failed to query C character locale")
-  local previous = previous_pointer as string
+  const previous = previous_pointer as string
   test.assert(ffi.setlocale(ffi.LC_CTYPE, "C") ~= nil,
               "failed to select C character locale")
   return previous
@@ -92,7 +92,7 @@ end
 
 local function require_match(candidate: pattern.Match?): pattern.Match
   test.assert(candidate ~= nil, "expected PEG search to match")
-  local found: pattern.Match = candidate
+  const found: pattern.Match = candidate
   return found
 end
 
@@ -104,17 +104,17 @@ end
 
 local function assert_compile_error_contains(source: string,
                                              fragment: string)
-  local message? = compile_error(source)
+  const message? = compile_error(source)
   test.assert(message ~= nil,
               "expected PEG source to fail: " .. source)
-  local actual: string = message
+  const actual: string = message
   test.assert(bytes_contain(actual, fragment), actual)
 end
 
 local function assert_exact_error(source: string, expected: string)
-  local message? = compile_error(source)
+  const message? = compile_error(source)
   test.assert(message ~= nil,
               "expected PEG source to fail: " .. source)
-  local actual: string = message
+  const actual: string = message
   test.assert(actual == expected, actual)
 end

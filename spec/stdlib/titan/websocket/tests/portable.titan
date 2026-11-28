@@ -7,14 +7,14 @@ function test_message_types_and_error_records(_: test.Context)
   when binary() then
   when text() then test.assert(false, "BINARY is not a binary message kind")
   end
-  local failure = websocket.Error("limit", "websocket.read", "message limit", 1009)
+  const failure = websocket.Error("limit", "websocket.read", "message limit", 1009)
   test.assert(failure.kind == "limit" and failure.operation == "websocket.read" and
     failure.message == "message limit" and failure.close_code == 1009)
-  local fields = http.headers({http.Header("X-Rejected", "yes")})
-  local rejected = websocket.HandshakeError("rejected", 403, fields)
+  const fields = http.headers({http.Header("X-Rejected", "yes")})
+  const rejected = websocket.HandshakeError("rejected", 403, fields)
   test.assert(rejected.message == "rejected" and rejected.status == 403 and
     rejected.headers:get("x-rejected") == "yes")
-  local hidden = websocket.HandshakeError("hidden", nil, nil)
+  const hidden = websocket.HandshakeError("hidden", nil, nil)
   test.assert(hidden.status == nil and hidden.headers == nil)
 end
 
@@ -39,9 +39,9 @@ end
 
 function test_dial_options_protocol_tokens(context: test.Context)
   websocket.DialOptions { subprotocols = {"chat", "Chat", "v1.example", "!#$%&'*+-.^_`|~"} }
-  local tokens = {"", "bad protocol", "bad,protocol", "\255", "a\0b"}
+  const tokens = {"", "bad protocol", "bad,protocol", "\255", "a\0b"}
   for index = 1, #tokens do
-    local token = tokens[index]
+    const token = tokens[index]
     context:run("invalid_" .. index, function (_: test.Context)
       assert_option_error(function () websocket.DialOptions { subprotocols = {token} } end,
         "invalid or duplicate WebSocket subprotocol")
@@ -54,11 +54,11 @@ function test_dial_options_protocol_tokens(context: test.Context)
 end
 
 function test_dial_options_reserved_headers(context: test.Context)
-  local names = {"Host", "Connection", "Upgrade", "Content-Length", "Transfer-Encoding", "Expect",
+  const names = {"Host", "Connection", "Upgrade", "Content-Length", "Transfer-Encoding", "Expect",
     "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Accept",
     "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"}
   for index = 1, #names do
-    local name = names[index]
+    const name = names[index]
     context:run(name, function (_: test.Context)
       assert_option_error(function ()
         websocket.DialOptions { headers = http.headers({http.Header(name, "value")}) }

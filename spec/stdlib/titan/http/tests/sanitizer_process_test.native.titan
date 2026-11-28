@@ -1,27 +1,27 @@
 function test_ssl_http_fresh_process_sanitizer_composition(_context: test.Context)
   runtime_test.run(function ()
-    local workspace = fs.tmpname()
+    const workspace = fs.tmpname()
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
       command.remove_tree(workspace)
     end)
 
-    local source = fs.read_file(
+    const source = fs.read_file(
       "spec/fixtures/stdlib/titan/ssl_http_sanitizer_app.titan")
     fs.write_file(workspace .. "/ssl_http_sanitizer_app.titan", source)
     local output, why, compiled = command.compile(workspace, "ssl_http_sanitizer_app")
     test.assert(why == "exit" and compiled == 0,
                 "could not compile SSL/HTTP fixture: " .. output)
 
-    local result_path = workspace .. "/ssl-http.result"
-    local status = command.system({
+    const result_path = workspace .. "/ssl-http.result"
+    const status = command.system({
       command.program(workspace, "ssl_http_sanitizer_app"),
       result_path,
       "spec/fixtures/ssl/server.pem",
       "spec/fixtures/ssl/server-key.pem",
     }, nil, {["SSL_CERT_FILE"] = "spec/fixtures/ssl/ca.pem"})
-    local report = fs.read_file(result_path)
+    const report = fs.read_file(result_path)
     defer fs.unlink(result_path)
     test.assert(status == 0 and
                 report == "OK:ssl-http-sanitizer-ok",

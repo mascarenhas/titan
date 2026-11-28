@@ -24,9 +24,9 @@ function test_lua_independent_async_transfer_variants(context: test.Context)
   check_async_transfer(context, "native_numbers", check_closure_native_numbers)
   check_async_transfer(context, "destination_globals", check_closure_destination_globals)
   check_async_transfer(context, "managed_pointers", check_closure_managed_pointers)
-  local modes = {"incremental", "generational"}
+  const modes = {"incremental", "generational"}
   for index = 1, #modes do
-    local mode = modes[index]
+    const mode = modes[index]
     check_async_transfer(context, mode, function (run: IndependentRun)
       check_closure_snapshots(run, mode)
     end)
@@ -36,9 +36,9 @@ end
 function test_lua_independent_receiver_copies_closure_before_origin_close(
     _context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     defer receiver:close()
-    local state = tlua.new()
+    const state = tlua.new()
     defer state:close()
     state:run_async([[
       local handle = ...
@@ -48,7 +48,7 @@ function test_lua_independent_receiver_copies_closure_before_origin_close(
     ]], nil, async.TransferValue.is_pointer(receiver:handle()))
     state:close()
     gclib.collect()
-    local callback: function (): integer = receiver:wait()
+    const callback: function (): integer = receiver:wait()
     test.assert(callback() == 105 and callback() == 205)
   end)
 end
@@ -61,7 +61,7 @@ function test_lua_worker_registers_a_missed_nominal_when_its_packet_decodes(
     defer rx:close()
     -- The entry's module never imports lua.transfer_fixture, so the worker
     -- resolves this name before any packet has loaded its declaring module.
-    local worker = lua_support.spawn_late_nominal_probe(rx,
+    const worker = lua_support.spawn_late_nominal_probe(rx,
       "lua.transfer_fixture.TransferRecord")
     tx:send(transfer_fixture.record_value(23))
     case worker:join()
@@ -81,10 +81,10 @@ local function check_late_held(boxed: boolean, number: integer)
     local tx, rx = nominal_thread.channel<|value|>(1)
     defer tx:close()
     defer rx:close()
-    local worker = lua_support.spawn_late_held_probe(rx,
+    const worker = lua_support.spawn_late_held_probe(rx,
       "lua.transfer_fixture.TransferRecord")
     if boxed then
-      tx:send(lua_support.LateBox.new(transfer_fixture.record_value(number)))
+      tx:send(lua_support.LateBox(transfer_fixture.record_value(number)))
     else
       tx:send(lua_support.LateHolder(transfer_fixture.record_value(number)))
     end

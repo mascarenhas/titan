@@ -16,7 +16,7 @@ local function cancelled_with(status: async.TaskStatus,
                               expected: string): boolean
   local was_cancelled, reason? = status:has_cancelled()
   if not was_cancelled then return false end
-  local exact = reason as async.CancellationReason
+  const exact = reason as async.CancellationReason
   case exact
   when simple(message) then return message == expected
   else return false
@@ -46,7 +46,7 @@ end
 local function cancelled_payload(status: async.TaskStatus): value
   local was_cancelled, reason? = status:has_cancelled()
   test.assert(was_cancelled, "expected cancelled Task status")
-  local cancellation = reason as async.CancellationReason
+  const cancellation = reason as async.CancellationReason
   case cancellation
   when simple(text) then return text
   when complex(payload) then return payload
@@ -63,12 +63,12 @@ end
 -- async ownership has released the Map, without importing titan.gc.
 local function mark_finalizable(candidate: {string: value},
                                 callback: function (value): ())
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   test.assert(ffi.lua_checkstack(L, 3) ~= 0,
         "cannot reserve Lua stack for reachability probe")
   ffi.lua_pushtvalue(L, candidate)
-  local metatable: {string: value} = {
+  const metatable: {string: value} = {
     ["__gc"] = callback,
   }
   ffi.lua_pushtvalue(L, metatable)

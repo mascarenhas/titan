@@ -201,6 +201,7 @@ return {
             { "finalizable", "implemented", "gc.tests" },
             { "generational", "implemented", "gc.tests" },
             { "incremental", "implemented", "gc.tests" },
+            { "keep_alive", "implemented", "gc.tests" },
             { "majorminor", "implemented", "gc.tests" },
             { "minormajor", "implemented", "gc.tests" },
             { "minormul", "implemented", "gc.tests" },

@@ -6,7 +6,7 @@ foreign import "address-native.h"
 -- @usage uv/types.md#sockaddr_t
 record sockaddr_t
   local native: foreign sockaddr_storage
-  local native_length: integer
+  local const native_length: integer
 end
 
 local function sockaddr_t:pointer(): foreign *sockaddr
@@ -22,7 +22,7 @@ local function sockaddr_copy_sized(native: foreign const *sockaddr,
     return nil
   end
   local storage = foreign sockaddr_storage.new()
-  local result = sockaddr_t(storage, length)
+  const result = sockaddr_t(storage, length)
   ffi.memcpy(result.native, native, length as foreign size_t)
   return result
 end
@@ -40,8 +40,8 @@ local function sockaddr_copy(native: foreign const *sockaddr): sockaddr_t?
     -- sockaddr_un/storage length here would overread. Preserve nonnull address
     -- presence and the family without pretending the remaining bytes exist.
     local storage = foreign sockaddr_storage.new()
-    local result = sockaddr_t(storage, 0)
-    local address = result.native as foreign *sockaddr
+    const result = sockaddr_t(storage, 0)
+    const address = result.native as foreign *sockaddr
     address.sa_family = native.sa_family
     return result
   end
@@ -55,10 +55,10 @@ end
 -- @return Copied or retained sockaddr_t result, or nil on failure or absence.
 -- @usage uv/functions/misc.md#ip4_addr
 function ip4_addr(ip: string, port: integer): (integer, sockaddr_t?)
-  local native_port = port as foreign int
+  const native_port = port as foreign int
   local native = foreign sockaddr_storage.new()
-  local owner = sockaddr_t(native, foreign sockaddr_in.sizeof as integer)
-  local status = ffi.uv_ip4_addr(ip, native_port,
+  const owner = sockaddr_t(native, foreign sockaddr_in.sizeof as integer)
+  const status = ffi.uv_ip4_addr(ip, native_port,
       owner.native as foreign *sockaddr_in) as integer
   if status < 0 then return status, nil end
   return status, owner
@@ -71,10 +71,10 @@ end
 -- @return Copied or retained sockaddr_t result, or nil on failure or absence.
 -- @usage uv/functions/misc.md#ip6_addr
 function ip6_addr(ip: string, port: integer): (integer, sockaddr_t?)
-  local native_port = port as foreign int
+  const native_port = port as foreign int
   local native = foreign sockaddr_storage.new()
-  local owner = sockaddr_t(native, foreign sockaddr_in6.sizeof as integer)
-  local status = ffi.uv_ip6_addr(ip, native_port,
+  const owner = sockaddr_t(native, foreign sockaddr_in6.sizeof as integer)
+  const status = ffi.uv_ip6_addr(ip, native_port,
       owner.native as foreign *sockaddr_in6) as integer
   if status < 0 then return status, nil end
   return status, owner
@@ -88,7 +88,7 @@ end
 function ip4_name(address: sockaddr_t): (integer, string?)
   if address.native.ss_family ~= ffi.AF_INET then return ffi.UV_EAFNOSUPPORT, nil end
   local text = foreign char.new_array(16)
-  local status = ffi.uv_ip4_name(address.native as foreign *sockaddr_in,
+  const status = ffi.uv_ip4_name(address.native as foreign *sockaddr_in,
                                 text, 16) as integer
   if status < 0 then return status, nil end
   return status, (text as foreign *char) as string
@@ -102,7 +102,7 @@ end
 function ip6_name(address: sockaddr_t): (integer, string?)
   if address.native.ss_family ~= ffi.AF_INET6 then return ffi.UV_EAFNOSUPPORT, nil end
   local text = foreign char.new_array(46)
-  local status = ffi.uv_ip6_name(address.native as foreign *sockaddr_in6,
+  const status = ffi.uv_ip6_name(address.native as foreign *sockaddr_in6,
                                 text, 46) as integer
   if status < 0 then return status, nil end
   return status, (text as foreign *char) as string
@@ -115,7 +115,7 @@ end
 -- @usage uv/functions/misc.md#ip_name
 function ip_name(address: sockaddr_t): (integer, string?)
   local text = foreign char.new_array(46)
-  local status = ffi.uv_ip_name(address:pointer(), text, 46) as integer
+  const status = ffi.uv_ip_name(address:pointer(), text, 46) as integer
   if status < 0 then return status, nil end
   return status, (text as foreign *char) as string
 end
@@ -146,7 +146,7 @@ end
 -- @usage uv/supplemental.md#sockaddr_traw_bytes
 function sockaddr_t:raw_bytes(): string?
   if self.native_length == 0 then return nil end
-  local bytes: owned unsigned char[] = foreign unsigned char.new_array(self.native_length)
+  const bytes: owned unsigned char[] = foreign unsigned char.new_array(self.native_length)
   ffi.memcpy(bytes, self.native, self.native_length as foreign size_t)
   return bytes as string
 end
@@ -156,11 +156,11 @@ end
 -- @usage uv/supplemental.md#sockaddr_tport
 function sockaddr_t:port(): integer
   if self.native.ss_family == ffi.AF_INET then
-    local address = self.native as foreign *sockaddr_in
+    const address = self.native as foreign *sockaddr_in
     return ffi.titan_sockaddr_ntohs(address.sin_port) as integer
   end
   if self.native.ss_family ~= ffi.AF_INET6 then raise "IP address required" end
-  local address = self.native as foreign *sockaddr_in6
+  const address = self.native as foreign *sockaddr_in6
   return ffi.titan_sockaddr_ntohs(address.sin6_port) as integer
 end
 
@@ -202,14 +202,14 @@ end
 -- @usage uv/supplemental.md#sockaddr_taddress_bytes
 function sockaddr_t:address_bytes(): string
   if self.native.ss_family == ffi.AF_INET then
-    local bytes: owned unsigned char[] = foreign unsigned char.new_array(4)
-    local address = self.native as foreign *sockaddr_in
+    const bytes: owned unsigned char[] = foreign unsigned char.new_array(4)
+    const address = self.native as foreign *sockaddr_in
     ffi.memcpy(bytes, address.sin_addr, 4)
     return bytes as string
   end
   if self.native.ss_family ~= ffi.AF_INET6 then raise "IP address required" end
-  local bytes: owned unsigned char[] = foreign unsigned char.new_array(16)
-  local address = self.native as foreign *sockaddr_in6
+  const bytes: owned unsigned char[] = foreign unsigned char.new_array(16)
+  const address = self.native as foreign *sockaddr_in6
   ffi.memcpy(bytes, address.sin6_addr, 16)
   return bytes as string
 end
@@ -222,13 +222,13 @@ end
 -- @return Copied or retained string result, or nil on failure or absence.
 -- @usage uv/functions/misc.md#inet_pton
 function inet_pton(af: integer, source: string): (integer, string?)
-  local native_af = af as foreign int
+  const native_af = af as foreign int
   local length = 0
   if native_af == ffi.AF_INET then length = 4
   elseif native_af == ffi.AF_INET6 then length = 16
   else return ffi.UV_EAFNOSUPPORT, nil end
-  local bytes: owned unsigned char[] = foreign unsigned char.new_array(length)
-  local status = ffi.uv_inet_pton(native_af, source, bytes) as integer
+  const bytes: owned unsigned char[] = foreign unsigned char.new_array(length)
+  const status = ffi.uv_inet_pton(native_af, source, bytes) as integer
   if status < 0 then return status, nil end
   return status, bytes as string
 end
@@ -240,14 +240,14 @@ end
 -- @return Copied or retained string result, or nil on failure or absence.
 -- @usage uv/functions/misc.md#inet_ntop
 function inet_ntop(af: integer, source: string): (integer, string?)
-  local native_af = af as foreign int
+  const native_af = af as foreign int
   if native_af == ffi.AF_INET then
     if #source ~= 4 then return ffi.UV_EINVAL, nil end
   elseif native_af == ffi.AF_INET6 then
     if #source ~= 16 then return ffi.UV_EINVAL, nil end
   else return ffi.UV_EAFNOSUPPORT, nil end
   local text = foreign char.new_array(46)
-  local status = ffi.uv_inet_ntop(native_af, source, text, 46) as integer
+  const status = ffi.uv_inet_ntop(native_af, source, text, 46) as integer
   if status < 0 then return status, nil end
   return status, (text as foreign *char) as string
 end
@@ -257,7 +257,7 @@ end
 -- @return Copied or retained integer result, or nil on failure or absence.
 -- @usage uv/supplemental.md#sockaddr_tsa_len
 function sockaddr_t:sa_len(): integer?
-  local length = ffi.titan_sockaddr_length_field(self.native as foreign *sockaddr) as integer
+  const length = ffi.titan_sockaddr_length_field(self.native as foreign *sockaddr) as integer
   if length < 0 then return nil end
   return length
 end

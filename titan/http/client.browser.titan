@@ -21,7 +21,7 @@ record ClientResponse
   headers: Headers
   url: string?
   redirected: boolean
-  local session: FetchSession
+  local const session: FetchSession
   local excess: string
   local reading: boolean
 end
@@ -47,7 +47,7 @@ local function fetch_error(message: string, operation: string): async.OperationE
 end
 
 local function FetchSession:close()
-  local handle? = self.handle
+  const handle? = self.handle
   if handle == nil then return end
   self.handle = nil
   defer handle:close()
@@ -55,11 +55,11 @@ local function FetchSession:close()
 end
 
 local function FetchSession:wait(arguments: {Value}, operation: string): string?
-  local task = async.running()
-  local token = async.ResumeToken(operation)
+  const task = async.running()
+  const token = async.ResumeToken(operation)
   local result = Value.is_nil()
   local failure: async.OperationError? = nil
-  local request = fetch_source():start(function (...: Value): Value
+  const request = fetch_source():start(function (...: Value): Value
     result = ...[1]
     task:resume(token)
     return Value.is_nil()
@@ -80,14 +80,14 @@ local function FetchSession:wait(arguments: {Value}, operation: string): string?
   raise fetch_error("host fetch returned a value that is not bytes", operation)
 catch
   if not (error is browser.BrowserError) then raise end
-  local failure: browser.BrowserError = error
-  local message = failure.message
+  const failure: browser.BrowserError = error
+  const message = failure.message
   failure:close()
   raise fetch_error(message, operation)
 end
 
 local function forbidden_fetch_method(method: string): boolean
-  local lower = lower_header_name(method)
+  const lower = lower_header_name(method)
   return lower == "connect" or lower == "trace" or lower == "track"
 end
 
@@ -129,19 +129,19 @@ local const forbidden_fetch_headers: {string: boolean} = {
 }
 
 local function fetch_request_headers(parsed: url.Url, policy: RequestOptions): {Value}
-  local pairs: {Value} = {}
+  const pairs: {Value} = {}
   local host_seen = false
   local length_seen = false
   local body_length = 0
   if policy.body ~= nil then body_length = #policy.body end
   -- Preserve insertion order and duplicates without Headers:all()'s deep copy.
   for index = 1, #policy.headers.entries do
-    local entry = policy.headers.entries[index]
-    local name = lower_header_name(entry.name)
+    const entry = policy.headers.entries[index]
+    const name = lower_header_name(entry.name)
     if name == "host" then
       if host_seen then raise "HTTP request has more than one Host header" end
       host_seen = true
-      local host = parse_request_url_or_raise(parsed.scheme, entry.contents, "/")
+      const host = parse_request_url_or_raise(parsed.scheme, entry.contents, "/")
       if host.host ~= parsed.host or host.port ~= parsed.port then
         raise "HTTP custom Host header is unavailable on the browser target"
       end
@@ -202,9 +202,9 @@ end
 
 local function fetch_response(session: FetchSession, head: string,
                               source_url: string, redirect: string): ClientResponse
-  local fields: {string} = {}
+  const fields: {string} = {}
   for field in string.split(head, "\0") do fields[#fields + 1] = field end
-  local status? = math.tointeger(fields[1])
+  const status? = math.tointeger(fields[1])
   if status == nil or (status ~= 0 and (status < 200 or status > 999)) then
     raise fetch_error("host fetch returned invalid response metadata", "http.request")
   end
@@ -218,7 +218,7 @@ local function fetch_response(session: FetchSession, head: string,
         redirected = false, session = session, excess = "", reading = false}
     end
   end
-  local reason = fields[3]
+  const reason = fields[3]
   if string.match(reason, FORBIDDEN_FIELD_BYTE_PATTERN) then
     raise "HTTP reason phrase contains a forbidden byte"
   end
@@ -226,12 +226,12 @@ local function fetch_response(session: FetchSession, head: string,
   if response_url == "" then response_url = nil end
   -- Only an opaqueredirect retains the requested URL; an opaque response has none.
   if fields[5] == "opaqueredirect" then response_url = source_url end
-  local received = headers()
+  const received = headers()
   local index = 6
   while index < #fields do
-    local name = fields[index]
-    local contents = fields[index + 1]
-    local lower = lower_header_name(name)
+    const name = fields[index]
+    const contents = fields[index + 1]
+    const lower = lower_header_name(name)
     if lower ~= "set-cookie" and lower ~= "set-cookie2" then received:add(name, contents) end
     index = index + 2
   end
@@ -249,15 +249,15 @@ function Client:request(method: string, source_url: string, options: RequestOpti
   self:bind()
   validate_http_token(method, "HTTP method")
   if forbidden_fetch_method(method) then raise "HTTP method is forbidden on the browser target" end
-  local policy = options or RequestOptions()
+  const policy = options or RequestOptions()
   if is_no_cors(policy.mode) then validate_no_cors_method(method) end
-  local parsed = parse_url_or_raise(source_url)
+  const parsed = parse_url_or_raise(source_url)
   if policy.ca_file ~= nil then raise "HTTP ca_file is unavailable on the browser target" end
-  local lower = lower_header_name(method)
+  const lower = lower_header_name(method)
   if policy.body ~= nil and (lower == "get" or lower == "head") then
     raise "HTTP GET and HEAD do not accept a request body on the browser target"
   end
-  local pairs = fetch_request_headers(parsed, policy)
+  const pairs = fetch_request_headers(parsed, policy)
   if is_only_if_cached(policy.cache) then
     case fetch_source():call(Value.is_string("has-cache"))
     when is_boolean(has_cache) then
@@ -271,19 +271,19 @@ function Client:request(method: string, source_url: string, options: RequestOpti
   when is_handle(created) then handle = created
   end
   if handle == nil then raise fetch_error("host fetch did not create a session", "http.request") end
-  local session = FetchSession(handle)
+  const session = FetchSession(handle)
   local adopted = false
   defer if not adopted then session:close() end
   local body = Value.is_nil()
   if policy.body ~= nil then body = Value.is_bytes(policy.body) end
-  local redirect = redirect_mode_string(policy.redirect, true)
-  local arguments: {Value} = {Value.is_string("open"), Value.is_handle(handle),
+  const redirect = redirect_mode_string(policy.redirect, true)
+  const arguments: {Value} = {Value.is_string("open"), Value.is_handle(handle),
     Value.is_string(source_url), Value.is_string(method), body,
     Value.is_string(cache_mode_string(policy.cache)),
     Value.is_string(credentials_mode_string(policy.credentials)),
     Value.is_string(request_mode_string(policy.mode)), Value.is_string(redirect), ...pairs}
-  local head = session:wait(arguments, "http.request")
-  local response = fetch_response(session, head, source_url, redirect)
+  const head = session:wait(arguments, "http.request")
+  const response = fetch_response(session, head, source_url, redirect)
   adopted = true
   return response
 end
@@ -320,7 +320,7 @@ end
 
 local function ClientResponse:read_chunk(): string?
   if self.session.handle == nil then return nil end
-  local chunk? = self.session:wait({Value.is_string("read"), Value.is_handle(self.session.handle)}, "http.read")
+  const chunk? = self.session:wait({Value.is_string("read"), Value.is_handle(self.session.handle)}, "http.read")
   if chunk == nil then self.session:close() end
   return chunk
 catch
@@ -337,7 +337,7 @@ function ClientResponse:read(): string?
   self.reading = true
   defer self.reading = false
   if #self.excess > 0 then
-    local chunk = self.excess
+    const chunk = self.excess
     self.excess = ""
     return chunk
   end
@@ -355,28 +355,28 @@ function ClientResponse:read_until(delimiter: string, chop: boolean?): string?
   if self.reading then raise "HTTP response already has a reader" end
   self.reading = true
   defer self.reading = false
-  local builder = string.writer()
+  const builder = string.writer()
   local pending = self.excess
   self.excess = ""
   while true do
-    local found? = string.find(pending, delimiter, 1)
+    const found? = string.find(pending, delimiter, 1)
     if found ~= nil then
-      local last = found + #delimiter - 1
+      const last = found + #delimiter - 1
       if chop then builder:write(string.sub(pending, 1, found - 1))
       else builder:write(string.sub(pending, 1, last)) end
       self.excess = string.sub(pending, last + 1)
       return builder:drain()
     end
     -- Retain only the potential delimiter overlap, not the accumulated body.
-    local emitted = #pending - #delimiter + 1
+    const emitted = #pending - #delimiter + 1
     if emitted > 0 then
       builder:write(string.sub(pending, 1, emitted))
       pending = string.sub(pending, emitted + 1)
     end
-    local chunk? = self:read_chunk()
+    const chunk? = self:read_chunk()
     if chunk == nil then
       builder:write(pending)
-      local tail = builder:drain()
+      const tail = builder:drain()
       if #tail == 0 then return nil end
       return tail
     end
@@ -401,7 +401,7 @@ end
 function Client:close()
   if self.closed then return end
   self.closed = true
-  local remove? = self.remove_close_listener
+  const remove? = self.remove_close_listener
   self.remove_close_listener = nil
   if remove ~= nil then remove() end
 end

@@ -1,5 +1,5 @@
 local test = import "test"
-local json = import "titan.json"
+local json = import "json"
 local peg = import "peg"
 local reflect = import "reflect"
 local string = import "string"

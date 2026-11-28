@@ -2,6 +2,7 @@
 -- @module titan.uv
 -- @usage standard-library-uv.md
 
+local gc = import "gc"
 local iteration = import "iteration"
 local protobuf = import "protobuf"
 local reflect = import "reflect"
@@ -34,12 +35,12 @@ record loop_t
   local walk_argument: value
   local inline_depth: integer
   local walk_depth: integer
-  local walk_handler: function (loop_t, foreign *uv_handle_t): ()
+  local const walk_handler: function (loop_t, foreign *uv_handle_t): ()
   local native: foreign uv_loop_t
-  local state: foreign *lua_State
+  local const state: foreign *lua_State
   local initialized: boolean
-  local handles: {value: boolean}
-  local requests: {value: boolean}
+  local const handles: {value: boolean}
+  local const requests: {value: boolean}
   local failure_count: integer
   local failure_error: value
   local failure_trace: string
@@ -56,8 +57,8 @@ record timer_t
   local callback: (function (timer_t): ())?
   local close_callback: (function (handle_t): ())?
   local typed_close_callback: timer_cb?
-  local handler: function (timer_t, loop_t): ()
-  local close_handler: function (timer_t, loop_t): ()
+  local const handler: function (timer_t, loop_t): ()
+  local const close_handler: function (timer_t, loop_t): ()
   local userdata: value
 end
 
@@ -95,7 +96,7 @@ union handle_t
 end
 
 local function current_main(): foreign *lua_State
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve main lookup" end
   ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX,
@@ -108,7 +109,7 @@ end
 -- @usage uv/supplemental.md#loop_tnew
 function loop_t.new(): loop_t
   local native = foreign uv_loop_t.new()
-  local owner: loop_t = {
+  const owner: loop_t = {
     native = native,
     inline_depth = 0,
     walk_callback = nil, walk_argument = nil, walk_depth = 0, walk_handler = walk_deliver,
@@ -128,7 +129,7 @@ end
 function loop_init(loop: loop_t): integer
   if loop.initialized then return ffi.UV_EBUSY end
   loops[loop] = true
-  local status = ffi.uv_loop_init(loop.native) as integer
+  const status = ffi.uv_loop_init(loop.native) as integer
   if status < 0 then loops[loop] = nil; return status end
   loop.initialized = true
   ffi.uv_loop_set_data(loop.native, loop as foreign *void)
@@ -145,7 +146,7 @@ function loop_close(loop: loop_t): integer
   if iteration.next(loop.handles, nil) ~= nil or iteration.next(loop.requests, nil) ~= nil then
     return ffi.UV_EBUSY
   end
-  local status = ffi.uv_loop_close(loop.native) as integer
+  const status = ffi.uv_loop_close(loop.native) as integer
   if status == 0 then loop.initialized = false; loops[loop] = nil end
   return status
 end
@@ -161,8 +162,8 @@ end
 
 local function rethrow(loop: loop_t)
   if loop.failure_count == 0 then return end
-  local err = loop.failure_error
-  local trace = loop.failure_trace
+  const err = loop.failure_error
+  const trace = loop.failure_trace
   loop.secondary_errors = loop.failure_count - 1
   loop.failure_count = 0
   loop.failure_error = false
@@ -191,7 +192,7 @@ function run(loop: loop_t, mode: run_mode?): integer
   driving = loop
   defer do driving = nil end
   loop.secondary_errors = 0
-  local result = ffi.uv_run(loop.native, native_mode) as integer
+  const result = ffi.uv_run(loop.native, native_mode) as integer
   rethrow(loop)
   return result
 end
@@ -199,21 +200,21 @@ end
 -- These handlers replace only abandoned requests' terminal handlers. They do
 -- not call domain code or inspect resources stored in public userdata.
 local function fs_abandoned(owner: fs_t, loop: loop_t)
-  local kind = ffi.uv_fs_get_type(owner.native)
-  local result = ffi.uv_fs_get_result(owner.native)
+  const kind = ffi.uv_fs_get_type(owner.native)
+  const result = ffi.uv_fs_get_result(owner.native)
   if result >= 0 then
     local cleanup = foreign uv_fs_t.new()
     if kind == ffi.UV_FS_OPEN or kind == ffi.UV_FS_MKSTEMP then
       ffi.uv_fs_close(nil, cleanup, result as foreign uv_file, nil)
       ffi.uv_fs_req_cleanup(cleanup)
     elseif kind == ffi.UV_FS_OPENDIR then
-      local directory = ffi.uv_fs_get_ptr(owner.native) as foreign *uv_dir_t
+      const directory = ffi.uv_fs_get_ptr(owner.native) as foreign *uv_dir_t
       ffi.uv_fs_closedir(nil, cleanup, directory, nil)
       cleanup.ptr = nil
       ffi.uv_fs_req_cleanup(cleanup)
     end
   end
-  local directory? = owner.directory
+  const directory? = owner.directory
   if directory ~= nil and kind == ffi.UV_FS_CLOSEDIR then
     if result >= 0 then directory.native = nil end
     directory.busy = false
@@ -231,7 +232,7 @@ end
 local function getaddrinfo_abandoned(owner: getaddrinfo_t, loop: loop_t,
                                     status: integer, native: foreign *addrinfo)
   ffi.uv_freeaddrinfo(native)
-  local result = owner.result as addrinfo_result_t
+  const result = owner.result as addrinfo_result_t
   result.native = nil
   result.released = true
   owner.result_status = status
@@ -311,15 +312,15 @@ function loop_abandon(loop: loop_t): integer
   -- slots change here; no new branch is added to ordinary operation dispatch.
   for candidate in iteration.pairs(loop.requests) do
     if candidate is fs_t then
-      local owner = candidate as fs_t
+      const owner = candidate as fs_t
       owner.callback = nil
       owner.handler = fs_abandoned
     elseif candidate is getaddrinfo_t then
-      local owner = candidate as getaddrinfo_t
+      const owner = candidate as getaddrinfo_t
       owner.callback = nil
       owner.handler = getaddrinfo_abandoned
     elseif candidate is getnameinfo_t then
-      local owner = candidate as getnameinfo_t
+      const owner = candidate as getnameinfo_t
       owner.callback = nil
       owner.handler = getnameinfo_abandoned
     elseif candidate is connect_t then (candidate as connect_t).callback = nil
@@ -327,10 +328,10 @@ function loop_abandon(loop: loop_t): integer
     elseif candidate is shutdown_t then (candidate as shutdown_t).callback = nil
     elseif candidate is udp_send_t then (candidate as udp_send_t).callback = nil
     elseif candidate is random_t then
-      local owner = candidate as random_t
+      const owner = candidate as random_t
       owner.callback = nil
     elseif candidate is work_t then
-      local owner = candidate as work_t
+      const owner = candidate as work_t
       owner.callback = nil
     end
   end
@@ -352,7 +353,7 @@ function loop_t:secondary_error_count(): integer
 end
 
 local function timer_deliver(owner: timer_t, loop: loop_t)
-  local callback? = owner.callback
+  const callback? = owner.callback
   if callback ~= nil then callback(owner) end
 catch
   -- No allocating Titan helper entry may run outside this catch boundary.
@@ -367,8 +368,8 @@ end
 local function timer_closed(owner: timer_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
-  local typed_callback? = owner.typed_close_callback
+  const callback? = owner.close_callback
+  const typed_callback? = owner.typed_close_callback
   owner.callback = nil
   owner.close_callback = nil
   owner.typed_close_callback = nil
@@ -446,7 +447,7 @@ function timer_init(loop: loop_t, timer: timer_t): integer
   if not loop.initialized or timer.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[timer] = true
   timer.loop = loop
-  local status = ffi.uv_timer_init(loop.native, timer.native) as integer
+  const status = ffi.uv_timer_init(loop.native, timer.native) as integer
   if status < 0 then loop.handles[timer] = nil; timer.loop = nil; return status end
   timer.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(timer.native as foreign *uv_handle_t, timer as foreign *void)
@@ -502,7 +503,7 @@ end
 -- @usage uv/supplemental.md#timer_close
 function timer_close(timer: timer_t, callback: timer_cb?)
   if timer.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-  local native = timer.native as foreign *uv_handle_t
+  const native = timer.native as foreign *uv_handle_t
   if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
   timer.close_callback = nil
   timer.typed_close_callback = callback
@@ -517,86 +518,86 @@ function close(handle: handle_t, callback: (function (handle_t): ())?)
   case handle
   when timer(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.typed_close_callback = nil
     owner.close_callback = callback
     ffi.uv_close(native, timer_close_callback)
   when process(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, process_close_callback)
   when tcp(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, tcp_close_callback)
   when pipe(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, pipe_close_callback)
   when tty(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, tty_close_callback)
   when udp(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, udp_close_callback)
   when fs_event(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, fs_event_close_callback)
   when fs_poll(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, fs_poll_close_callback)
   when idle(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, idle_close_callback)
   when prepare(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, prepare_close_callback)
   when check(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, check_close_callback)
   when async(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, async_close_callback)
   when signal(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, signal_close_callback)
   when poll(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
-    local native = owner.native as foreign *uv_handle_t
+    const native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
     owner.close_callback = callback
     ffi.uv_close(native, poll_close_callback)
@@ -741,9 +742,9 @@ record stat_t
 end
 
 local function fs_deliver(owner: fs_t, loop: loop_t)
-  local directory? = owner.directory
+  const directory? = owner.directory
   if directory ~= nil then
-    local kind = ffi.uv_fs_get_type(owner.native)
+    const kind = ffi.uv_fs_get_type(owner.native)
     if kind == ffi.UV_FS_OPENDIR then
       if ffi.uv_fs_get_result(owner.native) >= 0 then
         directory.native = ffi.uv_fs_get_ptr(owner.native) as foreign *uv_dir_t
@@ -755,7 +756,7 @@ local function fs_deliver(owner: fs_t, loop: loop_t)
   end
   loop.requests[owner] = nil
   owner.pending = false
-  local callback? = owner.callback
+  const callback? = owner.callback
   owner.callback = nil
   if callback ~= nil then callback(owner) end
 catch
@@ -870,7 +871,7 @@ function cancel(request: req_t): integer
     return ffi.uv_cancel(owner.native as foreign *uv_req_t)
   when work(owner) then
     if not owner.pending then return ffi.UV_EINVAL end
-    local native = owner.native as foreign *uv_work_t
+    const native = owner.native as foreign *uv_work_t
     return ffi.uv_cancel(native as foreign *uv_req_t)
   when random(owner) then
     if not owner.pending then return ffi.UV_EINVAL end
@@ -912,10 +913,10 @@ function fs_stat(loop: loop_t?, request: fs_t, path: string,
                   callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_stat(
+  const result = ffi.uv_fs_stat(
       native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -935,15 +936,15 @@ end
 function fs_open(loop: loop_t?, request: fs_t, path: string,
                   flags: integer, mode: integer,
                   callback: (function (fs_t): ())?): integer
-  local native_flags = flags as foreign int
-  local native_mode = mode as foreign int
+  const native_flags = flags as foreign int
+  const native_mode = mode as foreign int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_open(
+  const result = ffi.uv_fs_open(
       native_loop, request.native, path, native_flags,
       native_mode, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -960,14 +961,14 @@ end
 -- @usage uv/functions/fs.md#fs_close
 function fs_close(loop: loop_t?, request: fs_t, file: integer,
                    callback: (function (fs_t): ())?): integer
-  local native_file = file as foreign uv_file
+  const native_file = file as foreign uv_file
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_close(
+  const result = ffi.uv_fs_close(
       native_loop, request.native, native_file,
       native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -991,11 +992,11 @@ end
 function fs_get_statbuf(request: fs_t): stat_t
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   if ffi.uv_fs_get_result(request.native) < 0 then raise "FS stat request failed" end
-  local kind = ffi.uv_fs_get_type(request.native)
+  const kind = ffi.uv_fs_get_type(request.native)
   if kind ~= ffi.UV_FS_STAT and kind ~= ffi.UV_FS_FSTAT and kind ~= ffi.UV_FS_LSTAT then
     raise "FS request has no stat result"
   end
-  local native = ffi.uv_fs_get_statbuf(request.native)
+  const native = ffi.uv_fs_get_statbuf(request.native)
   return stat_copy(native)
 end
 
@@ -1006,7 +1007,7 @@ end
 function fs_get_path(request: fs_t): string?
   if request.pending then raise "FS request is pending" end
   if not request.dirty then return nil end
-  local path = ffi.uv_fs_get_path(request.native)
+  const path = ffi.uv_fs_get_path(request.native)
   if not path then return nil end
   return path as string
 end
@@ -1017,8 +1018,8 @@ end
 function fs_req_cleanup(request: fs_t)
   if request.pending then raise "FS request is pending" end
   if not request.dirty then return end
-  local kind = ffi.uv_fs_get_type(request.native)
-  local directory? = request.directory
+  const kind = ffi.uv_fs_get_type(request.native)
+  const directory? = request.directory
   -- Cancelled CLOSEDIR never consumed the separately owned directory. Unix
   -- cleanup otherwise frees req.ptr blindly; detach it before request cleanup.
   if kind == ffi.UV_FS_CLOSEDIR then request.native.ptr = nil end
@@ -1066,7 +1067,7 @@ record work_t
   local pending: boolean
   local argument_owner: value
   local callback: (function (work_t, integer): ())?
-  local handler: function (work_t, loop_t, integer): ()
+  local const handler: function (work_t, loop_t, integer): ()
   local userdata: value
 end
 
@@ -1076,15 +1077,16 @@ local function work_deliver(owner: work_t, loop: loop_t, status: integer)
   -- user code can resubmit this owner, possibly on a different loop.
   loop.requests[owner] = nil
   owner.pending = false
-  local argument_owner = owner.argument_owner
+  const argument_owner = owner.argument_owner
   owner.argument_owner = nil
-  local callback? = owner.callback
+  const callback? = owner.callback
   owner.callback = nil
   owner.work_data.worker = nil
   owner.work_data.arg = nil
   -- The old argument graph stays in this handler frame through user delivery;
   -- request reuse may independently install a new graph.
   if callback ~= nil then callback(owner, status) end
+  gc.keep_alive(argument_owner)
 catch
   -- This is the originating loop, even if the callback requeued owner.
   -- No allocating Titan helper entry may run outside this catch boundary.
@@ -1185,7 +1187,7 @@ function queue_work(loop: loop_t, req: work_t, worker: foreign function (*void):
 
   -- All allocations and callable adjustments precede acceptance. The map
   -- insertion is first: allocation failure leaves this request unmodified.
-  local previous_loop? = req.loop
+  const previous_loop? = req.loop
   loop.requests[req] = true
   req.loop = loop
   req.pending = true
@@ -1194,9 +1196,9 @@ function queue_work(loop: loop_t, req: work_t, worker: foreign function (*void):
   req.work_data.worker = worker
   req.work_data.arg = arg
   req.work_data.owner = req as foreign *void
-  local native = req.native as foreign *uv_work_t
+  const native = req.native as foreign *uv_work_t
   native.data = req.work_data as foreign *void
-  local status = ffi.uv_queue_work(
+  const status = ffi.uv_queue_work(
       loop.native, native, work_worker_callback, work_after_callback) as integer
   if status ~= 0 then
     -- Rejection promises no native callback. There is no concurrently accepted
@@ -1236,8 +1238,8 @@ foreign import "limits.h"
 record buf_t
   local native: foreign uv_buf_t
   local const storage: foreign char[]
-  local keepalive: value
-  local writable: boolean
+  local const keepalive: value
+  local const writable: boolean
 end
 
 --- Allocate a writable byte buffer of `capacity` bytes.
@@ -1248,7 +1250,7 @@ function buf_t.allocate(capacity: integer): buf_t
   if capacity < 0 or capacity > ffi.UINT_MAX as integer then
     raise "buffer capacity is outside native range"
   end
-  local owner = buf_t(foreign uv_buf_t.new(),
+  const owner = buf_t(foreign uv_buf_t.new(),
                       foreign char.new_array(capacity), nil, true)
   owner.native = ffi.uv_buf_init(owner.storage, capacity as foreign unsigned int)
   return owner
@@ -1271,7 +1273,7 @@ end
 -- @usage uv/functions/misc.md#buf_init
 function buf_init(base: string, length: integer): buf_t
   buf_check_length(base, length)
-  local owner = buf_t(foreign uv_buf_t.new(), nil, base, false)
+  const owner = buf_t(foreign uv_buf_t.new(), nil, base, false)
   owner.native = ffi.uv_buf_init(base as foreign *char,
                                 length as foreign unsigned int)
   return owner
@@ -1307,11 +1309,11 @@ end
 -- @return Native buf_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#buf_tslice
 function buf_t:slice(first: integer, length: integer): buf_t
-  local capacity = self.native.len as integer
+  const capacity = self.native.len as integer
   if first < 1 or length < 0 or first - 1 > capacity - length then
     raise "buffer slice is out of bounds"
   end
-  local owner = buf_t(foreign uv_buf_t.new(), nil, self, self.writable)
+  const owner = buf_t(foreign uv_buf_t.new(), nil, self, self.writable)
   owner.native = ffi.uv_buf_init(
       self.native.base + (first - 1) as foreign ptrdiff_t,
       length as foreign unsigned int)
@@ -1326,7 +1328,7 @@ function buf_t:get(index: integer): integer
   if index < 1 or index > self.native.len as integer then
     raise "buffer index is out of bounds"
   end
-  local bytes = self.native.base as foreign *unsigned char
+  const bytes = self.native.base as foreign *unsigned char
   return bytes[index - 1] as integer
 end
 
@@ -1339,7 +1341,7 @@ function buf_t:set(index: integer, byte: integer)
   if index < 1 or index > self.native.len as integer or byte < 0 or byte > 255 then
     raise "buffer byte/index is out of bounds"
   end
-  local bytes = self.native.base as foreign *unsigned char
+  const bytes = self.native.base as foreign *unsigned char
   bytes[index - 1] = byte as foreign unsigned char
 end
 
@@ -1356,12 +1358,12 @@ end
 
 local function fs_buffer_snapshot(buffers: {buf_t}, writable: boolean):
     (integer, (owned uv_buf_t[])?, {buf_t}?)
-  local count = #buffers
+  const count = #buffers
   if count > ffi.UINT_MAX as integer then return ffi.UV_EINVAL, nil, nil end
-  local native = foreign uv_buf_t.new_array(count)
-  local retained: {buf_t} = {}
+  const native = foreign uv_buf_t.new_array(count)
+  const retained: {buf_t} = {}
   for i = 1, count do
-    local buffer = buffers[i]
+    const buffer = buffers[i]
     if writable and not buffer.writable then return ffi.UV_EINVAL, nil, nil end
     native[i - 1] = buffer.native[0]
     retained[i] = buffer
@@ -1384,21 +1386,21 @@ function fs_read(loop: loop_t?, request: fs_t, file: integer,
   if request.pending or request.dirty then return ffi.UV_EBUSY end
   local prepared, native?, retained? = fs_buffer_snapshot(buffers, true)
   if prepared < 0 then return prepared end
-  local native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
-  local count = #(retained as {buf_t})
-  local native_file = file as foreign uv_file
-  local native_offset = offset as foreign int64_t
-  local native_count = count as foreign unsigned int
+  const native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  const count = #(retained as {buf_t})
+  const native_file = file as foreign uv_file
+  const native_offset = offset as foreign int64_t
+  const native_count = count as foreign unsigned int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
   request.buffers = retained
   request.native_buffers = native
-  local result = ffi.uv_fs_read(native_loop, request.native,
+  const result = ffi.uv_fs_read(native_loop, request.native,
       native_file, native_data,
       native_count, native_offset,
       native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -1421,21 +1423,21 @@ function fs_write(loop: loop_t?, request: fs_t, file: integer,
   if request.pending or request.dirty then return ffi.UV_EBUSY end
   local prepared, native?, retained? = fs_buffer_snapshot(buffers, false)
   if prepared < 0 then return prepared end
-  local native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
-  local count = #(retained as {buf_t})
-  local native_file = file as foreign uv_file
-  local native_offset = offset as foreign int64_t
-  local native_count = count as foreign unsigned int
+  const native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  const count = #(retained as {buf_t})
+  const native_file = file as foreign uv_file
+  const native_offset = offset as foreign int64_t
+  const native_count = count as foreign unsigned int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
   request.buffers = retained
   request.native_buffers = native
-  local result = ffi.uv_fs_write(native_loop, request.native,
+  const result = ffi.uv_fs_write(native_loop, request.native,
       native_file, native_data,
       native_count, native_offset,
       native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -1601,7 +1603,7 @@ end
 function metrics_info(loop: loop_t): (integer, metrics_t?)
   if not loop.initialized then return ffi.UV_EINVAL, nil end
   local native = foreign uv_metrics_t.new()
-  local status: integer = ffi.uv_metrics_info(loop.native, native)
+  const status: integer = ffi.uv_metrics_info(loop.native, native)
   if status < 0 then return status, nil end
   return status, metrics_t(native.loop_count as foreign lua_Integer,
                             native.events as foreign lua_Integer,
@@ -1819,7 +1821,7 @@ end
 -- @usage uv/functions/handle.md#send_buffer_size
 function send_buffer_size(handle: handle_t, size: integer): (integer, integer)
   local native_size = size as foreign int
-  local status: integer = ffi.uv_send_buffer_size(handle_native(handle), native_size)
+  const status: integer = ffi.uv_send_buffer_size(handle_native(handle), native_size)
   return status, native_size
 end
 
@@ -1831,7 +1833,7 @@ end
 -- @usage uv/functions/handle.md#recv_buffer_size
 function recv_buffer_size(handle: handle_t, size: integer): (integer, integer)
   local native_size = size as foreign int
-  local status: integer = ffi.uv_recv_buffer_size(handle_native(handle), native_size)
+  const status: integer = ffi.uv_recv_buffer_size(handle_native(handle), native_size)
   return status, native_size
 end
 
@@ -1873,8 +1875,8 @@ function timer_get_due_in(timer: timer_t): integer
 end
 
 local function handle_from_native(native: foreign *uv_handle_t): handle_t
-  local owner = ffi.uv_handle_get_data(native) as foreign *Udata
-  local boxed: value = owner
+  const owner = ffi.uv_handle_get_data(native) as foreign *Udata
+  const boxed: value = owner
   if ffi.uv_handle_get_type(native) == ffi.UV_TIMER then
     return handle_t.timer(boxed as timer_t)
   end
@@ -1919,7 +1921,7 @@ local function handle_from_native(native: foreign *uv_handle_t): handle_t
 end
 
 local function walk_deliver(loop: loop_t, native: foreign *uv_handle_t)
-  local callback = loop.walk_callback as function (handle_t, value): ()
+  const callback = loop.walk_callback as function (handle_t, value): ()
   callback(handle_from_native(native), loop.walk_argument)
 catch
   if loop.failure_count == 0 then
@@ -1953,11 +1955,11 @@ function walk(loop: loop_t, callback: function (handle_t, value): (), arg: value
   loop_require(loop)
   if L ~= main_thread then raise "uv.walk requires the owning main Lua thread" end
   if ffi.lua_checkstack(L, ffi.LUA_MINSTACK) == 0 then raise "cannot reserve native callback stack" end
-  local saved_callback? = loop.walk_callback
-  local saved_argument = loop.walk_argument
-  local saved_count = loop.failure_count
-  local saved_error = loop.failure_error
-  local saved_trace = loop.failure_trace
+  const saved_callback? = loop.walk_callback
+  const saved_argument = loop.walk_argument
+  const saved_count = loop.failure_count
+  const saved_error = loop.failure_error
+  const saved_trace = loop.failure_trace
   defer do
     loop.walk_depth = loop.walk_depth - 1
     walking_depth = walking_depth - 1
@@ -1986,13 +1988,13 @@ record idle_t
   local loop: loop_t?
   local callback: (function (idle_t): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (idle_t, loop_t): ()
-  local close_handler: function (idle_t, loop_t): ()
+  local const handler: function (idle_t, loop_t): ()
+  local const close_handler: function (idle_t, loop_t): ()
   local userdata: value
 end
 
 local function idle_deliver(owner: idle_t, loop: loop_t)
-  local callback? = owner.callback
+  const callback? = owner.callback
   if callback ~= nil then callback(owner) end
 catch
   if loop.failure_count == 0 then
@@ -2006,7 +2008,7 @@ end
 local function idle_closed(owner: idle_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.callback = nil
   owner.close_callback = nil
   if callback ~= nil then callback(handle_t.idle(owner)) end
@@ -2072,7 +2074,7 @@ function idle_init(loop: loop_t, handle: idle_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_idle_init(loop.native, handle.native)
+  const status: integer = ffi.uv_idle_init(loop.native, handle.native)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -2089,9 +2091,9 @@ function idle_start(handle: idle_t, callback: function (idle_t): ()): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   if ffi.uv_is_active(handle.native as foreign *uv_handle_t) ~= 0 then return 0 end
-  local old_callback? = handle.callback
+  const old_callback? = handle.callback
   handle.callback = callback
-  local status: integer = ffi.uv_idle_start(handle.native, idle_callback)
+  const status: integer = ffi.uv_idle_start(handle.native, idle_callback)
   if status < 0 then handle.callback = old_callback end
   return status
 end
@@ -2114,13 +2116,13 @@ record prepare_t
   local loop: loop_t?
   local callback: (function (prepare_t): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (prepare_t, loop_t): ()
-  local close_handler: function (prepare_t, loop_t): ()
+  local const handler: function (prepare_t, loop_t): ()
+  local const close_handler: function (prepare_t, loop_t): ()
   local userdata: value
 end
 
 local function prepare_deliver(owner: prepare_t, loop: loop_t)
-  local callback? = owner.callback
+  const callback? = owner.callback
   if callback ~= nil then callback(owner) end
 catch
   if loop.failure_count == 0 then
@@ -2134,7 +2136,7 @@ end
 local function prepare_closed(owner: prepare_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.callback = nil
   owner.close_callback = nil
   if callback ~= nil then callback(handle_t.prepare(owner)) end
@@ -2200,7 +2202,7 @@ function prepare_init(loop: loop_t, handle: prepare_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_prepare_init(loop.native, handle.native)
+  const status: integer = ffi.uv_prepare_init(loop.native, handle.native)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -2217,9 +2219,9 @@ function prepare_start(handle: prepare_t, callback: function (prepare_t): ()): i
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   if ffi.uv_is_active(handle.native as foreign *uv_handle_t) ~= 0 then return 0 end
-  local old_callback? = handle.callback
+  const old_callback? = handle.callback
   handle.callback = callback
-  local status: integer = ffi.uv_prepare_start(handle.native, prepare_callback)
+  const status: integer = ffi.uv_prepare_start(handle.native, prepare_callback)
   if status < 0 then handle.callback = old_callback end
   return status
 end
@@ -2242,13 +2244,13 @@ record check_t
   local loop: loop_t?
   local callback: (function (check_t): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (check_t, loop_t): ()
-  local close_handler: function (check_t, loop_t): ()
+  local const handler: function (check_t, loop_t): ()
+  local const close_handler: function (check_t, loop_t): ()
   local userdata: value
 end
 
 local function check_deliver(owner: check_t, loop: loop_t)
-  local callback? = owner.callback
+  const callback? = owner.callback
   if callback ~= nil then callback(owner) end
 catch
   if loop.failure_count == 0 then
@@ -2262,7 +2264,7 @@ end
 local function check_closed(owner: check_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.callback = nil
   owner.close_callback = nil
   if callback ~= nil then callback(handle_t.check(owner)) end
@@ -2328,7 +2330,7 @@ function check_init(loop: loop_t, handle: check_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_check_init(loop.native, handle.native)
+  const status: integer = ffi.uv_check_init(loop.native, handle.native)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -2345,9 +2347,9 @@ function check_start(handle: check_t, callback: function (check_t): ()): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   if ffi.uv_is_active(handle.native as foreign *uv_handle_t) ~= 0 then return 0 end
-  local old_callback? = handle.callback
+  const old_callback? = handle.callback
   handle.callback = callback
-  local status: integer = ffi.uv_check_start(handle.native, check_callback)
+  const status: integer = ffi.uv_check_start(handle.native, check_callback)
   if status < 0 then handle.callback = old_callback end
   return status
 end
@@ -2370,13 +2372,13 @@ record async_t
   local loop: loop_t?
   local callback: (function (async_t): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (async_t, loop_t): ()
+  local const handler: function (async_t, loop_t): ()
   local close_handler: function (async_t, loop_t): ()
   local userdata: value
 end
 
 local function async_deliver(owner: async_t, loop: loop_t)
-  local callback? = owner.callback
+  const callback? = owner.callback
   if callback ~= nil then callback(owner) end
 catch
   if loop.failure_count == 0 then
@@ -2390,7 +2392,7 @@ end
 local function async_closed(owner: async_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.callback = nil
   owner.close_callback = nil
   if callback ~= nil then callback(handle_t.async(owner)) end
@@ -2457,7 +2459,7 @@ function async_init(loop: loop_t, handle: async_t, callback: (function (async_t)
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_async_init(loop.native, handle.native, async_callback)
+  const status: integer = ffi.uv_async_init(loop.native, handle.native, async_callback)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -2507,13 +2509,13 @@ record signal_t
   local loop: loop_t?
   local callback: (function (signal_t, integer): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (signal_t, loop_t, integer): ()
-  local close_handler: function (signal_t, loop_t): ()
+  local const handler: function (signal_t, loop_t, integer): ()
+  local const close_handler: function (signal_t, loop_t): ()
   local userdata: value
 end
 
 local function signal_deliver(owner: signal_t, loop: loop_t, signum: integer)
-  local callback? = owner.callback
+  const callback? = owner.callback
   if callback ~= nil then callback(owner, signum) end
 catch
   if loop.failure_count == 0 then
@@ -2527,7 +2529,7 @@ end
 local function signal_closed(owner: signal_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.callback = nil
   owner.close_callback = nil
   if callback ~= nil then callback(handle_t.signal(owner)) end
@@ -2603,7 +2605,7 @@ function signal_init(loop: loop_t, handle: signal_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_signal_init(loop.native, handle.native)
+  const status: integer = ffi.uv_signal_init(loop.native, handle.native)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -2620,10 +2622,10 @@ end
 function signal_start(handle: signal_t, callback: function (signal_t, integer): (), signum: integer): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
-  local native_signum = signum as foreign int
-  local old_callback? = handle.callback
+  const native_signum = signum as foreign int
+  const old_callback? = handle.callback
   handle.callback = callback
-  local status: integer = ffi.uv_signal_start(handle.native, signal_callback, native_signum)
+  const status: integer = ffi.uv_signal_start(handle.native, signal_callback, native_signum)
   if status < 0 then handle.callback = old_callback end
   return status
 end
@@ -2637,10 +2639,10 @@ end
 function signal_start_oneshot(handle: signal_t, callback: function (signal_t, integer): (), signum: integer): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
-  local native_signum = signum as foreign int
-  local old_callback? = handle.callback
+  const native_signum = signum as foreign int
+  const old_callback? = handle.callback
   handle.callback = callback
-  local status: integer = ffi.uv_signal_start_oneshot(handle.native, signal_callback, native_signum)
+  const status: integer = ffi.uv_signal_start_oneshot(handle.native, signal_callback, native_signum)
   if status < 0 then handle.callback = old_callback end
   return status
 end
@@ -2664,13 +2666,13 @@ record poll_t
   local loop: loop_t?
   local callback: (function (poll_t, integer, integer): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (poll_t, loop_t, integer, integer): ()
-  local close_handler: function (poll_t, loop_t): ()
+  local const handler: function (poll_t, loop_t, integer, integer): ()
+  local const close_handler: function (poll_t, loop_t): ()
   local userdata: value
 end
 
 local function poll_deliver(owner: poll_t, loop: loop_t, status: integer, events: integer)
-  local callback? = owner.callback
+  const callback? = owner.callback
   if callback ~= nil then callback(owner, status, events) end
 catch
   if loop.failure_count == 0 then
@@ -2685,7 +2687,7 @@ local function poll_closed(owner: poll_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
   owner.ready = false
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.callback = nil
   owner.close_callback = nil
   if callback ~= nil then callback(handle_t.poll(owner)) end
@@ -2752,12 +2754,12 @@ end
 -- @usage uv/functions/poll.md#poll_init
 function poll_init(loop: loop_t, handle: poll_t, file: integer): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
-  local native_file = file as foreign int
+  const native_file = file as foreign int
   ffi.memset(handle.native, 0, foreign uv_poll_t.sizeof)
   handle.ready = false
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_poll_init(loop.native, handle.native, native_file)
+  const status: integer = ffi.uv_poll_init(loop.native, handle.native, native_file)
   if ffi.uv_handle_get_type(handle.native as foreign *uv_handle_t) ~= ffi.UV_POLL then
     loop.handles[handle] = nil; handle.loop = nil; return status
   end
@@ -2779,13 +2781,13 @@ end
 function poll_start(handle: poll_t, callback: function (poll_t, integer, integer): (), events: integer): integer
   if handle.phase ~= HANDLE_LIVE or not handle.ready then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
-  local allowed = (ffi.UV_READABLE as integer) | (ffi.UV_WRITABLE as integer) |
+  const allowed = (ffi.UV_READABLE as integer) | (ffi.UV_WRITABLE as integer) |
                   (ffi.UV_DISCONNECT as integer) | (ffi.UV_PRIORITIZED as integer)
   if (events & ~allowed) ~= 0 then return ffi.UV_EINVAL end
-  local native_events = events as foreign int
-  local old_callback? = handle.callback
+  const native_events = events as foreign int
+  const old_callback? = handle.callback
   handle.callback = callback
-  local status: integer = ffi.uv_poll_start(handle.native, native_events, poll_callback)
+  const status: integer = ffi.uv_poll_start(handle.native, native_events, poll_callback)
   if status < 0 then handle.callback = old_callback end
   return status
 end
@@ -2954,7 +2956,7 @@ end
 -- @return Copied or retained string result, or nil on failure or absence.
 -- @usage uv/functions/handle.md#handle_type_name
 function handle_type_name(kind: handle_type): string?
-  local name = ffi.uv_handle_type_name(handle_type_native(kind))
+  const name = ffi.uv_handle_type_name(handle_type_native(kind))
   if not name then return nil end
   return name as string
 end
@@ -3064,7 +3066,7 @@ end
 -- @return Copied or retained string result, or nil on failure or absence.
 -- @usage uv/functions/request.md#req_type_name
 function req_type_name(kind: req_type): string?
-  local name = ffi.uv_req_type_name(req_type_native(kind))
+  const name = ffi.uv_req_type_name(req_type_native(kind))
   if not name then return nil end
   return name as string
 end
@@ -3111,7 +3113,7 @@ record random_t
   local loop: loop_t?
   local buffer: buf_t?
   local callback: (function (random_t, integer, buf_t, integer): ())?
-  local handler: function (random_t, loop_t, integer, integer): ()
+  local const handler: function (random_t, loop_t, integer, integer): ()
   local userdata: value
 end
 
@@ -3120,8 +3122,8 @@ local function random_deliver(owner: random_t, loop: loop_t,
   loop.requests[owner] = nil
   owner.pending = false
   owner.loop = nil
-  local buffer = owner.buffer as buf_t
-  local callback? = owner.callback
+  const buffer = owner.buffer as buf_t
+  const callback? = owner.callback
   owner.callback = nil
   owner.buffer = nil
   if callback ~= nil then callback(owner, status, buffer, length) end
@@ -3180,14 +3182,14 @@ function random(loop: loop_t?, request: random_t?, buffer: buf_t,
   if not buffer.writable or length < 0 or length > buffer.native.len as integer then
     return ffi.UV_EINVAL
   end
-  local native_length = length as foreign size_t
-  local native_flags = flags as foreign unsigned int
+  const native_length = length as foreign size_t
+  const native_flags = flags as foreign unsigned int
   if callback == nil then
     return ffi.uv_random(nil, nil, buffer.native.base, native_length, native_flags, nil)
   end
   if not loop or not loop.initialized or not request then return ffi.UV_EINVAL end
-  local req = request as random_t
-  local owner_loop = loop as loop_t
+  const req = request as random_t
+  const owner_loop = loop as loop_t
   if req.pending then return ffi.UV_EBUSY end
   owner_loop.requests[req] = true
   req.pending = true
@@ -3195,7 +3197,7 @@ function random(loop: loop_t?, request: random_t?, buffer: buf_t,
   req.buffer = buffer
   req.callback = callback
   ffi.uv_req_set_data(req.native as foreign *uv_req_t, req as foreign *void)
-  local status: integer = ffi.uv_random(owner_loop.native, req.native,
+  const status: integer = ffi.uv_random(owner_loop.native, req.native,
       buffer.native.base, native_length, native_flags, random_callback)
   if status < 0 then
     owner_loop.requests[req] = nil
@@ -3230,14 +3232,14 @@ record fs_event_t
   local loop: loop_t?
   local callback: (function (fs_event_t, string?, integer, integer): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (fs_event_t, loop_t, foreign const *char, integer, integer): ()
-  local close_handler: function (fs_event_t, loop_t): ()
+  local const handler: function (fs_event_t, loop_t, foreign const *char, integer, integer): ()
+  local const close_handler: function (fs_event_t, loop_t): ()
   local path: string?
   local userdata: value
 end
 
 local function fs_event_deliver(owner: fs_event_t, loop: loop_t, filename: foreign const *char, events: integer, status: integer)
-  local callback? = owner.callback
+  const callback? = owner.callback
   local name: string? = nil
   if filename then name = filename as string end
   if callback ~= nil then callback(owner, name, events, status) end
@@ -3253,7 +3255,7 @@ end
 local function fs_event_closed(owner: fs_event_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.callback = nil
   owner.close_callback = nil
   owner.path = nil
@@ -3322,7 +3324,7 @@ function fs_event_init(loop: loop_t, handle: fs_event_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_fs_event_init(loop.native, handle.native)
+  const status: integer = ffi.uv_fs_event_init(loop.native, handle.native)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -3340,12 +3342,12 @@ function fs_event_start(handle: fs_event_t, callback: function (fs_event_t, stri
                       path: string, flags: integer): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
-  local native_option = flags as foreign unsigned int
-  local old_callback? = handle.callback
-  local old_path? = handle.path
+  const native_option = flags as foreign unsigned int
+  const old_callback? = handle.callback
+  const old_path? = handle.path
   handle.callback = callback
   handle.path = path
-  local status: integer = ffi.uv_fs_event_start(handle.native, fs_event_callback, path, native_option)
+  const status: integer = ffi.uv_fs_event_start(handle.native, fs_event_callback, path, native_option)
   if status < 0 then handle.callback = old_callback; handle.path = old_path end
   return status
 end
@@ -3370,8 +3372,8 @@ end
 function fs_event_getpath(handle: fs_event_t, capacity: integer): (integer, string?, integer)
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL, nil, capacity end
   local native_size = capacity as foreign size_t
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_fs_event_getpath(handle.native, buffer, native_size)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_fs_event_getpath(handle.native, buffer, native_size)
   if status < 0 then return status, nil, native_size end
   return status, (buffer as foreign *char) as string, native_size
 end
@@ -3384,14 +3386,14 @@ record fs_poll_t
   local loop: loop_t?
   local callback: (function (fs_poll_t, integer, stat_t?, stat_t?): ())?
   local close_callback: (function (handle_t): ())?
-  local handler: function (fs_poll_t, loop_t, integer, foreign const *uv_stat_t, foreign const *uv_stat_t): ()
-  local close_handler: function (fs_poll_t, loop_t): ()
+  local const handler: function (fs_poll_t, loop_t, integer, foreign const *uv_stat_t, foreign const *uv_stat_t): ()
+  local const close_handler: function (fs_poll_t, loop_t): ()
   local path: string?
   local userdata: value
 end
 
 local function fs_poll_deliver(owner: fs_poll_t, loop: loop_t, status: integer, prev: foreign const *uv_stat_t, curr: foreign const *uv_stat_t)
-  local callback? = owner.callback
+  const callback? = owner.callback
   local previous: stat_t? = nil
   local current: stat_t? = nil
   if status == 0 then previous = stat_copy(prev); current = stat_copy(curr) end
@@ -3408,7 +3410,7 @@ end
 local function fs_poll_closed(owner: fs_poll_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
-  local callback? = owner.close_callback
+  const callback? = owner.close_callback
   owner.callback = nil
   owner.close_callback = nil
   owner.path = nil
@@ -3477,7 +3479,7 @@ function fs_poll_init(loop: loop_t, handle: fs_poll_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
   handle.loop = loop
-  local status: integer = ffi.uv_fs_poll_init(loop.native, handle.native)
+  const status: integer = ffi.uv_fs_poll_init(loop.native, handle.native)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE
   ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
@@ -3496,12 +3498,12 @@ function fs_poll_start(handle: fs_poll_t, callback: function (fs_poll_t, integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   if ffi.uv_is_active(handle.native as foreign *uv_handle_t) ~= 0 then return 0 end
-  local native_option = interval as foreign unsigned int
-  local old_callback? = handle.callback
-  local old_path? = handle.path
+  const native_option = interval as foreign unsigned int
+  const old_callback? = handle.callback
+  const old_path? = handle.path
   handle.callback = callback
   handle.path = path
-  local status: integer = ffi.uv_fs_poll_start(handle.native, fs_poll_callback, path, native_option)
+  const status: integer = ffi.uv_fs_poll_start(handle.native, fs_poll_callback, path, native_option)
   if status < 0 then handle.callback = old_callback; handle.path = old_path end
   return status
 end
@@ -3526,8 +3528,8 @@ end
 function fs_poll_getpath(handle: fs_poll_t, capacity: integer): (integer, string?, integer)
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL, nil, capacity end
   local native_size = capacity as foreign size_t
-  local buffer = foreign char.new_array(capacity)
-  local status: integer = ffi.uv_fs_poll_getpath(handle.native, buffer, native_size)
+  const buffer = foreign char.new_array(capacity)
+  const status: integer = ffi.uv_fs_poll_getpath(handle.native, buffer, native_size)
   if status < 0 then return status, nil, native_size end
   return status, (buffer as foreign *char) as string, native_size
 end
@@ -3705,7 +3707,7 @@ end
 -- @usage uv/functions/fs.md#fs_get_type
 function fs_get_type(request: fs_t): fs_type_t
   if request.pending then raise "FS request is pending" end
-  local kind = ffi.uv_fs_get_type(request.native)
+  const kind = ffi.uv_fs_get_type(request.native)
   if kind == ffi.UV_FS_UNKNOWN then return fs_type_t.unknown() end
   if kind == ffi.UV_FS_CUSTOM then return fs_type_t.custom() end
   if kind == ffi.UV_FS_OPEN then return fs_type_t.open() end
@@ -3795,9 +3797,9 @@ function fs_get_entries(request: fs_t): {dirent_t}
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_READDIR or
       ffi.uv_fs_get_result(request.native) < 0 then raise "FS request has no directory entries" end
-  local entries = request.native_dirents as owned uv_dirent_t[]
-  local count = ffi.uv_fs_get_result(request.native) as integer
-  local result: {dirent_t} = {}
+  const entries = request.native_dirents as owned uv_dirent_t[]
+  const count = ffi.uv_fs_get_result(request.native) as integer
+  const result: {dirent_t} = {}
   for i = 1, count do
     result[i] = dirent_t(entries[i - 1].name as string,
                         fs_dirent_type(entries[i - 1].type))
@@ -3811,7 +3813,7 @@ end
 -- @usage uv/supplemental.md#fs_get_string
 function fs_get_string(request: fs_t): string
   if request.pending or not request.dirty then raise "FS result is unavailable" end
-  local kind = ffi.uv_fs_get_type(request.native)
+  const kind = ffi.uv_fs_get_type(request.native)
   if (kind ~= ffi.UV_FS_READLINK and kind ~= ffi.UV_FS_REALPATH) or
       ffi.uv_fs_get_result(request.native) < 0 then raise "FS request has no string result" end
   return (ffi.uv_fs_get_ptr(request.native) as foreign *char) as string
@@ -3825,7 +3827,7 @@ function fs_get_statfs(request: fs_t): statfs_t
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_STATFS or
       ffi.uv_fs_get_result(request.native) < 0 then raise "FS request has no statfs result" end
-  local native = ffi.uv_fs_get_ptr(request.native) as foreign *uv_statfs_t
+  const native = ffi.uv_fs_get_ptr(request.native) as foreign *uv_statfs_t
   return statfs_t {
     f_type = (native.f_type as foreign lua_Integer) as integer,
     f_bsize = (native.f_bsize as foreign lua_Integer) as integer,
@@ -3852,7 +3854,7 @@ function fs_scandir_next(request: fs_t): (integer, dirent_t?)
     raise "FS request has no scandir result"
   end
   local native = foreign uv_dirent_t.new()
-  local status = ffi.uv_fs_scandir_next(request.native, native) as integer
+  const status = ffi.uv_fs_scandir_next(request.native, native) as integer
   if status < 0 then return status, nil end
   return status, dirent_t(native.name as string, fs_dirent_type(native.type))
 end
@@ -3864,7 +3866,7 @@ end
 function fs_get_ptr(request: fs_t): fs_ptr_t?
   if request.pending then raise "FS request is pending" end
   if not request.dirty or not ffi.uv_fs_get_ptr(request.native) then return nil end
-  local kind = ffi.uv_fs_get_type(request.native)
+  const kind = ffi.uv_fs_get_type(request.native)
   if kind == ffi.UV_FS_STAT or kind == ffi.UV_FS_LSTAT or kind == ffi.UV_FS_FSTAT then
     return fs_ptr_t.stat(fs_get_statbuf(request))
   elseif kind == ffi.UV_FS_OPENDIR then
@@ -3894,9 +3896,9 @@ function fs_unlink(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_unlink(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_unlink(native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -3915,9 +3917,9 @@ function fs_mkdtemp(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_mkdtemp(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_mkdtemp(native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -3936,9 +3938,9 @@ function fs_mkstemp(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_mkstemp(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_mkstemp(native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -3957,9 +3959,9 @@ function fs_rmdir(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_rmdir(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_rmdir(native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -3978,9 +3980,9 @@ function fs_lstat(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_lstat(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_lstat(native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -3999,9 +4001,9 @@ function fs_readlink(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_readlink(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_readlink(native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4020,9 +4022,9 @@ function fs_realpath(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_realpath(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_realpath(native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4041,9 +4043,9 @@ function fs_statfs(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_statfs(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_statfs(native_loop, request.native, path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4061,12 +4063,12 @@ end
 -- @usage uv/functions/fs.md#fs_mkdir
 function fs_mkdir(loop: loop_t?, request: fs_t, path: string, mode: integer,
     callback: (function (fs_t): ())?): integer
-  local native_mode = mode as foreign int
+  const native_mode = mode as foreign int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_mkdir(native_loop, request.native, path, native_mode, native_callback) as integer
+  const result = ffi.uv_fs_mkdir(native_loop, request.native, path, native_mode, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4084,12 +4086,12 @@ end
 -- @usage uv/functions/fs.md#fs_access
 function fs_access(loop: loop_t?, request: fs_t, path: string, mode: integer,
     callback: (function (fs_t): ())?): integer
-  local native_mode = mode as foreign int
+  const native_mode = mode as foreign int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_access(native_loop, request.native, path, native_mode, native_callback) as integer
+  const result = ffi.uv_fs_access(native_loop, request.native, path, native_mode, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4107,12 +4109,12 @@ end
 -- @usage uv/functions/fs.md#fs_chmod
 function fs_chmod(loop: loop_t?, request: fs_t, path: string, mode: integer,
     callback: (function (fs_t): ())?): integer
-  local native_mode = mode as foreign int
+  const native_mode = mode as foreign int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_chmod(native_loop, request.native, path, native_mode, native_callback) as integer
+  const result = ffi.uv_fs_chmod(native_loop, request.native, path, native_mode, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4130,12 +4132,12 @@ end
 -- @usage uv/functions/fs.md#fs_scandir
 function fs_scandir(loop: loop_t?, request: fs_t, path: string, flags: integer,
     callback: (function (fs_t): ())?): integer
-  local native_flags = flags as foreign int
+  const native_flags = flags as foreign int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_scandir(native_loop, request.native, path, native_flags, native_callback) as integer
+  const result = ffi.uv_fs_scandir(native_loop, request.native, path, native_flags, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4152,12 +4154,12 @@ end
 -- @usage uv/functions/fs.md#fs_fstat
 function fs_fstat(loop: loop_t?, request: fs_t, file: integer,
     callback: (function (fs_t): ())?): integer
-  local native_file = file as foreign uv_file
+  const native_file = file as foreign uv_file
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_fstat(native_loop, request.native, native_file, native_callback) as integer
+  const result = ffi.uv_fs_fstat(native_loop, request.native, native_file, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4174,12 +4176,12 @@ end
 -- @usage uv/functions/fs.md#fs_fsync
 function fs_fsync(loop: loop_t?, request: fs_t, file: integer,
     callback: (function (fs_t): ())?): integer
-  local native_file = file as foreign uv_file
+  const native_file = file as foreign uv_file
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_fsync(native_loop, request.native, native_file, native_callback) as integer
+  const result = ffi.uv_fs_fsync(native_loop, request.native, native_file, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4196,12 +4198,12 @@ end
 -- @usage uv/functions/fs.md#fs_fdatasync
 function fs_fdatasync(loop: loop_t?, request: fs_t, file: integer,
     callback: (function (fs_t): ())?): integer
-  local native_file = file as foreign uv_file
+  const native_file = file as foreign uv_file
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_fdatasync(native_loop, request.native, native_file, native_callback) as integer
+  const result = ffi.uv_fs_fdatasync(native_loop, request.native, native_file, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4222,9 +4224,9 @@ function fs_rename(loop: loop_t?, request: fs_t, path: string, new_path: string,
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
   request.new_path = new_path
-  local result = ffi.uv_fs_rename(native_loop, request.native, path, new_path, native_callback) as integer
+  const result = ffi.uv_fs_rename(native_loop, request.native, path, new_path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4245,9 +4247,9 @@ function fs_link(loop: loop_t?, request: fs_t, path: string, new_path: string,
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
   request.new_path = new_path
-  local result = ffi.uv_fs_link(native_loop, request.native, path, new_path, native_callback) as integer
+  const result = ffi.uv_fs_link(native_loop, request.native, path, new_path, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4266,13 +4268,13 @@ end
 -- @usage uv/functions/fs.md#fs_copyfile
 function fs_copyfile(loop: loop_t?, request: fs_t, path: string, new_path: string, flags: integer,
     callback: (function (fs_t): ())?): integer
-  local native_flags = flags as foreign int
+  const native_flags = flags as foreign int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
   request.new_path = new_path
-  local result = ffi.uv_fs_copyfile(native_loop, request.native, path, new_path, native_flags, native_callback) as integer
+  const result = ffi.uv_fs_copyfile(native_loop, request.native, path, new_path, native_flags, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4291,13 +4293,13 @@ end
 -- @usage uv/functions/fs.md#fs_symlink
 function fs_symlink(loop: loop_t?, request: fs_t, path: string, new_path: string, flags: integer,
     callback: (function (fs_t): ())?): integer
-  local native_flags = flags as foreign int
+  const native_flags = flags as foreign int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
   request.new_path = new_path
-  local result = ffi.uv_fs_symlink(native_loop, request.native, path, new_path, native_flags, native_callback) as integer
+  const result = ffi.uv_fs_symlink(native_loop, request.native, path, new_path, native_flags, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4315,13 +4317,13 @@ end
 -- @usage uv/functions/fs.md#fs_ftruncate
 function fs_ftruncate(loop: loop_t?, request: fs_t, file: integer, offset: integer,
     callback: (function (fs_t): ())?): integer
-  local native_file = file as foreign uv_file
-  local native_offset = offset as foreign int64_t
+  const native_file = file as foreign uv_file
+  const native_offset = offset as foreign int64_t
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_ftruncate(native_loop, request.native, native_file, native_offset, native_callback) as integer
+  const result = ffi.uv_fs_ftruncate(native_loop, request.native, native_file, native_offset, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4341,15 +4343,15 @@ end
 -- @usage uv/functions/fs.md#fs_sendfile
 function fs_sendfile(loop: loop_t?, request: fs_t, out_fd: integer, in_fd: integer, in_offset: integer, length: integer,
     callback: (function (fs_t): ())?): integer
-  local native_out_fd = out_fd as foreign uv_file
-  local native_in_fd = in_fd as foreign uv_file
-  local native_in_offset = in_offset as foreign int64_t
-  local native_length = length as foreign size_t
+  const native_out_fd = out_fd as foreign uv_file
+  const native_in_fd = in_fd as foreign uv_file
+  const native_in_offset = in_offset as foreign int64_t
+  const native_length = length as foreign size_t
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_sendfile(native_loop, request.native, native_out_fd, native_in_fd, native_in_offset, native_length, native_callback) as integer
+  const result = ffi.uv_fs_sendfile(native_loop, request.native, native_out_fd, native_in_fd, native_in_offset, native_length, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4368,13 +4370,13 @@ end
 -- @usage uv/functions/fs.md#fs_utime
 function fs_utime(loop: loop_t?, request: fs_t, path: string, atime: float, mtime: float,
     callback: (function (fs_t): ())?): integer
-  local native_atime = atime as foreign double
-  local native_mtime = mtime as foreign double
+  const native_atime = atime as foreign double
+  const native_mtime = mtime as foreign double
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_utime(native_loop, request.native, path, native_atime, native_mtime, native_callback) as integer
+  const result = ffi.uv_fs_utime(native_loop, request.native, path, native_atime, native_mtime, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4393,13 +4395,13 @@ end
 -- @usage uv/functions/fs.md#fs_lutime
 function fs_lutime(loop: loop_t?, request: fs_t, path: string, atime: float, mtime: float,
     callback: (function (fs_t): ())?): integer
-  local native_atime = atime as foreign double
-  local native_mtime = mtime as foreign double
+  const native_atime = atime as foreign double
+  const native_mtime = mtime as foreign double
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_lutime(native_loop, request.native, path, native_atime, native_mtime, native_callback) as integer
+  const result = ffi.uv_fs_lutime(native_loop, request.native, path, native_atime, native_mtime, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4418,14 +4420,14 @@ end
 -- @usage uv/functions/fs.md#fs_futime
 function fs_futime(loop: loop_t?, request: fs_t, file: integer, atime: float, mtime: float,
     callback: (function (fs_t): ())?): integer
-  local native_file = file as foreign uv_file
-  local native_atime = atime as foreign double
-  local native_mtime = mtime as foreign double
+  const native_file = file as foreign uv_file
+  const native_atime = atime as foreign double
+  const native_mtime = mtime as foreign double
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_futime(native_loop, request.native, native_file, native_atime, native_mtime, native_callback) as integer
+  const result = ffi.uv_fs_futime(native_loop, request.native, native_file, native_atime, native_mtime, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4443,13 +4445,13 @@ end
 -- @usage uv/functions/fs.md#fs_fchmod
 function fs_fchmod(loop: loop_t?, request: fs_t, file: integer, mode: integer,
     callback: (function (fs_t): ())?): integer
-  local native_file = file as foreign uv_file
-  local native_mode = mode as foreign int
+  const native_file = file as foreign uv_file
+  const native_mode = mode as foreign int
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_fchmod(native_loop, request.native, native_file, native_mode, native_callback) as integer
+  const result = ffi.uv_fs_fchmod(native_loop, request.native, native_file, native_mode, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4476,9 +4478,9 @@ function fs_chown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid:
   else native_gid = gid as foreign uv_gid_t end
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_chown(native_loop, request.native, path, native_uid, native_gid, native_callback) as integer
+  const result = ffi.uv_fs_chown(native_loop, request.native, path, native_uid, native_gid, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4505,9 +4507,9 @@ function fs_lchown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid
   else native_gid = gid as foreign uv_gid_t end
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
-  local result = ffi.uv_fs_lchown(native_loop, request.native, path, native_uid, native_gid, native_callback) as integer
+  const result = ffi.uv_fs_lchown(native_loop, request.native, path, native_uid, native_gid, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4526,7 +4528,7 @@ end
 -- @usage uv/functions/fs.md#fs_fchown
 function fs_fchown(loop: loop_t?, request: fs_t, file: integer, uid: integer, gid: integer,
     callback: (function (fs_t): ())?): integer
-  local native_file = file as foreign uv_file
+  const native_file = file as foreign uv_file
   local native_uid: foreign uv_uid_t = 0
   if uid == -1 then native_uid = (-1 as foreign int) as foreign uv_uid_t
   else native_uid = uid as foreign uv_uid_t end
@@ -4535,9 +4537,9 @@ function fs_fchown(loop: loop_t?, request: fs_t, file: integer, uid: integer, gi
   else native_gid = gid as foreign uv_gid_t end
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
-  local result = ffi.uv_fs_fchown(native_loop, request.native, native_file, native_uid, native_gid, native_callback) as integer
+  const result = ffi.uv_fs_fchown(native_loop, request.native, native_file, native_uid, native_gid, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4556,16 +4558,16 @@ function fs_opendir(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   if request.pending or request.dirty then return ffi.UV_EBUSY end
   -- Preallocate the public owner before native code can allocate a directory.
-  local directory = dir_t.new()
+  const directory = dir_t()
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
   if status < 0 then return status end
   request.directory = directory
-  local result = ffi.uv_fs_opendir(native_loop, request.native, path, native_callback) as integer
+  const result = ffi.uv_fs_opendir(native_loop, request.native, path, native_callback) as integer
   if callback == nil and result >= 0 then
     directory.native = ffi.uv_fs_get_ptr(request.native) as foreign *uv_dir_t
   end
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4587,9 +4589,9 @@ function fs_readdir(loop: loop_t?, request: fs_t, directory: dir_t, capacity: in
   if not directory.native or capacity < 0 or capacity > ffi.UINT_MAX as integer then
     return ffi.UV_EINVAL
   end
-  local native_capacity = capacity as foreign size_t
-  local entries = foreign uv_dirent_t.new_array(capacity)
-  local native_entries = entries as foreign *uv_dirent_t
+  const native_capacity = capacity as foreign size_t
+  const entries = foreign uv_dirent_t.new_array(capacity)
+  const native_entries = entries as foreign *uv_dirent_t
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
   if status < 0 then return status end
   request.directory = directory
@@ -4597,9 +4599,9 @@ function fs_readdir(loop: loop_t?, request: fs_t, directory: dir_t, capacity: in
   directory.native.dirents = native_entries
   directory.native.nentries = native_capacity
   directory.busy = true
-  local result = ffi.uv_fs_readdir(native_loop, request.native, directory.native, native_callback) as integer
+  const result = ffi.uv_fs_readdir(native_loop, request.native, directory.native, native_callback) as integer
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil
@@ -4624,13 +4626,13 @@ function fs_closedir(loop: loop_t?, request: fs_t, directory: dir_t,
   if status < 0 then return status end
   request.directory = directory
   directory.busy = true
-  local result = ffi.uv_fs_closedir(native_loop, request.native, directory.native, native_callback) as integer
+  const result = ffi.uv_fs_closedir(native_loop, request.native, directory.native, native_callback) as integer
   if callback == nil or result < 0 then
     if result >= 0 then directory.native = nil end
     directory.busy = false
   end
   if result < 0 and request.pending then
-    local owner_loop = request.loop as loop_t
+    const owner_loop = request.loop as loop_t
     owner_loop.requests[request] = nil
     request.pending = false
     request.callback = nil

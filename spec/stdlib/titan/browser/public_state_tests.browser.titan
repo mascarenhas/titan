@@ -12,7 +12,7 @@ local type Value = browser.BrowserValue
 local type Callable = function (...: Value): Value
 
 local function publish(name: string, callback: Callable)
-  local target = browser.binding("publish")
+  const target = browser.binding("publish")
   defer target:close()
   target:call(Value.is_string(name), Value.is_callable(callback))
 end
@@ -38,19 +38,19 @@ local public_state_owners: {integer: state_lua.Lua} = {}
 local public_detached_state: foreign *lua_State = nil
 
 local function create_public_state(...: Value): Value
-  local index = expect_integer(...[1])
-  local child = state_lua.new()
+  const index = expect_integer(...[1])
+  const child = state_lua.new()
   local stored = false
   defer if not stored then child:close() end
-  local token = child:run("return require('browser.public_state').prepare(" .. index .. ")")
+  const token = child:run("return require('browser.public_state').prepare(" .. index .. ")")
   public_state_owners[index] = child
   stored = true
   return Value.is_integer(token:to_value() as integer)
 end
 
 local function close_public_state(...: Value): Value
-  local index = expect_integer(...[1])
-  local child? = public_state_owners[index]
+  const index = expect_integer(...[1])
+  const child? = public_state_owners[index]
   public_state_owners[index] = nil
   if child ~= nil then
     child:close()
@@ -65,8 +65,8 @@ local function drop_public_state(...: Value): Value
 end
 
 local function detach_public_state(...: Value): Value
-  local index = expect_integer(...[1])
-  local child = public_state_owners[index]
+  const index = expect_integer(...[1])
+  const child = public_state_owners[index]
   test.assert(public_detached_state == nil, "a detached public child is already owned")
   public_detached_state = child:detach()
   child:close()
@@ -77,7 +77,7 @@ end
 
 local function close_public_detached(...: Value): Value
   if public_detached_state ~= nil then
-    local state = public_detached_state
+    const state = public_detached_state
     public_detached_state = nil
     ffi.titan_bridge_test_close_detached(state)
   end

@@ -6,7 +6,7 @@
 
 local function _initialize_native()
   -- Implementation notes: doc/implementation/lpeglabel-embedding.md#opening-one-private-engine-per-lua-state
-  local top = ffi.lua_gettop(L)
+  const top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   -- The opener is a lua_CFunction: call it through Lua so it gets its own
   -- frame with LUA_MINSTACK free slots, as every C function may assume.
@@ -17,7 +17,7 @@ local function _initialize_native()
   if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "embedded LPegLabel opener did not return its module table"
   end
-  local raw_engine: value = ffi.lua_totvalue(L, -1)
+  const raw_engine: value = ffi.lua_totvalue(L, -1)
   _engine = raw_engine as {string: value}
 
   _P = _engine["P"] as NativeUnary
@@ -46,8 +46,8 @@ local function _initialize_native()
   if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "embedded LPegLabel did not install its private pattern metatable"
   end
-  local raw_metatable: value = ffi.lua_totvalue(L, -1)
-  local metatable = raw_metatable as {string: value}
+  const raw_metatable: value = ffi.lua_totvalue(L, -1)
+  const metatable = raw_metatable as {string: value}
   _sequence = metatable["__mul"] as NativeBinary
   _choice = metatable["__add"] as NativeBinary
   _difference = metatable["__sub"] as NativeBinary
@@ -89,8 +89,8 @@ end
 local function _normalized_init(subject: string,
                                 supplied: integer?): integer
   if not supplied then return 1 end
-  local init = supplied as integer
-  local length = #subject
+  const init = supplied as integer
+  const length = #subject
   if init > 0 then
     if init > length + 1 then return length + 1 end
     return init

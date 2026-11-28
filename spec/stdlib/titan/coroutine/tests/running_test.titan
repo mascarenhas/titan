@@ -1,6 +1,6 @@
 function test_running_returns_nil_outside_coroutine(_context: test.Context)
   test.assert(coroutine.running() == nil)
-  local co = coroutine.create(function(_: value): value
+  const co = coroutine.create(function(_: value): value
     return nil
   end, "running")
   test.assert(coroutine.running() == nil, "creation changed running coroutine")
@@ -34,7 +34,7 @@ function test_running_tracks_nested_tagged_yield(_context: test.Context)
   end, "inner")
   outer = coroutine.create(function(_: value): value
     test.assert(coroutine.running() == outer, "outer coroutine was not current")
-    local result = inner:resume(nil)
+    const result = inner:resume(nil)
     test.assert(coroutine.running() == outer, "inner return did not restore outer")
     return result
   end, "outer")

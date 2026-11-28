@@ -1,5 +1,5 @@
 local function check_no_nul(subject: string, operation: string)
-  local position? = string.find(subject, "\0")
+  const position? = string.find(subject, "\0")
   if position ~= nil then
     raise Error {
       message = "embedded NUL is not permitted",
@@ -15,7 +15,7 @@ end
 local function valid_text(subject: string): boolean
   local index = 1
   while index <= #subject do
-    local first: integer = string.byte(subject, index)
+    const first: integer = string.byte(subject, index)
     if first == 0 then return false end
     if first < 128 then
       index = index + 1
@@ -37,10 +37,10 @@ local function valid_text(subject: string): boolean
         return false
       end
       if length > #subject - index + 1 then return false end
-      local second: integer = string.byte(subject, index + 1)
+      const second: integer = string.byte(subject, index + 1)
       if second < lower or second > upper then return false end
       for offset = 2, length - 1 do
-        local byte: integer = string.byte(subject, index + offset)
+        const byte: integer = string.byte(subject, index + offset)
         if byte < 128 or byte > 191 then return false end
       end
       index = index + length
@@ -119,7 +119,7 @@ local function bind_argument(cell: foreign *TitanSqliteCell,
     copy_argument_bytes(cell, bytes, operation)
   when is_record(inspected) then
     if inspected.value is Blob then
-      local blob: Blob = inspected.value
+      const blob: Blob = inspected.value
       cell.kind = ffi.SQLITE_BLOB
       copy_argument_bytes(cell, blob.bytes, operation)
     else
@@ -163,16 +163,16 @@ local function Statement:bind(packet: foreign *TitanSqlitePacket,
 end
 
 local function copy_result_bytes(cell: foreign *TitanSqliteCell): string
-  local bytes: owned char[] = foreign char.new_array(cell.length)
+  const bytes: owned char[] = foreign char.new_array(cell.length)
   if cell.length > 0 then ffi.memcpy(bytes, cell.bytes, cell.length) end
   return bytes as string
 end
 
 local function decode_columns(packet: foreign *TitanSqlitePacket): const {Column}
-  local columns: {Column} = {}
-  local count: integer = packet.column_count
+  const columns: {Column} = {}
+  const count: integer = packet.column_count
   for index = 1, count do
-    local native_column = packet.columns + (index - 1)
+    const native_column = packet.columns + (index - 1)
     local declared_type: string?
     if native_column.declared_type ~= nil then
       declared_type = native_column.declared_type as string
@@ -184,14 +184,14 @@ end
 
 local function decode_row(packet: foreign *TitanSqlitePacket,
                            columns: const {Column}): Row
-  local cells: {value} = {}
+  const cells: {value} = {}
   for index = 1, #columns do
-    local cell = packet.cells + (index - 1)
+    const cell = packet.cells + (index - 1)
     if cell.kind == ffi.SQLITE_INTEGER then
-      local number: integer = cell.integer_value
+      const number: integer = cell.integer_value
       cells[index] = number
     elseif cell.kind == ffi.SQLITE_FLOAT then
-      local number: float = cell.float_value
+      const number: float = cell.float_value
       cells[index] = number
     elseif cell.kind == ffi.SQLITE_TEXT then
       cells[index] = copy_result_bytes(cell)

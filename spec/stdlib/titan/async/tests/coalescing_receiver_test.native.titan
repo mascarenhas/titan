@@ -9,7 +9,7 @@ local coalescing_receiver_hook_encode_calls = 0
 local coalescing_receiver_hook_decode_calls = 0
 
 record CoalescingReceiverHookProbe
-  local tag: integer
+  local const tag: integer
 end
 
 function CoalescingReceiverHookProbe.new(tag: integer): CoalescingReceiverHookProbe
@@ -30,7 +30,7 @@ function CoalescingReceiverHookProbe.from_transfer_payload(
   coalescing_receiver_hook_decode_calls = coalescing_receiver_hook_decode_calls + 1
   local parsed = 0
   for index = 1, #payload do
-    local code: integer = coalescing_receiver_string.byte(payload, index)
+    const code: integer = coalescing_receiver_string.byte(payload, index)
     parsed = parsed * 10 + (code - 48)
   end
   return { tag = parsed }
@@ -76,8 +76,8 @@ local coalescing_receiver_decode_fail_trace = ""
 -- Attaches two counted native resources, then fails decode before claiming
 -- either; the traceback at the original raise is saved for comparison.
 record CoalescingReceiverDecodeFailProbe
-  local first: foreign *void
-  local second: foreign *void
+  local const first: foreign *void
+  local const second: foreign *void
 end
 
 function CoalescingReceiverDecodeFailProbe:to_transfer_payload(): string
@@ -89,12 +89,10 @@ end
 
 function CoalescingReceiverDecodeFailProbe.from_transfer_payload(
     payload: string): CoalescingReceiverDecodeFailProbe
-  do
-    raise "coalescing-receiver-decode-fail:" .. #payload
-  catch
-    coalescing_receiver_decode_fail_trace = traceback
-    raise
-  end
+  raise "coalescing-receiver-decode-fail:" .. #payload
+catch
+  coalescing_receiver_decode_fail_trace = traceback
+  raise
 end
 
 -- Fields decode in order: `before` is adopted into a finalized wrapper before
@@ -137,29 +135,27 @@ end
 -- therefore queues its reader before this ordinary await resumes the observer
 -- directly from check, without driving the Runtime loop from test code.
 local function coalescing_receiver_after_poll()
-  local phase = uv.check_t.new()
+  const phase = uv.check_t()
   test.assert(uv.check_init(async.current_loop(), phase) == 0)
-  local handle = phase:as_handle_t()
+  const handle = phase:as_handle_t()
   defer if not uv.is_closing(handle) then uv.close(handle) end
-  local idle = uv.idle_t.new()
+  const idle = uv.idle_t()
   test.assert(uv.idle_init(async.current_loop(), idle) == 0)
-  local idle_handle = idle:as_handle_t()
+  const idle_handle = idle:as_handle_t()
   defer if not uv.is_closing(idle_handle) then uv.close(idle_handle) end
   -- A check watcher alone does not prevent the poll from blocking when the
   -- signal was already processed. Keep this barrier's own poll nonblocking.
   test.assert(uv.idle_start(idle, function (_: uv.idle_t) end) == 0)
   async.await<|nil, nil|>(function (resolve, _reject, fatal)
     test.assert(uv.check_start(phase, function (current: uv.check_t)
-      do
-        test.assert(uv.check_stop(current) == 0)
-        uv.close(handle)
-        test.assert(uv.idle_stop(idle) == 0)
-        uv.close(idle_handle)
-        resolve(nil)
-      catch
-        fatal(error, traceback)
-        raise
-      end
+      test.assert(uv.check_stop(current) == 0)
+      uv.close(handle)
+      test.assert(uv.idle_stop(idle) == 0)
+      uv.close(idle_handle)
+      resolve(nil)
+    catch
+      fatal(error, traceback)
+      raise
     end) == 0)
   end)
 end
@@ -168,20 +164,18 @@ end
 -- ready timer's delivery of an already queued reader wake. This is a phase
 -- barrier, not an assumption about a number of Task yields or elapsed time.
 local function coalescing_receiver_after_ready_delivery()
-  local phase = uv.prepare_t.new()
+  const phase = uv.prepare_t()
   test.assert(uv.prepare_init(async.current_loop(), phase) == 0)
-  local handle = phase:as_handle_t()
+  const handle = phase:as_handle_t()
   defer if not uv.is_closing(handle) then uv.close(handle) end
   async.await<|nil, nil|>(function (resolve, _reject, fatal)
     test.assert(uv.prepare_start(phase, function (current: uv.prepare_t)
-      do
-        test.assert(uv.prepare_stop(current) == 0)
-        uv.close(handle)
-        resolve(nil)
-      catch
-        fatal(error, traceback)
-        raise
-      end
+      test.assert(uv.prepare_stop(current) == 0)
+      uv.close(handle)
+      resolve(nil)
+    catch
+      fatal(error, traceback)
+      raise
     end) == 0)
   end)
 end
@@ -190,8 +184,8 @@ local function send_ephemeral_sender_in_frame(
     handle: foreign *void,
     ordinal: integer): coalescing_receiver_thread.Receiver<|integer|>
   local tx, rx = coalescing_receiver_thread.channel<|integer|>(1)
-  local env = CoalescingReceiverSenderEnvelope(
-    ordinal, CoalescingReceiverHookProbe.new(ordinal), tx)
+  const env = CoalescingReceiverSenderEnvelope(
+    ordinal, CoalescingReceiverHookProbe(ordinal), tx)
   async.send(handle, env)
   return rx
 end
@@ -199,7 +193,7 @@ end
 local function send_ephemeral_sender(
     handle: foreign *void,
     ordinal: integer): coalescing_receiver_thread.Receiver<|integer|>
-  local rx = send_ephemeral_sender_in_frame(handle, ordinal)
+  const rx = send_ephemeral_sender_in_frame(handle, ordinal)
   support.collect_garbage()
   support.collect_garbage()
   test.assert(not rx:is_closed(),
@@ -216,8 +210,8 @@ local function send_ephemeral_nested_receiver_in_frame(
   local inner_tx, inner_rx = coalescing_receiver_thread.channel<|integer|>(1)
   test.assert(outer_tx:try_send(inner_tx),
     "could not buffer nested Sender inside outer channel")
-  local env = CoalescingReceiverNestedReceiverEnvelope(
-    ordinal, CoalescingReceiverHookProbe.new(ordinal), outer_rx)
+  const env = CoalescingReceiverNestedReceiverEnvelope(
+    ordinal, CoalescingReceiverHookProbe(ordinal), outer_rx)
   async.send(handle, env)
   return outer_tx, inner_rx
 end
@@ -237,8 +231,8 @@ end
 local function wait_and_drop_decoded_envelope(
     receiver: async.Receiver,
     ordinal: integer): coalescing_receiver_thread.Receiver<|integer|>
-  local rx = send_ephemeral_sender(receiver:handle(), ordinal)
-  local delivered: CoalescingReceiverSenderEnvelope = receiver:wait()
+  const rx = send_ephemeral_sender(receiver:handle(), ordinal)
+  const delivered: CoalescingReceiverSenderEnvelope = receiver:wait()
   test.assert(delivered.ordinal == ordinal and not rx:is_closed(),
     "wait did not adopt the live Sender endpoint")
   return rx
@@ -248,12 +242,12 @@ function test_receiver_replace_before_callback_disposes_displaced_endpoints_with
     _context: test.Context)
   coalescing_receiver_reset_hook_counts()
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     runtime_test.cleanup(function () receiver:close() end)
-    local handle = receiver:handle()
+    const handle = receiver:handle()
 
     -- Publish 101 into the native slot before yielding to any loop callback.
-    local rx1 = send_ephemeral_sender(handle, 101)
+    const rx1 = send_ephemeral_sender(handle, 101)
     defer rx1:close()
     test.assert(coalescing_receiver_hook_encode_calls == 1 and
                 coalescing_receiver_hook_decode_calls == 0)
@@ -270,14 +264,14 @@ function test_receiver_replace_before_callback_disposes_displaced_endpoints_with
       "displacing a packet invoked a user transfer decoder")
 
     -- Discarding the outer Receiver also drains its buffered inner Sender.
-    local rx3 = send_ephemeral_sender(handle, 103)
+    const rx3 = send_ephemeral_sender(handle, 103)
     defer rx3:close()
     test.assert(outer_tx2:is_closed() and inner_rx2:is_closed(),
       "displaced Receiver packet did not release outer channel and queued inner endpoint")
     test.assert(not rx3:is_closed() and coalescing_receiver_hook_decode_calls == 0,
       "latest packet was disturbed or decoded during replacement")
 
-    local restored: CoalescingReceiverSenderEnvelope = receiver:wait()
+    const restored: CoalescingReceiverSenderEnvelope = receiver:wait()
     test.assert(restored.ordinal == 103 and restored.probe:value() == 103)
     test.assert(coalescing_receiver_hook_encode_calls == 3 and
                 coalescing_receiver_hook_decode_calls == 1,
@@ -297,11 +291,11 @@ function test_receiver_callbacks_wake_only_and_replace_before_wait(
     _context: test.Context)
   runtime_test.run(function ()
     coalescing_receiver_reset_hook_counts()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     runtime_test.cleanup(function () receiver:close() end)
-    local handle = receiver:handle()
+    const handle = receiver:handle()
 
-    local rx1 = send_ephemeral_sender(handle, 201)
+    const rx1 = send_ephemeral_sender(handle, 201)
     defer rx1:close()
     -- Observe the completed I/O phase while no reader is registered.
     coalescing_receiver_after_poll()
@@ -309,7 +303,7 @@ function test_receiver_callbacks_wake_only_and_replace_before_wait(
     test.assert(not rx1:is_closed() and coalescing_receiver_hook_decode_calls == 0,
       "wake callback consumed or decoded the unread packet when no reader waited")
 
-    local rx2 = send_ephemeral_sender(handle, 202)
+    const rx2 = send_ephemeral_sender(handle, 202)
     defer rx2:close()
     test.assert(rx1:is_closed() and not rx2:is_closed() and
                 coalescing_receiver_hook_decode_calls == 0,
@@ -318,7 +312,7 @@ function test_receiver_callbacks_wake_only_and_replace_before_wait(
     support.collect_garbage()
     test.assert(not rx2:is_closed() and coalescing_receiver_hook_decode_calls == 0)
 
-    local env2: CoalescingReceiverSenderEnvelope = receiver:wait()
+    const env2: CoalescingReceiverSenderEnvelope = receiver:wait()
     test.assert(env2.ordinal == 202 and env2.probe:value() == 202)
     test.assert(coalescing_receiver_hook_decode_calls == 1)
     test.assert(env2.tx:try_send(2020))
@@ -326,9 +320,9 @@ function test_receiver_callbacks_wake_only_and_replace_before_wait(
     test.assert(ok2 and val2 == 2020)
     env2.tx:close()
 
-    local rx3 = send_ephemeral_sender(handle, 203)
+    const rx3 = send_ephemeral_sender(handle, 203)
     defer rx3:close()
-    local env3: CoalescingReceiverSenderEnvelope = receiver:wait()
+    const env3: CoalescingReceiverSenderEnvelope = receiver:wait()
     test.assert(env3.ordinal == 203 and env3.probe:value() == 203)
     test.assert(coalescing_receiver_hook_decode_calls == 2)
     test.assert(env3.tx:try_send(2030))
@@ -342,11 +336,11 @@ function test_receiver_queued_wake_rejects_second_reader_and_coalesces_replaceme
     _context: test.Context)
   runtime_test.run(function ()
     coalescing_receiver_reset_hook_counts()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     runtime_test.cleanup(function () receiver:close() end)
-    local handle = receiver:handle()
+    const handle = receiver:handle()
 
-    local reader1 = async.run<|value, value|>(receiver:wait)
+    const reader1 = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(reader1, "Receiver reserved reader1 cleanup")
     support.wait_until_waiting(reader1)
 
@@ -355,7 +349,7 @@ function test_receiver_queued_wake_rejects_second_reader_and_coalesces_replaceme
       receiver:wait()
     end, "waiting")
 
-    local rx1 = send_ephemeral_sender(handle, 301)
+    const rx1 = send_ephemeral_sender(handle, 301)
     defer rx1:close()
     -- The check-phase observer resumes before the ready timer can deliver
     -- reader1's queued wake. The packet must still belong to the native slot.
@@ -368,15 +362,15 @@ function test_receiver_queued_wake_rejects_second_reader_and_coalesces_replaceme
       receiver:wait()
     end, "waiting")
 
-    local rx2 = send_ephemeral_sender(handle, 302)
+    const rx2 = send_ephemeral_sender(handle, 302)
     defer rx2:close()
     test.assert(rx1:is_closed() and not rx2:is_closed() and
                 coalescing_receiver_hook_decode_calls == 0,
       "replacing packet during queued wake did not dispose displaced packet")
-    local st_reader1 = async.join(reader1)
+    const st_reader1 = async.join(reader1)
     case st_reader1
     when succeeded(delivered) then
-      local env2: CoalescingReceiverSenderEnvelope = delivered
+      const env2: CoalescingReceiverSenderEnvelope = delivered
       test.assert(env2.ordinal == 302 and env2.probe:value() == 302,
         "woken reader1 did not receive the replacement packet")
       test.assert(coalescing_receiver_hook_decode_calls == 1)
@@ -389,9 +383,9 @@ function test_receiver_queued_wake_rejects_second_reader_and_coalesces_replaceme
     end
 
     -- Reservation must be released once wait returns.
-    local rx3 = send_ephemeral_sender(handle, 303)
+    const rx3 = send_ephemeral_sender(handle, 303)
     defer rx3:close()
-    local env3: CoalescingReceiverSenderEnvelope = receiver:wait()
+    const env3: CoalescingReceiverSenderEnvelope = receiver:wait()
     test.assert(env3.ordinal == 303 and coalescing_receiver_hook_decode_calls == 2)
     env3.tx:close()
   end)
@@ -401,17 +395,17 @@ function test_receiver_cancelled_reader_preserves_unread_packet(
     _context: test.Context)
   runtime_test.run(function ()
     coalescing_receiver_reset_hook_counts()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     runtime_test.cleanup(function () receiver:close() end)
-    local handle = receiver:handle()
+    const handle = receiver:handle()
 
-    local waiting = async.run<|value, value|>(receiver:wait)
+    const waiting = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting, "cancelled Receiver reader cleanup")
     support.wait_until_waiting(waiting)
 
     -- Neither send nor cancel yields: cancellation wins before delivery
     -- and must withdraw only the reader reservation while leaving 401 unread.
-    local rx1 = send_ephemeral_sender(handle, 401)
+    const rx1 = send_ephemeral_sender(handle, 401)
     defer rx1:close()
     waiting:cancel(async.CancellationReason.simple("Receiver wait cancelled"))
     test.assert(support.cancelled_with(
@@ -423,7 +417,7 @@ function test_receiver_cancelled_reader_preserves_unread_packet(
     -- A started Task with pending cancellation must fail at wait's checkpoint()
     -- before exchanging the unread slot, releasing its reservation cleanly.
     local entered_wait = false
-    local pre_cancelled = async.run<|value, value|>(function (): value
+    const pre_cancelled = async.run<|value, value|>(function (): value
       entered_wait = true
       async.running():cancel(async.CancellationReason.simple("pre-cancelled reader"))
       return receiver:wait()
@@ -435,7 +429,7 @@ function test_receiver_cancelled_reader_preserves_unread_packet(
                 coalescing_receiver_hook_decode_calls == 0,
       "reader with pending cancellation took the unread packet before checkpoint")
 
-    local env1: CoalescingReceiverSenderEnvelope = receiver:wait()
+    const env1: CoalescingReceiverSenderEnvelope = receiver:wait()
     test.assert(env1.ordinal == 401 and env1.probe:value() == 401)
     test.assert(coalescing_receiver_hook_decode_calls == 1)
     test.assert(env1.tx:try_send(4010))
@@ -443,9 +437,9 @@ function test_receiver_cancelled_reader_preserves_unread_packet(
     test.assert(ok1 and val1 == 4010)
     env1.tx:close()
 
-    local rx2 = send_ephemeral_sender(handle, 402)
+    const rx2 = send_ephemeral_sender(handle, 402)
     defer rx2:close()
-    local env2: CoalescingReceiverSenderEnvelope = receiver:wait()
+    const env2: CoalescingReceiverSenderEnvelope = receiver:wait()
     test.assert(env2.ordinal == 402 and coalescing_receiver_hook_decode_calls == 2)
     env2.tx:close()
   end)
@@ -455,9 +449,9 @@ function test_receiver_send_between_empty_check_and_suspension_and_stale_wake_re
     _context: test.Context)
   runtime_test.run(function ()
     coalescing_receiver_reset_hook_counts()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     runtime_test.cleanup(function () receiver:close() end)
-    local handle = receiver:handle()
+    const handle = receiver:handle()
 
     -- Part 1: Send between the empty-slot check/suspension and the loop's I/O poll.
     -- Queue reader and sender together on the ready queue: reader runs first,
@@ -465,9 +459,9 @@ function test_receiver_send_between_empty_check_and_suspension_and_stale_wake_re
     -- sender runs immediately in the same ready batch before uv_run polls
     -- uv.async_t, publishing 501 and leaving a pending UV signal.
     local rx1: coalescing_receiver_thread.Receiver<|integer|>? = nil
-    local reader_between = async.run<|value, value|>(receiver:wait)
+    const reader_between = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(reader_between, "reader_between cleanup")
-    local sender_between = async.run<|nil, value|>(function (): nil
+    const sender_between = async.run<|nil, value|>(function (): nil
       test.assert(reader_between:status():as_string() == "waiting",
         "reader did not suspend after empty check")
       rx1 = send_ephemeral_sender(handle, 501)
@@ -482,7 +476,7 @@ function test_receiver_send_between_empty_check_and_suspension_and_stale_wake_re
       "sender failed to publish after the reader suspended on the empty slot")
     case st_reader
     when succeeded(delivered1) then
-      local env1: CoalescingReceiverSenderEnvelope = delivered1
+      const env1: CoalescingReceiverSenderEnvelope = delivered1
       test.assert(env1.ordinal == 501 and coalescing_receiver_hook_decode_calls == 1)
       env1.tx:close()
     else
@@ -493,16 +487,16 @@ function test_receiver_send_between_empty_check_and_suspension_and_stale_wake_re
     -- Send 502 and consume it immediately via the synchronous fast path
     -- before uv_run polls uv.async_t. That leaves the UV async signal pending
     -- for a now-empty slot.
-    local rx_fast = send_ephemeral_sender(handle, 502)
+    const rx_fast = send_ephemeral_sender(handle, 502)
     defer rx_fast:close()
-    local env_fast: CoalescingReceiverSenderEnvelope = receiver:wait()
+    const env_fast: CoalescingReceiverSenderEnvelope = receiver:wait()
     test.assert(env_fast.ordinal == 502 and coalescing_receiver_hook_decode_calls == 2)
     env_fast.tx:close()
 
     -- Now park a reader on the empty slot; the next loop turn delivers the
     -- stale UV async callback from 502. The reader must recheck the empty
     -- slot, reset notified = false, keep its reservation, and re-suspend.
-    local waiting_stale = async.run<|value, value|>(receiver:wait)
+    const waiting_stale = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting_stale, "waiting_stale cleanup")
     support.wait_until_waiting(waiting_stale)
     coalescing_receiver_after_poll()
@@ -513,11 +507,11 @@ function test_receiver_send_between_empty_check_and_suspension_and_stale_wake_re
       receiver:wait()
     end, "waiting")
 
-    local rx_after_stale = send_ephemeral_sender(handle, 503)
+    const rx_after_stale = send_ephemeral_sender(handle, 503)
     defer rx_after_stale:close()
     case async.join(waiting_stale)
     when succeeded(delivered_after) then
-      local env_after: CoalescingReceiverSenderEnvelope = delivered_after
+      const env_after: CoalescingReceiverSenderEnvelope = delivered_after
       test.assert(env_after.ordinal == 503 and coalescing_receiver_hook_decode_calls == 3)
       test.assert(env_after.tx:try_send(5030))
       local ok_after, val_after? = rx_after_stale:try_receive()
@@ -534,9 +528,9 @@ function test_receiver_close_and_shutdown_dispose_endpoints_without_decode(
   coalescing_receiver_reset_hook_counts()
   runtime_test.run(function ()
     -- 1. Closing a Receiver wakes a parked reader with "receiver is closed".
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     runtime_test.cleanup(function () receiver:close() end)
-    local waiting = async.run<|value, value|>(receiver:wait)
+    const waiting = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting, "closed Receiver waiter cleanup")
     support.wait_until_waiting(waiting)
     receiver:close()
@@ -554,7 +548,7 @@ function test_receiver_close_and_shutdown_dispose_endpoints_without_decode(
 
     -- 2. Closing a Receiver with an unread packet disposes it immediately
     -- without calling any decoder.
-    local unread_receiver = async.receiver()
+    const unread_receiver = async.receiver()
     runtime_test.cleanup(function () unread_receiver:close() end)
     local outer_tx_unread, inner_rx_unread =
       send_ephemeral_nested_receiver(unread_receiver:handle(), 601)
@@ -574,24 +568,24 @@ function test_receiver_close_and_shutdown_dispose_endpoints_without_decode(
     -- 3. Dropping a decoded envelope returned by wait() releases its adopted
     -- endpoint on GC, and lua_close finalization of an unclosed Receiver in an
     -- independent state disposes its unread packet without decoding.
-    local drop_receiver = async.receiver()
+    const drop_receiver = async.receiver()
     runtime_test.cleanup(function () drop_receiver:close() end)
-    local rx_gc_dropped = wait_and_drop_decoded_envelope(drop_receiver, 602)
+    const rx_gc_dropped = wait_and_drop_decoded_envelope(drop_receiver, 602)
     defer rx_gc_dropped:close()
     support.collect_garbage()
     support.collect_garbage()
     test.assert(rx_gc_dropped:is_closed() and coalescing_receiver_hook_decode_calls == 1,
       "dropping decoded envelope from wait did not release its endpoint on GC")
 
-    local state = coalescing_receiver_lua.new()
+    const state = coalescing_receiver_lua.new()
     defer state:close()
-    local remote_unclosed = coalescing_receiver_unwrap_handle(state:run([[
+    const remote_unclosed = coalescing_receiver_unwrap_handle(state:run([[
       package.path, package.cpath = '', ''
       local async = require('titan.async')
       _G.held_unclosed_receiver = async.receiver()
       return _G.held_unclosed_receiver:handle()
     ]], "=receiver-finalize-on-lua-close"))
-    local rx_lua_close = send_ephemeral_sender(remote_unclosed, 603)
+    const rx_lua_close = send_ephemeral_sender(remote_unclosed, 603)
     defer rx_lua_close:close()
     state:close()
     test.assert(rx_lua_close:is_closed() and coalescing_receiver_hook_decode_calls == 1,
@@ -603,7 +597,7 @@ function test_receiver_close_and_shutdown_dispose_endpoints_without_decode(
   local shutdown_receiver: async.Receiver? = nil
   local rx_shutdown: coalescing_receiver_thread.Receiver<|integer|>? = nil
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     shutdown_receiver = receiver
     rx_shutdown = send_ephemeral_sender(receiver:handle(), 604)
   end)
@@ -615,8 +609,8 @@ function test_receiver_close_and_shutdown_dispose_endpoints_without_decode(
     coalescing_receiver_thread.channel<|integer|>(1)
   defer tx_after_shutdown:close()
   defer rx_after_shutdown:close()
-  local env_after_shutdown = CoalescingReceiverSenderEnvelope(
-    605, CoalescingReceiverHookProbe.new(605), tx_after_shutdown)
+  const env_after_shutdown = CoalescingReceiverSenderEnvelope(
+    605, CoalescingReceiverHookProbe(605), tx_after_shutdown)
   coalescing_receiver_expect_error(function ()
     async.send(shutdown_receiver:handle(), env_after_shutdown)
   end, "closed")
@@ -659,22 +653,22 @@ end
 -- [5] successful loop-closure oracle.
 function coalescing_receiver_abandoned_runtime_bootstrap(
     counts_raw: value, park_task: boolean): foreign *void
-  local counts = counts_raw as foreign *void
-  local oracle = CoalescingReceiverLoopOracle(nil, counts)
+  const counts = counts_raw as foreign *void
+  const oracle = CoalescingReceiverLoopOracle(nil, counts)
   coalescing_receiver_gc.finalizable(oracle, coalescing_receiver_loop_oracle)
   coalescing_receiver_loop_probe = oracle
-  local owner = async.receiver()
+  const owner = async.receiver()
   coalescing_receiver_abandoned_inbox = owner
-  local loop = async.current_loop()
+  const loop = async.current_loop()
   oracle.loop = loop
   async.add_close_listener(function ()
     coalescing_receiver_count(counts, 3)
   end)
-  local live = uv.timer_t.new()
+  const live = uv.timer_t()
   test.assert(uv.timer_init(loop, live) == 0)
   test.assert(uv.timer_start(live, function (_: uv.timer_t) end, 60000, 0) == 0)
   if park_task then
-    local parked = async.run<|nil, value|>(function (): nil
+    const parked = async.run<|nil, value|>(function (): nil
       async.wait_external(function (_: foreign *void): boolean
         coalescing_receiver_count(counts, 1)
         return true
@@ -683,7 +677,7 @@ function coalescing_receiver_abandoned_runtime_bootstrap(
       end)
       return nil
     end)
-    local channel_waiter = async.run<|integer, value|>(function (): integer
+    const channel_waiter = async.run<|integer, value|>(function (): integer
       -- Endpoints are newer than this coroutine, so their finalizers withdraw
       -- the intrusive wait while its stack is still allocated.
       local tx, rx = coalescing_receiver_thread.channel<|integer|>(1)
@@ -698,14 +692,14 @@ function coalescing_receiver_abandoned_runtime_bootstrap(
   end
   -- This Thread's finalizer runs before Runtime retirement and clears its
   -- native pointer. Dispatching its captured callback afterward is unsafe.
-  local worker = coalescing_receiver_thread.spawn(function (): integer return 17 end)
-  local closing = uv.timer_t.new()
+  const worker = coalescing_receiver_thread.spawn(function (): integer return 17 end)
+  const closing = uv.timer_t()
   test.assert(uv.timer_init(loop, closing) == 0)
   uv.close(closing:as_handle_t(), function (_: uv.handle_t)
     coalescing_receiver_count(counts, 0)
     worker:status()
   end)
-  local recursive = uv.timer_t.new()
+  const recursive = uv.timer_t()
   test.assert(uv.timer_init(loop, recursive) == 0)
   uv.close(recursive:as_handle_t(), function (_: uv.handle_t)
     coalescing_receiver_count(counts, 4)
@@ -715,7 +709,7 @@ function coalescing_receiver_abandoned_runtime_bootstrap(
 end
 
 local function coalescing_receiver_close_unretired_runtime(park_task: boolean)
-  local counts: owned int[] = foreign int.new_array(6)
+  const counts: owned int[] = foreign int.new_array(6)
   counts[0] = 0
   counts[1] = 0
   counts[2] = 0
@@ -724,15 +718,15 @@ local function coalescing_receiver_close_unretired_runtime(park_task: boolean)
   counts[5] = 0
   local registrations = 0
   if park_task then registrations = 1 end
-  local state = coalescing_receiver_lua.new()
+  const state = coalescing_receiver_lua.new()
   defer state:close()
-  local remote = coalescing_receiver_unwrap_handle(state:run([[
+  const remote = coalescing_receiver_unwrap_handle(state:run([[
     package.path, package.cpath = '', ''
     return require('async.tests').coalescing_receiver_abandoned_runtime_bootstrap(...)
   ]], "=abandoned-runtime-bootstrap",
     async.TransferValue.is_pointer(counts as foreign *void),
     async.TransferValue.is_boolean(park_task)))
-  local rx = send_ephemeral_sender(remote, 701)
+  const rx = send_ephemeral_sender(remote, 701)
   defer rx:close()
   test.assert((counts[0] as integer) == 0 and (counts[1] as integer) == registrations and
               (counts[2] as integer) == 0 and not rx:is_closed(),
@@ -767,7 +761,7 @@ function test_receiver_lua_close_retires_unretired_runtime_loop(context: test.Co
 end
 
 local function coalescing_receiver_retire_runtime()
-  local owner = async.receiver()
+  const owner = async.receiver()
   owner:close()
   async.loop()
 end
@@ -776,8 +770,8 @@ end
 function coalescing_receiver_collect_runtime()
   coalescing_receiver_gc.pause()
   coalescing_receiver_retire_runtime()
-  local owner = async.receiver()
-  local loop = async.current_loop()
+  const owner = async.receiver()
+  const loop = async.current_loop()
   local closed = false
   async.add_close_listener(function () closed = true end)
   coalescing_receiver_gc.resume()
@@ -787,7 +781,7 @@ function coalescing_receiver_collect_runtime()
   test.assert(async.current_loop() == loop and not closed,
     "ordinary GC retired the active Runtime or notified its close listener")
   async.send(owner:handle(), 709)
-  local task = async.run<|integer, value|>(function (): integer
+  const task = async.run<|integer, value|>(function (): integer
     defer owner:close()
     return owner:wait()
   end)
@@ -798,7 +792,7 @@ function coalescing_receiver_collect_runtime()
 end
 
 function test_receiver_runtime_finalizer_is_inert_during_ordinary_gc(_: test.Context)
-  local state = coalescing_receiver_lua.new()
+  const state = coalescing_receiver_lua.new()
   defer state:close()
   state:run([[
     package.path, package.cpath = '', ''
@@ -824,10 +818,10 @@ end
 function test_receiver_wait_decode_failure_consumes_packet_and_keeps_receiver_usable(
     _context: test.Context)
   runtime_test.run(function ()
-    local receiver = async.receiver()
+    const receiver = async.receiver()
     runtime_test.cleanup(function () receiver:close() end)
-    local c1: owned int[] = foreign int.new_array(1)
-    local c2: owned int[] = foreign int.new_array(1)
+    const c1: owned int[] = foreign int.new_array(1)
+    const c2: owned int[] = foreign int.new_array(1)
     c1[0] = 1
     c2[0] = 1
     local before_rx, after_rx = send_decode_failing_envelope_in_frame(
@@ -865,9 +859,9 @@ function test_receiver_wait_decode_failure_consumes_packet_and_keeps_receiver_us
       "failed Receiver:wait decode released twice or leaked the adopted Sender")
 
     -- The reader reservation and native slot are clear for the next value.
-    local rx_next = send_ephemeral_sender(receiver:handle(), 701)
+    const rx_next = send_ephemeral_sender(receiver:handle(), 701)
     defer rx_next:close()
-    local delivered: CoalescingReceiverSenderEnvelope = receiver:wait()
+    const delivered: CoalescingReceiverSenderEnvelope = receiver:wait()
     test.assert(delivered.ordinal == 701 and delivered.probe:value() == 701,
       "Receiver was unusable after a failed decode")
     test.assert(delivered.tx:try_send(7010))
@@ -881,8 +875,8 @@ local function send_ephemeral_sender_to_closed_in_frame(
     closed_handle: foreign *void,
     ordinal: integer): coalescing_receiver_thread.Receiver<|integer|>
   local tx, rx = coalescing_receiver_thread.channel<|integer|>(1)
-  local env = CoalescingReceiverSenderEnvelope(
-    ordinal, CoalescingReceiverHookProbe.new(ordinal), tx)
+  const env = CoalescingReceiverSenderEnvelope(
+    ordinal, CoalescingReceiverHookProbe(ordinal), tx)
   coalescing_receiver_expect_error(function ()
     async.send(closed_handle, env)
   end, "closed")
@@ -894,14 +888,14 @@ local function send_ephemeral_sender_expecting_notify_failure_in_frame(
     ordinal: integer,
     expected_code: integer): coalescing_receiver_thread.Receiver<|integer|>
   local tx, rx = coalescing_receiver_thread.channel<|integer|>(1)
-  local env = CoalescingReceiverSenderEnvelope(
-    ordinal, CoalescingReceiverHookProbe.new(ordinal), tx)
+  const env = CoalescingReceiverSenderEnvelope(
+    ordinal, CoalescingReceiverHookProbe(ordinal), tx)
   local notify_failed = false
   do
     async.send(handle, env)
   catch
     if error is async.OperationError then
-      local op_err = error as async.OperationError
+      const op_err = error as async.OperationError
       notify_failed = op_err.operation == "async.send" and
                       op_err.code == expected_code
     end
@@ -915,16 +909,16 @@ function test_receiver_pre_admit_guard_and_post_exchange_notification_failure(
     _context: test.Context)
   runtime_test.run(function ()
     coalescing_receiver_reset_hook_counts()
-    local owned_rx = async.receiver()
+    const owned_rx = async.receiver()
     runtime_test.cleanup(function () owned_rx:close() end)
-    local closed_rx = async.receiver()
+    const closed_rx = async.receiver()
     runtime_test.cleanup(function () closed_rx:close() end)
     closed_rx:close()
 
     -- Pre-admission rejection on a closed Receiver must discard the temporary
     -- encoded packet natively (releasing its attached endpoint unit) while
     -- leaving the caller's value live for later sends.
-    local rx_discarded_temp =
+    const rx_discarded_temp =
       send_ephemeral_sender_to_closed_in_frame(closed_rx:handle(), 700)
     defer rx_discarded_temp:close()
     support.collect_garbage()
@@ -937,8 +931,8 @@ function test_receiver_pre_admit_guard_and_post_exchange_notification_failure(
     local tx_preserved, rx_preserved = coalescing_receiver_thread.channel<|integer|>(1)
     defer tx_preserved:close()
     defer rx_preserved:close()
-    local env_preserved = CoalescingReceiverSenderEnvelope(
-      701, CoalescingReceiverHookProbe.new(701), tx_preserved)
+    const env_preserved = CoalescingReceiverSenderEnvelope(
+      701, CoalescingReceiverHookProbe(701), tx_preserved)
 
     coalescing_receiver_expect_error(function ()
       async.send(nil, env_preserved)
@@ -955,7 +949,7 @@ function test_receiver_pre_admit_guard_and_post_exchange_notification_failure(
       "pre-admit send rejection closed the caller's live Sender or decoded")
 
     async.send(owned_rx:handle(), env_preserved)
-    local env_delivered: CoalescingReceiverSenderEnvelope = owned_rx:wait()
+    const env_delivered: CoalescingReceiverSenderEnvelope = owned_rx:wait()
     test.assert(env_delivered.ordinal == 701 and
                 coalescing_receiver_hook_decode_calls == 1)
     test.assert(env_delivered.tx:try_send(7010))
@@ -965,7 +959,7 @@ function test_receiver_pre_admit_guard_and_post_exchange_notification_failure(
 
     -- Seed owned_rx with 702, then verify an encoding failure before C admission
     -- leaves the unread packet in owned_rx's slot untouched.
-    local rx_slot = send_ephemeral_sender(owned_rx:handle(), 702)
+    const rx_slot = send_ephemeral_sender(owned_rx:handle(), 702)
     defer rx_slot:close()
     coalescing_receiver_expect_error(function ()
       async.send(owned_rx:handle(),
@@ -980,13 +974,13 @@ function test_receiver_pre_admit_guard_and_post_exchange_notification_failure(
     -- remain committed in owned_rx's slot even after the sender's local is
     -- collected (proving the caller's raw local was cleared before raising),
     -- and wait() must still recover and decode 703.
-    local guard: owned *titan_receiver_send_guard =
+    const guard: owned *titan_receiver_send_guard =
       foreign titan_receiver_send_guard.new()
     ffi.titan_receiver_guard_install(
       guard, owned_rx:handle(), uv.ENOMEM as foreign int)
     defer ffi.titan_receiver_guard_restore(guard)
 
-    local rx_committed = send_ephemeral_sender_expecting_notify_failure_in_frame(
+    const rx_committed = send_ephemeral_sender_expecting_notify_failure_in_frame(
       owned_rx:handle(), 703, uv.ENOMEM)
     defer rx_committed:close()
     ffi.titan_receiver_guard_restore(guard)
@@ -1000,7 +994,7 @@ function test_receiver_pre_admit_guard_and_post_exchange_notification_failure(
                 coalescing_receiver_hook_decode_calls == 1,
       "post-commit notification failure lost or decoded the committed packet")
 
-    local env_committed: CoalescingReceiverSenderEnvelope = owned_rx:wait()
+    const env_committed: CoalescingReceiverSenderEnvelope = owned_rx:wait()
     test.assert(env_committed.ordinal == 703 and
                 coalescing_receiver_hook_decode_calls == 2)
     test.assert(env_committed.tx:try_send(7030))
@@ -1010,7 +1004,7 @@ function test_receiver_pre_admit_guard_and_post_exchange_notification_failure(
 
     ffi.titan_receiver_guard_install(
       guard, owned_rx:handle(), uv.EIO as foreign int)
-    local rx_committed_close = send_ephemeral_sender_expecting_notify_failure_in_frame(
+    const rx_committed_close = send_ephemeral_sender_expecting_notify_failure_in_frame(
       owned_rx:handle(), 704, uv.EIO)
     defer rx_committed_close:close()
     ffi.titan_receiver_guard_restore(guard)
@@ -1029,14 +1023,14 @@ local function coalescing_receiver_thread_worker(
     host_handle_val: async.TransferValue,
     ready_tx: coalescing_receiver_thread.Sender<|integer|>,
     ctrl_rx: coalescing_receiver_thread.Receiver<|integer|>): integer
-  local host_handle = coalescing_receiver_unwrap_handle(host_handle_val)
+  const host_handle = coalescing_receiver_unwrap_handle(host_handle_val)
   coalescing_receiver_reset_hook_counts()
   defer ready_tx:close()
 
   -- 1. Send a displaced endpoint packet followed by a live duplex endpoint
   -- packet from this child OS thread to the host's Receiver before
   -- signaling ready_tx so the host never races between the two sends.
-  local disp_rx = send_ephemeral_sender(host_handle, 801)
+  const disp_rx = send_ephemeral_sender(host_handle, 801)
   defer disp_rx:close()
   test.assert(not disp_rx:is_closed())
 
@@ -1047,7 +1041,7 @@ local function coalescing_receiver_thread_worker(
   async.send(
     host_handle,
     CoalescingReceiverDuplexEnvelope(
-      802, CoalescingReceiverHookProbe.new(802), reply_tx, inbox_rx))
+      802, CoalescingReceiverHookProbe(802), reply_tx, inbox_rx))
   test.assert(disp_rx:is_closed() and coalescing_receiver_hook_decode_calls == 0,
     "cross-thread replacement in host Receiver did not dispose displaced endpoint")
 
@@ -1057,7 +1051,7 @@ local function coalescing_receiver_thread_worker(
   -- 2. Create a child-thread Receiver, send its handle to the host,
   -- receive a coalesced endpoint packet from the host, and retire host sends
   -- via ctrl_rx before closing worker_receiver.
-  local worker_receiver = async.receiver()
+  const worker_receiver = async.receiver()
   defer worker_receiver:close()
   async.send(
     host_handle,
@@ -1065,7 +1059,7 @@ local function coalescing_receiver_thread_worker(
 
   -- Wait until the host has sent both its displaced and replacement packets.
   test.assert(ctrl_rx:receive() == 1)
-  local from_host: CoalescingReceiverSenderEnvelope = worker_receiver:wait()
+  const from_host: CoalescingReceiverSenderEnvelope = worker_receiver:wait()
   test.assert(from_host.ordinal == 804 and from_host.probe:value() == 804)
   test.assert(coalescing_receiver_hook_decode_calls == 1,
     "child thread decoded more than the surviving packet")
@@ -1082,7 +1076,7 @@ function test_receiver_cross_thread_endpoint_handoff_and_coalescing(
     _context: test.Context)
   runtime_test.run(function ()
     coalescing_receiver_reset_hook_counts()
-    local host_receiver = async.receiver()
+    const host_receiver = async.receiver()
     runtime_test.cleanup(function () host_receiver:close() end)
     local ready_tx, ready_rx = coalescing_receiver_thread.channel<|integer|>(1)
     local ctrl_tx, ctrl_rx = coalescing_receiver_thread.channel<|integer|>(2)
@@ -1093,7 +1087,7 @@ function test_receiver_cross_thread_endpoint_handoff_and_coalescing(
       ctrl_rx:close()
     end)
 
-    local worker = coalescing_receiver_thread.spawn_three(
+    const worker = coalescing_receiver_thread.spawn_three(
       coalescing_receiver_thread_worker,
       async.TransferValue.is_pointer(host_receiver:handle()),
       ready_tx,
@@ -1104,7 +1098,7 @@ function test_receiver_cross_thread_endpoint_handoff_and_coalescing(
     end)
 
     test.assert(ready_rx:receive() == 1)
-    local duplex: CoalescingReceiverDuplexEnvelope = host_receiver:wait()
+    const duplex: CoalescingReceiverDuplexEnvelope = host_receiver:wait()
     test.assert(duplex.ordinal == 802 and duplex.probe:value() == 802)
     test.assert(coalescing_receiver_hook_decode_calls == 1,
       "host decoded displaced cross-thread packet")
@@ -1115,12 +1109,12 @@ function test_receiver_cross_thread_endpoint_handoff_and_coalescing(
 
     -- The sent payload was an explicit pointer policy; eager wait()
     -- returns the borrowed lightuserdata address, not the policy wrapper.
-    local worker_handle = host_receiver:wait() as foreign *void
+    const worker_handle = host_receiver:wait() as foreign *void
 
-    local host_disp_rx = send_ephemeral_sender(worker_handle, 803)
+    const host_disp_rx = send_ephemeral_sender(worker_handle, 803)
     defer host_disp_rx:close()
     test.assert(not host_disp_rx:is_closed())
-    local host_live_rx = send_ephemeral_sender(worker_handle, 804)
+    const host_live_rx = send_ephemeral_sender(worker_handle, 804)
     defer host_live_rx:close()
     test.assert(host_disp_rx:is_closed(),
       "displaced packet sent to worker thread did not auto-close its peer Receiver")
@@ -1145,27 +1139,27 @@ function coalescing_receiver_remote_initialized(): boolean
 end
 
 function coalescing_receiver_remote_bootstrap(host_raw: value): foreign *void
-  local host_handle = host_raw as foreign *void
+  const host_handle = host_raw as foreign *void
   coalescing_receiver_reset_hook_counts()
-  local owner = async.receiver()
+  const owner = async.receiver()
   coalescing_receiver_remote_inbox = owner
   coalescing_receiver_remote_worker = async.run<|integer, value|>(function (): integer
     -- 1. Receive the surviving duplex packet sent by the host (after the host
     -- replaced an earlier packet in owner's slot).
-    local from_host: CoalescingReceiverDuplexEnvelope = owner:wait()
+    const from_host: CoalescingReceiverDuplexEnvelope = owner:wait()
     test.assert(from_host.ordinal == 902 and from_host.probe:value() == 902)
     test.assert(coalescing_receiver_hook_decode_calls == 1,
       "independent state decoded displaced packet")
-    local number = from_host.inbox:receive()
+    const number = from_host.inbox:receive()
     from_host.inbox:close()
 
     -- 2. Send a displaced packet followed by a surviving endpoint packet back
     -- to the host's Receiver before acknowledging on from_host.reply so
     -- the host waits until replacement has completed.
-    local remote_disp_rx = send_ephemeral_sender(host_handle, 903)
+    const remote_disp_rx = send_ephemeral_sender(host_handle, 903)
     defer remote_disp_rx:close()
     test.assert(not remote_disp_rx:is_closed())
-    local remote_live_rx = send_ephemeral_sender(host_handle, 904)
+    const remote_live_rx = send_ephemeral_sender(host_handle, 904)
     defer remote_live_rx:close()
     test.assert(remote_disp_rx:is_closed(),
       "independent-state replacement in host Receiver did not close peer")
@@ -1175,9 +1169,9 @@ function coalescing_receiver_remote_bootstrap(host_raw: value): foreign *void
     -- 3. Wait for the stop packet carrying the quiescence Receiver, wait until
     -- the host signals that its final send has returned, and only then
     -- close owner.
-    local stop_env: CoalescingReceiverReceiverEnvelope = owner:wait()
+    const stop_env: CoalescingReceiverReceiverEnvelope = owner:wait()
     test.assert(stop_env.ordinal == 905 and coalescing_receiver_hook_decode_calls == 2)
-    local stop_code = stop_env.rx:receive()
+    const stop_code = stop_env.rx:receive()
     stop_env.rx:close()
     owner:close()
     coalescing_receiver_gc.collect()
@@ -1188,7 +1182,7 @@ end
 
 function coalescing_receiver_remote_drive(): integer
   async.loop()
-  local worker = coalescing_receiver_remote_worker as async.Task<|integer, value|>
+  const worker = coalescing_receiver_remote_worker as async.Task<|integer, value|>
   case worker:status()
   when succeeded(total) then return total
   when failed(failure) then failure:raise()
@@ -1204,12 +1198,12 @@ function test_receiver_independent_lua_state_endpoint_handoff(
     test.assert(not coalescing_receiver_remote_initialized(),
       "host module unexpectedly owns an independent-state Receiver")
 
-    local host_receiver = async.receiver()
+    const host_receiver = async.receiver()
     runtime_test.cleanup(function () host_receiver:close() end)
-    local state = coalescing_receiver_lua.new()
+    const state = coalescing_receiver_lua.new()
     runtime_test.cleanup(function () state:close() end)
 
-    local remote_handle = coalescing_receiver_unwrap_handle(state:run_async([[
+    const remote_handle = coalescing_receiver_unwrap_handle(state:run_async([[
       package.path, package.cpath = '', ''
       return require('async.tests').coalescing_receiver_remote_bootstrap(...)
     ]], "=coalescing-receiver-bootstrap",
@@ -1217,7 +1211,7 @@ function test_receiver_independent_lua_state_endpoint_handoff(
 
     -- Before driving the remote state's loop, send a displaced packet and then
     -- a live duplex packet to remote_handle.
-    local host_disp_rx = send_ephemeral_sender(remote_handle, 901)
+    const host_disp_rx = send_ephemeral_sender(remote_handle, 901)
     defer host_disp_rx:close()
     test.assert(not host_disp_rx:is_closed())
 
@@ -1228,12 +1222,12 @@ function test_receiver_independent_lua_state_endpoint_handoff(
     async.send(
       remote_handle,
       CoalescingReceiverDuplexEnvelope(
-        902, CoalescingReceiverHookProbe.new(902), reply_tx, inbox_rx))
+        902, CoalescingReceiverHookProbe(902), reply_tx, inbox_rx))
     test.assert(host_disp_rx:is_closed() and coalescing_receiver_hook_decode_calls == 0,
       "replacing packet in independent-state Receiver did not close peer")
 
-    local driving = async.run<|integer, value|>(function (): integer
-      local result = state:run_async([[
+    const driving = async.run<|integer, value|>(function (): integer
+      const result = state:run_async([[
         return require('async.tests').coalescing_receiver_remote_drive()
       ]], "=coalescing-receiver-drive")
       case result
@@ -1246,7 +1240,7 @@ function test_receiver_independent_lua_state_endpoint_handoff(
     inbox_tx:send(99)
     test.assert(reply_rx:receive() == "remote-ack-99")
 
-    local from_remote: CoalescingReceiverSenderEnvelope = host_receiver:wait()
+    const from_remote: CoalescingReceiverSenderEnvelope = host_receiver:wait()
     test.assert(from_remote.ordinal == 904 and from_remote.probe:value() == 904)
     test.assert(coalescing_receiver_hook_decode_calls == 1,
       "host decoded displaced packet from independent state")
@@ -1256,7 +1250,7 @@ function test_receiver_independent_lua_state_endpoint_handoff(
     async.send(
       remote_handle,
       CoalescingReceiverReceiverEnvelope(
-        905, CoalescingReceiverHookProbe.new(905), done_rx))
+        905, CoalescingReceiverHookProbe(905), done_rx))
     from_remote.tx:send(9000)
     from_remote.tx:close()
     -- Signal only after async.send(remote_handle, ...) has returned.
@@ -1275,8 +1269,8 @@ function test_receiver_independent_lua_state_endpoint_handoff(
     local late_tx, late_rx = coalescing_receiver_thread.channel<|integer|>(1)
     defer late_tx:close()
     defer late_rx:close()
-    local late_env = CoalescingReceiverSenderEnvelope(
-      906, CoalescingReceiverHookProbe.new(906), late_tx)
+    const late_env = CoalescingReceiverSenderEnvelope(
+      906, CoalescingReceiverHookProbe(906), late_tx)
     coalescing_receiver_expect_error(function ()
       async.send(remote_handle, late_env)
     end, "closed")

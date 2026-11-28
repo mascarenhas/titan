@@ -49,7 +49,7 @@ local function Encoder:record_value(
   self:enter(candidate.value)
   defer self.active[candidate.value] = nil
   for index = 1, #candidate.type.fields do
-    local field = candidate.type.fields[index]
+    const field = candidate.type.fields[index]
     trace_member(field.name)
     self:field(buf, field_number(index), candidate:project(index),
                field.type, depth + 1)
@@ -66,11 +66,11 @@ local function Encoder:union_value(
   self:enter(candidate.value)
   defer self.active[candidate.value] = nil
   for index = 1, #candidate.type.variants do
-    local variant = candidate.type.variants[index]
+    const variant = candidate.type.variants[index]
     if variant.tag == candidate.tag then
-      local mark = begin_nested(buf, field_number(index))
+      const mark = begin_nested(buf, field_number(index))
       for part = 1, #variant.parts do
-        local part_type = variant.parts[part]
+        const part_type = variant.parts[part]
         trace_member(part_type.name)
         self:field(buf, field_number(part), candidate:project(part),
                    part_type.type, depth + 1)
@@ -101,8 +101,8 @@ local function Encoder:array(
     end)(candidate)
   for index = 1, #entries do
     trace_index(index)
-    local item: value = entries[index]
-    local slot_mark = begin_nested(buf, 1)
+    const item: value = entries[index]
+    const slot_mark = begin_nested(buf, 1)
     -- A missing Array slot is legal independently of its element descriptor.
     if item ~= nil then self:field(buf, 1, item, element, depth + 1) end
     end_nested(buf, slot_mark)
@@ -118,10 +118,10 @@ local function Encoder:foreign_array(
     element: reflect.Type,
     depth: integer)
   require_depth(depth)
-  local entries: const {value} = candidate
+  const entries: const {value} = candidate
   for index = 1, #entries do
     trace_index(index)
-    local slot_mark = begin_nested(buf, 1)
+    const slot_mark = begin_nested(buf, 1)
     self:field(buf, 1, entries[index], element, depth + 1)
     end_nested(buf, slot_mark)
     trace_leave()
@@ -135,9 +135,9 @@ local function Encoder:foreign_struct(
     depth: integer)
   require_depth(depth)
   require_struct(descriptor)
-  local fields: const {value} = candidate
+  const fields: const {value} = candidate
   for index = 1, #descriptor.fields do
-    local field = descriptor.fields[index]
+    const field = descriptor.fields[index]
     trace_member(field.name)
     if field.is_flexible_array then raise "protobuf: flexible foreign array" end
     self:field(buf, field_number(index), fields[index], field.type, depth + 1)
@@ -150,7 +150,7 @@ local function Encoder:value_field(
     candidate: value, depth: integer)
   -- Nil is absent; anything else is one nested TitanValue message.
   if candidate ~= nil then
-    local mark = begin_nested(buf, number)
+    const mark = begin_nested(buf, number)
     self:dynamic(buf, candidate, depth)
     end_nested(buf, mark)
   end
@@ -159,7 +159,7 @@ end
 local function Encoder:array_field(
     buf: foreign *titan_protobuf_buffer, number: integer,
     candidate: value, element: reflect.Type, depth: integer)
-  local mark = begin_nested(buf, number)
+  const mark = begin_nested(buf, number)
   self:array(buf, candidate, element, depth)
   end_nested(buf, mark)
 end
@@ -188,7 +188,7 @@ local function Encoder:hook_field(
   self:enter(actual.value)
   defer self.active[actual.value] = nil
   if codec_trace ~= nil then return end
-  local payload = encode_transfer_payload(
+  const payload = encode_transfer_payload(
       actual.value, encode, "protobuf: cyclic object graph")
   write_bytes(buf, number, payload)
 end
@@ -196,22 +196,22 @@ end
 local function Encoder:record_field(
     buf: foreign *titan_protobuf_buffer, number: integer,
     candidate: value, expected: reflect.RecordType, depth: integer)
-  local codec? = find_resource_codec_by_name(expected.name)
+  const codec? = find_resource_codec_by_name(expected.name)
   if codec ~= nil then
     self:resource_field(buf, number, candidate, expected.name, codec)
     return
   end
-  local generated = find_field_codec(candidate, expected.name, false)
+  const generated = find_field_codec(candidate, expected.name, false)
   if generated ~= nil then
     self:generated(buf, generated, number, candidate, depth)
     return
   end
-  local actual = inspected_record(candidate, expected.name)
-  local encode? = trace_checked_hooks(expected)
+  const actual = inspected_record(candidate, expected.name)
+  const encode? = trace_checked_hooks(expected)
   if encode ~= nil then
     self:hook_field(buf, number, actual, encode)
   else
-    local mark = begin_nested(buf, number)
+    const mark = begin_nested(buf, number)
     self:record_value(buf, actual, depth)
     end_nested(buf, mark)
   end
@@ -220,7 +220,7 @@ end
 local function Encoder:union_field(
     buf: foreign *titan_protobuf_buffer, number: integer,
     candidate: value, expected: reflect.UnionType, depth: integer)
-  local generated = find_field_codec(candidate, expected.name, true)
+  const generated = find_field_codec(candidate, expected.name, true)
   if generated ~= nil then
     self:generated(buf, generated, number, candidate, depth)
     return
@@ -228,7 +228,7 @@ local function Encoder:union_field(
   case reflect.inspect(candidate)
   when is_union(actual) then
     if actual.type.name ~= expected.name then raise "protobuf: union type mismatch" end
-    local mark = begin_nested(buf, number)
+    const mark = begin_nested(buf, number)
     self:union_value(buf, actual, depth)
     end_nested(buf, mark)
   else raise "protobuf: expected a union"
@@ -244,21 +244,21 @@ local function encode_scalar_field(
   when is_nil() then
     if candidate ~= nil then raise "protobuf: expected nil" end
   when is_boolean() then
-    local flag: boolean = candidate
+    const flag: boolean = candidate
     write_key(buf, number, 0)
     if flag then write_varint(buf, 1) else write_varint(buf, 0) end
   when is_integer() then
-    local integer_value: integer = candidate
+    const integer_value: integer = candidate
     write_key(buf, number, 0)
     write_varint(buf, zigzag(integer_value))
   when is_float() then
-    local number_value: float = candidate
+    const number_value: float = candidate
     write_double(buf, number, number_value)
   when is_string() then
-    local bytes: string = candidate
+    const bytes: string = candidate
     write_bytes(buf, number, bytes)
   when is_foreign_integer{spelling, is_signed, bits} then
-    local integer_value: integer = candidate
+    const integer_value: integer = candidate
     check_integer(integer_value, spelling, is_signed, bits)
     write_key(buf, number, 0)
     if is_signed then write_varint(buf, zigzag(integer_value))
@@ -266,11 +266,11 @@ local function encode_scalar_field(
     end
   when is_foreign_float(spelling) then
     if spelling == "long double" then
-      local exact: string = candidate
+      const exact: string = candidate
       write_bytes(buf, number, exact)
       return
     end
-    local number_value: float = candidate
+    const number_value: float = candidate
     if spelling == "float" then
       write_float32(buf, number, number_value)
     elseif spelling == "double" then
@@ -278,8 +278,8 @@ local function encode_scalar_field(
     else raise "protobuf: unsupported foreign floating type " .. spelling
     end
   when is_foreign_pointer() then
-    local address = candidate as foreign *void
-    local bits: integer = ffi.titan_protobuf_pointer_bits(address)
+    const address = candidate as foreign *void
+    const bits: integer = ffi.titan_protobuf_pointer_bits(address)
     write_fixed64(buf, number, bits)
   else raise "protobuf: unsupported field type"
   end
@@ -288,7 +288,7 @@ end
 local function Encoder:struct_field(
     buf: foreign *titan_protobuf_buffer, number: integer,
     candidate: value, structure: reflect.ForeignStructType, depth: integer)
-  local mark = begin_nested(buf, number)
+  const mark = begin_nested(buf, number)
   self:foreign_struct(buf, candidate, structure, depth)
   end_nested(buf, mark)
 end
@@ -297,7 +297,7 @@ local function Encoder:foreign_array_field(
     buf: foreign *titan_protobuf_buffer, number: integer,
     candidate: value, element: reflect.Type, length: value, depth: integer)
   require_foreign_array(length)
-  local mark = begin_nested(buf, number)
+  const mark = begin_nested(buf, number)
   self:foreign_array(buf, candidate, element, depth)
   end_nested(buf, mark)
 end
@@ -368,7 +368,7 @@ local function Encoder:dynamic(
     candidate: value,
     depth: integer)
   local raw: foreign TValue = candidate
-  local tag = ffi.lmacro_ttype(raw)
+  const tag = ffi.lmacro_ttype(raw)
   if tag ~= ffi.LUA_TUSERDATA then
     self:dynamic_scalar(buf, candidate, tag, depth)
   else
@@ -380,11 +380,11 @@ local function Encoder:dynamic(
       self:dynamic_nominal(buf, candidate, union_value.type.name,
           reflect.Type.is_union(union_value.type), depth)
     when is_array() then
-      local mark = begin_nested(buf, 6)
+      const mark = begin_nested(buf, 6)
       self:array(buf, candidate, dynamic_value, depth)
       end_nested(buf, mark)
     when is_const_array() then
-      local mark = begin_nested(buf, 6)
+      const mark = begin_nested(buf, 6)
       self:array(buf, candidate, dynamic_value, depth)
       end_nested(buf, mark)
     else raise "protobuf: unsupported dynamic value"
@@ -400,9 +400,9 @@ local function Encoder:begin_dynamic_nominal(
     (self.context as PortableCodec):nominal(name)
   end
   local raw: foreign TValue = candidate
-  local module = ffi.titan_codec_nominal_module(raw)
+  const module = ffi.titan_codec_nominal_module(raw)
   if module == nil then raise "protobuf: unsupported dynamic value" end
-  local mark = begin_nested(buf, 5)
+  const mark = begin_nested(buf, 5)
   write_bytes(buf, 1, module as string)
   write_bytes(buf, 2, name)
   return mark
@@ -416,7 +416,7 @@ local function Encoder:dynamic_nominal(
     name: string,
     descriptor: reflect.Type,
     depth: integer)
-  local mark = self:begin_dynamic_nominal(buf, candidate, name)
+  const mark = self:begin_dynamic_nominal(buf, candidate, name)
   self:field(buf, 3, candidate, descriptor, depth)
   end_nested(buf, mark)
 end

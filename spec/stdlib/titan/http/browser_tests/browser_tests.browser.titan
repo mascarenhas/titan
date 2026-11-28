@@ -17,7 +17,7 @@ local type Value = browser.BrowserValue
 local type Action = function (): ()
 
 local function environment(name: string): string
-  local contents? = os.getenv(name)
+  const contents? = os.getenv(name)
   if contents == nil then raise "missing browser network fixture variable: " .. name end
   return contents
 end
@@ -27,23 +27,23 @@ local function raw_server(): string return environment("TITAN_TEST_RAW_URL") end
 local function in_browser(): boolean return environment("TITAN_TEST_BROWSER") == "1" end
 
 local function all(response: http.ClientResponse): string
-  local writer = string.writer()
+  const writer = string.writer()
   for chunk in response:read do writer:write(chunk) end
   return writer:drain()
 catch
   if not (error is async.OperationError) then raise end
-  local failure: async.OperationError = error
+  const failure: async.OperationError = error
   raise failure.operation .. ": " .. failure.message
 end
 
 local function one_header(name: string, contents: string): http.Headers
-  local result = http.headers()
+  const result = http.headers()
   result:add(name, contents)
   return result
 end
 
 local function get_body(source: string, options: http.RequestOptions?): string
-  local response = http.get(source, options)
+  const response = http.get(source, options)
   defer response:close()
   test.assert(response.status == 200, "unexpected status at " .. source)
   return all(response)
@@ -55,7 +55,7 @@ local function operation_error(action: Action, operation: string)
     action()
   catch
     if not (error is async.OperationError) then raise end
-    local failure: async.OperationError = error
+    const failure: async.OperationError = error
     test.assert(failure.name == "EIO" and failure.operation == operation,
       "wrong Fetch failure identity: " .. failure.name .. " / " .. failure.operation)
     caught = true
@@ -74,7 +74,7 @@ local function string_error(action: Action)
 end
 
 local function host_note(text: string)
-  local target = browser.binding("net_note")
+  const target = browser.binding("net_note")
   defer target:close()
   target:call(Value.is_string(text))
 end
@@ -89,7 +89,7 @@ local function request_entry(...: Value): Value
     operation_error(function () http.get(source) end, "http.request")
     return Value.is_string("metadata EIO")
   end
-  local response = http.get(source)
+  const response = http.get(source)
   defer response:close()
   if phase == "body" then
     test.assert(response:read_until("\n") == "first\n", "held body did not arrive incrementally")
@@ -100,7 +100,7 @@ local function request_entry(...: Value): Value
 end
 
 do
-  local target = browser.binding("net_publish")
+  const target = browser.binding("net_publish")
   defer target:close()
   target:call(Value.is_callable(request_entry))
 end
