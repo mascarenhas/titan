@@ -362,6 +362,10 @@ plan:
             member(nil, { { name = "sqlite3_bind_text64", defined = true } }) }, "sqlite3_bind_text64")
         rejected({ member("uv.tcp", { { name = "uv_tcp_init", defined = true } }),
             member(nil, { { name = "uv_tcp_init_ex", defined = true } }) }, "uv_tcp_init_ex")
+        -- uv.tcp's own initializer is libuv's uv_tcp_init: only that module's
+        -- object may define it, so a C object's same-name definition fails.
+        rejected({ member("uv.tcp", { { name = "uv_tcp_init", defined = true } }),
+            member(nil, { { name = "uv_tcp_init", defined = true } }) }, "uv_tcp_init")
         -- A module named after the library itself exempts nothing.
         rejected({ member("sqlite3", { { name = "sqlite3_open", defined = true } }) }, "sqlite3_open")
         -- An absent module exempts nothing either.
@@ -434,6 +438,15 @@ plan:
     local clock = { "wasi_snapshot_preview1", "clock_time_get", { "i32", "i64", "i32" }, { "i32" } }
     local fixture_sleep = { "env", "fixture_sleep", { "i32" }, {} }
     local fixture_click = { "env", "titan_test_set_click_callback", { "i32", "i32", "i32" }, { "i32" } }
+
+    -- A final image's import is never a Titan definition, so the names the
+    -- build's Titan objects define never excuse one.
+    it("never exempts a final image import from the forbidden-symbol audit", function()
+        local ok, err = checks.check_image(import_image({ { "env", "uv_tcp_init", { "i32" }, {} } }),
+            "import.wasm", { ["uv_tcp_init"] = true })
+        assert.is_nil(ok)
+        assert.equal("import.wasm: forbidden browser stdlib symbol uv_tcp_init", err)
+    end)
 
     it("accepts an image whose imports the reviewed allowlist lists for its classes", function()
         assert.is_true(checks.check_imports(import_image({ completion, clock }), "entry.wasm", { "entry" }))

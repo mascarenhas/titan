@@ -77,7 +77,8 @@ const contended = 'contention exclusive 5,5 immediate 5,5 count 3 autocommit tru
 const logged = 'wal delete wal locked 5 shared 14 count 1\n';
 const donated = `donor busy 5 released 0 kept t${hex('probe')}; moved t${hex('in transit')};t${hex('adopted')};\n`;
 const progressed = /^tasks i1125000750000 least (\d+)\n$/;
-const cancelled = 'cancel waiting cancelled true returned false rows i200000 autocommit true deleted 200000\n';
+const cancelled = 'cancel waiting cancelled true grew true returned false rows i200000 autocommit true ' +
+  'deleted 200000\n';
 const dirty = 'TITAN_BROWSER_DISPOSED_DIRTY';
 
 function assertRan(report, stdout) {
@@ -190,16 +191,27 @@ if (!engines.length) {
   test('Node 26: storage scenarios on a memory mount, and the control image', images, async t => {
     const urls = {durable: pathToFileURL(image('durable', '.mjs')).href,
       control: pathToFileURL(image('stock-novfs', '.mjs')).href};
-    const client = {call: (name, ...args) => bounded(host[name](...args), `${name} ${JSON.stringify(args)}`)};
+    // A step that misses its deadline stops every instance the host still
+    // owns, so its storage worker cannot keep Node alive.
+    const client = {call: (name, ...args) => bounded(host[name](...args), `${name} ${JSON.stringify(args)}`)
+      .catch(async error => {
+        diagnostic(`${name}: stopped ${await host.forceDisposeAll()} live instance(s) after: ${error.message}`);
+        throw error;
+      })};
     const vfs = {mounts: {'/data': {backend: 'memory'}}};
-    await portableScenarios(t, client, urls, vfs);
-    await t.test('5. titan.fs, stock Lua io and os, os.chdir and ATTACH ? share one tree', async () => {
-      assertClean(await client.call('run', urls.durable, ['coherence'], {vfs}), coherent);
-    });
-    await t.test('2. a memory mount holds no durable write a forced disposal could lose', async () => {
-      const report = await client.call('run', urls.durable, ['unsynchronized'], {vfs, disposal: 'force'});
-      assertClean(report, 'unsynchronized ok\n');
-    });
+    try {
+      await portableScenarios(t, client, urls, vfs);
+      await t.test('5. titan.fs, stock Lua io and os, os.chdir and ATTACH ? share one tree', async () => {
+        assertClean(await client.call('run', urls.durable, ['coherence'], {vfs}), coherent);
+      });
+      await t.test('2. a memory mount holds no durable write a forced disposal could lose', async () => {
+        const report = await client.call('run', urls.durable, ['unsynchronized'], {vfs, disposal: 'force'});
+        assertClean(report, 'unsynchronized ok\n');
+      });
+      assert.equal(await host.forceDisposeAll(), 0, 'a Node scenario left an instance undisposed');
+    } finally {
+      await host.forceDisposeAll();
+    }
   });
 }
 

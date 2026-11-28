@@ -206,6 +206,12 @@ local function tasks(root: string)
   }
   const workers: {async.Task<|nil, value|>} = {}
   for index = 1, 4 do workers[index] = async.run(bodies[index]) end
+  -- The peers stop however the scenario ends, before the channel closes.
+  defer do
+    running = false
+    for index = 1, #workers do workers[index]:cancel(async.CancellationReason.simple("scenario finished")) end
+    for index = 1, #workers do async.join(workers[index]) end
+  end
   for _ = 1, 4 do async.yield() end
   const before = {counts[1], counts[2], counts[3], counts[4]}
   const cursor = statement:query()
@@ -213,9 +219,6 @@ local function tasks(root: string)
   defer cursor:close()
   const row = cursor:fetch()
   if not row then raise "the long query returned no row" end
-  running = false
-  for index = 1, 4 do workers[index]:cancel(async.CancellationReason.simple("scenario finished")) end
-  for index = 1, 4 do async.join(workers[index]) end
   local least = after[1] - before[1]
   for index = 2, 4 do
     if after[index] - before[index] < least then least = after[index] - before[index] end
@@ -230,14 +233,17 @@ end
 
 -- D16: cancelling a Task whose SQLite request the worker accepted waits for
 -- that request, which completes, and only then delivers the cancellation;
--- the connection stays usable.
+-- the connection stays usable. The insert's file growth is already in the
+-- guest tree when the cancelled Task ends, before any later request.
 local function cancel_in_flight(root: string)
-  const db = sqlite3.connect(root .. "/cancel.db")
+  const path = root .. "/cancel.db"
+  const db = sqlite3.connect(path)
   defer db:close()
   execute(db, "CREATE TABLE item (v INTEGER)")
   const insert = db:prepare("INSERT INTO item WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL " ..
     "SELECT x + 1 FROM c WHERE x < 200000) SELECT x FROM c")
   defer insert:close()
+  const before_size = fs.stat(path).size
   local submitted, returned = false, false
   const writer = async.run<|nil, value|>(function (): nil
     submitted = true
@@ -249,10 +255,11 @@ local function cancel_in_flight(root: string)
   const state = writer:status():as_string()
   writer:cancel(async.CancellationReason.simple("cancel the accepted insert"))
   async.join(writer)
+  const grew = fs.stat(path).size > before_size
   const cancelled = writer:status():has_cancelled()
   const inserted = scalar(db, "SELECT count(*) FROM item")
-  io.print("cancel " .. state .. " cancelled " .. flag_text(cancelled) .. " returned " ..
-    flag_text(returned) .. " rows " .. cell_text(inserted) .. " autocommit " ..
+  io.print("cancel " .. state .. " cancelled " .. flag_text(cancelled) .. " grew " .. flag_text(grew) ..
+    " returned " .. flag_text(returned) .. " rows " .. cell_text(inserted) .. " autocommit " ..
     flag_text(db:get_autocommit()) .. " deleted " .. execute(db, "DELETE FROM item"))
 end
 

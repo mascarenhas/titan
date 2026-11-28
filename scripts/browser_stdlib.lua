@@ -164,7 +164,9 @@ local function titan_definitions(objects)
             if library and #prefix > #library then prefixes[prefix] = module end
         end
     end
-    local defined = {}
+    -- `owned[object]` holds the names that object may define; `defined` the
+    -- names some Titan object defines, which any object may reference.
+    local defined, owned = {}, {}
     for _, object in ipairs(objects) do
         local owner = object.metadata and object.metadata.module
         for _, symbol in ipairs(object.symbols or {}) do
@@ -174,12 +176,14 @@ local function titan_definitions(objects)
                     if name:sub(1, #prefix) == prefix and
                         (owner == module or TITAN_SEPARATORS[name:sub(#prefix + 1, #prefix + 3)]) then
                         defined[name] = true
+                        owned[object] = owned[object] or {}
+                        owned[object][name] = true
                     end
                 end
             end
         end
     end
-    return defined
+    return defined, owned
 end
 
 function M.check_symbol(name, origin, defined)
@@ -214,13 +218,19 @@ function M.check_headers(record)
     return true
 end
 
-local function check_object_symbols(object, origin, defined)
+-- A library-prefixed definition passes only in the Titan object that owns it,
+-- and a reference (an undefined symbol or object import) only to a name some
+-- Titan object of the audit defines.
+local function check_object_symbols(object, origin, defined, owned)
     local module = object.metadata and object.metadata.module
     if absent_modules[module] then
         return nil, origin .. ": forbidden browser stdlib module " .. module
     end
+    local own = owned and owned[object]
     for _, symbol in ipairs(object.symbols or {}) do
-        local ok, err = M.check_symbol(symbol.name, origin, defined)
+        local allowed = defined
+        if symbol.defined then allowed = own end
+        local ok, err = M.check_symbol(symbol.name, origin, allowed)
         if not ok then return nil, err end
     end
     for _, import in ipairs(object.imports or {}) do
@@ -241,8 +251,8 @@ local function check_object_headers(object, bytes, origin)
     return true
 end
 
-local function check_object(object, bytes, origin, defined)
-    local ok, err = check_object_symbols(object, origin, defined)
+local function check_object(object, bytes, origin, defined, owned)
+    local ok, err = check_object_symbols(object, origin, defined, owned)
     if not ok then return nil, err end
     return check_object_headers(object, bytes, origin)
 end
@@ -256,12 +266,12 @@ function M.check_archive(filename, scanned)
     end
     local objects = {}
     for _, member in ipairs(scanned.members or {}) do objects[#objects + 1] = member.object end
-    local defined = titan_definitions(objects)
+    local defined, owned = titan_definitions(objects)
     for _, member in ipairs(scanned.members or {}) do
         local origin = filename .. "(" .. member.display_name .. ")"
         ok, err = M.check_path(member.display_name)
         if not ok then return nil, err end
-        ok, err = check_object(member.object, member.bytes, origin, defined)
+        ok, err = check_object(member.object, member.bytes, origin, defined, owned)
         if not ok then return nil, err end
     end
     return true
@@ -271,16 +281,20 @@ end
 -- its public exports: dead-stripping must not conceal a linked host dependency.
 -- Which host imports an image may have is scripts/browser_imports.lua's rule.
 -- `defined` holds the library-prefixed names the build's own Titan objects
--- define, as check_output returns them.
+-- define, as check_output returns them; it exempts exports and internal
+-- functions, never an import, which no Titan object defines.
 function M.check_image(bytes, origin, defined)
     local image, err = staticmetadata.browser_trace_image(bytes, origin)
     if not image then return nil, err end
-    for _, inventory in ipairs({ image.imports, image.exports }) do
-        for _, symbol in ipairs(inventory) do
-            local ok
-            ok, err = M.check_symbol(symbol.name, origin, defined)
-            if not ok then return nil, err end
-        end
+    for _, symbol in ipairs(image.imports) do
+        local ok
+        ok, err = M.check_symbol(symbol.name, origin)
+        if not ok then return nil, err end
+    end
+    for _, symbol in ipairs(image.exports) do
+        local ok
+        ok, err = M.check_symbol(symbol.name, origin, defined)
+        if not ok then return nil, err end
     end
     if next(image.function_names) == nil then return nil, origin .. ": missing function name inventory" end
     for _, name in pairs(image.function_names) do
@@ -574,9 +588,9 @@ function M.check_output(strategy, directory)
     if not ok then return nil, visit_error end
     local scanned = {}
     for index, entry in ipairs(objects) do scanned[index] = entry.object end
-    local defined = titan_definitions(scanned)
+    local defined, owned = titan_definitions(scanned)
     for _, entry in ipairs(objects) do
-        ok, visit_error = check_object_symbols(entry.object, entry.origin, defined)
+        ok, visit_error = check_object_symbols(entry.object, entry.origin, defined, owned)
         if not ok then return nil, visit_error end
     end
     return true, defined
