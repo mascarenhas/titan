@@ -279,3 +279,25 @@ global settings. DSO-only regressions must exclude both source and archive
 fallbacks and assert dynamic selection; preprocessor recursion regressions keep
 their instruction-count bound. Regression placement is indexed in
 [test layers](test-runner.md#regression-placement).
+
+## Check bundled and rockspec dependencies
+
+Before cutting a release or during routine maintenance, check bundled/vendored
+standard-library dependencies and LuaRocks rockspec pins against upstream:
+
+```sh
+python3 scripts/check_bundled_deps.py
+python3 scripts/check_bundled_deps.py --offline   # local cross-file pin parity only
+```
+
+The script reads pins directly from `Makefile`,
+`vendor/windows-native/dependencies.tsv`, `vendor/libbacktrace/dependencies.tsv`,
+`vendor/lpeglabel/UPSTREAM.md`, `vendor/uwasi/UPSTREAM.md`,
+`scripts/build_uwasi_bundle.mjs`, `titan-*.rockspec`, and `luarocks.lock`.
+It checks `libuv`, `llhttp`, `sqlite3`, `libbacktrace`, `lpeglabel`, `uwasi`,
+the optional bundled `openssl` pin (tracking the latest stable `4.*` release),
+and all rockspec dependencies against the LuaRocks 5.5 manifest. `minicoro` is
+intentionally excluded because it is substantially modified in-tree rather than
+tracked as an upstream bundle. A weekly scheduled workflow
+(`.github/workflows/bundled-deps.yml`) runs the same check and maintains one
+rolling tracking issue when updates are available.
