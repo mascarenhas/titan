@@ -60,6 +60,13 @@ TITAN_RUNTIME_FUNC void titan_module_preload(lua_State *L, const char *name,
 ** Titan-owned state calls it after opening the Lua libraries. Implemented in
 ** titan_path.c; preserves the entry top. */
 TITAN_RUNTIME_FUNC void titan_install_searcher(lua_State *L);
+#if defined(TITAN_TARGET_BROWSER)
+/* Replace io.tmpfile and os.tmpname, which the browser's stock Lua cannot
+** provide, with versions that create files under /tmp. Every browser Lua
+** state calls it after opening the Lua libraries; a missing io or os library
+** is skipped. Implemented in titan.c; preserves the entry top. */
+TITAN_RUNTIME_FUNC void titan_browser_install_tmp_io(lua_State *L);
+#endif
 
 /* Allocation-free monotonic wall-clock nanoseconds for titan.test.
 ** Returns -1 when the platform clock fails or exceeds lua_Integer range. */

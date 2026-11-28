@@ -12360,6 +12360,7 @@ function driver.browser_entrypoint_contents(modname, program_name, options)
     local initializer = [[
 static int titan_browser_initialize_worker(lua_State *L) {
     luaL_openlibs(L);
+    titan_browser_install_tmp_io(L);
     titan_install_searcher(L);
     if (luaL_loadstring(L, TITAN_LUA_BROWSER_PROFILE) != LUA_OK) return lua_error(L);
     lua_call(L, 0, 0);
